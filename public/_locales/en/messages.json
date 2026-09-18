@@ -1,0 +1,14 @@
+{
+  "extension_name": {
+    "message": "Zai++",
+    "description": "Extension name shown in browser UI"
+  },
+  "extension_description": {
+    "message": "Agentic memory, skills, local shell/file tools, and MCP for Z.ai",
+    "description": "Extension description shown in browser UI"
+  },
+  "extension_action_title": {
+    "message": "Zai++",
+    "description": "Toolbar action title"
+  }
+}

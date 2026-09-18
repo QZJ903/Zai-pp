@@ -1,0 +1,14 @@
+{
+  "extension_name": {
+    "message": "Zai++",
+    "description": "浏览器界面中显示的扩展名称"
+  },
+  "extension_description": {
+    "message": "Z.ai 的 Agentic 记忆、Skill、本地 Shell/文件工具与 MCP 工具",
+    "description": "浏览器界面中显示的扩展描述"
+  },
+  "extension_action_title": {
+    "message": "Zai++",
+    "description": "工具栏按钮标题"
+  }
+}

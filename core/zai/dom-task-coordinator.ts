@@ -1,0 +1,433 @@
+/**
+ * GLM++ DOM 任务协调器（方案 §4.3 Step 2）。
+ *
+ * 自动化任务不再在后台 fetch completion，而是由后台「找到/打开一个
+ * chat.z.ai 标签页 → 把 prompt 交给该页 content script → content 复用
+ * zai.content.ts 的 DOM 注入 + 续跑循环让页面自己发请求」。本模块负责：
+ *
+ *   1. resolveTab：找/开 chat.z.ai 标签页（优先复用空闲后台 tab，busy 一 tab 一任务）；
+ *   2. startTask：握手（RUN_DOM_TASK，退避重试）→ 登记 pending → 等终态事件；
+ *   3. cancelTask：发 CANCEL_DOM_TASK；
+ *   4. on*Event：消费 content 回传的 DOM_TASK_STARTED/COMPLETE/FAILED/NEEDS_ACTION/PROGRESS。
+ *
+ * 工具执行与续跑仍由 content 自闭环（zai.content.ts 现状），本模块只做「工具执行器
+ * （EXECUTE_TOOL_CALL handler 现状）＋ 最终结果消费者（收 DOM_TASK_COMPLETE）」。
+ */
+
+import type { ToolExecutionRecord } from '../types';
+
+export type DomTaskKind = 'automation';
+
+export interface DomTaskStartedEvent {
+  taskId: string;
+  chatSessionId: string | null;
+}
+
+export interface DomTaskCompleteEvent {
+  taskId: string;
+  chatSessionId: string | null;
+  assistantText: string;
+  toolExecutions: ToolExecutionRecord[];
+  steps: number;
+}
+
+export interface DomTaskFailedEvent {
+  taskId: string;
+  error: string;
+}
+
+export interface DomTaskNeedsActionEvent {
+  taskId: string;
+  kind: 'captcha' | 'peak';
+}
+
+export interface DomTaskProgressEvent {
+  taskId: string;
+  text: string;
+  phase: string;
+}
+
+export type DomTaskOutcome =
+  | {
+      ok: true;
+      taskId: string;
+      chatSessionId: string | null;
+      assistantText: string;
+      toolExecutions: ToolExecutionRecord[];
+      steps: number;
+    }
+  | {
+      ok: false;
+      taskId: string;
+      error: string;
+      phase: 'tab' | 'bridge' | 'runner';
+      retrySafe?: boolean;
+    };
+
+export interface DomTaskStartInput {
+  taskId: string;
+  kind: DomTaskKind;
+  prompt: string;
+  chatSessionId: string | null;
+  /** 自动化任务是否开启 z.ai 联网搜索（任务归属请求体里置 features.web_search/auto_web_search）。 */
+  searchEnabled?: boolean;
+}
+
+export interface DomTaskStartOptions {
+  signal?: AbortSignal;
+  deadlineAt?: number;
+  handshakeTimeoutMs?: number;
+}
+
+export interface DomTaskCoordinatorDeps {
+  homeUrl?: string;
+  tabUrlPattern?: string;
+  queryTabs?(query: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab[]>;
+  createTab?(props: chrome.tabs.CreateProperties): Promise<chrome.tabs.Tab>;
+  updateTab?(
+    tabId: number,
+    props: chrome.tabs.UpdateProperties,
+  ): Promise<chrome.tabs.Tab>;
+  sendTabMessage?(tabId: number, message: unknown): Promise<unknown>;
+  reportError?(code: string, error: unknown): void;
+}
+
+export interface DomTaskCoordinator {
+  startTask(
+    input: DomTaskStartInput,
+    options?: DomTaskStartOptions,
+  ): Promise<DomTaskOutcome>;
+  cancelTask(taskId: string): void;
+  onStarted(event: DomTaskStartedEvent): void;
+  onComplete(event: DomTaskCompleteEvent): void;
+  onFailed(event: DomTaskFailedEvent): void;
+  onNeedsAction(event: DomTaskNeedsActionEvent): void;
+  onProgress(event: DomTaskProgressEvent): void;
+}
+
+const DEFAULT_HOME_URL = 'https://chat.z.ai/';
+const DEFAULT_TAB_URL_PATTERN = '*://chat.z.ai/*';
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 8_000;
+
+const RETRYABLE_PRE_SEND_ERRORS: ReadonlySet<string> = new Set([
+  'no_textarea',
+  'form_not_connected',
+  'agent_not_idle',
+]);
+
+interface PendingDomTask {
+  taskId: string;
+  kind: DomTaskKind;
+  tabId: number;
+  chatSessionId: string | null;
+  startedChatSessionId: string | null;
+  settled: boolean;
+  resolve: (outcome: DomTaskOutcome) => void;
+  reject: (error: unknown) => void;
+  deadlineTimer?: ReturnType<typeof setTimeout>;
+  abortCleanup?: () => void;
+}
+
+export function createDomTaskCoordinator(
+  deps: DomTaskCoordinatorDeps = {},
+): DomTaskCoordinator {
+  const homeUrl = (deps.homeUrl ?? DEFAULT_HOME_URL).replace(/\/+$/, '') + '/';
+  const tabUrlPattern = deps.tabUrlPattern ?? DEFAULT_TAB_URL_PATTERN;
+  const queryTabs = deps.queryTabs ?? ((query) => chrome.tabs.query(query));
+  const createTab = deps.createTab ?? ((props) => chrome.tabs.create(props));
+  const updateTab = deps.updateTab ?? ((tabId, props) => chrome.tabs.update(tabId, props));
+  const sendTabMessage = deps.sendTabMessage ?? ((tabId, message) => chrome.tabs.sendMessage(tabId, message));
+  const reportError = deps.reportError ?? ((code, error) => console.error(`[GLM++] ${code}`, error));
+
+  /** tabId → taskId：一 tab 同一时刻只跑一个后台任务（busy 锁）。 */
+  const busyTabs = new Map<number, string>();
+  /** taskId → 现场：等终态事件的任务。 */
+  const pending = new Map<string, PendingDomTask>();
+
+  function cleanupEntry(entry: PendingDomTask): void {
+    pending.delete(entry.taskId);
+    if (busyTabs.get(entry.tabId) === entry.taskId) busyTabs.delete(entry.tabId);
+    if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
+    entry.abortCleanup?.();
+  }
+
+  function settleEntry(entry: PendingDomTask, outcome: DomTaskOutcome): void {
+    if (entry.settled) return;
+    entry.settled = true;
+    cleanupEntry(entry);
+    entry.resolve(outcome);
+  }
+
+  function failEntry(entry: PendingDomTask, error: unknown): void {
+    if (entry.settled) return;
+    entry.settled = true;
+    cleanupEntry(entry);
+    entry.reject(error);
+  }
+
+  function buildSessionUrl(chatSessionId: string): string {
+    return `${homeUrl}c/${encodeURIComponent(chatSessionId)}`;
+  }
+
+  function normalizeTabUrl(url: string | undefined): string {
+    if (!url) return '';
+    try {
+      const parsed = new URL(url);
+      return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+    } catch {
+      return url;
+    }
+  }
+
+  /**
+   * 解析要用的 chat.z.ai 标签页，并返回「实际生效的会话 id」。
+   *
+   * 返回的 chatSessionId 与输入可能不同：续用会话时找不到精确 /c/<id> tab，
+   * 就降级为「新会话」语义（chatSessionId 置 null、走新对话的标签页解析），
+   * 而不是新开目标会话 tab 后又被 content 的 wrong_conversation 校验拒绝。
+   * content 收到 null 会跳过会话一致性校验（新会话本来就是 null）。
+   */
+  async function resolveDomTab(
+    chatSessionId: string | null,
+  ): Promise<{ tabId: number; chatSessionId: string | null; isNewlyCreated: boolean }> {
+    const sessionId = chatSessionId && chatSessionId.trim() ? chatSessionId : null;
+    const tabs = await queryTabs({ url: tabUrlPattern });
+    const idleTabs = tabs.filter((tab) => tab.id != null && !busyTabs.has(tab.id));
+
+    // 续用会话：必须落在精确的 /c/<id>（content 侧会做 wrong_conversation 校验）。
+    if (sessionId != null) {
+      const target = buildSessionUrl(sessionId);
+      const exact = idleTabs.find((tab) => normalizeTabUrl(tab.url) === target);
+      if (exact?.id != null) return { tabId: exact.id, chatSessionId: sessionId, isNewlyCreated: false };
+      // 找不到精确 tab：**新开目标会话 tab**（固定会话场景），而不是降级新会话。
+      // 让用户即使关掉了原会话窗口，后续运行也能找回同一个对话继续。
+      const created = await createTab({ url: target, active: false });
+      if (created.id == null) throw new Error('zai_tab_create_failed');
+      return { tabId: created.id, chatSessionId: sessionId, isNewlyCreated: true };
+    }
+
+    // 新对话：优先精确 home 页；找不到就新开一个 home tab。**绝不复用任何已有 /c/<id>
+    // 对话 tab**——否则会把 prompt 塞进用户当前停留的、不属于该任务的会话里。
+    const exactHome = idleTabs.find((tab) => normalizeTabUrl(tab.url) === homeUrl);
+    if (exactHome?.id != null) return { tabId: exactHome.id, chatSessionId: null, isNewlyCreated: false };
+
+    const created = await createTab({ url: homeUrl, active: false });
+    if (created.id == null) throw new Error('zai_tab_create_failed');
+    return { tabId: created.id, chatSessionId: null, isNewlyCreated: true };
+  }
+
+  async function handshake(
+    tabId: number,
+    input: DomTaskStartInput,
+    options: DomTaskStartOptions,
+  ): Promise<{ ok: boolean; error?: string; phase?: 'tab' | 'bridge' }> {
+    const deadline = Date.now() + (options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS);
+    let attempt = 0;
+    while (Date.now() < deadline) {
+      if (options.signal?.aborted) throw abortReason(options.signal);
+      try {
+        const response = await sendTabMessage(tabId, {
+          type: 'RUN_DOM_TASK',
+          taskId: input.taskId,
+          kind: input.kind,
+          prompt: input.prompt,
+          chatSessionId: input.chatSessionId,
+          searchEnabled: input.searchEnabled === true,
+        });
+        if (response && typeof response === 'object') {
+          const record = response as { ok?: boolean; error?: string };
+          if (record.ok === true) return { ok: true };
+          const error = record.error ?? 'dom_task_rejected';
+          return {
+            ok: false,
+            error,
+            phase: error === 'wrong_conversation' || error === 'busy' ? 'tab' : 'bridge',
+          };
+        }
+        // 无结构化响应：content 可能尚未注入 → 退避重试。
+      } catch (error) {
+        // 「Receiving end does not exist」→ content 未注入（新开 tab 加载中）→ 退避重试。
+        if (options.signal?.aborted) throw abortReason(options.signal);
+        void error;
+      }
+      await sleep(300 + attempt * 250);
+      attempt += 1;
+    }
+    return { ok: false, error: 'dom_task_handshake_timeout', phase: 'bridge' };
+  }
+
+  function cancelDomTaskMessage(tabId: number, taskId: string): Promise<unknown> {
+    return sendTabMessage(tabId, { type: 'CANCEL_DOM_TASK', taskId }).catch(() => undefined);
+  }
+
+  async function startTask(
+    input: DomTaskStartInput,
+    options: DomTaskStartOptions = {},
+  ): Promise<DomTaskOutcome> {
+    const taskId = input.taskId;
+    if (!taskId || !input.prompt) {
+      return { ok: false, taskId, error: 'missing_task_id_or_prompt', phase: 'runner' };
+    }
+    if (pending.has(taskId)) {
+      return { ok: false, taskId, error: 'task_already_registered', phase: 'runner' };
+    }
+    const signal = options.signal;
+    if (signal?.aborted) throw abortReason(signal);
+
+    let tabId: number;
+    let effectiveChatSessionId: string | null;
+    let isNewlyCreated = false;
+    try {
+      const resolved = await resolveDomTab(input.chatSessionId);
+      tabId = resolved.tabId;
+      effectiveChatSessionId = resolved.chatSessionId;
+      isNewlyCreated = resolved.isNewlyCreated;
+    } catch (error) {
+      return { ok: false, taskId, error: errorMessage(error), phase: 'tab' };
+    }
+    busyTabs.set(tabId, taskId);
+
+    // 只对新开的 tab 激活一次（首次加载需要前台才能完成初始化）；
+    // 复用已有 tab 时绝不抢用户焦点，避免把用户正在看的前台页面切走。
+    if (isNewlyCreated) {
+      try {
+        await updateTab(tabId, { active: true });
+      } catch {
+        /* 激活失败不致命，继续握手 */
+      }
+    }
+
+    return new Promise<DomTaskOutcome>((resolve, reject) => {
+      const entry: PendingDomTask = {
+        taskId,
+        kind: input.kind,
+        tabId,
+        chatSessionId: effectiveChatSessionId,
+        startedChatSessionId: effectiveChatSessionId,
+        settled: false,
+        resolve,
+        reject,
+      };
+      pending.set(taskId, entry);
+
+      if (signal) {
+        const onAbort = () => {
+          void cancelDomTaskMessage(tabId, taskId);
+          failEntry(entry, abortReason(signal));
+        };
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+        entry.abortCleanup = () => signal.removeEventListener('abort', onAbort);
+      }
+
+      if (options.deadlineAt != null) {
+        const waitMs = Math.max(0, options.deadlineAt - Date.now());
+        entry.deadlineTimer = setTimeout(() => {
+          void cancelDomTaskMessage(tabId, taskId);
+          failEntry(entry, new Error('dom_task_deadline_exceeded'));
+        }, waitMs);
+      }
+
+      // 握手消息使用解析后的 effectiveChatSessionId：降级成新会话时传给 content 的是
+      // null，content 的 wrong_conversation 校验直接跳过。
+      void handshake(tabId, { ...input, chatSessionId: effectiveChatSessionId }, options).then(
+        (result) => {
+          if (entry.settled) return;
+          if (result.ok) return; // 等待 DOM_TASK_STARTED/COMPLETE/FAILED 事件。
+          settleEntry(entry, {
+            ok: false,
+            taskId,
+            error: result.error ?? 'dom_task_rejected',
+            phase: result.phase ?? 'bridge',
+          });
+        },
+        (error) => {
+          if (!entry.settled) {
+            settleEntry(entry, { ok: false, taskId, error: errorMessage(error), phase: 'bridge' });
+          }
+        },
+      );
+    });
+  }
+
+  function cancelTask(taskId: string): void {
+    const entry = pending.get(taskId);
+    if (entry) void cancelDomTaskMessage(entry.tabId, taskId);
+  }
+
+  function onStarted(event: DomTaskStartedEvent): void {
+    const entry = pending.get(event.taskId);
+    if (entry) {
+      entry.startedChatSessionId = event.chatSessionId ?? entry.startedChatSessionId;
+    }
+  }
+
+  function onComplete(event: DomTaskCompleteEvent): void {
+    const entry = pending.get(event.taskId);
+    if (!entry || entry.settled) return;
+    const chatSessionId = event.chatSessionId ?? entry.startedChatSessionId;
+    settleEntry(entry, {
+      ok: true,
+      taskId: event.taskId,
+      chatSessionId,
+      assistantText: event.assistantText ?? '',
+      toolExecutions: event.toolExecutions ?? [],
+      steps: event.steps ?? 0,
+    });
+  }
+
+  function onFailed(event: DomTaskFailedEvent): void {
+    const entry = pending.get(event.taskId);
+    if (!entry || entry.settled) return;
+    const retrySafe = RETRYABLE_PRE_SEND_ERRORS.has(event.error);
+    settleEntry(entry, {
+      ok: false,
+      taskId: event.taskId,
+      error: event.error || 'dom_task_failed',
+      phase: 'runner',
+      retrySafe,
+    });
+  }
+
+  function onNeedsAction(event: DomTaskNeedsActionEvent): void {
+    const entry = pending.get(event.taskId);
+    if (!entry) return;
+    void updateTab(entry.tabId, { active: true })
+      .catch((error) => reportError('dom_task_needs_action_tab_focus_failed', error));
+    reportError(
+      'dom_task_needs_action',
+      new Error(`${event.kind} requires user action (task ${event.taskId}).`),
+    );
+  }
+
+  function onProgress(_event: DomTaskProgressEvent): void {
+    // 一期单块终答，无动作。
+  }
+
+  return Object.freeze({
+    startTask,
+    cancelTask,
+    onStarted,
+    onComplete,
+    onFailed,
+    onNeedsAction,
+    onProgress,
+  });
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  if (signal.reason instanceof Error) return signal.reason;
+  if (signal.reason !== undefined && signal.reason !== null) return signal.reason;
+  return new DOMException('The operation was aborted.', 'AbortError');
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

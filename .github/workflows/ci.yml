@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Lightweight gate: typecheck, unit tests, and a Chrome build. The upstream
+      # full release chain (ci:quality) is not used here because this project does
+      # not publish to the Chrome Web Store or npm.
+      - name: Typecheck
+        run: npm run compile
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build (Chrome MV3)
+        run: npm run build:chrome

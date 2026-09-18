@@ -1,0 +1,1070 @@
+import {
+  getAllMemories,
+  getMemoryById,
+  importMemoriesAtomically,
+  saveMemory,
+  updateMemory,
+  deleteMemory,
+  touchMemories,
+  archiveStaleMemories,
+} from '../core/memory/store';
+import {
+  getAllSkillSources,
+  getAllSkills,
+  getSkillLibrary,
+  saveSkill,
+  setSkillEnabled,
+  setSkillsEnabled,
+  stageDeleteSkillAlreadyLocked,
+  stageDeleteSkillSourceAlreadyLocked,
+} from '../core/skill/registry';
+import {
+  checkGitHubSkillSourceUpdates,
+  importGitHubSkillSource,
+  previewGitHubSkillSource,
+  updateGitHubSkillSource,
+} from '../core/skill/github-importer';
+import {
+  importLocalSkillSource,
+  pickLocalSkillFolder,
+  previewLocalSkillSource,
+  relocateLocalSkillSource,
+  updateLocalSkillSource,
+} from '../core/skill/local-importer';
+import {
+  getAllPresets,
+  savePreset,
+  getActivePreset,
+  setActivePresetId,
+  stageDeletePresetAlreadyLocked,
+} from '../core/preset/store';
+import { getBackgroundConfig, saveBackgroundConfig, clearBackgroundConfig } from '../core/background/store';
+import { clearUsageRecords, getUsageSummary, recordUsageTurn } from '../core/usage/store';
+import { getExtensionVersion } from '../core/version';
+import {
+  recoverPendingSyncLocalApply,
+  runLocalStateMutationWithRecovery,
+} from '../core/sync/local-apply-runtime';
+import { createSyncRecoveryBarrier } from '../core/sync/recovery-barrier';
+import { clearToolCallHistory, getToolCallHistory } from '../core/tool/history';
+import {
+  appendExternalizedToolPayloadChunk,
+  clearExternalizedToolPayloadNamespace,
+} from '../core/tool/externalized-payload';
+import {
+  createInvalidToolCallResult,
+  createRuntimeToolRuntime,
+  type RuntimeToolCallOptions,
+} from '../core/tool/runtime';
+import { createProductionToolProviderRegistry } from './background/tool-provider-composition';
+import { createMcpCapabilityInvocationResolver } from '../core/mcp/capability-runtime';
+import {
+  getMcpCapabilitySettings,
+  setMcpCapabilityServerExposure,
+  updateMcpCapabilitySettings,
+} from '../core/mcp/capability-settings';
+import { projectMcpCapabilityDescriptors } from '../core/mcp/capability-projection';
+import {
+  authorizeExternalToolPayloadChunk,
+  closeToolAuthorization,
+  createToolAuthorization,
+  createToolAuthorizationResult,
+} from '../core/tool/authorization';
+import { ExternalPayloadAuthorizationCache } from '../core/tool/external-payload-authorization-cache';
+import {
+  browserControlService,
+  getBrowserControlSettings,
+  getBrowserControlState,
+  saveBrowserControlSettings,
+  setBrowserControlEnabled,
+} from '../core/browser-control';
+import {
+  addConversationToProject,
+  bindPendingProjectConversation,
+  createProjectContext,
+  stageDeleteProjectContextAndMemoriesAlreadyLocked,
+  formatProjectPromptContext,
+  getProjectContextState,
+  getProjectForConversation,
+  getProjectPromptContextForConversation,
+  refreshProjectConversation,
+  removeConversationFromProject,
+  setPendingProjectContext,
+  updateProjectContext,
+} from '../core/project';
+import { getArtifact } from '../core/artifact';
+import {
+  deleteSavedItem,
+  getAllSavedItems,
+  getSavedItemsState,
+  saveSavedItem,
+} from '../core/saved-items';
+import {
+  getPromptInjectionSettings,
+  savePromptInjectionSettings,
+} from '../core/prompt/settings';
+import {
+  getSkillAutoActivationSettings,
+  saveSkillAutoActivationSettings,
+} from '../core/skill/auto-activation-settings';
+import {
+  normalizeSandboxExecutionResult,
+  parseSandboxEnvelope,
+  readSandboxRequestId,
+  SANDBOX_MESSAGE_TYPES,
+  SANDBOX_OFFSCREEN_PORT,
+  type SandboxExecutionResult,
+  type SandboxRunRequest,
+  type SandboxToolRuntime,
+} from '../core/sandbox';
+import { getCurrentPlatformEnvironment } from '../core/platform';
+import { readOptionalChromeApi } from '../core/platform/chrome-api';
+import {
+  dismissWhatsNew,
+  hasPendingWhatsNew,
+  markWhatsNewPending,
+} from '../core/whats-new';
+import {
+  createMcpServer,
+  deleteMcpServer,
+  getAllMcpServers,
+  getMcpToolCache,
+  getMcpServerById,
+  updateMcpServer,
+} from '../core/mcp/store';
+import { refreshMcpServerDiscovery } from '../core/mcp/discovery';
+import { getMcpOriginPattern, hasMcpServerOriginPermission } from '../core/mcp/transports';
+import {
+  buildShellAllowlistUpgrade,
+  createShellMcpPresetInput,
+  isShellMcpServer,
+} from '../core/shell';
+import { getWebToolSettings, setWebToolEnabled } from '../core/tool/web-settings';
+import {
+  createAutomation,
+  deleteAutomation,
+  getAllAutomations,
+  getAutomationById,
+  getAutomationRuns,
+  setAutomationStatus,
+  updateAutomation,
+} from '../core/automation/store';
+import { createAutomationRunnerFailure } from '../core/automation/messages';
+import {
+  AUTOMATION_WAKE_ALARM_NAME,
+  AUTOMATION_WAKE_INTERVAL_MINUTES,
+  cancelActiveAutomationRun,
+  refreshAutomationNextRunAt,
+  runAutomation,
+  scanDueAutomations,
+} from '../core/automation/scheduler';
+import { createDomTaskCoordinator } from '../core/zai/dom-task-coordinator';
+import { createDomTaskRuntimeHandlers } from './background/dom-task-handlers';
+import { broadcastRuntimeUpdate } from '../core/messaging/broadcast';
+import { createBackgroundErrorResponse } from '../core/messaging/background-error';
+import {
+  authorizeRuntimeMessage,
+  createRuntimeBoundaryErrorResponse,
+  createRuntimeMessageContext,
+  decodeRuntimeMessageEnvelope,
+  RuntimeBoundaryError,
+  type RuntimeMessageContext,
+  type RuntimeMessageEnvelope,
+} from '../core/messaging/runtime-boundary';
+import { requiresCurrentToolAuthorizationSubject } from '../core/messaging/tool-runtime-contracts';
+import { createRuntimeCommandRegistry } from '../core/messaging/runtime-command-registry';
+import { createBootstrapRuntimeHandlers } from './background/bootstrap-handlers';
+import { createDiagnosticsRuntimeHandlers } from './background/diagnostics-handlers';
+import { createTrackedLocalStateMutationRunner } from './background/local-state-mutation-runner';
+import { createPersistenceMutationBindings } from './background/persistence-mutation-bindings';
+import { createPersistenceRuntimeHandlers } from './background/persistence-handlers';
+import { createToolRuntimeHandlers } from './background/tool-runtime-handlers';
+import { createTrustedToolExecutionContext } from './background/tool-execution-handlers';
+import { createBackgroundRuntimeHandlers } from './background/background-runtime-handlers';
+import { refreshRuntimeMessageContextFromBrowserTab } from './background/runtime-message-context';
+import {
+  createTranslator,
+  DEFAULT_LOCALE,
+  type LocaleMessageKey,
+  type MessageParams,
+  type SupportedLocale,
+} from '../core/i18n/background';
+import {
+  getResolvedLocaleState,
+  watchLocalePreference,
+} from '../core/i18n/store';
+import type {
+  BackgroundConfig,
+  CurrentGLMConversation,
+  ToolCall,
+  ToolDescriptor,
+  ToolExecutionTrigger,
+  ToolResult,
+} from '../core/types';
+import type { McpServerConfig } from '../core/mcp/types';
+import type { AutomationRunnerRequest, AutomationRunnerResult } from '../core/automation/types';
+import type { AutomationExecutionContext } from '../core/automation/execution';
+
+const ZAI_HOME_URL = 'https://chat.z.ai/';
+const ZAI_TAB_URL_PATTERN = '*://chat.z.ai/*';
+/** 向 chat.z.ai 标签页请求 auth 刷新（content 从页面 localStorage 兜底读 token）。 */
+const REFRESH_AUTH_MESSAGE = { type: 'REFRESH_ZAI_AUTH' } as const;
+const domTaskCoordinator = createDomTaskCoordinator({
+  homeUrl: ZAI_HOME_URL,
+  tabUrlPattern: ZAI_TAB_URL_PATTERN,
+  reportError: reportBackgroundStartupError,
+});
+const externalPayloadAuthorizationCache = new ExternalPayloadAuthorizationCache();
+const {
+  executeToolCall: executeRuntimeToolCall,
+  getAuthorizationDescriptors: getRuntimeAuthorizationDescriptors,
+  getToolDescriptors: getRuntimeToolDescriptors,
+  refreshToolDescriptors: refreshRuntimeToolDescriptors,
+} = createRuntimeToolRuntime(createProductionToolProviderRegistry(), {
+  capabilityInvocationResolver: createMcpCapabilityInvocationResolver(),
+});
+let currentBackgroundLocale: SupportedLocale = DEFAULT_LOCALE;
+let currentBackgroundTranslator = createTranslator(DEFAULT_LOCALE);
+let sandboxOffscreenCreation: Promise<void> | null = null;
+const syncLocalRecoveryBarrier = createSyncRecoveryBarrier({
+  recover: recoverPendingSyncLocalApply,
+  async notifyRecovered() {
+    await Promise.all([
+      broadcastStateUpdate(),
+      broadcastProjectContextUpdate(),
+      broadcastSavedItemsUpdate(),
+    ]);
+  },
+  onRecoveryFailure(error) {
+    reportBackgroundStartupError('sync_local_recovery_failed', error);
+  },
+  onNotificationFailure(error) {
+    reportBackgroundStartupError('sync_local_recovery_broadcast_failed', error);
+  },
+});
+const beginLocalStateMutation = createTrackedLocalStateMutationRunner({
+  runWithRecovery: runLocalStateMutationWithRecovery,
+  trackApply: (operation) => syncLocalRecoveryBarrier.trackApply(operation),
+});
+const persistenceMutations = createPersistenceMutationBindings({
+  runLocalStateMutation: beginLocalStateMutation,
+  stageDeleteSkillAlreadyLocked,
+  stageDeleteSkillSourceAlreadyLocked,
+  stageDeletePresetAlreadyLocked,
+  stageDeleteProjectContextAndMemoriesAlreadyLocked,
+  importGitHubSkillSource,
+  importLocalSkillSource,
+  updateLocalSkillSource,
+  relocateLocalSkillSource,
+  updateGitHubSkillSource,
+  executeLocalSkillImporterToolCall,
+});
+const SANDBOX_OFFSCREEN_URL = 'sandbox-offscreen.html';
+const browserSandboxRuntime: SandboxToolRuntime = {
+  runSandbox: (request) => runBrowserSandboxToolResult(request),
+};
+const runtimeCommandRegistry = createRuntimeCommandRegistry({
+  typedHandlers: [
+    ...createDomTaskRuntimeHandlers({ coordinator: domTaskCoordinator }),
+    ...createBootstrapRuntimeHandlers({
+      getVersion: getExtensionVersion,
+      dismissWhatsNew,
+      refreshWhatsNewBadge,
+    }),
+    ...createDiagnosticsRuntimeHandlers({
+      getVersion: getExtensionVersion,
+    }),
+    ...createPersistenceRuntimeHandlers({
+      memory: {
+        getAllMemories,
+        getMemoryById,
+        saveMemory,
+        importMemoriesAtomically,
+        updateMemory,
+        deleteMemory,
+        touchMemories,
+        notifyCommittedStateUpdate,
+      },
+      skill: {
+        getLocale: () => currentBackgroundLocale,
+        getAllSkills: (locale) => getAllSkills({ locale }),
+        getSkillLibrary,
+        getAllSkillSources,
+        saveSkill,
+        deleteSkill: persistenceMutations.deleteSkill,
+        setSkillEnabled,
+        setSkillsEnabled,
+        previewGitHubSkillSource,
+        importGitHubSkillSource: persistenceMutations.importGitHubSkillSource,
+        previewLocalSkillSource: (rootPath) => previewLocalSkillSource(
+          rootPath,
+          { executeToolCall: executeLocalSkillImporterToolCall },
+        ),
+        pickLocalSkillFolder: (defaultPath) => pickLocalSkillFolder(
+          defaultPath,
+          { executeToolCall: executeLocalSkillImporterToolCall },
+        ),
+        importLocalSkillSource: persistenceMutations.importLocalSkillSource,
+        updateLocalSkillSource: persistenceMutations.updateLocalSkillSource,
+        relocateLocalSkillSource: persistenceMutations.relocateLocalSkillSource,
+        checkGitHubSkillSourceUpdates,
+        updateGitHubSkillSource: persistenceMutations.updateGitHubSkillSource,
+        deleteGitHubSkillSource: persistenceMutations.deleteGitHubSkillSource,
+        broadcastStateUpdate,
+      },
+      library: {
+        getAllPresets,
+        savePreset,
+        deletePreset: persistenceMutations.deletePreset,
+        setActivePresetId,
+        getActivePreset,
+        getPromptInjectionSettings,
+        savePromptInjectionSettings,
+        getSkillAutoActivationSettings,
+        saveSkillAutoActivationSettings,
+        getAllSavedItems,
+        saveSavedItem,
+        deleteSavedItem,
+        insertPromptIntoActiveGLMTab,
+        broadcastStateUpdate,
+        broadcastSavedItemsUpdate,
+      },
+      project: {
+        getProjectContextState,
+        createProjectContext,
+        updateProjectContext,
+        deleteProjectContext: persistenceMutations.deleteProjectContext,
+        addConversationToProject,
+        removeConversationFromProject,
+        setPendingProjectContext,
+        getCurrentGLMConversation,
+        bindPendingProjectConversation,
+        refreshProjectConversation,
+        getProjectForConversation,
+        getProjectPromptContextForConversation,
+        formatProjectPromptContext,
+        getArtifact,
+        notifyCommittedProjectContextUpdate,
+        notifyCommittedStateUpdate,
+      },
+      localPreference: {
+        broadcastStateUpdate,
+        getBackgroundConfig,
+        saveBackgroundConfig,
+        clearBackgroundConfig,
+        broadcastBackgroundUpdate,
+      },
+    }),
+    ...createToolRuntimeHandlers({
+      mcp: {
+        getAllMcpServers,
+        getMcpCapabilitySettings,
+        updateMcpCapabilitySettings,
+        setMcpCapabilityServerExposure,
+        getMcpServerById,
+        createMcpServer,
+        updateMcpServer,
+        deleteMcpServer,
+        getMcpToolCache,
+        refreshMcpServerDiscovery,
+        getMcpOriginPattern,
+        hasMcpServerOriginPermission,
+        broadcastMcpServersUpdate,
+        broadcastToolDescriptorsUpdate,
+      },
+      browser: {
+        getWebToolSettings,
+        setWebToolEnabled,
+        getBrowserControlSettings,
+        saveBrowserControlSettings,
+        setBrowserControlEnabled,
+        getBrowserControlState,
+        setBrowserControlTarget: (tabId) => browserControlService.setTarget(tabId),
+        detachBrowserControl: () => browserControlService.detach(),
+        requestHostPermission: (origins) => chrome.permissions.request({ origins }),
+        fetch: (input, init) => fetch(input, init),
+        broadcastToolDescriptorsUpdate,
+        broadcastBrowserControlUpdate,
+      },
+      execution: {
+        getLocale: () => currentBackgroundLocale,
+        getToolDescriptors: getRuntimeToolDescriptors,
+        getPromptToolDescriptors: getPromptToolDescriptors,
+        getAuthorizationDescriptors: getRuntimeAuthorizationDescriptors,
+        refreshToolDescriptors: refreshRuntimeToolDescriptors,
+        createToolAuthorization,
+        // Validate whether a directory belongs to an imported local
+        // skill (owned and trusted by background).
+        validateLocalSkillDirectory: async (dir: string): Promise<boolean> => {
+          if (!dir) return false;
+          const sources = await getAllSkillSources();
+          // Treat dir as trusted when it matches an imported local
+          // skill source's root path, OR when it matches the actual install
+          // directory (localDirectory) of any imported local skill. The latter
+          // is required because activeLocalSkillDir is set to the skill's
+          // localDirectory (e.g. rootPath/subSkill) rather than the source
+          // rootPath when a multi-skill folder is imported.
+          if (sources.some(
+            (source) => source.provider === 'local' && source.rootPath === dir,
+          )) {
+            return true;
+          }
+          const skills = await getAllSkills({ includeDisabled: true });
+          return skills.some(
+            (skill) => skill.remote?.provider === 'local' && skill.remote?.localDirectory === dir,
+          );
+        },
+        closeToolAuthorization,
+        authorizeExternalToolPayloadChunk,
+        createToolAuthorizationResult,
+        createInvalidToolCallResult,
+        externalPayloadAuthorizationCache,
+        appendExternalizedToolPayloadChunk,
+        clearExternalizedToolPayloadNamespace,
+        executeToolCall: executeRuntimeToolCall,
+        runSandbox: runBrowserSandboxToolResult,
+        getToolCallHistory,
+        clearToolCallHistory,
+        getPlatformEnvironment: getCurrentPlatformEnvironment,
+        createRequestId: () => crypto.randomUUID(),
+        now: () => Date.now(),
+        sandboxInvalidRequestSummary: () => backgroundT('tool.sandbox.invalidRequest'),
+        broadcastToolDescriptorsUpdate,
+        broadcastMcpServersUpdate,
+        broadcastToolCallHistoryUpdate,
+        notifyStateCommitted: notifyCommittedStateUpdate,
+      },
+    }),
+    ...createBackgroundRuntimeHandlers({
+      usage: {
+        recordUsageTurn,
+        getUsageSummary,
+        clearUsageRecords,
+      },
+      automation: {
+        getAllAutomations,
+        getAutomationRuns,
+        createAutomation,
+        updateAutomation,
+        setAutomationStatus,
+        deleteAutomation,
+        refreshAutomationNextRunAt,
+        cancelActiveAutomationRun,
+        runAutomationNow,
+        broadcastAutomationUpdate,
+        broadcastAutomationRunsUpdate,
+      },
+    }),
+  ],
+});
+
+function backgroundT(key: LocaleMessageKey, params?: MessageParams): string {
+  return currentBackgroundTranslator.t(key, params);
+}
+
+async function refreshBackgroundLocale(): Promise<void> {
+  const resolved = await getResolvedLocaleState();
+  currentBackgroundLocale = resolved.locale;
+  currentBackgroundTranslator = createTranslator(resolved.locale);
+}
+type SidePanelApi = {
+  setPanelBehavior?: (options: { openPanelOnActionClick: boolean }) => Promise<void>;
+};
+
+type ActionApi = {
+  setBadgeText?: (details: { text: string }) => Promise<void> | void;
+  setBadgeBackgroundColor?: (details: { color: string }) => Promise<void> | void;
+};
+
+export default defineBackground(() => {
+  void syncLocalRecoveryBarrier.ensureReady().catch(acknowledgeReportedSyncRecoveryFailure);
+  enableSidePanelActionClick();
+  registerWhatsNewInstallListener();
+  registerAutomationAlarmListener();
+  refreshBackgroundLocale()
+    .catch((error) => reportBackgroundStartupError('locale_init_failed', error));
+  watchLocalePreference(() => {
+    refreshBackgroundLocale()
+      .then(async () => {
+        await broadcastStateUpdate();
+        await broadcastToolDescriptorsUpdate();
+      })
+      .catch((error) => reportBackgroundStartupError('locale_refresh_failed', error));
+  });
+
+  syncLocalRecoveryBarrier.ensureReady()
+    .then(() => archiveStaleMemories()
+      .catch((error) => reportBackgroundStartupError('archive_stale_memories_failed', error)))
+    .catch(acknowledgeReportedSyncRecoveryFailure);
+  ensureBuiltInMcpPresets().catch((error) => reportBackgroundStartupError('builtin_mcp_presets_failed', error));
+  refreshWhatsNewBadge().catch((error) => reportBackgroundStartupError('whats_new_badge_failed', error));
+  ensureAutomationWakeAlarm().catch((error) => reportBackgroundStartupError('automation_alarm_create_failed', error));
+  syncLocalRecoveryBarrier.ensureReady()
+    .then(() => scanDueAutomationsFromWake()
+      .catch((error) => reportBackgroundStartupError('automation_startup_scan_failed', error)))
+    .catch(acknowledgeReportedSyncRecoveryFailure);
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    let envelope: RuntimeMessageEnvelope | undefined;
+    let context: RuntimeMessageContext;
+    try {
+      envelope = decodeRuntimeMessageEnvelope(message);
+      context = createRuntimeMessageContext(sender, {
+        runtimeId: chrome.runtime.id,
+        extensionOrigin: chrome.runtime.getURL('/'),
+        glmOrigin: new URL(ZAI_HOME_URL).origin,
+      });
+      authorizeRuntimeMessage(envelope, context);
+    } catch (error) {
+      sendResponse(createRuntimeBoundaryErrorResponse(error, envelope));
+      return false;
+    }
+
+    const contextForDispatch = requiresCurrentToolAuthorizationSubject(envelope.type)
+      ? refreshRuntimeMessageContextFromBrowserTab(context, {
+        tabs: chrome.tabs,
+        glmOrigin: new URL(ZAI_HOME_URL).origin,
+      })
+      : Promise.resolve(context);
+
+    contextForDispatch
+      .then((currentContext) => syncLocalRecoveryBarrier.ensureReady()
+        .then(() => handleMessage(envelope, currentContext)))
+      .then(sendResponse)
+      .catch((error) => sendResponse(error instanceof RuntimeBoundaryError
+        ? createRuntimeBoundaryErrorResponse(error, envelope)
+        : createBackgroundErrorResponse(
+          envelope,
+          error,
+          backgroundT('content.toolBlock.summaries.backgroundFailed'),
+        )));
+    return true;
+  });
+});
+
+function registerAutomationAlarmListener() {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name !== AUTOMATION_WAKE_ALARM_NAME) return;
+    syncLocalRecoveryBarrier.ensureReady()
+      .then(() => scanDueAutomationsFromWake()
+        .catch((error) => reportBackgroundStartupError('automation_alarm_scan_failed', error)))
+      .catch(acknowledgeReportedSyncRecoveryFailure);
+  });
+}
+
+async function ensureAutomationWakeAlarm() {
+  await chrome.alarms.create(AUTOMATION_WAKE_ALARM_NAME, {
+    periodInMinutes: AUTOMATION_WAKE_INTERVAL_MINUTES,
+  });
+}
+
+function enableSidePanelActionClick() {
+  const sidePanel = readOptionalChromeApi(
+    () => (chrome as typeof chrome & { sidePanel?: SidePanelApi }).sidePanel,
+  );
+  sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true })
+    .catch((error) => reportBackgroundStartupError('sidepanel_behavior_failed', error));
+}
+
+function registerWhatsNewInstallListener() {
+  chrome.runtime.onInstalled.addListener((details) => {
+    if (details.reason !== 'update') return;
+
+    markWhatsNewPending(details.previousVersion ?? null)
+      .then(() => refreshWhatsNewBadge())
+      .catch((error) => reportBackgroundStartupError('whats_new_update_failed', error));
+  });
+}
+
+async function refreshWhatsNewBadge() {
+  const action = readOptionalChromeApi(
+    () => (chrome as typeof chrome & { action?: ActionApi }).action,
+  );
+  if (!action?.setBadgeText) return;
+
+  const showBadge = await hasPendingWhatsNew();
+  await action.setBadgeText({ text: showBadge ? 'NEW' : '' });
+  if (showBadge && action.setBadgeBackgroundColor) {
+    await action.setBadgeBackgroundColor({ color: '#4D6BFE' });
+  }
+}
+
+async function ensureBuiltInMcpPresets() {
+  const servers = await getAllMcpServers();
+  const shellServer = servers.find(isShellMcpServer);
+  if (!shellServer) {
+    await createMcpServer(createShellMcpPresetInput({ enabled: false }));
+  } else {
+    await ensureShellMcpCompatibility(shellServer);
+  }
+}
+
+async function ensureShellMcpCompatibility(server: McpServerConfig) {
+  let nextServer = server;
+  const upgradedAllowlist = buildShellAllowlistUpgrade(server.allowlist);
+  if (upgradedAllowlist) {
+    nextServer = await updateMcpServer(server.id, {
+      allowlist: upgradedAllowlist,
+    }) ?? server;
+  }
+
+  if (!nextServer.enabled || !nextServer.execution.enabled || nextServer.execution.mode === 'disabled') {
+    return;
+  }
+
+  const hasCache = Boolean(await getMcpToolCache(nextServer.id));
+  if (!hasCache && !upgradedAllowlist) return;
+
+  try {
+    await refreshMcpServerDiscovery(nextServer.id);
+  } catch (error) {
+    reportBackgroundStartupError('shell_mcp_discovery_refresh_failed', error);
+  }
+}
+
+function reportBackgroundStartupError(code: string, error: unknown) {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.error(`[GLM++] ${code}: ${detail}`, error);
+}
+
+function acknowledgeReportedSyncRecoveryFailure(error: unknown): void {
+  // The recovery barrier invokes onRecoveryFailure before rejecting. Startup
+  // observers consume that already-reported rejection to prevent an unhandled promise.
+  void error;
+}
+
+async function handleMessage(
+  message: RuntimeMessageEnvelope,
+  context: RuntimeMessageContext,
+) {
+  return runtimeCommandRegistry.dispatch(message, context);
+}
+
+async function executeLocalSkillImporterToolCall(call: ToolCall): Promise<ToolResult> {
+  return executeBackgroundRuntimeToolCall(call, 'manual_chat');
+}
+
+async function broadcastToTabs(payload: Record<string, unknown>, excludeTabId?: number) {
+  await broadcastRuntimeUpdate(payload, excludeTabId, {
+    tabUrlPattern: ZAI_TAB_URL_PATTERN,
+    sendRuntimeMessage: (message) => chrome.runtime.sendMessage(message),
+    queryTabsByUrl: (urlPattern) => chrome.tabs.query({ url: urlPattern }),
+    sendTabMessage: (tabId, message) => chrome.tabs.sendMessage(tabId, message),
+    reportError: reportBackgroundStartupError,
+  });
+}
+
+async function broadcastStateUpdate(excludeTabId?: number) {
+  const [memories, skills, activePreset, promptSettings, skillAutoActivation] = await Promise.all([
+    getAllMemories(),
+    getAllSkills({ locale: currentBackgroundLocale }),
+    getActivePreset(),
+    getPromptInjectionSettings(),
+    getSkillAutoActivationSettings(),
+  ]);
+  await broadcastToTabs({ type: 'STATE_UPDATED', memories, skills, activePreset, promptSettings, skillAutoActivation }, excludeTabId);
+}
+
+async function notifyCommittedStateUpdate(excludeTabId?: number): Promise<void> {
+  try {
+    await broadcastStateUpdate(excludeTabId);
+  } catch (error) {
+    reportBackgroundStartupError('committed_state_broadcast_failed', error);
+  }
+}
+
+async function broadcastBackgroundUpdate(config: BackgroundConfig | null) {
+  await broadcastToTabs({ type: 'BACKGROUND_UPDATED', config });
+}
+
+async function broadcastMcpServersUpdate(excludeTabId?: number) {
+  const servers = await getAllMcpServers();
+  await broadcastToTabs({ type: 'MCP_SERVERS_UPDATED', servers }, excludeTabId);
+}
+
+async function broadcastToolDescriptorsUpdate(excludeTabId?: number) {
+  const toolDescriptors = await getRuntimeToolDescriptors(currentBackgroundLocale);
+  await broadcastToTabs({ type: 'TOOL_DESCRIPTORS_UPDATED', toolDescriptors }, excludeTabId);
+}
+
+async function broadcastBrowserControlUpdate(excludeTabId?: number) {
+  await broadcastToTabs({ type: 'BROWSER_CONTROL_UPDATED' }, excludeTabId);
+}
+
+async function broadcastToolCallHistoryUpdate(excludeTabId?: number) {
+  await broadcastToTabs({ type: 'TOOL_CALL_HISTORY_UPDATED' }, excludeTabId);
+}
+
+async function broadcastProjectContextUpdate(excludeTabId?: number) {
+  const state = await getProjectContextState();
+  await broadcastToTabs({ type: 'PROJECT_CONTEXT_UPDATED', state }, excludeTabId);
+}
+
+async function notifyCommittedProjectContextUpdate(excludeTabId?: number): Promise<void> {
+  try {
+    await broadcastProjectContextUpdate(excludeTabId);
+  } catch (error) {
+    reportBackgroundStartupError('committed_project_broadcast_failed', error);
+  }
+}
+
+async function getCurrentGLMConversation(): Promise<
+  { ok: true; conversation: CurrentGLMConversation } | { ok: false; error: string }
+> {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs.find((item) => item.id != null && isChatConversationUrl(item.url));
+  if (!tab?.id) return { ok: false, error: 'no_active_glm_conversation' };
+
+  try {
+    const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_CURRENT_GLM_CONVERSATION' });
+    if (response?.ok && response.conversation) {
+      return { ok: true, conversation: response.conversation as CurrentGLMConversation };
+    }
+    return { ok: false, error: response?.error ?? 'no_current_conversation' };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function isGLMChatUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === 'chat.z.ai' && /^\/c\//.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** 当前活跃对话 URL（只匹配 chat.z.ai，项目页据此抓当前对话）。已不再支持 glm 域名。 */
+function isChatConversationUrl(url: string | undefined): boolean {
+  return isGLMChatUrl(url);
+}
+
+async function insertPromptIntoActiveGLMTab(
+  text: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (text.length === 0) {
+    return { ok: false, error: 'empty_prompt_text' };
+  }
+
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs.find((item) => item.id != null && isGLMPageUrl(item.url));
+  if (!tab?.id) {
+    return { ok: false, error: backgroundT('background.auth.missingGLM') };
+  }
+
+  try {
+    const response = await chrome.tabs.sendMessage(tab.id, { type: 'INSERT_PROMPT_TEXT', text });
+    if (response?.ok) return { ok: true };
+    return {
+      ok: false,
+      error: getPromptInsertionErrorMessage(response?.error),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function getPromptInsertionErrorMessage(error: unknown): string {
+  if (error === 'empty_prompt_text') return 'empty_prompt_text';
+  if (error === 'prompt_input_not_found') return backgroundT('background.auth.missingGLM');
+  return typeof error === 'string' && error.length > 0
+    ? error
+    : backgroundT('background.auth.missingGLM');
+}
+
+function isGLMPageUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    return new URL(url).hostname === 'chat.z.ai';
+  } catch {
+    return false;
+  }
+}
+
+async function broadcastSavedItemsUpdate(excludeTabId?: number) {
+  const savedItems = await getAllSavedItems();
+  await broadcastToTabs({ type: 'SAVED_ITEMS_UPDATED', savedItems }, excludeTabId);
+}
+
+async function broadcastAutomationUpdate(excludeTabId?: number) {
+  const automations = await getAllAutomations();
+  await broadcastToTabs({ type: 'AUTOMATIONS_UPDATED', automations }, excludeTabId);
+}
+
+async function broadcastAutomationRunsUpdate(excludeTabId?: number) {
+  await broadcastToTabs({ type: 'AUTOMATION_RUNS_UPDATED' }, excludeTabId);
+}
+
+async function executeBackgroundRuntimeToolCall(
+  call: ToolCall,
+  source: ToolExecutionTrigger,
+  options?: RuntimeToolCallOptions,
+): Promise<ToolResult> {
+  return executeRuntimeToolCall(
+    call,
+    createTrustedToolExecutionContext(
+      call,
+      source,
+      undefined,
+      options?.trustedCapabilityScopeId,
+    ),
+    currentBackgroundLocale,
+    options,
+  );
+}
+
+async function getPromptToolDescriptors(
+  locale: SupportedLocale,
+  intent: string,
+): Promise<ToolDescriptor[]> {
+  const [descriptors, settings] = await Promise.all([
+    getRuntimeToolDescriptors(locale),
+    getMcpCapabilitySettings(),
+  ]);
+  return projectMcpCapabilityDescriptors({ descriptors, settings, intent }).descriptors;
+}
+
+async function runBrowserSandboxToolResult(request: SandboxRunRequest): Promise<ToolResult> {
+  const startedAt = Date.now();
+  const result = await requestOffscreenSandboxRun(request);
+  const completedAt = Date.now();
+  const detail = result.ok
+    ? result.result || result.stdout || ''
+    : result.stderr || result.error || backgroundT('tool.sandbox.failed');
+
+  return {
+    ok: result.ok,
+    summary: result.ok ? backgroundT('tool.sandbox.executed') : backgroundT('tool.sandbox.failed'),
+    detail,
+    output: sandboxExecutionResultToJson(result),
+    error: result.ok ? undefined : {
+      code: result.error || 'sandbox_execution_failed',
+      message: detail,
+      retryable: result.error === 'sandbox_timeout' || result.error === 'sandbox_frame_timeout',
+    },
+    startedAt,
+    completedAt,
+    durationMs: result.durationMs,
+    truncated: result.truncated,
+  };
+}
+
+async function requestOffscreenSandboxRun(request: SandboxRunRequest): Promise<SandboxExecutionResult> {
+  if (!chrome.offscreen?.createDocument || !chrome.offscreen?.hasDocument) {
+    return createSandboxFailure(
+      backgroundT('tool.sandbox.offscreenUnavailableDetail'),
+      'sandbox_offscreen_unavailable',
+    );
+  }
+
+  try {
+    await ensureSandboxOffscreenDocument();
+  } catch (error) {
+    return createSandboxFailure(
+      error instanceof Error ? error.message : String(error),
+      'sandbox_offscreen_create_failed',
+    );
+  }
+
+  return sendSandboxRunToOffscreen(request);
+}
+
+async function ensureSandboxOffscreenDocument(): Promise<void> {
+  if (await chrome.offscreen.hasDocument()) return;
+
+  if (!sandboxOffscreenCreation) {
+    sandboxOffscreenCreation = chrome.offscreen.createDocument({
+      url: SANDBOX_OFFSCREEN_URL,
+      reasons: [chrome.offscreen.Reason.IFRAME_SCRIPTING, chrome.offscreen.Reason.WORKERS],
+      justification: 'Run GLM-requested JavaScript, TypeScript, Python, and HTML in an isolated extension sandbox instead of the GLM page.',
+    }).finally(() => {
+      sandboxOffscreenCreation = null;
+    });
+  }
+
+  await sandboxOffscreenCreation;
+}
+
+function sendSandboxRunToOffscreen(request: SandboxRunRequest): Promise<SandboxExecutionResult> {
+  const requestId = crypto.randomUUID();
+  const timeoutMs = Math.max(2_000, request.timeoutMs + 2_000);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const port = chrome.runtime.connect({ name: SANDBOX_OFFSCREEN_PORT });
+    const settle = (result: SandboxExecutionResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      try {
+        port.disconnect();
+      } catch (error) {
+        reportBackgroundStartupError('offscreen_port_disconnect_cleanup_failed', error);
+      }
+      resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      settle(createSandboxFailure('Sandbox offscreen document timed out.', 'sandbox_offscreen_timeout', timeoutMs));
+    }, timeoutMs);
+
+    port.onMessage.addListener((message: unknown) => {
+      const envelope = parseSandboxEnvelope(message, SANDBOX_MESSAGE_TYPES.offscreenResult, requestId);
+      if (!envelope) {
+        if (readSandboxRequestId(message, SANDBOX_MESSAGE_TYPES.offscreenResult) === requestId) {
+          settle(createSandboxFailure('Invalid sandbox offscreen result.', 'sandbox_invalid_result'));
+        }
+        return;
+      }
+      settle(normalizeSandboxExecutionResult(envelope.result));
+    });
+
+    port.onDisconnect.addListener(() => {
+      const lastError = chrome.runtime.lastError?.message;
+      if (settled) return;
+      settle(createSandboxFailure(lastError || 'Sandbox offscreen document disconnected.', 'sandbox_offscreen_disconnected'));
+    });
+
+    port.postMessage({
+      type: SANDBOX_MESSAGE_TYPES.offscreenRun,
+      requestId,
+      payload: request,
+    });
+  });
+}
+
+function createSandboxFailure(message: string, code: string, durationMs = 0): SandboxExecutionResult {
+  return {
+    ok: false,
+    stdout: '',
+    stderr: message,
+    durationMs,
+    truncated: false,
+    error: code,
+  };
+}
+
+function sandboxExecutionResultToJson(result: SandboxExecutionResult): Record<string, string | number | boolean> {
+  return {
+    ok: result.ok,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    result: result.result ?? '',
+    html: result.html ?? '',
+    previewText: result.previewText ?? '',
+    durationMs: result.durationMs,
+    truncated: result.truncated,
+    error: result.error ?? '',
+  };
+}
+
+async function scanDueAutomationsFromWake() {
+  const result = await scanDueAutomations(executeAutomationWithContext);
+  if (result.initialized > 0 || result.started > 0 || result.failed > 0) {
+    await broadcastAutomationUpdate();
+  }
+  if (result.started > 0 || result.failed > 0) {
+    await broadcastAutomationRunsUpdate();
+    await broadcastToolCallHistoryUpdate();
+  }
+  return result;
+}
+
+async function runAutomationNow(id: string, excludeTabId?: number) {
+  const automation = await getAutomationById(id);
+  if (!automation) return { ok: false as const, error: 'automation_not_found' };
+
+  const run = await runAutomation({
+    automationId: id,
+    trigger: 'manual',
+    scheduledFor: null,
+    executor: executeAutomationWithContext,
+  });
+
+  await broadcastAutomationUpdate(excludeTabId);
+  await broadcastAutomationRunsUpdate(excludeTabId);
+  await broadcastToolCallHistoryUpdate(excludeTabId);
+
+  return run ?? { ok: false as const, error: 'automation_already_running' };
+}
+
+async function executeAutomationWithContext(
+  request: AutomationRunnerRequest,
+  execution: AutomationExecutionContext,
+): Promise<AutomationRunnerResult> {
+  execution.assertActive();
+  const taskId = crypto.randomUUID();
+  const prompt = request.prompt;
+  // 固定会话：仅当该任务开启了 fixedSession 才沿用上次的 chatSessionId；
+  // 否则传 null，强制每次新开对话（关闭开关 = 重新开一个窗口）。
+  // 兜底：搜索任务（高级搜索）强制新会话——advanced-search 的工具 schema 是 z.ai
+  // 在建会话时才注入的，复用旧会话续写时服务端不会重新装配工具，模型会退化成
+  // 把 search 当正文文本吐 `<tool_call>search(...)` 导致搜索失败。所以 search 与
+  // fixedSession 互斥，后端再兜一层，防止 UI 门控被绕过或旧数据残留。
+  const searchEnabled = request.promptOptions?.searchEnabled === true;
+  const chatSessionId = request.promptOptions?.fixedSession === true && !searchEnabled
+    ? request.chatSessionId
+    : null;
+
+  let outcome;
+  try {
+    outcome = await domTaskCoordinator.startTask(
+      {
+        taskId,
+        kind: 'automation',
+        prompt,
+        chatSessionId,
+        searchEnabled,
+      },
+      { signal: execution.signal, deadlineAt: execution.deadlineAt },
+    );
+  } catch (error) {
+    // coordinator 抛错（含 abort / deadline）→ 交给 scheduler 判定超时/取消。
+    if (execution.signal.aborted) execution.assertActive();
+    return createAutomationRunnerFailure(
+      request,
+      'dom_automation_failed',
+      error instanceof Error ? error.message : String(error),
+      'bridge',
+      false,
+      Date.now(),
+      { externalOutcome: 'ambiguous', retrySafe: false },
+    );
+  }
+  execution.assertActive();
+
+  if (!outcome.ok) {
+    const retrySafe = outcome.retrySafe === true;
+    return createAutomationRunnerFailure(
+      request,
+      `dom_automation_${outcome.error}`,
+      outcome.error,
+      outcome.phase,
+      retrySafe,
+      Date.now(),
+      { externalOutcome: retrySafe ? 'not_started' : 'ambiguous', retrySafe },
+    );
+  }
+
+  const finalChatSessionId = outcome.chatSessionId ?? chatSessionId;
+  const completedAt = Date.now();
+  return {
+    ok: true,
+    chatSessionId: finalChatSessionId ?? '',
+    sessionUrl: finalChatSessionId ? buildZaiSessionUrl(finalChatSessionId) : null,
+    parentMessageId: request.parentMessageId ?? 0,
+    assistantMessageId: null,
+    assistantText: outcome.assistantText,
+    toolExecutions: outcome.toolExecutions,
+    history: null,
+    completedAt,
+  };
+}
+
+function buildZaiSessionUrl(chatSessionId: string): string {
+  return `${ZAI_HOME_URL}c/${encodeURIComponent(chatSessionId)}`;
+}

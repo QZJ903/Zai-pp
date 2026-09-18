@@ -1,0 +1,20 @@
+{
+  "name": "glm-pp-shell-host",
+  "version": "2.14.61",
+  "description": "Native Messaging Shell MCP host installer for GLM++",
+  "type": "module",
+  "private": true,
+  "license": "Apache-2.0",
+  "bin": {
+    "glm-pp-shell-host": "bin/glm-pp-shell-host.mjs"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "native/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  }
+}
