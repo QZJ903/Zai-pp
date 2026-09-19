@@ -24,8 +24,9 @@ const expectedHostPermissions = [
   '*://chat.z.ai/*',
   '*://cn.bing.com/*',
   '*://www.bing.com/*',
+  'http://*/*',
+  'https://*/*',
 ];
-const expectedOptionalHostPermissions = ['http://*/*', 'https://*/*'];
 const expectedLocalizedManifest = {
   default_locale: 'en',
   name: '__MSG_extension_name__',
@@ -58,10 +59,11 @@ for (const target of targets) {
   assertEqual(manifest.description, expectedLocalizedManifest.description, `${target.browser}: localized description`);
   assertSetEqual(manifest.permissions, target.permissions, `${target.browser}: permissions`);
   assertSetEqual(manifest.host_permissions, expectedHostPermissions, `${target.browser}: host_permissions`);
-  assertSetEqual(
+  // optional_host_permissions 已全部升为必需权限，manifest 里不再有这个字段。
+  assertEqual(
     manifest.optional_host_permissions,
-    expectedOptionalHostPermissions,
-    `${target.browser}: optional_host_permissions`,
+    undefined,
+    `${target.browser}: optional_host_permissions must be absent`,
   );
 
   if (target.permissions.includes('sidePanel')) {

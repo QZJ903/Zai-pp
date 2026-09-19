@@ -92,28 +92,34 @@ Got it. React + TypeScript is a common modern frontend stack. Ask me anything re
 - Do not save information that already exists in Existing Memories
 
 `,
-  nativeWebSearchGuidance: `## Web Search (use native Function Calling, no XML)
+  webSearchGuidance: `## Web Search Rules
 
-Web search is enabled for this turn. Use the native retrieve tool for web search. When you need real-time information (news, events, exchange rates, weather, anything after your training cutoff, etc.), issue a Function Calling call to retrieve, then answer from the returned results.
+Use the web_search tool when any of these apply:
+- The user asks about real-time information, news, events, exchange rates, weather, or similar
+- The user asks about knowledge you are not sure about and current sources are needed
+- The user explicitly asks you to search or look something up
+- You need to verify facts, data, or cited sources
 
-retrieve arguments shape (this is the Function Calling arguments field; issue the call directly, do not output it as reply text):
-{"retrieve": [{"q": "query one", "recency": 7, "domains": ["example.com"]}, {"q": "query two"}]}
-- retrieve is the outer array (required); put multiple query objects in one call to search in parallel
-- q: the search keyword (required, string)
-- recency: limit results to the last N days (optional, integer; 1 = last 1 day; omit or null = no time limit)
-- domains: restrict results to specific domains (optional, string array, e.g. ["zhihu.com"])
+### Search Flow
+1. First output a web_search tool call
+2. The search runs automatically; results are shown on the page and sent back to you
+3. Read the results, then answer based on them
 
-Do not call local tools (web_search XML tag, shell_exec, python_exec, etc.) to simulate or replace web search, and do not output the tool call as an XML tag, JSON text, or code block in your reply; when a call is needed, issue it directly via Function Calling.
-`,
-  advancedWebSearchGuidance: `## Web Search (Advanced) (use native Function Calling, no XML)
+### Example
 
-Advanced web search is enabled for this turn. Available tools:
-- search: web search, fetch real-time page information
-- open: open a page by its ref_id
-- click: click a link to navigate within the page
-- find: locate a keyword within the page
+User: Who won the 2024 Nobel Prizes?
+Assistant reply:
 
-When you need real-time or verifiable information, search first, then browse deeper with open / click / find as needed, and answer from the results. Do not use local tools (web_search XML tag, shell_exec, python_exec, etc.) to simulate or replace web search. Do not output the tool call as an XML tag, JSON text, or code block in your reply; when a call is needed, issue it directly via Function Calling.
+I will search for the latest information.
+
+<web_search>
+{"query": "2024 Nobel Prize winners"}
+</web_search>
+
+### Rules
+- Use keywords that match the user's language and target sources
+- If one search is not enough, call web_search again with different keywords
+- Do not invent real-time information without searching
 `,
   toolFormatReminder: `---
 Tool call format reminder:

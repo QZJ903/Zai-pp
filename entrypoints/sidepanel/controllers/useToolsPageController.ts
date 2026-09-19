@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LocaleMessageKey, MessageParams } from '../../../core/i18n';
 import type { McpServerConfig, McpToolCacheEntry, PlatformEnvironment } from '../../../core/types';
+import type { WebSearchToolName } from '../../../core/tool/web-search';
 import { createRequestGenerationFence } from '../async-state';
 import { getRuntimeErrorMessage } from '../runtime-response';
 import {
@@ -19,13 +20,33 @@ export type ControllerMessageTone = 'success' | 'error' | 'warning' | 'info';
 type Translator = (key: LocaleMessageKey, params?: MessageParams) => string;
 
 export function useToolsPageController(t: Translator) {
+  const [settings, setSettings] = useState<Record<WebSearchToolName, boolean>>({
+    web_search: true,
+    web_fetch: true,
+  });
+  const [settingsError, setSettingsError] = useState('');
   const [pythonServer, setPythonServer] = useState<McpServerConfig | null>(null);
   const [pythonCache, setPythonCache] = useState<McpToolCacheEntry | null>(null);
   const [pythonBusy, setPythonBusy] = useState<PythonBusyState>('idle');
   const [pythonMessage, setPythonMessage] = useState('');
   const [pythonMessageTone, setPythonMessageTone] = useState<ControllerMessageTone>('info');
   const [platform, setPlatform] = useState<PlatformEnvironment | null>(null);
+  const settingsFence = useRef(createRequestGenerationFence());
   const pythonFence = useRef(createRequestGenerationFence());
+
+  const loadSettings = useCallback(async () => {
+    const generation = settingsFence.current.begin();
+    try {
+      const next = await mcpToolsController.getWebToolSettings();
+      if (!settingsFence.current.isCurrent(generation)) return;
+      setSettings(next);
+      setSettingsError('');
+    } catch (error) {
+      if (settingsFence.current.isCurrent(generation)) {
+        setSettingsError(getRuntimeErrorMessage(error));
+      }
+    }
+  }, []);
 
   const loadPythonTool = useCallback(async () => {
     const generation = pythonFence.current.begin();
@@ -49,6 +70,7 @@ export function useToolsPageController(t: Translator) {
   }, []);
 
   useEffect(() => {
+    void loadSettings();
     void loadPythonTool();
     const reloadForRuntimeUpdate = (message: { type?: string }) => {
       if (message.type === 'MCP_SERVERS_UPDATED' || message.type === 'TOOL_DESCRIPTORS_UPDATED') {
@@ -57,10 +79,11 @@ export function useToolsPageController(t: Translator) {
     };
     chrome.runtime.onMessage.addListener(reloadForRuntimeUpdate);
     return () => {
+      settingsFence.current.invalidate();
       pythonFence.current.invalidate();
       chrome.runtime.onMessage.removeListener(reloadForRuntimeUpdate);
     };
-  }, [loadPythonTool]);
+  }, [loadPythonTool, loadSettings]);
 
   const createPythonShell = useCallback(async () => {
     setPythonBusy('creating');
@@ -141,7 +164,21 @@ export function useToolsPageController(t: Translator) {
     }
   }, [loadPythonTool, pythonCache, pythonServer, t]);
 
+  const toggleWebTool = useCallback(async (name: WebSearchToolName, enabled: boolean) => {
+    const previous = settings[name];
+    setSettings((current) => ({ ...current, [name]: enabled }));
+    setSettingsError('');
+    try {
+      await mcpToolsController.setWebToolEnabled(name, enabled);
+    } catch (error) {
+      setSettings((current) => ({ ...current, [name]: previous }));
+      setSettingsError(getRuntimeErrorMessage(error));
+    }
+  }, [settings]);
+
   return {
+    settings,
+    settingsError,
     pythonServer,
     pythonCache,
     pythonBusy,
@@ -151,5 +188,6 @@ export function useToolsPageController(t: Translator) {
     createPythonShell,
     refreshPythonTools,
     togglePython,
+    toggleWebTool,
   };
 }

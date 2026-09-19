@@ -206,24 +206,25 @@ function readRecord(value: unknown): Record<string, unknown> | null {
 }
 
 // ---------------------------------------------------------------------------
-// z.ai 联网搜索 features（features.web_search + features.auto_web_search 一起置 true）。
-// 协议依据：GLM-Free-API zai.go 的 WebSearch 分支（两个 flag 同时写 true）。
+// z.ai 原生联网开关：强制关闭（features.auto_web_search + features.web_search 一起置 false）。
+// 协议依据：z.ai 真机抓包 —— 普通搜索两个 flag 都是 true，高级搜索是
+// auto_web_search=true / web_search=false；两个都写 false 用来观测能否关掉原生联网。
+// 联网一律走扩展自带的 web_search / web_fetch。
 // ---------------------------------------------------------------------------
 
 /**
- * 安全合并 features：开启「强制联网」= auto_web_search + web_search 都置 true。
- * 语义（z.ai 真机抓包 + GLM-Free-API zai.go 的 WebSearch 分支）：`auto_web_search`=自动
- * 判断要不要搜（不稳定、时搜时不搜），`web_search`=强制联网搜索（每次必搜）。用户要求
- * 自动化「开联网=强制联网」，故两个都置 true（对齐 GLM-Free-API 的强制写法）。
+ * 安全合并 features：关闭原生联网 = auto_web_search + web_search 都置 false。
+ * 语义（z.ai 真机抓包）：`auto_web_search`=自动判断要不要搜，`web_search`=强制联网搜索。
+ * 两个都置 false 用于关闭服务器侧的原生检索通道（保留其它既有 features 字段）。
  */
-export function mergeZaiWebSearchFeatures(features: unknown): Record<string, unknown> {
+export function mergeZaiNativeSearchDisabled(features: unknown): Record<string, unknown> {
   const existing = readRecord(features) ?? {};
-  return { ...existing, auto_web_search: true, web_search: true };
+  return { ...existing, auto_web_search: false, web_search: false };
 }
 
-/** 在 completion body 顶层 `features` 上开启联网搜索（原地合并浅拷贝，返回是否可写）。 */
-export function applyZaiWebSearchFeatures(body: Record<string, unknown>): boolean {
+/** 在 body 顶层 `features` 上关闭原生联网搜索（原地合并浅拷贝，返回是否可写）。 */
+export function disableZaiNativeWebSearch(body: Record<string, unknown>): boolean {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
-  body.features = mergeZaiWebSearchFeatures(body.features);
+  body.features = mergeZaiNativeSearchDisabled(body.features);
   return true;
 }

@@ -62,13 +62,18 @@ export function createManifest(env: ConfigEnv): UserManifest {
     permissions: isChromiumTarget
       ? [...chromiumPermissions, 'sidePanel']
       : basePermissions,
-    optional_host_permissions: ['http://*/*', 'https://*/*'],
     host_permissions: [
       // Bing: web_search 依赖。
       '*://cn.bing.com/*',
       '*://www.bing.com/*',
       // GLM++ (z.ai) host.
       '*://chat.z.ai/*',
+      // web_fetch 抓任意站点、MCP 自配端点、GitHub skill 导入都要跨源访问。
+      // 声明成必需权限（而非 optional_host_permissions）以省掉运行时授权步骤 ——
+      // 此前实测在开发者模式下扩展本就已获得「所有网站」访问权，声明成必需
+      // 只是把这件事实写明，安装时用户即可看到权限范围。
+      'http://*/*',
+      'https://*/*',
     ],
     content_security_policy: {
       extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",

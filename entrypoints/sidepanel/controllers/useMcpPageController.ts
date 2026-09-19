@@ -27,7 +27,7 @@ import {
 } from './mcp-tools-controller';
 
 type Translator = (key: LocaleMessageKey, params?: MessageParams) => string;
-type BusyAction = 'refresh' | 'test' | 'permission';
+type BusyAction = 'refresh' | 'test';
 type Banner = { tone: 'success' | 'error' | 'info'; text: string };
 type Confirm = (options: {
   title: string;
@@ -216,25 +216,6 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
     setBusy((current) => ({ ...current, [serverId]: action }));
   }, []);
 
-  const requestPermission = useCallback(async (server: McpServerConfig) => {
-    setBusyState(server.id, 'permission');
-    clearBanner();
-    try {
-      const result = await mcpToolsController.requestServerPermission(server);
-      if (result.ok) {
-        showBanner('success', t('sidepanel.mcpPage.messages.permissionGranted', {
-          origin: result.origin ?? t('sidepanel.mcpPage.localHost'),
-        }));
-      } else {
-        showBanner('error', result.error ?? t('sidepanel.mcpPage.messages.permissionDenied'));
-      }
-    } catch (error) {
-      showBanner('error', getRuntimeErrorMessage(error));
-    } finally {
-      setBusyState(server.id, null);
-    }
-  }, [clearBanner, setBusyState, showBanner, t]);
-
   const connectServer = useCallback(async (
     server: McpServerConfig,
     action: McpConnectionAction,
@@ -343,7 +324,6 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
     saveServer,
     removeServer,
     patchServer,
-    requestPermission,
     refreshServer: connectServer,
     toggleTool,
     updateCapabilitySettings,

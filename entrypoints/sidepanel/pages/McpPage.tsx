@@ -25,7 +25,6 @@ import {
   isMcpToolEnabled,
   isMcpToolSelected,
   isShellMcpServer,
-  mcpServerNeedsOriginPermission,
 } from '../controllers/mcp-tools-controller';
 import { useMcpPageController } from '../controllers/useMcpPageController';
 import {
@@ -36,7 +35,7 @@ import {
 } from '../components/settings/primitives';
 
 type McpTransportKind = McpServerTransportConfig['kind'];
-type BusyAction = 'refresh' | 'test' | 'permission';
+type BusyAction = 'refresh' | 'test';
 type Translator = (key: LocaleMessageKey, params?: MessageParams) => string;
 
 type FormState = {
@@ -116,7 +115,6 @@ export default function McpPage() {
     saveServer,
     removeServer,
     patchServer,
-    requestPermission,
     refreshServer,
     toggleTool,
     updateCapabilitySettings,
@@ -244,7 +242,6 @@ export default function McpPage() {
                       mode,
                       capabilitySettings?.servers[server.id]?.pinnedDescriptorIds,
                     )}
-                    onRequestPermission={() => requestPermission(server)}
                     onRefresh={() => refreshServer(server, 'refresh')}
                     onTest={() => refreshServer(server, 'test')}
                     onToggleTool={(tool) => toggleTool(server, tool)}
@@ -770,7 +767,6 @@ function ServerDetail({
   pinnedDescriptorIds,
   onPatch,
   onSetExposure,
-  onRequestPermission,
   onRefresh,
   onTest,
   onToggleTool,
@@ -786,7 +782,6 @@ function ServerDetail({
   pinnedDescriptorIds: readonly string[];
   onPatch: (patch: Partial<McpServerConfig>) => Promise<void>;
   onSetExposure: (mode: McpCapabilityExposureMode) => Promise<void>;
-  onRequestPermission: () => void;
   onRefresh: () => void;
   onTest: () => void;
   onToggleTool: (tool: ToolDescriptor) => void;
@@ -805,11 +800,6 @@ function ServerDetail({
           <div className="text-[11px] truncate" style={{ color: 'var(--ds-text-tertiary)' }}>{endpointLabel(server)}</div>
         </div>
         <div className="flex gap-1.5">
-          {mcpServerNeedsOriginPermission(server) && (
-            <button onClick={onRequestPermission} className="ds-btn-secondary px-2 py-1 text-[11px] rounded-md" disabled={busy !== null}>
-              {t('sidepanel.mcpPage.detail.grant')}
-            </button>
-          )}
           <button onClick={onTest} className="ds-btn-secondary px-2 py-1 text-[11px] rounded-md" disabled={busy !== null}>
             {busy === 'test' ? t('sidepanel.mcpPage.row.testing') : t('common.test')}
           </button>

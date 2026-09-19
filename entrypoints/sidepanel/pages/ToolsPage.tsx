@@ -1,10 +1,103 @@
+import { useState } from 'react';
+import type { LocaleMessageKey } from '../../../core/i18n';
 import type { McpServerConfig, McpToolCacheEntry } from '../../../core/types';
 import PageIntro from '../components/PageIntro';
-import { StatusMessage } from '../components/settings/primitives';
+import { SettingsSection, StatusMessage, ToggleRow } from '../components/settings/primitives';
 import { AutomationSection } from './AutomationPage';
-import { isMcpToolEnabled } from '../controllers/mcp-tools-controller';
+import { isMcpToolEnabled, mcpToolsController } from '../controllers/mcp-tools-controller';
 import { useToolsPageController } from '../controllers/useToolsPageController';
 import { useI18n } from '../i18n';
+
+type DiagState = 'idle' | 'running' | 'done' | 'err';
+type DiagResult = Record<string, { status: number; length: number; error?: string; preview?: string }>;
+
+function DiagSearch() {
+  const { t } = useI18n();
+  const [query, setQuery] = useState(t('sidepanel.toolsPage.diagnosticsDefaultQuery'));
+  const [state, setState] = useState<DiagState>('idle');
+  const [result, setResult] = useState<DiagResult | null>(null);
+
+  const run = async () => {
+    setState('running');
+    setResult(null);
+    try {
+      setResult(await mcpToolsController.diagnoseWebSearch(query));
+      setState('done');
+    } catch {
+      setState('err');
+    }
+  };
+
+  const inputStyle = {
+    background: 'var(--ds-bg)',
+    borderColor: 'var(--ds-border)',
+    color: 'var(--ds-text)',
+  };
+
+  return (
+    <div className="ds-surface-panel rounded-xl p-4 space-y-3">
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && run()}
+          className="flex-1 px-3 py-2 text-xs rounded-lg border outline-none"
+          style={inputStyle}
+        />
+        <button
+          onClick={run}
+          disabled={state === 'running' || !query.trim()}
+          className="ds-btn-secondary shrink-0 px-3 py-2 text-[11px] font-medium rounded-lg disabled:opacity-40"
+        >
+          {state === 'running' ? t('sidepanel.toolsPage.diagnosticsRunning') : t('sidepanel.toolsPage.diagnosticsRun')}
+        </button>
+      </div>
+      {result && (
+        <div className="text-[11px] space-y-2">
+          {Object.entries(result).map(([domain, info]) => (
+            <div key={domain} className="rounded-lg px-3 py-2" style={{
+              background: info.status >= 200 && info.status < 400 ? 'var(--ds-success-bg)' : 'var(--ds-danger-bg)',
+            }}>
+              <div style={{ fontWeight: 600, color: 'var(--ds-text)' }}>{domain}</div>
+              <div style={{ color: 'var(--ds-text-secondary)' }}>
+                HTTP {info.status} · {t('sidepanel.toolsPage.bytes', { count: info.length })}
+                {info.error && <span style={{ color: 'var(--ds-danger)' }}> · {t('sidepanel.toolsPage.errorPrefix', { error: info.error })}</span>}
+              </div>
+              {info.preview && (
+                <div className="mt-1 p-2 rounded text-[10px] leading-relaxed" style={{
+                  background: 'var(--ds-bg)', color: 'var(--ds-text-secondary)', maxHeight: 80, overflow: 'hidden',
+                }}>
+                  {info.preview.slice(0, 300)}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const WEB_TOOLS = [
+  {
+    key: 'web_search',
+    nameKey: 'sidepanel.toolsPage.webSearchName',
+    descriptionKey: 'sidepanel.toolsPage.webSearchDescription',
+    icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z',
+  },
+  {
+    key: 'web_fetch',
+    nameKey: 'sidepanel.toolsPage.webFetchName',
+    descriptionKey: 'sidepanel.toolsPage.webFetchDescription',
+    icon: 'M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
+  },
+] as const satisfies readonly {
+  key: 'web_search' | 'web_fetch';
+  nameKey: LocaleMessageKey;
+  descriptionKey: LocaleMessageKey;
+  icon: string;
+}[];
 
 function PythonToolCard({
   server,
@@ -129,6 +222,8 @@ function PythonToolCard({
 export default function ToolsPage() {
   const { t } = useI18n();
   const {
+    settings,
+    settingsError,
     pythonServer,
     pythonCache,
     pythonBusy,
@@ -138,6 +233,7 @@ export default function ToolsPage() {
     createPythonShell,
     refreshPythonTools,
     togglePython,
+    toggleWebTool,
   } = useToolsPageController(t);
 
   return (
@@ -148,6 +244,32 @@ export default function ToolsPage() {
       />
 
       <div className="space-y-2">
+        {WEB_TOOLS.map((tool) => (
+          <div
+            key={tool.key}
+            className="ds-surface-panel rounded-xl p-4 flex items-start gap-3"
+          >
+            <svg
+              className="w-5 h-5 shrink-0 mt-0.5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              style={{ color: settings[tool.key] ? 'var(--ds-blue)' : 'var(--ds-text-tertiary)' }}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d={tool.icon} />
+            </svg>
+
+            <div className="flex-1 min-w-0">
+              <ToggleRow
+                title={t(tool.nameKey)}
+                description={t(tool.descriptionKey)}
+                enabled={settings[tool.key]}
+                onToggle={(next) => toggleWebTool(tool.key, next)}
+              />
+            </div>
+          </div>
+        ))}
         <PythonToolCard
           server={pythonServer}
           cache={pythonCache}
@@ -161,6 +283,8 @@ export default function ToolsPage() {
         />
       </div>
 
+      {settingsError && <StatusMessage tone="error">{settingsError}</StatusMessage>}
+
       <div
         className="text-[11px] px-3 py-2 rounded-lg"
         style={{
@@ -170,6 +294,13 @@ export default function ToolsPage() {
       >
         {t('sidepanel.toolsPage.disabledNotice')}
       </div>
+
+      <SettingsSection
+        title={t('sidepanel.toolsPage.diagnosticTitle')}
+        description={t('sidepanel.toolsPage.diagnosticDescription')}
+      >
+        <DiagSearch />
+      </SettingsSection>
 
       <AutomationSection />
     </div>

@@ -31,15 +31,7 @@ export interface PromptAugmentationOptions {
   forceResponseLanguage?: SupportedLocale | null;
   /** z.ai agent 模式（chatNew.type/flags == general_agent）；用于按需注入沙盒段、抑制 chat 段。 */
   isAgent?: boolean;
-  /**
-   * 本轮 z.ai 搜索模式（仅 chat 模式）：'off' 不注入；'normal' 注入 retrieve 引导；
-   * 'advanced' 注入 search/open/click/find 高级搜索引导。agent 模式恒不注入。
-   */
-  searchMode?: ZaiSearchMode;
 }
-
-/** z.ai chat 模式的搜索模式三态：关闭 / 普通搜索(retrieve) / 高级搜索(search+open+click+find)。 */
-export type ZaiSearchMode = 'off' | 'normal' | 'advanced';
 
 export interface PromptAugmentationResult {
   augmented: string;
@@ -62,7 +54,6 @@ export function buildPromptAugmentation(
     systemPromptEnabled = true,
     forceResponseLanguage = null,
     isAgent = false,
-    searchMode = 'off',
   } = options ?? {};
   const toolDescriptors = options?.toolDescriptors ?? createDefaultToolDescriptors(locale);
   const visiblePromptMetadata = options?.visibleUserPrompt === undefined
@@ -89,7 +80,7 @@ export function buildPromptAugmentation(
     skillSystemContext ? renderSkillSystemContext(skillSystemContext, locale) : '',
     standaloneMemories,
     renderProjectContext(projectContext),
-    renderNativeWebSearchGuidance(isAgent, searchMode, locale),
+    systemPromptEnabled ? renderWebSearchGuidance(isAgent, toolDescriptors, locale) : '',
     renderSandboxHostGuidance(isAgent, toolDescriptors, locale),
     renderForcedResponseLanguage(forceResponseLanguage, locale),
   ].filter(Boolean).join('\n\n');
@@ -140,19 +131,24 @@ export function renderToolSchemas(
 }
 
 /**
- * 原生联网引导：仅 chat 模式（非 agent）且本轮开启搜索才注入，按三态选文案。
- * 'normal' 注入 retrieve 引导，'advanced' 注入 search/open/click/find 引导。
- * agent 模式什么都不注入（其联网是沙箱原生能力，z.ai 自己管）。
+ * 联网搜索引导：chat 模式、目录里有扩展自带的 web_search 描述符就注入。
+ *
+ * 两个门：
+ * 1. `isAgent` —— agent 模式的联网由服务端沙箱承担，不注入（其工具也已被
+ *    core/zai/model-facing.ts 的 AGENT_ONLY_FILTERED_TOOL_NAMES 裁掉，
+ *    所以这一门是双保险：即使将来过滤名单变了，引导也不会漏进 agent）。
+ * 2. 工具在不在 —— 用户在侧边栏关掉 web 工具时，目录里没有 web_search，
+ *    引导也应随之消失。
  */
-function renderNativeWebSearchGuidance(
+function renderWebSearchGuidance(
   isAgent: boolean,
-  searchMode: ZaiSearchMode,
+  descriptors: readonly ToolDescriptor[],
   locale: SupportedLocale,
 ): string {
   if (isAgent) return '';
-  if (searchMode === 'normal') return translate(locale, 'prompt.nativeWebSearchGuidance');
-  if (searchMode === 'advanced') return translate(locale, 'prompt.advancedWebSearchGuidance');
-  return '';
+  const hasWebSearch = descriptors.some((descriptor) => descriptor.name === 'web_search');
+  if (!hasWebSearch) return '';
+  return translate(locale, 'prompt.webSearchGuidance');
 }
 
 /**

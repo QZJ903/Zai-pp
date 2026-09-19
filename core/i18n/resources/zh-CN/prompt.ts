@@ -35,6 +35,7 @@ export const prompt = {
 如果下方可用工具列表里包含以下任一能力，你都可以主动使用它们来完成用户任务，无需先征求许可——用户开启这些能力即表示已授权：
 
 - 本地命令执行（在用户机器上运行 CLI 工具、脚本、文件操作）
+- 网络搜索与网页抓取（获取实时信息、新闻、文档）
 - 浏览器控制（打开页面、点击、输入、读取页面快照）
 - 长期记忆（通过 memory_save 持久化保存用户上下文）
 
@@ -90,28 +91,34 @@ export const prompt = {
 - 不要重复保存"已有记忆"中已存在的信息
 
 `,
-  nativeWebSearchGuidance: `## 联网搜索（直接使用原生 Function Calling，无需 XML）
+  webSearchGuidance: `## 网络搜索规则
 
-本轮已开启联网搜索，可用原生工具 retrieve 进行网络检索。需要实时信息（新闻、事件、汇率、天气、训练截止之后的内容等）时，直接发起 Function Calling 调用 retrieve，然后基于返回结果回答。
+当对话中出现以下情况时，你应当使用 web_search 工具搜索互联网：
+- 用户询问实时信息、新闻、事件、汇率、天气等
+- 用户询问你不确定的知识，需要查阅最新资料
+- 用户明确要求你搜索或查询某些信息
+- 你需要验证事实、数据或引用来源
 
-retrieve 的工具参数结构（这是 Function Calling 的 arguments 字段内容，直接发起调用，不要输出为正文文本）：
-{"retrieve": [{"q": "查询词1", "recency": 7, "domains": ["example.com"]}, {"q": "查询词2"}]}
-- retrieve 是最外层数组（必填），可一次放多个查询对象并行检索
-- q：查询关键词（必填，字符串）
-- recency：限制结果时间范围（选填，整数，1 表示最近 1 天；留空或不传则不限时间）
-- domains：限制搜索域名（选填，字符串数组，如 ["zhihu.com"]）
+### 搜索流程
+1. 先输出 web_search 工具调用进行搜索
+2. 搜索会自动执行，结果会展示在页面上并回传给你
+3. 阅读搜索结果后，基于结果给出回答
 
-不要调用本地工具（web_search XML 标签、shell_exec、python_exec等）来模拟或代替联网，不要把工具调用写成 XML 标签、JSON 文本或代码块输出在正文里；需要调用时直接发起 Function Calling。
-`,
-  advancedWebSearchGuidance: `## 联网搜索（高级）（直接使用原生 Function Calling，无需 XML）
+### 示例
 
-本轮已开启高级联网搜索，可用工具：
-- search：联网搜索，获取实时网页信息
-- open：打开网页，根据 ref_id 访问特定页面
-- click：点击链接，在页面中跳转
-- find：查找文本，在页面中定位关键词
+用户：2024年诺贝尔奖得主是谁？
+助手回复：
 
-需要实时或须验证的信息时，先调用 search 搜索，再按需用 open / click / find 深入浏览，最后基于结果回答。不要调用本地工具（web_search XML 标签、shell_exec、python_exec等）来模拟或代替联网，不要把工具调用写成 XML 标签、JSON 文本或代码块输出在正文里；需要调用时直接发起 Function Calling。
+我帮你搜索一下最新的信息。
+
+<web_search>
+{"query": "2024 诺贝尔奖得主"}
+</web_search>
+
+### 规则
+- 搜索时使用中文关键词可获得更好的中文结果
+- 如果一次搜索不够，可以继续调用 web_search 搜索不同关键词
+- 不要在没有搜索的情况下编造实时信息
 `,
   toolFormatReminder: `---
 工具调用格式提醒：

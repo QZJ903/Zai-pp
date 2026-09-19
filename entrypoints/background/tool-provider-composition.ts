@@ -44,7 +44,6 @@ import {
   executeWebSearchToolCall,
   WEB_SEARCH_TOOL_PROVIDER,
 } from '../../core/tool/web-search';
-import { getWebToolSettings } from '../../core/tool/web-settings';
 import {
   MCP_CAPABILITY_TOOL_PROVIDER,
   createMcpCapabilityToolDescriptors,
@@ -88,12 +87,10 @@ export function createProductionToolProviderRegistry(): ToolProviderRegistry {
     ),
     createLocalProvider(
       WEB_SEARCH_TOOL_PROVIDER.id,
-      async ({ locale }) => {
-        const settings = await getWebToolSettings();
-        return createWebSearchToolDescriptors(locale).filter(
-          (descriptor) => settings[descriptor.name as keyof typeof settings] !== false,
-        );
-      },
+      // 始终返回全部 web 描述符：开关是否放行交给内容脚本按「本轮是否要用联网」决定
+      // （用户点开页面原生联网时，即使扩展搜索开关是关的也要放行，见 core/zai/model-facing.ts）。
+      // 这个 provider 只负责给出描述符与执行，不做可见性裁剪。
+      ({ locale }) => createWebSearchToolDescriptors(locale),
       (call, _descriptor, { locale, signal }) => executeWebSearchToolCall(call, locale, { signal }),
     ),
     createLocalProvider(

@@ -20,7 +20,7 @@ import type {
   Skill,
   SystemPromptPreset,
 } from '../core/types';
-import { buildPromptAugmentation, type ZaiSearchMode } from '../core/prompt';
+import { buildPromptAugmentation } from '../core/prompt';
 import { extractVisibleUserPrompt } from '../core/prompt/visibility';
 import {
   DEFAULT_PROMPT_INJECTION_SETTINGS,
@@ -50,7 +50,7 @@ import {
 } from '../core/skill/auto-activation-settings';
 import { filterZaiModelFacingToolDescriptors } from '../core/zai/model-facing';
 import {
-  applyZaiWebSearchFeatures,
+  disableZaiNativeWebSearch,
   parseZaiBody,
   parseZaiChatNewBody,
   readZaiCurrentUserMessageParentId,
@@ -99,6 +99,11 @@ let currentPromptSettings: PromptInjectionSettings = DEFAULT_PROMPT_INJECTION_SE
 let currentContentLocale: SupportedLocale = DEFAULT_LOCALE;
 let currentProjectContext: string | null = null;
 let currentProjectId: string | null = null;
+/**
+ * 侧边栏「联网搜索」开关的存储值。与「本轮是否开着页面原生联网」取或决定 web 工具
+ * 是否进模型目录 —— 任一为真就放行，保证「用户想搜」时一定用扩展自己的搜索。
+ */
+let currentWebToolsEnabled = false;
 let currentRequestMessageCount = 0;
 let extensionContextValid = true;
 /** 已执行过工具的 toolCall 签名集合（防 TOOL_CALL 通道重复执行同一 XML）。 */
@@ -107,6 +112,10 @@ const executedToolCallSignatures = new Set<string>();
 const grantChatSessionIdByAuthId = new Map<string, string | null>();
 /** requestId → chatSessionId 映射：执行时补全 source.chatSessionId 用。 */
 const chatSessionIdByRequestId = new Map<string, string | null>();
+/** requestId → 是否 agent 轮：启动续跑循环时记下，循环内复用同一套裁剪口径。 */
+const isAgentTurnByRequestId = new Map<string, boolean>();
+/** requestId → 本轮是否开着原生联网：与上面同理，供 handleResponseComplete 建续跑循环时取用。 */
+const nativeSearchOnByRequestId = new Map<string, boolean>();
 /** requestId → 本轮已完成的工具执行记录（TOOL_CALL 通道执行后写入，response 里读取续跑判定）。 */
 const executionsByRequest = new Map<string, ToolExecutionRecord[]>();
 /** 待完成的工具执行 promise（REQUEST_TERMINAL 关闭授权前要等它们先跑完）。 */
@@ -169,6 +178,10 @@ interface ContinuationLoop {
   taskId: string | null;
   /** 续跑收尾时回传给后台的最终回复正文。 */
   finalAssistantText: string;
+  /** 启动该循环的那轮是否为 agent 轮：续跑/nudge 轮复用同一套模型侧裁剪口径。 */
+  isAgentTurn: boolean;
+  /** 启动该循环的那轮是否开着原生联网：续跑/nudge 轮同样要据此放行 web 工具。 */
+  nativeSearchOn: boolean;
 }
 
 let continuationLoop: ContinuationLoop | null = null;
@@ -255,15 +268,11 @@ function isContinuationRequest(text: string): boolean {
   return text.includes('<original_task>') && text.includes('<tool_results>');
 }
 
-/** 读 chatNew body 的搜索模式：chat.auto_web_search 判定开/关，chat.mcp_servers 含 advanced-search 判定高级。 */
-function readChatNewSearchMode(body: Record<string, unknown>): ZaiSearchMode {
+/** 读 chatNew body 是否已开原生联网：chat.auto_web_search 为 true 视为开。 */
+function readChatNewNativeSearchEnabled(body: Record<string, unknown>): boolean {
   const chat = body.chat;
-  if (!chat || typeof chat !== 'object' || Array.isArray(chat)) return 'off';
-  const record = chat as Record<string, unknown>;
-  if (record.auto_web_search !== true) return 'off';
-  const mcpServers = record.mcp_servers;
-  const advanced = Array.isArray(mcpServers) && mcpServers.includes('advanced-search');
-  return advanced ? 'advanced' : 'normal';
+  if (!chat || typeof chat !== 'object' || Array.isArray(chat)) return false;
+  return (chat as Record<string, unknown>).auto_web_search === true;
 }
 
 /** 读 completion body 的 agent 标志：features.flags 含 general_agent 即 agent 模式。 */
@@ -274,15 +283,12 @@ function readZaiAgentFlag(body: Record<string, unknown>): boolean {
   return Array.isArray(flags) && flags.includes(ZAI_AGENT_FLAG);
 }
 
-/** 读 completion body 的搜索模式：features.web_search/auto_web_search 判定开/关，顶层 mcp_servers 含 advanced-search 判定高级。 */
-function readCompletionSearchMode(body: Record<string, unknown>): ZaiSearchMode {
+/** 读 completion body 是否已开原生联网：features 的 auto_web_search / web_search 任一为 true 视为开。 */
+function readCompletionNativeSearchEnabled(body: Record<string, unknown>): boolean {
   const features = body.features;
-  if (!features || typeof features !== 'object' || Array.isArray(features)) return 'off';
+  if (!features || typeof features !== 'object' || Array.isArray(features)) return false;
   const record = features as Record<string, unknown>;
-  if (record.auto_web_search !== true && record.web_search !== true) return 'off';
-  const mcpServers = body.mcp_servers;
-  const advanced = Array.isArray(mcpServers) && mcpServers.includes('advanced-search');
-  return advanced ? 'advanced' : 'normal';
+  return record.auto_web_search === true || record.web_search === true;
 }
 
 function hasLiveExtensionContext(): boolean {
@@ -372,7 +378,7 @@ function syncHookState(): void {
 }
 
 async function loadAndSyncRuntimeState(): Promise<void> {
-  const [memories, descriptors, skills, skillAutoActivation, activePreset, promptSettings, resolvedLocale] = await Promise.all([
+  const [memories, descriptors, skills, skillAutoActivation, activePreset, promptSettings, webToolSettings, resolvedLocale] = await Promise.all([
     sendRuntimeMessage<Memory[]>({ type: 'GET_MEMORIES' }).then((v) => (Array.isArray(v) ? v : [])),
     sendRuntimeMessage<ToolDescriptor[]>({ type: 'GET_TOOL_DESCRIPTORS' }).then((v) => (Array.isArray(v) ? v : [])),
     sendRuntimeMessage<Skill[]>({ type: 'GET_SKILLS' }).then((v) => (Array.isArray(v) ? v : [])),
@@ -385,6 +391,8 @@ async function loadAndSyncRuntimeState(): Promise<void> {
     sendRuntimeMessage<PromptInjectionSettings>({ type: 'GET_PROMPT_INJECTION_SETTINGS' }).then(
       (v) => normalizePromptInjectionSettings(v),
     ),
+    // 联网开关的存储值：决定 web 工具是否进模型目录（见 augmentPrompt 的 modelFacing）。
+    sendRuntimeMessage<Record<string, unknown>>({ type: 'GET_WEB_TOOL_SETTINGS' }),
     getResolvedLocaleState(),
   ]);
   currentMemories = memories;
@@ -393,6 +401,10 @@ async function loadAndSyncRuntimeState(): Promise<void> {
   currentSkillAutoActivation = skillAutoActivation;
   currentActivePreset = activePreset;
   currentPromptSettings = promptSettings;
+  // 任一工具开关开着就算「联网可用」；读取失败时保持上一次的值。
+  if (webToolSettings && typeof webToolSettings === 'object') {
+    currentWebToolsEnabled = webToolSettings.web_search === true || webToolSettings.web_fetch === true;
+  }
   currentContentLocale = resolvedLocale.locale;
   syncHookState();
 }
@@ -593,16 +605,20 @@ function augmentPrompt(
     projectContext?: string | null;
     projectId?: string | null;
     isAgent?: boolean;
-    searchMode?: ZaiSearchMode;
+    /** 本轮是否开着页面原生联网（等同「用户想搜」）。 */
+    nativeSearchOn?: boolean;
   },
 ): string {
-  // 模型侧裁掉 agent 原生已覆盖的工具。
-  const modelFacing = filterZaiModelFacingToolDescriptors(
-    options?.toolDescriptors ?? currentToolDescriptors,
-  );
   const isFirstMessage = options?.isFirstMessage ?? true;
   const isAgent = options?.isAgent ?? false;
-  const searchMode = options?.searchMode ?? 'off';
+  const nativeSearchOn = options?.nativeSearchOn ?? false;
+  // 模型侧裁掉由服务端或独立 UI 流程承担的工具。
+  // web 工具（web_search / web_fetch）：agent 恒裁；chat 模式下「开关开着」或
+  // 「本轮开着原生联网」任一成立就放行 —— 保证用户想搜时一定走扩展自己的搜索。
+  const modelFacing = filterZaiModelFacingToolDescriptors(
+    options?.toolDescriptors ?? currentToolDescriptors,
+    { isAgent, webToolsEnabled: currentWebToolsEnabled, nativeSearchOn },
+  );
   const locale = currentContentLocale ?? DEFAULT_LOCALE;
   const projectId = options?.projectId ?? currentProjectId ?? null;
   const projectContext = options?.projectContext ?? currentProjectContext ?? null;
@@ -669,7 +685,6 @@ function augmentPrompt(
         systemPromptEnabled,
         forceResponseLanguage,
         isAgent,
-        searchMode,
       });
       return result.augmented;
     }
@@ -685,7 +700,6 @@ function augmentPrompt(
       systemPromptEnabled,
       forceResponseLanguage,
       isAgent,
-      searchMode,
     });
     return result.augmented;
   }
@@ -700,7 +714,6 @@ function augmentPrompt(
     systemPromptEnabled,
     forceResponseLanguage,
     isAgent,
-    searchMode,
   });
   return result.augmented;
 }
@@ -772,12 +785,12 @@ async function handleAugmentRequestBody(
         }
       }
 
-      // 联网引导判定：搜索模式必须看「自动化任务自身的 searchEnabled」或
-      // 「body 已带 auto_web_search / mcp_servers」（手动点网页开关的场景），而不是只读原始
-      // body——自动化的 auto_web_search 是下面才写进 nextBody 的，提前读永远是 off → 引导不注入。
-      const searchMode: ZaiSearchMode = firstTaskId
-        ? (activeDomTasks.get(firstTaskId)?.searchEnabled === true ? 'advanced' : readChatNewSearchMode(body))
-        : readChatNewSearchMode(body);
+      // 联网判定：自动化任务自身的 searchEnabled，或页面 body 已带原生联网标记
+      // （手动点网页开关的场景）。检测到即为「本轮要用联网」——一律关掉原生通道，
+      // 走扩展自带的 web_search / web_fetch。
+      const nativeSearchOn = firstTaskId
+        ? (activeDomTasks.get(firstTaskId)?.searchEnabled === true || readChatNewNativeSearchEnabled(body))
+        : readChatNewNativeSearchEnabled(body);
 
       const authorization = await createToolAuthorization({
         requestId,
@@ -786,28 +799,28 @@ async function handleAugmentRequestBody(
       });
       activeToolAuthorizations.set(requestId, authorization);
       grantChatSessionIdByAuthId.set(authorization.id, chatSessionId);
-      // 首条（chats/new）始终增强：把工具目录 + 记忆 + 高级搜索引导注入，让模型在建会话
-      // 那一刻就学会工具用法（shell 写文件、memory 等）。首条注入不会污染 parent 链
-      // （首条是会话起点，无 parent），所以搜索会话也照常注入。
+      // 首条（chats/new）始终增强：把工具目录 + 记忆 + 联网引导注入，让模型在建会话
+      // 那一刻就学会工具用法（web_search 搜、shell 写文件、memory 等）。首条注入不会污染
+      // parent 链（首条是会话起点，无 parent），所以联网会话也照常注入。
       const augmented = parsed.userMessageTexts.map((text) =>
         augmentPrompt(text, {
           toolDescriptors: authorization.descriptors,
           isFirstMessage: true,
           isAgent: isAgentTurn,
-          searchMode,
+          nativeSearchOn,
         }),
       );
       const nextBody = rewriteZaiChatNewUserMessages(body, augmented);
 
-      // 联网搜索：chatNew 阶段绝不改 chat.features（它是「数组」，
-      // 覆盖成对象会 400 卡首页），而是在 chat 对象「顶层」写 auto_web_search=true
-      // （布尔字段，HAR 抓包实证 z.ai 首条建会话就是用这个顶层布尔开联网，见
-      // zhipu-ai-proxy har 里 chat.auto_web_search:true）。completion 阶段的 features
-      // 对象（web_search/auto_web_search）在下方 completion 分支另行写入。
-      if (firstTaskId && activeDomTasks.get(firstTaskId)?.searchEnabled === true) {
+      // 关闭原生联网（chatNew 阶段）：**不能**改 chat.features（它是「数组」，
+      // 覆盖成对象会 400 卡首页），而是在 chat 对象「顶层」写布尔字段。
+      // 抓包实证：普通搜索时 chat.auto_web_search=true；高级搜索时同样为 true 且带
+      // chat.mcp_servers:["advanced-search"]。这里统一写 false，让会话从头就走扩展的
+      // web_search / web_fetch，不启用服务端检索通道。
+      if (nativeSearchOn) {
         const chat = nextBody.chat;
         if (chat && typeof chat === 'object' && !Array.isArray(chat)) {
-          (chat as Record<string, unknown>).auto_web_search = true;
+          (chat as Record<string, unknown>).auto_web_search = false;
         }
       }
       // 诊断：确认 chatNew 顶层 auto_web_search 写进去了、task 是否命中。
@@ -816,6 +829,7 @@ async function handleAugmentRequestBody(
         at: Date.now(),
         route: 'chatNew-search',
         searchEnabled: searchTask?.searchEnabled ?? null,
+        nativeSearchOn,
         autoWebSearchWrote: ((nextBody as { chat?: { auto_web_search?: unknown } }).chat?.auto_web_search) ?? null,
       });
       postToMainWorld({
@@ -867,8 +881,9 @@ async function handleAugmentRequestBody(
       });
       activeToolAuthorizations.set(requestId, auth);
       grantChatSessionIdByAuthId.set(auth.id, chatSessionId);
-      // 续跑轮也保持联网搜索：归属任务开启搜索时（matchedTask 或续跑循环所属任务），
-      // 给透传 body 补上 features（避免搜索只在首轮生效）。
+      // 续跑轮也保持「原生联网关闭」：归属任务开启搜索时（matchedTask 或续跑循环所属任务），
+      // 给透传 body 补上 features.auto_web_search=false + features.web_search=false，
+      // 确保整条会话始终走扩展自带的 web_search / web_fetch。
       const searchEnabled =
         matchedTask?.searchEnabled === true ||
         (continuationLoop?.taskId != null &&
@@ -877,7 +892,7 @@ async function handleAugmentRequestBody(
       if (searchEnabled) {
         const parsedBody = parseZaiBody(bodyStr);
         if (parsedBody) {
-          applyZaiWebSearchFeatures(parsedBody);
+          disableZaiNativeWebSearch(parsedBody);
           nextBodyStr = JSON.stringify(parsedBody);
         }
       }
@@ -906,34 +921,33 @@ async function handleAugmentRequestBody(
     const isFirstMessage = parentId === null || parentId === undefined;
     // completion 路由的 agent 判定：features.flags 里含 general_agent。
     const isAgentTurn = readZaiAgentFlag(body);
-    // 联网引导判定：首条 completion 的 matchedTask 在下方被识别；这里先取
-    // 本文 task（taskIdByPromptText 命中即自动化任务），有则看它的 searchEnabled。
+    // 记下 requestId → agent 标记：续跑/nudge 轮要用同一套模型侧裁剪口径。
+    isAgentTurnByRequestId.set(requestId, isAgentTurn);
+    // 联网判定：自动化任务自身的 searchEnabled，或 body 已带原生联网标记
+    // （features.auto_web_search / features.web_search）。
     // 注意 matchedTask 变量在下方声明，这里先读 taskId 判断。
     const firstCompletionTaskId = taskIdByPromptText.get(originalPrompt);
-    const searchMode: ZaiSearchMode = firstCompletionTaskId
-      ? (activeDomTasks.get(firstCompletionTaskId)?.searchEnabled === true ? 'advanced' : readCompletionSearchMode(body))
-      : readCompletionSearchMode(body);
+    const nativeSearchOn = firstCompletionTaskId
+      ? (activeDomTasks.get(firstCompletionTaskId)?.searchEnabled === true || readCompletionNativeSearchEnabled(body))
+      : readCompletionNativeSearchEnabled(body);
+    // 记下 requestId → 联网标记：同上。
+    nativeSearchOnByRequestId.set(requestId, nativeSearchOn);
     // 项目上下文：ds++ 对首条消息才 bindPendingProject；z.ai 会话 id 从 /c/<id> 读，不需要 conversation title/url 也能拿到对话归属。
     const project = await resolveProjectContextForRequest(chatSessionId, isFirstMessage);
-    // 搜索会话（普通/高级）的续写轮（非首条）不增强：z.ai 续写只认 role=user、把
-    // messages.content 当「用户原话」存历史 + 参与 parent 链校验，注入会污染 parent 链
-    // （除首句外搜索全部失效）+ 历史气泡变成长文本。首条照常增强（让模型在建会话时就学会
-    // 工具用法，例如「搜索后写入本地文件」用 shell_exec）。搜索能力由服务端会话级
-    // mcp_servers 装配，续写轮不需要再注入，故透传原文。
+    // 每轮都增强（含续写轮）。
     //
-    // 此判定条件不可放宽：任何形式的续写轮注入（全量 / 短提示 / 只在工具集变化时 /
-    // 独立前导消息）都会破坏搜索稳定性。不要改这行。
-    const shouldAugment = searchMode === 'off' || isFirstMessage;
-    const augmented = shouldAugment
-      ? augmentPrompt(originalPrompt, {
-          toolDescriptors: auth.descriptors,
-          isFirstMessage,
-          projectContext: project?.context ?? null,
-          projectId: project?.projectId ?? null,
-          isAgent: isAgentTurn,
-          searchMode,
-        })
-      : originalPrompt;
+    // 这里历史上曾按「本轮是否联网」跳过续写轮注入（`searchMode === 'off' || isFirstMessage`），
+    // 那是为了让页面原生联网能正常工作 —— 原生通道在续写轮会因 messages.content 被替换而
+    // 不再装配工具。现在联网一律走扩展自己的 web_search / web_fetch（原生通道由下方
+    // disableZaiNativeWebSearch 关掉），那个前提不复存在，跳过的理由也随之作废。
+    const augmented = augmentPrompt(originalPrompt, {
+      toolDescriptors: auth.descriptors,
+      isFirstMessage,
+      projectContext: project?.context ?? null,
+      projectId: project?.projectId ?? null,
+      isAgent: isAgentTurn,
+      nativeSearchOn,
+    });
     currentRequestMessageCount = isFirstMessage ? 1 : currentRequestMessageCount + 1;
     const nextBody = rewriteZaiLastUserMessage(body, augmented);
     // 关键：signature_prompt 是服务端权威 prompt、参与续写链 parent 校验与历史存储，
@@ -941,13 +955,10 @@ async function handleAugmentRequestBody(
     const visibleOriginal = extractVisibleUserPrompt(augmented) ?? originalPrompt;
     (nextBody as Record<string, unknown>).signature_prompt = visibleOriginal;
 
-    // 联网搜索强制：普通搜索模式（手动点「普通搜索」按钮 or 自动化任务开搜索，均归到
-    // searchMode='normal'）时，补上 features.web_search=true（强制联网、每次必搜）。
-    // auto_web_search 是「自动判断要不要搜」（时搜时不搜），用户要的是「点了搜索就一定搜」，
-    // 所以强制。高级搜索（searchMode='advanced'）走 mcp_servers 那套原生工具，这里绝不
-    // 强制 web_search，否则可能把 advanced-search 的服务端工具路径搞乱。
-    if (searchMode === 'normal') {
-      applyZaiWebSearchFeatures(nextBody);
+    // 关闭原生联网：检测到本轮要用联网时，把 features 的 auto_web_search / web_search
+    // 都写成 false，让服务端不装配原生检索通道，联网一律走扩展的 web_search / web_fetch。
+    if (nativeSearchOn) {
+      disableZaiNativeWebSearch(nextBody);
     }
 
     // 诊断：记录 completion 首条/续跑的归属 + features 最终值，便于定位联网开关问题。
@@ -1384,7 +1395,14 @@ async function handleResponseComplete(complete: ZaiResponseComplete): Promise<vo
       continuationLoop.nudgeCount += 1;
       // 实时拉取最新工具目录，nudge 轮注入的「可用工具清单」同样实时。
       await loadAndSyncRuntimeState();
-      const nudgeToolNames = catalogNamesFor(filterZaiModelFacingToolDescriptors(currentToolDescriptors));
+      const nudgeToolNames = catalogNamesFor(filterZaiModelFacingToolDescriptors(
+        currentToolDescriptors,
+        {
+          isAgent: continuationLoop.isAgentTurn,
+          webToolsEnabled: currentWebToolsEnabled,
+          nativeSearchOn: continuationLoop.nativeSearchOn,
+        },
+      ));
       const nudgePrompt = buildZaiNudgePrompt(
         continuationLoop.originalTask,
         complete.assistantText,
@@ -1483,7 +1501,11 @@ async function handleResponseComplete(complete: ZaiResponseComplete): Promise<vo
     lastVisibleText: complete.assistantText,
     taskId: taskIdByRequestId.get(complete.requestId) ?? null,
     finalAssistantText: complete.assistantText,
+    isAgentTurn: isAgentTurnByRequestId.get(complete.requestId) ?? false,
+    nativeSearchOn: nativeSearchOnByRequestId.get(complete.requestId) ?? false,
   };
+  isAgentTurnByRequestId.delete(complete.requestId);
+  nativeSearchOnByRequestId.delete(complete.requestId);
   stampLoopDiagnostic();
   await advanceContinuationLoop();
 }
@@ -1502,7 +1524,14 @@ async function advanceContinuationLoop(): Promise<void> {
   // 实时拉取最新工具目录，续跑轮注入的「可用工具清单」始终是当前真实状态
   // （用户新增 skill / MCP 后，续跑轮立刻能用到，而非首条消息时的快照）。
   await loadAndSyncRuntimeState();
-  const toolNames = catalogNamesFor(filterZaiModelFacingToolDescriptors(currentToolDescriptors));
+  const toolNames = catalogNamesFor(filterZaiModelFacingToolDescriptors(
+    currentToolDescriptors,
+    {
+      isAgent: loop.isAgentTurn,
+      webToolsEnabled: currentWebToolsEnabled,
+      nativeSearchOn: loop.nativeSearchOn,
+    },
+  ));
   const prompt = buildZaiContinuationPrompt(loop.originalTask, loop.toolExecutions, toolNames);
   loop.pendingPrompt = prompt;
   loop.stepCount += 1;
@@ -1664,15 +1693,13 @@ async function submitAutomationPromptViaPage(
       return false;
     }
 
-    // 联网任务：发送前先像用户一样点开前端「联网模式」按钮（data-active）。这是稳定
-    // 联网的唯一可靠手段——仅改 body 字段会被 z.ai 前端忽略，导致「时搜时不搜」。
-    // 自动化固定走「高级搜索」（search/open/click/find，服务端硬注入、稳定），
-    // 所以先点普通地球（高级依赖普通）再点高级搜索 switch。
+    // 联网任务：不再点前端的「高级搜索」开关 —— 高级搜索会把 mcp_servers 写成
+    // ["advanced-search"]、让服务端硬注入 search/open/click/find，与扩展自带的
+    // web_search / web_fetch 抢通道。联网一律交给扩展工具，由 handleAugmentRequestBody
+    // 把 features.auto_web_search / features.web_search 强制写成 false 关掉原生通道。
     const taskRecord = activeDomTasks.get(taskId);
     if (taskRecord?.searchEnabled === true) {
-      const opened = await clickWebSearchToggle();
-      const advancedOpened = await clickAdvancedSearchToggle();
-      diag.sendProbe?.push({ kind: 'automation-send', webSearchToggle: opened, advancedSearchToggle: advancedOpened });
+      diag.sendProbe?.push({ kind: 'automation-send', nativeSearchForcedOff: true });
     }
 
     // 原生 setter + input 事件（真机验证过的写法）。不 disable 输入框。
@@ -1814,219 +1841,6 @@ async function waitForNewAugRequest(beforeCount: number, timeoutMs = 1_200): Pro
     await sleep(80);
   }
   return false;
-}
-
-/**
- * 像用户一样点开前端「联网模式」开关。
- *
- * 定位（真机确认）：联网开关是地球图标按钮（svg path 以 `M0.665039 7.331`
- * 开头），位于**输入框内偏左下、上传文件「+」号右边**，无悬浮面板、无 role/aria。它用
- * `data-active` 表达开/关态（true=开）。handler 在该 button 上，重试点它即可。
- */
-function findWebSearchToggleButton(): HTMLButtonElement | null {
-  const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('button[data-active]'));
-  return buttons.find((button) => {
-    const path = button.querySelector('svg path');
-    return path?.getAttribute('d')?.startsWith('M0.665039 7.331');
-  }) ?? null;
-}
-
-async function clickWebSearchToggle(): Promise<boolean> {
-  const MAX_ATTEMPTS = 6;
-  try {
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-      const globe = findWebSearchToggleButton();
-      if (!globe) {
-        await sleep(300);
-        continue;
-      }
-      if (globe.getAttribute('data-active') === 'true') return true;
-
-      const rect = globe.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-
-      const fire = (type: string, Ctor: new (t: string, init?: EventInit) => Event) => {
-        try {
-          globe.dispatchEvent(new Ctor(type, {
-            bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0,
-          } as EventInit));
-        } catch {
-          /* ignore */
-        }
-      };
-      fire('pointerdown', PointerEvent as unknown as new (t: string, init?: EventInit) => Event);
-      fire('pointerup', PointerEvent as unknown as new (t: string, init?: EventInit) => Event);
-      fire('mousedown', MouseEvent as unknown as new (t: string, init?: EventInit) => Event);
-      fire('mouseup', MouseEvent as unknown as new (t: string, init?: EventInit) => Event);
-      try {
-        globe.click();
-      } catch {
-        /* ignore */
-      }
-
-      const endAt = Date.now() + 400;
-      while (Date.now() < endAt) {
-        const latest = findWebSearchToggleButton();
-        if (latest && latest.getAttribute('data-active') === 'true') return true;
-        await sleep(80);
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 定位「高级搜索」开关。它是 hover 地球按钮后弹出的 bits-ui 浮层里的一个 switch
- * （`button[role="switch"][data-switch-root]`）。浮层是 document 级挂载、移开地球就消失，
- * 所以先按文本「高级搜索/Advanced」锁定那份浮层，再取它内部的 switch 按钮。
- * 开/关态用 `data-state`（checked/unchecked）或 `aria-checked` 表达。
- */
-function findAdvancedSearchSwitch(): HTMLButtonElement | null {
-  const wrappers = document.querySelectorAll('[data-bits-floating-content-wrapper]');
-  for (const wrapper of wrappers) {
-    const text = wrapper.textContent ?? '';
-    if (!text.includes('高级搜索') && !text.includes('Advanced')) continue;
-    const button = wrapper.querySelector<HTMLButtonElement>('button[data-switch-root][role="switch"]');
-    if (button) return button;
-  }
-  return null;
-}
-
-function isAdvancedSearchChecked(button: HTMLButtonElement): boolean {
-  return button.getAttribute('data-state') === 'checked' ||
-    button.getAttribute('aria-checked') === 'true';
-}
-
-/**
- * hover 地球按钮，等「高级搜索」浮层挂载。浮层由 mouseenter/pointerenter 触发且 delayed-open，
- * 所以持续补发 hover 事件保持「鼠标仍悬停在地球上」的语义（不 dispatch leave 就不会消失）。
- */
-async function hoverToOpenAdvancedSearchPanel(timeoutMs = 3_000): Promise<boolean> {
-  const globe = findWebSearchToggleButton();
-  if (!globe) return false;
-  const rect = globe.getBoundingClientRect();
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-  const fireHover = (type: string) => {
-    try {
-      globe.dispatchEvent(new MouseEvent(type, {
-        bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0, view: window,
-      }));
-    } catch {
-      /* ignore */
-    }
-  };
-  for (const type of ['pointerenter', 'mouseenter', 'mouseover', 'pointerover']) fireHover(type);
-  const endAt = Date.now() + timeoutMs;
-  while (Date.now() < endAt) {
-    if (findAdvancedSearchSwitch()) return true;
-    for (const type of ['pointerover', 'mouseover']) fireHover(type);
-    await sleep(100);
-  }
-  return findAdvancedSearchSwitch() !== null;
-}
-
-/**
- * 收尾：向地球按钮补派发「鼠标移开」事件，让 hover 驱动的浮层自己收起。
- * hoverToOpenAdvancedSearchPanel 只派发了 enter/over（模拟悬停），从没派发过
- * leave/out，所以点完开关后浮层会一直挂着（z.ai 记得联网状态、常走「已 checked」
- * 快路径时尤其如此）——浮层 z-index 9999 且 pointer-events:auto，会盖住输入框、
- * 挡住后续写值/提交。这里固定补一轮 leave 系列，精确对应「移开就消失」。
- */
-function dismissAdvancedSearchPanel(): void {
-  try {
-    const globe = findWebSearchToggleButton();
-    if (!globe) return;
-    const rect = globe.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    for (const type of ['pointerleave', 'mouseleave', 'mouseout', 'pointerout']) {
-      try {
-        globe.dispatchEvent(new MouseEvent(type, {
-          bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0, view: window,
-        }));
-      } catch {
-        /* ignore */
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-}
-
-/**
- * 打开「高级搜索」开关：先确保普通搜索（地球）开着（高级依赖普通），再 hover 地球弹出
- * 浮层 → 点高级搜索 switch → 用和 clickWebSearchToggle 完全相同的合成事件序列 + 重试。
- * 点开高级后，z.ai 页面自己发的请求体就会带 mcp_servers: ["advanced-search"]，服务端硬注入
- * search/open/click/find，比普通搜索（retrieve）稳定。
- */
-async function clickAdvancedSearchToggle(): Promise<boolean> {
-  const MAX_ATTEMPTS = 6;
-  try {
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-      // 1. 高级搜索依赖普通搜索先开（真机确认：开高级时地球图标是亮的）。
-      if (!(await clickWebSearchToggle())) {
-        await sleep(300);
-        continue;
-      }
-
-      // 2. hover 地球弹出高级搜索浮层。
-      if (!(await hoverToOpenAdvancedSearchPanel())) {
-        await sleep(300);
-        continue;
-      }
-
-      // 3. 定位高级搜索 switch。
-      const switchButton = findAdvancedSearchSwitch();
-      if (!switchButton) {
-        dismissAdvancedSearchPanel();
-        await sleep(300);
-        continue;
-      }
-      if (isAdvancedSearchChecked(switchButton)) {
-        dismissAdvancedSearchPanel();
-        return true;
-      }
-
-      // 4. 合成事件点它（与 clickWebSearchToggle 同款序列）。
-      const rect = switchButton.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      const fire = (type: string, Ctor: new (t: string, init?: EventInit) => Event) => {
-        try {
-          switchButton.dispatchEvent(new Ctor(type, {
-            bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0,
-          } as EventInit));
-        } catch {
-          /* ignore */
-        }
-      };
-      fire('pointerdown', PointerEvent as unknown as new (t: string, init?: EventInit) => Event);
-      fire('pointerup', PointerEvent as unknown as new (t: string, init?: EventInit) => Event);
-      fire('mousedown', MouseEvent as unknown as new (t: string, init?: EventInit) => Event);
-      fire('mouseup', MouseEvent as unknown as new (t: string, init?: EventInit) => Event);
-      try {
-        switchButton.click();
-      } catch {
-        /* ignore */
-      }
-
-      dismissAdvancedSearchPanel();
-      const endAt = Date.now() + 400;
-      while (Date.now() < endAt) {
-        const latest = findAdvancedSearchSwitch();
-        if (latest && isAdvancedSearchChecked(latest)) return true;
-        await sleep(80);
-      }
-    }
-    return false;
-  } catch {
-    dismissAdvancedSearchPanel();
-    return false;
-  }
 }
 
 /** 等 textarea 所在的 form 真正挂载到文档（isConnected）并给一个反应式稳定期。 */

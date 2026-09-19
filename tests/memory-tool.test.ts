@@ -145,10 +145,12 @@ describe('web tool localization', () => {
     expect(english[0].title).toBe('Search the web');
     expect(schemaPropertyDescription(english[0], 'query')).toBe('Search query keywords');
 
+    // 模型可见的 descriptor 文案在 zh 下也保持英文（与 memory / browser 工具一致），
+    // 只有工具名（协议标识）必须恒定不变。
     expect(chinese[0].name).toBe('web_search');
     expect(chinese[0].invocationName).toBe('web_search');
-    expect(chinese[0].title).toBe('搜索互联网');
-    expect(schemaPropertyDescription(chinese[0], 'query')).toBe('搜索查询关键词');
+    expect(chinese[0].title).toBe('Search the web');
+    expect(schemaPropertyDescription(chinese[0], 'query')).toBe('Search query keywords');
   });
 
   it('returns localized web validation errors without network access', async () => {

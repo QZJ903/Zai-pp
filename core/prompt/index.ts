@@ -16,5 +16,4 @@ export {
 export type {
   PromptAugmentationOptions,
   PromptAugmentationResult,
-  ZaiSearchMode,
 } from './augmentation';

@@ -232,13 +232,58 @@ describe('zai model-facing filter', () => {
       inputSchema: {},
     }) as unknown as ToolDescriptor;
 
-  it('filters web_search and web_fetch out of the model catalog', () => {
+  it('keeps web_search and web_fetch when the web tools switch is on', () => {
     const descriptors = [
       mk('memory_save', 'memory_save'),
       mk('web_search', 'web_search'),
       mk('web_fetch', 'web_fetch'),
     ];
-    const filtered = filterZaiModelFacingToolDescriptors(descriptors);
+    const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
+      isAgent: false,
+      webToolsEnabled: true,
+    });
+    expect(filtered.map((d) => d.name)).toEqual(['memory_save', 'web_search', 'web_fetch']);
+  });
+
+  it('keeps web tools when page-native search is on even if the switch is off', () => {
+    const descriptors = [
+      mk('memory_save', 'memory_save'),
+      mk('web_search', 'web_search'),
+      mk('web_fetch', 'web_fetch'),
+    ];
+    const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
+      isAgent: false,
+      webToolsEnabled: false,
+      nativeSearchOn: true,
+    });
+    expect(filtered.map((d) => d.name)).toEqual(['memory_save', 'web_search', 'web_fetch']);
+  });
+
+  it('filters web tools when the switch is off and native search is off', () => {
+    const descriptors = [
+      mk('memory_save', 'memory_save'),
+      mk('web_search', 'web_search'),
+      mk('web_fetch', 'web_fetch'),
+    ];
+    const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
+      isAgent: false,
+      webToolsEnabled: false,
+      nativeSearchOn: false,
+    });
+    expect(filtered.map((d) => d.name)).toEqual(['memory_save']);
+  });
+
+  it('filters web_search and web_fetch out of the model catalog for agent turns', () => {
+    const descriptors = [
+      mk('memory_save', 'memory_save'),
+      mk('web_search', 'web_search'),
+      mk('web_fetch', 'web_fetch'),
+    ];
+    const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
+      isAgent: true,
+      webToolsEnabled: true,
+      nativeSearchOn: true,
+    });
     expect(filtered.map((d) => d.name)).toEqual(['memory_save']);
   });
 
