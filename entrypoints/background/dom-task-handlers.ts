@@ -71,6 +71,9 @@ export function createDomTaskRuntimeHandlers(
     event<DomTaskFailedEvent>('DOM_TASK_FAILED', (message) => ({
       taskId: readString(message, 'taskId'),
       error: readString(message, 'error'),
+      // 首轮中途被暂停时，两次 DOM_TASK_STARTED 都还没读到会话 id，只有失败回传
+      // 这一刻带得回来 —— 缺了它，自动化会一直显示会话「未创建」。
+      chatSessionId: readNullableString(message, 'chatSessionId'),
     }), (coordinator, payload) => coordinator.onFailed(payload)),
     event<DomTaskNeedsActionEvent>('DOM_TASK_NEEDS_ACTION', (message) => ({
       taskId: readString(message, 'taskId'),

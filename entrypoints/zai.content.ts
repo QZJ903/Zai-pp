@@ -19,6 +19,7 @@ import type {
   ToolExecutionRecord,
   Skill,
   SystemPromptPreset,
+  BackgroundConfig,
 } from '../core/types';
 import { buildPromptAugmentation } from '../core/prompt';
 import { extractVisibleUserPrompt } from '../core/prompt/visibility';
@@ -61,6 +62,7 @@ import {
 import {
   buildZaiContinuationPrompt,
   buildZaiNudgePrompt,
+  isZaiContinuationPrompt,
   shouldNudgeZai,
   ZAI_CONTINUATION_DELAY_MS,
   ZAI_INLINE_AGENT_MAX_NUDGES,
@@ -71,7 +73,13 @@ import {
   ZAI_MAIN_TO_CONTENT,
 } from '../core/zai/messages';
 import {
+  applyBackground,
+  isBackgroundActive,
+  patchContainerBackgrounds,
+} from '../core/zai/page-background';
+import {
   ZAI_AGENT_FLAG,
+  ZAI_CHAT_INPUT_SELECTOR as CHAT_INPUT_SELECTOR,
   ZAI_DIAG_GLOBAL,
   ZAI_DIAG_LOOP_ATTR,
   ZAI_DIAG_LOOP_CHECK_ATTR,
@@ -265,7 +273,7 @@ function getCurrentConversationTitle(): string {
 }
 
 function isContinuationRequest(text: string): boolean {
-  return text.includes('<original_task>') && text.includes('<tool_results>');
+  return isZaiContinuationPrompt(text);
 }
 
 /** 读 chatNew body 是否已开原生联网：chat.auto_web_search 为 true 视为开。 */
@@ -874,6 +882,15 @@ async function handleAugmentRequestBody(
 
     // 续跑请求：透传 body 不重灌工具目录，但每轮新建授权（防上一轮 grant 被关掉）。
     if (isContinuationRequest(originalPrompt)) {
+      // 续跑轮同样登记 requestId → taskId：手动停止检测（armManualStopDetection）与
+      // HTML_CHALLENGE 推进都靠这两个登记项定位「在飞的那一轮」。此前这里直接 return，
+      // 导致续跑期间点 Stop 完全检测不到 → 只能等 180s 执行租约超时。
+      if (continuationLoop?.status === 'running') {
+        continuationLoop.activeRequestId = requestId;
+        if (continuationLoop.taskId) {
+          taskIdByRequestId.set(requestId, continuationLoop.taskId);
+        }
+      }
       const auth = await createToolAuthorization({
         requestId,
         chatSessionId,
@@ -1070,14 +1087,27 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         if (requestId && activeToolAuthorizations.has(requestId)) {
           await closeToolAuthorization(requestId);
         }
+        // 流终止但这一轮从未产出 RESPONSE_COMPLETE = 页面侧把读取流 abort 了
+        // （用户点 Stop，或读取中途出错）。这比「等 Stop 按钮消失」更直接，
+        // 这里立刻挂上手动停止宽限窗口，不必再等 180s 执行租约超时。
+        // 正常结束的轮次不走这里：fetch hook 先发 RESPONSE_COMPLETE 再发 REQUEST_TERMINAL。
+        if (requestId && !respondedRequestIds.has(requestId)) {
+          armManualStopDetection();
+        }
         return;
       }
       case 'HTML_CHALLENGE': {
         // completion 返回 HTML：推进续跑而不是干等。
         const requestId = (data.payload as { requestId?: string } | undefined)?.requestId;
         if (continuationLoop?.status === 'running' && continuationLoop.activeRequestId === requestId) {
-          continuationLoop.pendingPrompt = continuationLoop.pendingPrompt;
-          setTimeout(() => { void advanceContinuationLoop(); }, ZAI_CONTINUATION_DELAY_MS);
+          const expectedLoop = continuationLoop;
+          setTimeout(() => {
+            // 延迟到期时复检：期间可能已被别的 RESPONSE_COMPLETE 推进过、
+            // 或整个循环已收尾 —— 不复检会重复注入同一轮。
+            if (continuationLoop !== expectedLoop || expectedLoop.status !== 'running') return;
+            if (expectedLoop.activeRequestId !== requestId) return;
+            void advanceContinuationLoop();
+          }, ZAI_CONTINUATION_DELAY_MS);
         }
         return;
       }
@@ -1309,11 +1339,29 @@ async function handleResponseComplete(complete: ZaiResponseComplete): Promise<vo
       continuationLoop.activeRequestId === complete.requestId);
 
   if (isContinuationTurn) {
-    // 续跑轮：绝不能回退到原生轮分支。续跑轮没有 running loop 时直接收尾。
+    // 续跑轮：绝不能回退到原生轮分支。续跑轮没有 running loop 时不能裸 return ——
+    // 归属在这个 requestId 上的后台任务会永远等不到终态（一直显示「运行中」，直到
+    // 180s 执行租约超时）。这里直接回 FAILED 让任务立即收尾。
     if (!continuationLoop || continuationLoop.status !== 'running') {
+      const orphanTaskId = taskIdByRequestId.get(complete.requestId);
+      if (orphanTaskId) {
+        clearActiveDomTask(orphanTaskId);
+        diag.failures?.push({
+          kind: 'continuation_loop_missing',
+          taskId: orphanTaskId,
+          requestId: complete.requestId,
+        });
+        void sendRuntimeMessage({
+          type: 'DOM_TASK_FAILED',
+          taskId: orphanTaskId,
+          error: 'continuation_loop_missing',
+        });
+      }
       return;
     }
     continuationLoop.activeRequestId = null;
+    // 本轮已完成，摘掉它的归属登记（收尾时 clearActiveDomTask 会兜底清剩下的）。
+    taskIdByRequestId.delete(complete.requestId);
 
     // 关键：这轮的工具 XML 可能已经通过 TOOL_CALL 通道执行过了（fetch-hook 既发 TOOL_CALL
     // 又发 RESPONSE_COMPLETE，两条消息同 requestId）。先读回已执行记录复用，别再重新执行
@@ -1479,7 +1527,45 @@ async function handleResponseComplete(complete: ZaiResponseComplete): Promise<vo
       pathname: location.pathname,
       executionNames: executions.map((e) => e.name),
     });
+    // 读不到 /c/<id> 就没法建续跑循环。若这个 requestId 归属着后台任务，
+    // 必须回 FAILED 收尾，否则任务一直挂在「运行中」直到 180s 租约超时。
+    const orphanTaskId = taskIdByRequestId.get(complete.requestId);
+    if (orphanTaskId) {
+      clearActiveDomTask(orphanTaskId);
+      diag.failures?.push({
+        kind: 'continuation_session_id_missing',
+        taskId: orphanTaskId,
+        requestId: complete.requestId,
+      });
+      void sendRuntimeMessage({
+        type: 'DOM_TASK_FAILED',
+        taskId: orphanTaskId,
+        error: 'continuation_session_id_missing',
+      });
+    }
     return;
+  }
+
+  // 覆盖前先处理已在跑的上一个循环：它若归属着后台任务，一旦被下面这行覆盖，
+  // 它的 taskId 就再也没人推进 → 那个任务永远收不到终态。这里先判失败收尾。
+  if (continuationLoop?.status === 'running') {
+    const staleLoop = continuationLoop;
+    if (staleLoop.taskId) {
+      const staleTaskId = staleLoop.taskId;
+      staleLoop.taskId = null;
+      clearActiveDomTask(staleTaskId);
+      diag.failures?.push({
+        kind: 'continuation_loop_superseded',
+        taskId: staleTaskId,
+        requestId: complete.requestId,
+      });
+      void sendRuntimeMessage({
+        type: 'DOM_TASK_FAILED',
+        taskId: staleTaskId,
+        error: 'continuation_loop_superseded',
+      });
+    }
+    finishContinuationLoop(staleLoop);
   }
 
   console.log('[GLM++] starting continuation loop', {
@@ -2056,6 +2142,88 @@ function clearActiveDomTask(taskId: string): void {
   }
 }
 
+/**
+ * 会话 id 的出现时机：新会话**不是发出请求就有的** —— 要等模型开始回答、
+ * SPA 把地址切到 `/c/<id>`，地址栏里才带得出会话 id。
+ *
+ * 只靠 `DOM_TASK_STARTED` 不够：那条事件依赖 `RESPONSE_COMPLETE`（模型答完），
+ * 用户在模型回答前暂停就永远等不到 → 自动化停在会话「未创建」。
+ * 这里直接盯地址变化，`/c/<id>` 一出现就补报给后台。
+ */
+let sessionWatchInstalled = false;
+
+/** 把当前地址里的会话 id 补给所有还没拿到它的在跑任务（幂等：id 相同就跳过）。 */
+function reportLiveSessionToActiveTasks(): void {
+  // 没有在跑的后台任务时直接返回。
+  if (activeDomTasks.size === 0) return;
+  const sessionId = readZaiChatSessionId();
+  if (!sessionId) return;
+  for (const task of activeDomTasks.values()) {
+    if (task.status !== 'pending' && task.status !== 'injected' && task.status !== 'running') continue;
+    // 已有别的会话 id = 页面被导航到了另一条对话，不是本次运行的目标会话，不覆盖。
+    if (task.chatSessionId !== null && task.chatSessionId !== sessionId) continue;
+    if (task.chatSessionId === sessionId) continue;
+    task.chatSessionId = sessionId;
+    void sendRuntimeMessage({
+      type: 'DOM_TASK_STARTED',
+      taskId: task.taskId,
+      chatSessionId: sessionId,
+    });
+  }
+}
+
+/**
+ * 盯地址变化。用 wxt 的 `wxt:locationchange`（它走 Navigation API、拿不到时才
+ * 退回 1s 轮询）—— 不用手包 `history.pushState`：内容脚本跑在隔离世界，
+ * 包不到页面自己那个 `history` 对象。
+ *
+ * 兜底再挂 popstate / hashchange，并把 1s 轮询留着：地址切换的时机是「模型开始
+ * 回答前后」，远早于用户能按下暂停，1s 粒度足够；有任务在跑时才有开销。
+ */
+function installSessionWatch(ctx: { addEventListener: (t: Window, type: string, h: () => void) => void }): void {
+  if (sessionWatchInstalled) return;
+  sessionWatchInstalled = true;
+  try {
+    ctx.addEventListener(window, 'wxt:locationchange', reportLiveSessionToActiveTasks);
+  } catch (error) {
+    console.warn('[GLM++] locationchange listener unavailable', error);
+  }
+  window.addEventListener('popstate', reportLiveSessionToActiveTasks);
+  window.addEventListener('hashchange', reportLiveSessionToActiveTasks);
+  setInterval(reportLiveSessionToActiveTasks, SESSION_WATCH_INTERVAL_MS);
+}
+
+const SESSION_WATCH_INTERVAL_MS = 1_000;
+
+/**
+ * 自定义背景：拉一次已保存的配置并应用，同时订阅 DOM 变更持续把新出现的
+ * 页面容器标成透明（聊天页是 SPA，切会话/渲染消息都会重建容器）。
+ *
+ * 变更回调按帧合并：流式回答时 DOM 每秒会变更上百次，而
+ * `patchContainerBackgrounds` 要读 `getComputedStyle` + `getBoundingClientRect`
+ * （强制布局），逐次触发会明显掉帧。
+ */
+async function installBackgroundCapability(): Promise<void> {
+  try {
+    const config = await sendRuntimeMessage<BackgroundConfig | null>({ type: 'GET_BACKGROUND' });
+    applyBackground(config ?? null);
+  } catch (error) {
+    console.warn('[GLM++] background config load failed', error);
+  }
+
+  let scheduled = false;
+  const observer = new MutationObserver(() => {
+    if (scheduled || !isBackgroundActive()) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      patchContainerBackgrounds();
+    });
+  });
+  const root = document.body ?? document.documentElement;
+  if (root) observer.observe(root, { childList: true, subtree: true });
+}
+
 function finishContinuationLoop(loop: ContinuationLoop): void {
   if (continuationLoop !== loop) return;
   loop.status = 'idle';
@@ -2095,7 +2263,6 @@ function finishContinuationLoop(loop: ContinuationLoop): void {
 // ---------------------------------------------------------------------------
 
 const SEND_BUTTON_SELECTOR = '#send-message-button';
-const CHAT_INPUT_SELECTOR = '#chat-input';
 const SUBMIT_OBSERVE_TIMEOUT_MS = 4_000;
 
 let submitObserver: MutationObserver | null = null;
@@ -2187,8 +2354,12 @@ function armManualStopDetection(): void {
 /**
  * 把 task 判为「用户手动停止」并清理归属：摘掉 requestId→taskId 映射、清 timer、
  * 回传 DOM_TASK_FAILED（error='cancelled'，coordinator 归为 ambiguous 不重试）。
+ *
+ * 带上此刻页面的会话 id：首轮生成中途被暂停时，两次 DOM_TASK_STARTED 都还没读到
+ * `/c/<id>`，只有这里能补上真值 —— 否则自动化会一直显示会话「未创建」。
  */
 async function terminateDomTaskAsStopped(taskId: string, requestId: string): Promise<void> {
+  const liveSessionId = readZaiChatSessionId();
   taskIdByRequestId.delete(requestId);
   respondedRequestIds.add(requestId);
   manualStopTimers.delete(requestId);
@@ -2199,7 +2370,12 @@ async function terminateDomTaskAsStopped(taskId: string, requestId: string): Pro
   }
   clearActiveDomTask(taskId);
   diag.failures?.push({ kind: 'manual_stop_detected', taskId, requestId });
-  void sendRuntimeMessage({ type: 'DOM_TASK_FAILED', taskId, error: 'cancelled' });
+  void sendRuntimeMessage({
+    type: 'DOM_TASK_FAILED',
+    taskId,
+    error: 'cancelled',
+    chatSessionId: liveSessionId,
+  });
 }
 
 function isAgentCurrentlyRunning(): boolean {
@@ -2551,7 +2727,7 @@ function autoSendAfterDialogDismiss(): void {
 export default defineContentScript({
   matches: ['*://chat.z.ai/*'],
   runAt: 'document_idle',
-  async main() {
+  async main(ctx) {
     extensionContextValid = true;
 
     window.addEventListener('message', (event) => {
@@ -2565,6 +2741,12 @@ export default defineContentScript({
       if (!message || typeof message !== 'object') return undefined;
       if (message.type === 'STATE_UPDATED' || message.type === 'TOOL_DESCRIPTORS_UPDATED') {
         void loadAndSyncRuntimeState();
+        sendResponse({ ok: true });
+        return true;
+      }
+      if (message.type === 'BACKGROUND_UPDATED') {
+        // 背景配置变了（侧边栏保存/清除）→ 立刻应用，不必等页面刷新。
+        applyBackground((message.config ?? null) as BackgroundConfig | null);
         sendResponse({ ok: true });
         return true;
       }
@@ -2643,7 +2825,12 @@ export default defineContentScript({
             finishContinuationLoop(continuationLoop);
           }
           clearActiveDomTask(taskId);
-          void sendRuntimeMessage({ type: 'DOM_TASK_FAILED', taskId, error: 'cancelled' });
+          void sendRuntimeMessage({
+            type: 'DOM_TASK_FAILED',
+            taskId,
+            error: 'cancelled',
+            chatSessionId: readZaiChatSessionId(),
+          });
         }
         sendResponse({ ok: true });
         return true;
@@ -2653,6 +2840,8 @@ export default defineContentScript({
 
     installPeakDialogAutoDismiss();
     installStopObserver();
+    installSessionWatch(ctx);
+    void installBackgroundCapability();
 
     await loadAndSyncRuntimeState();
     stampLoopDiagnostic();

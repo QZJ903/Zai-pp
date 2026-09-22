@@ -16,7 +16,7 @@ import { libraryController } from './library-controller';
  * Central settings state + handlers.
  *
  * Previously SettingsPage.tsx held ~30 useState hooks and every handler inline.
- * Lifting them here lets each sub-page (General / Appearance / Data ...)
+ * Lifting them here lets each sub-page (General / Prompt / Usage ...)
  * consume only the slice it needs, while keeping the chrome.runtime message
  * contract byte-for-byte identical to the legacy implementation.
  */
@@ -208,7 +208,7 @@ export function useSettingsController() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `glm-pp-memories-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `zai-memories-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }, []);
@@ -219,7 +219,7 @@ export function useSettingsController() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `glm-pp-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
+    a.download = `zai-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }, []);

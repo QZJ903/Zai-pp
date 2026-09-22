@@ -26,7 +26,7 @@ describe('sidepanel lazy route boundaries', () => {
       'McpPage',
       'ToolsPage',
       'BrowserControlPage',
-      'PresetPage',
+      'AutomationPage',
     ]) {
       expect(source).toContain(`lazy(() => import('./${page}'))`);
       expect(source).not.toMatch(new RegExp(`import\\s+${page}\\s+from`));
@@ -39,8 +39,8 @@ describe('sidepanel lazy route boundaries', () => {
 
     for (const page of [
       'GeneralSubPage',
+      'PresetSubPage',
       'PromptSubPage',
-      'AppearanceSubPage',
       'UsageSubPage',
       'AboutSubPage',
     ]) {

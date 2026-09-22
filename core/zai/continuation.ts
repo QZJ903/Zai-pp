@@ -12,6 +12,19 @@ export const ZAI_INLINE_AGENT_MAX_STEPS = 25;
 export const ZAI_CONTINUATION_DELAY_MS = 2_500;
 export const ZAI_INLINE_AGENT_MAX_NUDGES = 8;
 
+/**
+ * 续跑轮识别：带 `<original_task>`，且带 `<tool_results>` 或 `<tool_results_so_far>`。
+ *
+ * 两个标签都要认：`buildZaiContinuationPrompt` 用 `<tool_results>`，
+ * `buildZaiNudgePrompt` 用 `<tool_results_so_far>`。漏认后者会把 nudge 轮当成原生轮，
+ * 于是新起一个 `taskId` 为 null 的续跑循环覆盖掉原循环，原循环再也无人推进，
+ * 自动化任务收不到终态、一直挂在「运行中」。
+ */
+export function isZaiContinuationPrompt(content: string): boolean {
+  if (!content.includes('<original_task>')) return false;
+  return content.includes('<tool_results>') || content.includes('<tool_results_so_far>');
+}
+
 const ORIGINAL_TASK_MAX_CHARS = 8_000;
 const NUDGE_PREVIOUS_TEXT_MAX_CHARS = 4_000;
 

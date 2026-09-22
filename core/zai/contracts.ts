@@ -41,6 +41,9 @@ export const ZAI_AGENT_FLAG = 'general_agent';
 /** SSE envelope：每条 `data: {"type":"chat:completion","data":{"phase":...}}`。 */
 export const ZAI_SSE_ENVELOPE_TYPE = 'chat:completion';
 
+/** 输入框选择器。发送链、背景应用层都读它，只在这一处定义。 */
+export const ZAI_CHAT_INPUT_SELECTOR = '#chat-input';
+
 /**
  * SSE phase 全集。thinking/answer 带文本三语义；tool_call/tool_response 只在
  * agent 模式出现（服务端沙箱工具，扩展本地不劫持）；done 收尾。

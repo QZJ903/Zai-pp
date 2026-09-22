@@ -15,6 +15,7 @@
  */
 
 import type { ToolExecutionRecord } from '../types';
+import { buildZaiChatSessionUrl } from './chat-session';
 
 export type DomTaskKind = 'automation';
 
@@ -34,6 +35,12 @@ export interface DomTaskCompleteEvent {
 export interface DomTaskFailedEvent {
   taskId: string;
   error: string;
+  /**
+   * 失败时页面上已经建立的会话 id。首轮生成中途被暂停时，DOM_TASK_STARTED 那两次
+   * 都还没拿到 `/c/<id>`，只有内容脚本在失败回传这一刻能读到真值 ——
+   * 不带回来，自动化就会永远停在会话「未创建」。
+   */
+  chatSessionId?: string | null;
 }
 
 export interface DomTaskNeedsActionEvent {
@@ -62,6 +69,12 @@ export type DomTaskOutcome =
       error: string;
       phase: 'tab' | 'bridge' | 'runner';
       retrySafe?: boolean;
+      /**
+       * 失败时页面上已经建立的会话 id（来自 DOM_TASK_STARTED）。
+       * 失败结果要把它带回后台落库，否则「新会话跑一半失败」的自动化永远停在
+       * 会话「未创建」——页面明明已经建了对话，侧边栏却打不开。
+       */
+      chatSessionId?: string | null;
     };
 
 export interface DomTaskStartInput {
@@ -77,6 +90,13 @@ export interface DomTaskStartOptions {
   signal?: AbortSignal;
   deadlineAt?: number;
   handshakeTimeoutMs?: number;
+  /**
+   * 内容脚本首次确认「本次运行落在哪个会话」时回调一次（新会话下 chatNew 阶段读不到
+   * `/c/<id>`，要等 SPA 跳转后的那次 DOM_TASK_STARTED 才有值）。
+   * 消费者据此立刻把会话落库，而不是等 run 收尾 —— 否则运行期间（以及失败收尾后）
+   * 侧边栏一直显示会话「未创建」、打不开。
+   */
+  onSessionStarted?(chatSessionId: string): void;
 }
 
 export interface DomTaskCoordinatorDeps {
@@ -121,6 +141,9 @@ interface PendingDomTask {
   tabId: number;
   chatSessionId: string | null;
   startedChatSessionId: string | null;
+  /** 会话 id 是否已经回调过 onSessionStarted（只回调一次）。 */
+  sessionReported: boolean;
+  onSessionStarted?: (chatSessionId: string) => void;
   settled: boolean;
   resolve: (outcome: DomTaskOutcome) => void;
   reject: (error: unknown) => void;
@@ -165,8 +188,12 @@ export function createDomTaskCoordinator(
     entry.reject(error);
   }
 
+  /**
+   * 会话 URL 与会话 id 的拼接只保留 `chat-session.ts` 一处真源 ——
+   * 这里把 deps 注入的 `homeUrl` 作为 baseUrl 传进去，保证自定义 host 时两边仍然一致。
+   */
   function buildSessionUrl(chatSessionId: string): string {
-    return `${homeUrl}c/${encodeURIComponent(chatSessionId)}`;
+    return buildZaiChatSessionUrl(chatSessionId, homeUrl);
   }
 
   function normalizeTabUrl(url: string | undefined): string {
@@ -304,6 +331,8 @@ export function createDomTaskCoordinator(
         tabId,
         chatSessionId: effectiveChatSessionId,
         startedChatSessionId: effectiveChatSessionId,
+        sessionReported: false,
+        onSessionStarted: options.onSessionStarted,
         settled: false,
         resolve,
         reject,
@@ -360,8 +389,17 @@ export function createDomTaskCoordinator(
 
   function onStarted(event: DomTaskStartedEvent): void {
     const entry = pending.get(event.taskId);
-    if (entry) {
-      entry.startedChatSessionId = event.chatSessionId ?? entry.startedChatSessionId;
+    if (!entry) return;
+    entry.startedChatSessionId = event.chatSessionId ?? entry.startedChatSessionId;
+    // 首次拿到会话 id 就立刻回调：内容脚本在 SPA 跳到 /c/<id> 后才发得出这个值，
+    // 此刻把会话落库，运行中/失败后侧边栏都能打开会话。
+    if (!entry.sessionReported && entry.startedChatSessionId) {
+      entry.sessionReported = true;
+      try {
+        entry.onSessionStarted?.(entry.startedChatSessionId);
+      } catch (error) {
+        reportError('dom_task_session_started_callback_failed', error);
+      }
     }
   }
 
@@ -389,6 +427,7 @@ export function createDomTaskCoordinator(
       error: event.error || 'dom_task_failed',
       phase: 'runner',
       retrySafe,
+      chatSessionId: event.chatSessionId ?? entry.startedChatSessionId,
     });
   }
 

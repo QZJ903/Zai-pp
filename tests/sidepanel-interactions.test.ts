@@ -95,7 +95,7 @@ describe('sidepanel interactions', () => {
       type: 'INSERT_SAVED_PROMPT_INTO_CHAT',
       payload: { text: 'Summarize this thread.' },
     });
-    expect(container.textContent).toContain('已插入当前 GLM 对话');
+    expect(container.textContent).toContain('已插入当前 Zai 对话');
   });
 
   it('shows insertion failures from the active GLM chat route', async () => {
@@ -113,7 +113,7 @@ describe('sidepanel interactions', () => {
         }];
       }
       if (message.type === 'INSERT_SAVED_PROMPT_INTO_CHAT') {
-        return { ok: false, error: '请先在 chat.z.ai 登录，或刷新 GLM 页面后重试。' };
+        return { ok: false, error: '请先在 chat.z.ai 登录，或刷新 Zai 页面后重试。' };
       }
       return null;
     });
@@ -123,7 +123,7 @@ describe('sidepanel interactions', () => {
     await flushPromises();
     await clickButton('插入到对话');
 
-    expect(container.textContent).toContain('插入到对话失败：请先在 chat.z.ai 登录，或刷新 GLM 页面后重试。');
+    expect(container.textContent).toContain('插入到对话失败：请先在 chat.z.ai 登录，或刷新 Zai 页面后重试。');
   });
 
   it('shows saved-item repository failures instead of rendering a fake empty state', async () => {

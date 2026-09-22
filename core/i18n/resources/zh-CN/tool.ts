@@ -87,7 +87,7 @@ export const tool = {
   },
   sandbox: {
     runTitle: '在浏览器沙箱中运行代码',
-    runDescription: '在隔离的扩展沙箱中执行 JavaScript、TypeScript、Python 或 HTML，不会在 GLM 页面里执行。',
+    runDescription: '在隔离的扩展沙箱中执行 JavaScript、TypeScript、Python 或 HTML，不会在 Zai 页面里执行。',
     languageDescription: '运行语言：javascript、typescript、python 或 html',
     codeDescription: '要在隔离浏览器沙箱中执行的代码',
     inputDescription: '可选输入字符串，代码中可读取',

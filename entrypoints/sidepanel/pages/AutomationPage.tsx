@@ -12,6 +12,7 @@ import {
   decodeAutomationRunList,
 } from '../../../core/automation/storage-codec';
 import { validateAutomationSchedule } from '../../../core/automation/schedule';
+import { buildZaiChatSessionUrl } from '../../../core/zai/chat-session';
 import type { SupportedLocale } from '../../../core/i18n';
 import { createRequestGenerationFence } from '../async-state';
 import PageIntro from '../components/PageIntro';
@@ -55,11 +56,7 @@ const EMPTY_FORM: FormState = {
   fixedSession: false,
 };
 
-export function AutomationSection() {
-  return <AutomationPageInner />;
-}
-
-function AutomationPageInner() {
+export default function AutomationPage() {
   const { t } = useI18n();
   const [automations, setAutomations] = useState<Automation[]>([]);
   const [runs, setRuns] = useState<Record<string, AutomationRun[]>>({});
@@ -256,13 +253,16 @@ function AutomationPageInner() {
     }
   };
 
-  const openSession = async (url: string | null) => {
+  // 会话 URL 缺失但会话 id 在（例如历史数据只存了 id）时按 /c/<id> 兜底，
+  // 避免「明明有会话却点不开」。
+  const openSession = async (automation: Automation) => {
+    const url = resolveSessionUrl(automation);
     if (!url) return;
     await chrome.tabs.create({ url, active: true });
   };
 
   return (
-    <div className="space-y-3">
+    <div className="p-4 space-y-3">
       <PageIntro
         title={t('sidepanel.automationPage.title')}
         description={t('sidepanel.automationPage.description')}
@@ -320,7 +320,7 @@ function AutomationPageInner() {
               onToggleStatus={() => toggleStatus(automation)}
               onEdit={() => startEdit(automation)}
               onDelete={() => remove(automation)}
-              onOpenSession={() => openSession(automation.glm.sessionUrl)}
+              onOpenSession={() => openSession(automation)}
             />
           ))}
         </div>
@@ -409,16 +409,12 @@ function AutomationForm({
         <ToggleRow
           title={t('sidepanel.automationPage.form.search')}
           enabled={form.searchEnabled}
-          onToggle={(next) =>
-            onChange({ ...form, searchEnabled: next, fixedSession: next ? false : form.fixedSession })
-          }
+          onToggle={(next) => update('searchEnabled', next)}
         />
         <ToggleRow
           title={t('sidepanel.automationPage.form.fixedSession')}
           enabled={form.fixedSession}
-          onToggle={(next) =>
-            onChange({ ...form, fixedSession: next, searchEnabled: next ? false : form.searchEnabled })
-          }
+          onToggle={(next) => update('fixedSession', next)}
         />
       </div>
 
@@ -455,6 +451,7 @@ function AutomationCard({
 }) {
   const { t, locale } = useI18n();
   const latestRun = runs[0];
+  const sessionUrl = resolveSessionUrl(automation);
   const statusColor = automation.status === 'active' ? 'var(--ds-success)' : 'var(--ds-text-tertiary)';
   const statusBg = automation.status === 'active' ? 'var(--ds-success-bg)' : 'var(--ds-surface)';
 
@@ -497,7 +494,7 @@ function AutomationCard({
       <div className="flex items-center justify-between gap-2">
         <button
           onClick={onOpenSession}
-          disabled={!automation.glm.sessionUrl}
+          disabled={!sessionUrl}
           className="ds-btn-secondary px-3 py-1.5 text-xs rounded-lg disabled:opacity-50"
         >
           {t('sidepanel.automationPage.actions.openSession')}
@@ -609,6 +606,18 @@ function formatRun(run: AutomationRun, t: ReturnType<typeof useI18n>['t']): stri
 
 function shortId(id: string): string {
   return id.slice(0, 8);
+}
+
+/**
+ * 会话 URL：优先用记录里的 sessionUrl；缺失**或与 id 不一致**时按 `/c/<id>` 兜底拼。
+ * 后者用于历史数据、以及早期版本留下的「新 id + 旧 url」记录 —— 直接信 url 会跳到
+ * 上一次的对话。URL 形状与后台共用 `buildZaiChatSessionUrl`，避免两处各拼一遍。
+ */
+function resolveSessionUrl(automation: Automation): string | null {
+  const { chatSessionId, sessionUrl } = automation.glm;
+  if (!chatSessionId) return sessionUrl;
+  const canonical = buildZaiChatSessionUrl(chatSessionId);
+  return sessionUrl === canonical ? sessionUrl : canonical;
 }
 
 

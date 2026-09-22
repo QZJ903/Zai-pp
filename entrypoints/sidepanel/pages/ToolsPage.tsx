@@ -3,7 +3,6 @@ import type { LocaleMessageKey } from '../../../core/i18n';
 import type { McpServerConfig, McpToolCacheEntry } from '../../../core/types';
 import PageIntro from '../components/PageIntro';
 import { SettingsSection, StatusMessage, ToggleRow } from '../components/settings/primitives';
-import { AutomationSection } from './AutomationPage';
 import { isMcpToolEnabled, mcpToolsController } from '../controllers/mcp-tools-controller';
 import { useToolsPageController } from '../controllers/useToolsPageController';
 import { useI18n } from '../i18n';
@@ -301,8 +300,6 @@ export default function ToolsPage() {
       >
         <DiagSearch />
       </SettingsSection>
-
-      <AutomationSection />
     </div>
   );
 }

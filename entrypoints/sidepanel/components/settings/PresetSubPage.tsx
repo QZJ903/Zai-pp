@@ -1,19 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import type { SystemPromptPreset } from '../../../core/types';
-import { decodeActivePreset, decodePresetCollection } from '../../../core/preset/codec';
-import PageIntro from '../components/PageIntro';
-import PresetCard from '../components/PresetCard';
-import PresetForm from '../components/PresetForm';
-import { SkeletonList, useBanner, useConfirm } from '../components/settings/primitives';
-import { useI18n } from '../i18n';
-import { createRequestGenerationFence } from '../async-state';
+import type { SystemPromptPreset } from '../../../../core/types';
+import { decodeActivePreset, decodePresetCollection } from '../../../../core/preset/codec';
+import PresetCard from '../PresetCard';
+import PresetForm from '../PresetForm';
+import { SkeletonList, SettingsSection, useBanner, useConfirm } from './primitives';
+import { useI18n } from '../../i18n';
+import { createRequestGenerationFence } from '../../async-state';
 import {
   decodeRuntimeResponse,
   getRuntimeErrorMessage,
-} from '../runtime-response';
-import { sidepanelRuntimeClient } from '../runtime-client';
+} from '../../runtime-response';
+import { sidepanelRuntimeClient } from '../../runtime-client';
 
-export default function PresetPage() {
+export default function PresetSubPage() {
   const { t } = useI18n();
   const [presets, setPresets] = useState<SystemPromptPreset[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -178,13 +177,16 @@ export default function PresetPage() {
   };
 
   return (
-    <div className="p-4 space-y-4">
-      <PageIntro
+    <div className="space-y-5">
+      <SettingsSection
         title={t('sidepanel.presetPage.title')}
         description={t('sidepanel.presetPage.description')}
-        meta={activeId ? t('sidepanel.presetPage.activeMeta') : t('sidepanel.presetPage.inactiveMeta')}
-        actions={(
-          <>
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>
+            {activeId ? t('sidepanel.presetPage.activeMeta') : t('sidepanel.presetPage.inactiveMeta')}
+          </span>
+          <div className="flex items-center gap-1.5">
             <input
               ref={fileInputRef}
               type="file"
@@ -211,54 +213,54 @@ export default function PresetPage() {
               </svg>
               {t('sidepanel.presetPage.create')}
             </button>
+          </div>
+        </div>
+
+        {showForm && (
+          <div className="animate-slide-down">
+            <PresetForm initial={editing} onSave={handleSave} onCancel={handleCancel} />
+          </div>
+        )}
+
+        {confirmNode}
+        {banner.node}
+
+        {loading ? (
+          <SkeletonList rows={3} />
+        ) : presets.length === 0 && loadFailed ? null : presets.length === 0 ? (
+          <div className="ds-empty-state">
+            <div className="ds-empty-state-icon">
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </div>
+            <div className="ds-empty-state-title">{t('sidepanel.presetPage.empty')}</div>
+            <div className="ds-empty-state-description">{t('sidepanel.presetPage.emptyHelp')}</div>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-2">
+              {presets.map((p, index) => (
+                <PresetCard
+                  key={`${p.id}:${index}`}
+                  preset={p}
+                  isActive={p.id === activeId}
+                  onActivate={() => handleActivate(p.id)}
+                  onDeactivate={handleDeactivate}
+                  onEdit={() => handleEdit(p)}
+                  onDelete={() => handleDelete(p.id)}
+                />
+              ))}
+            </div>
+
+            <div className="ds-info-panel rounded-xl p-3.5">
+              <p className="text-xs leading-relaxed" style={{ color: 'var(--ds-text-secondary)' }}>
+                {t('sidepanel.presetPage.activeHelp')}
+              </p>
+            </div>
           </>
         )}
-      />
-
-      {showForm && (
-        <div className="animate-slide-down">
-          <PresetForm initial={editing} onSave={handleSave} onCancel={handleCancel} />
-        </div>
-      )}
-
-      {confirmNode}
-      {banner.node}
-
-      {loading ? (
-        <SkeletonList rows={3} />
-      ) : presets.length === 0 && loadFailed ? null : presets.length === 0 ? (
-        <div className="ds-empty-state">
-          <div className="ds-empty-state-icon">
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-          </div>
-          <div className="ds-empty-state-title">{t('sidepanel.presetPage.empty')}</div>
-          <div className="ds-empty-state-description">{t('sidepanel.presetPage.emptyHelp')}</div>
-        </div>
-      ) : (
-        <>
-          <div className="space-y-2">
-            {presets.map((p, index) => (
-              <PresetCard
-                key={`${p.id}:${index}`}
-                preset={p}
-                isActive={p.id === activeId}
-                onActivate={() => handleActivate(p.id)}
-                onDeactivate={handleDeactivate}
-                onEdit={() => handleEdit(p)}
-                onDelete={() => handleDelete(p.id)}
-              />
-            ))}
-          </div>
-
-          <div className="ds-info-panel rounded-xl p-3.5">
-            <p className="text-xs leading-relaxed" style={{ color: 'var(--ds-text-secondary)' }}>
-              {t('sidepanel.presetPage.activeHelp')}
-            </p>
-          </div>
-        </>
-      )}
+      </SettingsSection>
     </div>
   );
 }

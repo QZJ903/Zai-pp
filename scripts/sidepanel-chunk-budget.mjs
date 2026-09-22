@@ -46,16 +46,18 @@ const BUDGET = Object.freeze({
     CapabilitiesPage: { raw: 5_000, gzip: 2_000 },
     SkillPage: { raw: 60_000, gzip: 13_000 },
     McpPage: { raw: 50_000, gzip: 12_000 },
-    // AutomationSection is imported into the Tools page (it is no longer a
-    // separate capability sub-tab), so its budget is merged in:
-    // 18_000 + 35_000 raw, 6_000 + 10_000 gzip, plus headroom.
-    ToolsPage: { raw: 54_000, gzip: 16_500 },
+    ToolsPage: { raw: 18_000, gzip: 6_000 },
     BrowserControlPage: { raw: 10_000, gzip: 4_000 },
-    PresetPage: { raw: 14_000, gzip: 5_000 },
+    AutomationPage: { raw: 35_000, gzip: 10_000 },
     SettingsPage: { raw: 45_000, gzip: 14_000 },
-    GeneralSubPage: { raw: 5_000, gzip: 2_500 },
+    // The background-image section moved from AppearanceSubPage into General,
+    // so General's budget absorbs the former Appearance allowance
+    // (5_000 + 8_000 raw, 2_500 + 3_500 gzip) plus headroom.
+    GeneralSubPage: { raw: 18_000, gzip: 7_500 },
+    // Presets moved from the capability tabs into settings, so its former
+    // standalone chunk budget moves with it.
+    PresetSubPage: { raw: 14_000, gzip: 5_000 },
     PromptSubPage: { raw: 14_000, gzip: 5_000 },
-    AppearanceSubPage: { raw: 8_000, gzip: 3_500 },
     UsageSubPage: { raw: 12_000, gzip: 5_000 },
     DataSubPage: { raw: 14_000, gzip: 5_500 },
     AboutSubPage: { raw: 3_000, gzip: 1_500 },

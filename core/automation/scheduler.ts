@@ -9,6 +9,7 @@ import {
   updateAutomationRuntime,
 } from './store';
 import { calculateNextRunAt } from './schedule';
+import { buildZaiChatSessionUrl } from '../zai/chat-session';
 import {
   AutomationExecutionStoppedError,
   createAutomationExecutionContext,
@@ -55,6 +56,8 @@ export interface ScanDueAutomationsResult {
   started: number;
   locked: number;
   failed: number;
+  /** 被 reconcile 判定为「中断」并改判终态的悬挂 run 数量（不含本次新起的 run）。 */
+  reconciled: number;
 }
 
 interface ActiveAutomationLease {
@@ -73,7 +76,7 @@ export async function scanDueAutomations(
   // Recover any `running` rows orphaned by a service-worker termination before
   // scanning, so the in-memory lock (which is lost on restart) doesn't allow a
   // duplicate run and so the orphaned row is finalized.
-  await reconcileStaleRunsDetailed(AUTOMATION_RUN_TIMEOUT_MS, now, {
+  const reconciled = await reconcileStaleRunsDetailed(AUTOMATION_RUN_TIMEOUT_MS, now, {
     protectedRunIds: new Set([...activeRunLeases.values()].map((lease) => lease.runId)),
     runtimePatch: (automation, run) => createInterruptedRuntimePatch(automation, run, now),
   });
@@ -87,6 +90,7 @@ export async function scanDueAutomations(
     started: 0,
     locked: 0,
     failed: 0,
+    reconciled: reconciled.length,
   };
 
   for (const automation of automations) {
@@ -234,7 +238,8 @@ async function completeRun(
     ? 'succeeded'
     : result.error.code === 'automation_run_timeout'
       ? 'timeout'
-      : result.error.code === 'automation_run_cancelled'
+      : result.error.code === 'automation_run_cancelled' ||
+          result.error.code === 'dom_automation_cancelled'
         ? 'cancelled'
         : 'failed';
   const finalized = await finalizeAutomationRun({
@@ -545,12 +550,30 @@ function createAutomationRuntimePatch(
     };
   }
 
+  // 会话状态收尾：把「目前已知的最新会话」与它的 URL 一起落库。
+  // - result 带了会话（成功收尾、或失败时内容脚本回传的真值）→ 以它为准；
+  // - result 没带（超时 / 租约丢失 / 中途暂停走 request.chatSessionId 的路径）→
+  //   退回记录里已有的会话，别把运行期间 persistAutomationSession 写进去的值抹掉；
+  // - sessionUrl 与 id 不一致也要重写：早期版本可能留下「新 id + 旧 url」的记录，
+  //   只判「url 缺不缺」会跳过修复，「打开会话」会一直跳到上一次的对话。
+  const nextSessionId = result.chatSessionId ?? automation.glm.chatSessionId;
+  const sessionPatch = nextSessionId && (
+    nextSessionId !== automation.glm.chatSessionId ||
+    automation.glm.sessionUrl !== buildZaiChatSessionUrl(nextSessionId)
+  )
+    ? {
+        glm: {
+          ...automation.glm,
+          chatSessionId: nextSessionId,
+          sessionUrl: buildZaiChatSessionUrl(nextSessionId),
+        },
+      }
+    : {};
+
   return {
     // Persist a session created during a failed run so the retry reuses it
     // instead of leaking a fresh GLM session per attempt (M15).
-    ...(result.chatSessionId && result.chatSessionId !== automation.glm.chatSessionId
-      ? { glm: { ...automation.glm, chatSessionId: result.chatSessionId } }
-      : {}),
+    ...sessionPatch,
     lastRunAt: completedAt,
     nextRunAt,
     lastError: result.error,

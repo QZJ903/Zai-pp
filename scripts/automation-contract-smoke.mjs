@@ -45,11 +45,10 @@ for (const removed of removedPaths) {
 
 assertContains('entrypoints/sidepanel/App.tsx', "labelKey: 'app.tabs.capabilities'");
 assertContains('entrypoints/sidepanel/App.tsx', "import('./pages/CapabilitiesPage')");
-// Automation lives as a section inside the Tools page (it is no longer its own
-// capability sub-tab).
-assertContains('entrypoints/sidepanel/pages/ToolsPage.tsx', "import { AutomationSection } from './AutomationPage'");
-assertContains('entrypoints/sidepanel/pages/ToolsPage.tsx', '<AutomationSection />');
-assertContains('entrypoints/sidepanel/pages/AutomationPage.tsx', 'export function AutomationSection');
+// Automation is its own capability sub-tab, sitting alongside Tools.
+assertContains('entrypoints/sidepanel/pages/CapabilitiesPage.tsx', "const AutomationPage = lazy(() => import('./AutomationPage'))");
+assertContains('entrypoints/sidepanel/pages/CapabilitiesPage.tsx', "sub === 'automation' && <AutomationPage />");
+assertContains('entrypoints/sidepanel/pages/AutomationPage.tsx', 'export default function AutomationPage');
 assertContains('core/automation/scheduler.ts', 'runAutomation');
 assertContains('wxt.config.ts', "'alarms'");
 assertContains('entrypoints/background.ts', 'chrome.alarms.create');

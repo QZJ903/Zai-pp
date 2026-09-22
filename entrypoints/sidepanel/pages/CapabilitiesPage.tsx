@@ -7,16 +7,16 @@ const SkillPage = lazy(() => import('./SkillPage'));
 const McpPage = lazy(() => import('./McpPage'));
 const ToolsPage = lazy(() => import('./ToolsPage'));
 const BrowserControlPage = lazy(() => import('./BrowserControlPage'));
-const PresetPage = lazy(() => import('./PresetPage'));
+const AutomationPage = lazy(() => import('./AutomationPage'));
 
-type CapabilitiesSubTab = 'skill' | 'mcp' | 'tools' | 'browser' | 'preset';
+type CapabilitiesSubTab = 'skill' | 'mcp' | 'tools' | 'browser' | 'automation';
 
-const SUB_TABS: { key: CapabilitiesSubTab; labelKey: 'sidepanel.capabilitiesPage.tabs.skill' | 'sidepanel.capabilitiesPage.tabs.mcp' | 'sidepanel.capabilitiesPage.tabs.tools' | 'sidepanel.capabilitiesPage.tabs.browser' | 'sidepanel.capabilitiesPage.tabs.preset' }[] = [
+const SUB_TABS: { key: CapabilitiesSubTab; labelKey: 'sidepanel.capabilitiesPage.tabs.skill' | 'sidepanel.capabilitiesPage.tabs.mcp' | 'sidepanel.capabilitiesPage.tabs.tools' | 'sidepanel.capabilitiesPage.tabs.browser' | 'sidepanel.capabilitiesPage.tabs.automation' }[] = [
   { key: 'skill', labelKey: 'sidepanel.capabilitiesPage.tabs.skill' },
   { key: 'mcp', labelKey: 'sidepanel.capabilitiesPage.tabs.mcp' },
   { key: 'tools', labelKey: 'sidepanel.capabilitiesPage.tabs.tools' },
   { key: 'browser', labelKey: 'sidepanel.capabilitiesPage.tabs.browser' },
-  { key: 'preset', labelKey: 'sidepanel.capabilitiesPage.tabs.preset' },
+  { key: 'automation', labelKey: 'sidepanel.capabilitiesPage.tabs.automation' },
 ];
 
 export default function CapabilitiesPage() {
@@ -38,7 +38,7 @@ export default function CapabilitiesPage() {
           {sub === 'mcp' && <McpPage />}
           {sub === 'tools' && <ToolsPage />}
           {sub === 'browser' && <BrowserControlPage />}
-          {sub === 'preset' && <PresetPage />}
+          {sub === 'automation' && <AutomationPage />}
         </Suspense>
       </div>
     </div>

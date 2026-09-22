@@ -7,25 +7,25 @@ import { useSettingsController } from '../controllers/useSettingsController';
 import { useI18n } from '../i18n';
 
 const GeneralSubPage = lazy(() => import('../components/settings/GeneralSubPage'));
+const PresetSubPage = lazy(() => import('../components/settings/PresetSubPage'));
 const PromptSubPage = lazy(() => import('../components/settings/PromptSubPage'));
-const AppearanceSubPage = lazy(() => import('../components/settings/AppearanceSubPage'));
 const UsageSubPage = lazy(() => import('../components/settings/UsageSubPage'));
 const AboutSubPage = lazy(() => import('../components/settings/AboutSubPage'));
 
-type SubTab = 'general' | 'prompt' | 'appearance' | 'usage' | 'about';
+type SubTab = 'general' | 'preset' | 'prompt' | 'usage' | 'about';
 
 const SUB_TABS: { key: SubTab; labelKey: LocaleMessageKey }[] = [
   { key: 'general', labelKey: 'sidepanel.settings.tabs.general' },
+  { key: 'preset', labelKey: 'sidepanel.settings.tabs.preset' },
   { key: 'prompt', labelKey: 'sidepanel.settings.tabs.prompt' },
-  { key: 'appearance', labelKey: 'sidepanel.settings.tabs.appearance' },
   { key: 'usage', labelKey: 'sidepanel.settings.tabs.usage' },
   { key: 'about', labelKey: 'sidepanel.settings.tabs.about' },
 ];
 
 const SUB_DESCRIPTION_KEY: Record<SubTab, LocaleMessageKey> = {
   general: 'sidepanel.settings.generalDescription',
+  preset: 'sidepanel.presetPage.description',
   prompt: 'sidepanel.settings.promptDescription',
-  appearance: 'sidepanel.settings.appearanceDescription',
   usage: 'sidepanel.settings.usageDescription',
   about: 'sidepanel.settings.aboutTagline',
 };
@@ -58,8 +58,8 @@ export default function SettingsPage() {
         ) : (
           <Suspense fallback={<RouteFallback />}>
             {sub === 'general' && <GeneralSubPage state={state} />}
+            {sub === 'preset' && <PresetSubPage />}
             {sub === 'prompt' && <PromptSubPage />}
-            {sub === 'appearance' && <AppearanceSubPage state={state} />}
             {sub === 'usage' && <UsageSubPage />}
             {sub === 'about' && <AboutSubPage state={state} />}
           </Suspense>

@@ -4,7 +4,7 @@ import { decodeRuntimeResponse } from '../core/messaging/runtime-response';
 import { decodeActivePreset } from '../core/preset/codec';
 import { LEGACY_PRESET } from './fixtures/persistence-contract/skill-preset-history';
 
-const presetPage = readFileSync('entrypoints/sidepanel/pages/PresetPage.tsx', 'utf8');
+const presetPage = readFileSync('entrypoints/sidepanel/components/settings/PresetSubPage.tsx', 'utf8');
 const skillPage = readFileSync('entrypoints/sidepanel/pages/SkillPage.tsx', 'utf8');
 
 describe('remaining local-state receiving boundaries', () => {

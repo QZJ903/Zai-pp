@@ -87,7 +87,7 @@ export const tool = {
   },
   sandbox: {
     runTitle: 'Run code in browser sandbox',
-    runDescription: 'Execute JavaScript, TypeScript, Python, or HTML in an isolated extension sandbox, not in the GLM page.',
+    runDescription: 'Execute JavaScript, TypeScript, Python, or HTML in an isolated extension sandbox, not in the Zai page.',
     languageDescription: 'Runtime language: javascript, typescript, python, or html',
     codeDescription: 'Code to run in the isolated browser sandbox',
     inputDescription: 'Optional input string available to the code',

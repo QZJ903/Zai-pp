@@ -30,7 +30,9 @@ export default function LibraryPage() {
         ariaLabel={t('sidepanel.libraryPage.navLabel')}
       />
 
-      <div className="flex-1 overflow-y-auto p-4">
+      {/* No padding here: each sub-page root already carries `p-4`, so an
+          extra layer would double the inset. */}
+      <div className="flex-1 overflow-y-auto">
         <Suspense fallback={<RouteFallback />}>
           {sub === 'memory' && <MemoryPage />}
           {sub === 'saved' && <SavedPage />}

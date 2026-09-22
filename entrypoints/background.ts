@@ -148,6 +148,7 @@ import {
   getAutomationRuns,
   setAutomationStatus,
   updateAutomation,
+  updateAutomationRuntime,
 } from '../core/automation/store';
 import { createAutomationRunnerFailure } from '../core/automation/messages';
 import {
@@ -159,6 +160,7 @@ import {
   scanDueAutomations,
 } from '../core/automation/scheduler';
 import { createDomTaskCoordinator } from '../core/zai/dom-task-coordinator';
+import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
 import { createDomTaskRuntimeHandlers } from './background/dom-task-handlers';
 import { broadcastRuntimeUpdate } from '../core/messaging/broadcast';
 import { createBackgroundErrorResponse } from '../core/messaging/background-error';
@@ -881,7 +883,7 @@ async function ensureSandboxOffscreenDocument(): Promise<void> {
     sandboxOffscreenCreation = chrome.offscreen.createDocument({
       url: SANDBOX_OFFSCREEN_URL,
       reasons: [chrome.offscreen.Reason.IFRAME_SCRIPTING, chrome.offscreen.Reason.WORKERS],
-      justification: 'Run GLM-requested JavaScript, TypeScript, Python, and HTML in an isolated extension sandbox instead of the GLM page.',
+      justification: 'Run Zai-requested JavaScript, TypeScript, Python, and HTML in an isolated extension sandbox instead of the Zai page.',
     }).finally(() => {
       sandboxOffscreenCreation = null;
     });
@@ -964,10 +966,12 @@ function sandboxExecutionResultToJson(result: SandboxExecutionResult): Record<st
 
 async function scanDueAutomationsFromWake() {
   const result = await scanDueAutomations(executeAutomationWithContext);
-  if (result.initialized > 0 || result.started > 0 || result.failed > 0) {
+  // `reconciled` 是「被改判为中断的悬挂 run」数：它同样改变侧边栏要显示的状态，
+  // 漏掉它会出现「DB 已是 failed、UI 仍显示运行中」直到用户切走再切回。
+  if (result.initialized > 0 || result.started > 0 || result.failed > 0 || result.reconciled > 0) {
     await broadcastAutomationUpdate();
   }
-  if (result.started > 0 || result.failed > 0) {
+  if (result.started > 0 || result.failed > 0 || result.reconciled > 0) {
     await broadcastAutomationRunsUpdate();
     await broadcastToolCallHistoryUpdate();
   }
@@ -1001,12 +1005,10 @@ async function executeAutomationWithContext(
   const prompt = request.prompt;
   // 固定会话：仅当该任务开启了 fixedSession 才沿用上次的 chatSessionId；
   // 否则传 null，强制每次新开对话（关闭开关 = 重新开一个窗口）。
-  // 兜底：搜索任务（高级搜索）强制新会话——advanced-search 的工具 schema 是 z.ai
-  // 在建会话时才注入的，复用旧会话续写时服务端不会重新装配工具，模型会退化成
-  // 把 search 当正文文本吐 `<tool_call>search(...)` 导致搜索失败。所以 search 与
-  // fixedSession 互斥，后端再兜一层，防止 UI 门控被绕过或旧数据残留。
+  // 联网与固定会话互不影响：联网走扩展自带的 web_search / web_fetch，由内容脚本
+  // 每轮注入目录，复用会话续写时同样可用。
   const searchEnabled = request.promptOptions?.searchEnabled === true;
-  const chatSessionId = request.promptOptions?.fixedSession === true && !searchEnabled
+  const chatSessionId = request.promptOptions?.fixedSession === true
     ? request.chatSessionId
     : null;
 
@@ -1020,7 +1022,16 @@ async function executeAutomationWithContext(
         chatSessionId,
         searchEnabled,
       },
-      { signal: execution.signal, deadlineAt: execution.deadlineAt },
+      {
+        signal: execution.signal,
+        deadlineAt: execution.deadlineAt,
+        // 新会话在 chatNew 阶段读不到 /c/<id>，要等 SPA 跳转后才有值。一旦拿到就
+        // 立刻落库：否则运行期间（以及中途暂停/点 Stop 之后的失败收尾）侧边栏
+        // 一直显示会话「未创建」，「打开会话」按钮是灰的。
+        onSessionStarted: (liveChatSessionId) => {
+          void persistAutomationSession(request.automationId, liveChatSessionId);
+        },
+      },
     );
   } catch (error) {
     // coordinator 抛错（含 abort / deadline）→ 交给 scheduler 判定超时/取消。
@@ -1047,6 +1058,9 @@ async function executeAutomationWithContext(
       retrySafe,
       Date.now(),
       { externalOutcome: retrySafe ? 'not_started' : 'ambiguous', retrySafe },
+      // 失败也要把「页面上已经建好的会话」带回后台：用户中途暂停 / 点 Stop 时
+      // 请求里的 chatSessionId 还是 null（新会话），只有这里能补上。
+      outcome.chatSessionId,
     );
   }
 
@@ -1066,5 +1080,42 @@ async function executeAutomationWithContext(
 }
 
 function buildZaiSessionUrl(chatSessionId: string): string {
-  return `${ZAI_HOME_URL}c/${encodeURIComponent(chatSessionId)}`;
+  return buildZaiChatSessionUrl(chatSessionId);
+}
+
+/**
+ * 把「本次运行落在哪个会话」写进自动化记录。
+ *
+ * 运行期间就落库（不等 run 收尾）：中途暂停 / 点 Stop 会让 run 走失败收尾，
+ * 而失败收尾的 runtimePatch 只有在 result 带 chatSessionId 时才写会话状态。
+ * 提前落库能保证任何收尾路径下侧边栏都拿得到可打开的会话。
+ */
+async function persistAutomationSession(
+  automationId: string,
+  chatSessionId: string,
+): Promise<void> {
+  try {
+    const automation = await getAutomationById(automationId);
+    if (!automation) return;
+    const nextSessionUrl = buildZaiSessionUrl(chatSessionId);
+    // 早退条件必须校验 URL 与 id 一致：早期版本可能留下「新 id + 旧 url」的记录，
+    // 只判存在性会跳过修复，「打开会话」会一直跳到上一次的对话。
+    if (
+      automation.glm.chatSessionId === chatSessionId &&
+      automation.glm.sessionUrl === nextSessionUrl
+    ) {
+      return;
+    }
+    await updateAutomationRuntime(automationId, {
+      glm: {
+        ...automation.glm,
+        chatSessionId,
+        sessionUrl: nextSessionUrl,
+      },
+    });
+    // 立刻广播：运行期间侧边栏就该能打开这个会话，不必等 run 收尾。
+    await broadcastAutomationUpdate();
+  } catch (error) {
+    reportBackgroundStartupError('automation_session_persist_failed', error);
+  }
 }

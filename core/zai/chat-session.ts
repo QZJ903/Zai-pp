@@ -1,7 +1,15 @@
 /**
- * 读取 z.ai 会话 id：`/c/<id>`。
+ * z.ai 会话 id ↔ URL：`/c/<id>`。
  */
+import { ZAI_WEB_ORIGIN } from './contracts';
+
 const ZAI_CHAT_SESSION_PATHNAME = /^\/c\/([^/?#]+)/;
+
+/** 由会话 id 构造可打开的会话 URL（与页面 /c/<id> 同形）。 */
+export function buildZaiChatSessionUrl(chatSessionId: string, baseUrl = ZAI_WEB_ORIGIN): string {
+  const origin = baseUrl.replace(/\/+$/, '');
+  return `${origin}/c/${encodeURIComponent(chatSessionId)}`;
+}
 
 export function readZaiChatSessionId(value: string | URL): string | null {
   const pathname = typeof value === 'string' ? readPathname(value) : value.pathname;
