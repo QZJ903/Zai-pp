@@ -234,6 +234,7 @@ describe('automation durable lease and restart recovery', () => {
             chatSessionId: null,
             parentMessageId: null,
             promptOptions: {
+              model: null,
               searchEnabled: false,
               fixedSession: false,
             },
@@ -281,6 +282,7 @@ async function createScheduledAutomation(): Promise<Automation> {
       minimumIntervalMinutes: 15,
     },
     promptOptions: {
+      model: null,
       searchEnabled: false,
       fixedSession: false,
     },

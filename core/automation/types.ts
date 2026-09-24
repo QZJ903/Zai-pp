@@ -40,6 +40,11 @@ export interface AutomationSchedule {
 }
 
 export interface AutomationPromptOptions {
+  /**
+   * 本次运行使用的模型 id（`/api/models` 里的一项），null = 跟随页面默认。
+   * 只在 chat 模式生效；agent 模式的模型由服务端按 `general_agent` 装配。
+   */
+  model: string | null;
   searchEnabled: boolean;
   /** 固定会话：开启后该自动化任务的后续运行沿用同一个对话（首跑新建，之后续用）。 */
   fixedSession: boolean;

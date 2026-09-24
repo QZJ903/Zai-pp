@@ -25,6 +25,7 @@ import {
   isMcpToolEnabled,
   isMcpToolSelected,
   isShellMcpServer,
+  orderMcpToolsByPin,
 } from '../controllers/mcp-tools-controller';
 import { useMcpPageController } from '../controllers/useMcpPageController';
 import {
@@ -790,6 +791,8 @@ function ServerDetail({
   locale: SupportedLocale;
 }) {
   const tools = cache?.descriptors ?? [];
+  // Pinning only reorders this list; the Schema projection keeps the server order.
+  const orderedTools = orderMcpToolsByPin(tools, pinnedDescriptorIds);
   const serverHistory = history.filter((record) => record.call.provider?.id === server.id).slice(0, 5);
   const [historyOpen, setHistoryOpen] = useState(false);
 
@@ -884,7 +887,7 @@ function ServerDetail({
           </div>
         ) : (
           <div className="space-y-2">
-            {tools.map((tool) => (
+            {orderedTools.map((tool) => (
               <ToolRow
                 key={tool.id}
                 server={server}

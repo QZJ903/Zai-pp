@@ -277,6 +277,16 @@ function parseCronToken(
   return { ok: true, value: { start, end, step } };
 }
 
+/**
+ * 找下一次命中的 cron 时刻。
+ *
+ * 逐分钟暴力扫描在「日级或更稀」的表达式上代价极高（实测 `0 0 1 * *` 约 4 万次、
+ * `0 0 1 1 *` 约 23 万次 Intl 调用，单次 2~10 秒；而 `calculateNextRunAt` 会调用
+ * 本函数两次，最坏情况接近一分钟）。这里做两件事，结果与逐分钟扫描完全等价：
+ *   1. 缓存 `Intl.DateTimeFormat`（按 timezone）—— 原先每次取日期部件都重建格式化器，
+ *      这是最大的开销来源；
+ *   2. 当天不可能命中时**整日跳过** —— 只有「当天可能命中」的日子才逐分钟走。
+ */
 function findNextCronRun(
   cron: ParsedCron,
   timezone: string,
@@ -286,10 +296,19 @@ function findNextCronRun(
   const maxLookaheadMs = (options.maxLookaheadDays ?? MAX_CRON_LOOKAHEAD_DAYS) * DAY_MS;
   const endAt = referenceAt + maxLookaheadMs;
   let candidate = Math.floor(referenceAt / MINUTE_MS) * MINUTE_MS + MINUTE_MS;
+  const lastMinuteOfDay = lastMatchingMinuteOfDay(cron);
 
   while (candidate <= endAt) {
-    if (matchesCron(cron, getZonedDateParts(candidate, timezone))) {
-      return { ok: true, value: candidate };
+    const parts = getZonedDateParts(candidate, timezone);
+    if (!matchesCronDay(cron, parts)) {
+      candidate = advanceToNextLocalDayStart(candidate, timezone);
+      continue;
+    }
+    if (matchesCron(cron, parts)) return { ok: true, value: candidate };
+    // 当天已过最后一个可命中分钟 → 剩下的分钟不可能命中，直接跳下一天。
+    if (parts.hour * 60 + parts.minute >= lastMinuteOfDay) {
+      candidate = advanceToNextLocalDayStart(candidate, timezone);
+      continue;
     }
     candidate += MINUTE_MS;
   }
@@ -297,20 +316,64 @@ function findNextCronRun(
   return error('cron_no_next_run', 'No cron run was found within the lookahead window.');
 }
 
-function matchesCron(cron: ParsedCron, parts: ZonedDateParts): boolean {
+/** 一天里最后一个可能命中的分钟序号（0~1439）。 */
+function lastMatchingMinuteOfDay(cron: ParsedCron): number {
+  return Math.max(...cron.hour.values) * 60 + Math.max(...cron.minute.values);
+}
+
+/** cron 的「日」条件：月 + 日/星期（含标准 cron 的「或」语义）。 */
+function matchesCronDay(cron: ParsedCron, parts: ZonedDateParts): boolean {
   const dayOfMonthMatches = cron.dayOfMonth.values.has(parts.dayOfMonth);
   const dayOfWeekMatches = cron.dayOfWeek.values.has(parts.dayOfWeek);
   const dayMatches =
     !cron.dayOfMonth.wildcard && !cron.dayOfWeek.wildcard
       ? dayOfMonthMatches || dayOfWeekMatches
       : dayOfMonthMatches && dayOfWeekMatches;
+  return cron.month.values.has(parts.month) && dayMatches;
+}
 
+function matchesCron(cron: ParsedCron, parts: ZonedDateParts): boolean {
   return (
     cron.minute.values.has(parts.minute) &&
     cron.hour.values.has(parts.hour) &&
-    cron.month.values.has(parts.month) &&
-    dayMatches
+    matchesCronDay(cron, parts)
   );
+}
+
+/**
+ * 求 `timestamp` 之后、该时区中「次日 00:00」的时刻（分钟对齐）。
+ *
+ * 先按 24 小时推进到「约次日同一时刻」，再迭代减去当地的时刻部分，收敛到某个当地 00:00。
+ *
+ * ## ⚠️ 末尾那个「+ 一分钟」退化不能改成「正确地跳到次日」（别再简化）
+ *
+ * 它同时是**两个**缺陷的修复机制，删任何一个都会让另一个复现：
+ *
+ * 1. **收敛可能落回今天。** 夏令时回拨日当地一天有 25 小时，`- 当地时刻 + 24h` 得到的
+ *    候选落回**今天**的某个 00:00（早于起点），此时必须退让 —— 若不判 `candidate > timestamp`
+ *    就返回，调用方会拿到一个「还是今天」的值、随即又跳一次，整整跳掉一天。
+ * 2. **快路径按当地墙钟判断，而墙钟在回拨日不单调。** 调用方的 `lastMatchingMinuteOfDay`
+ *    认为「当地时刻已过最后一个可命中分钟」就当当天结束，但回拨日当地 02:30 会出现**两次**，
+ *    第一次过后该判据已为真。正是这里的 +1 分钟退化让循环重新逐分钟前进，第二次命中才不被跳掉。
+ *
+ * 所以：**不要**把 `timestamp + MINUTE_MS` 改成「直接跳到次日 00:00」（那会打破第 2 条），
+ * 也**不要**去掉 `candidate > timestamp` 的判断（那会打破第 1 条）。
+ *
+ * 代价有界：只在受影响的那些天（每年至多两天）退化成逐分钟，其余日子仍是 O(1)。
+ */
+function advanceToNextLocalDayStart(timestamp: number, timezone: string): number {
+  const parts = getZonedDateParts(timestamp, timezone);
+  const todayStart = timestamp - (parts.hour * 60 + parts.minute) * MINUTE_MS;
+  let candidate = todayStart + DAY_MS;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const candidateParts = getZonedDateParts(candidate, timezone);
+    const offsetMs = (candidateParts.hour * 60 + candidateParts.minute) * MINUTE_MS;
+    if (offsetMs === 0) {
+      return candidate > timestamp ? candidate : timestamp + MINUTE_MS;
+    }
+    candidate -= offsetMs;
+  }
+  return timestamp + MINUTE_MS;
 }
 
 interface ZonedDateParts {
@@ -321,16 +384,28 @@ interface ZonedDateParts {
   dayOfWeek: number;
 }
 
+/**
+ * 取某时刻在指定时区的日期部件。
+ *
+ * `Intl.DateTimeFormat` 的构造是本函数最大的开销（远大于 `formatToParts` 本身），
+ * 而调度计算会对同一时区反复取部件（逐分钟扫描时是几万次）—— 所以按 timezone 缓存。
+ */
+const zonedFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
 function getZonedDateParts(timestamp: number, timezone: string): ZonedDateParts {
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    weekday: 'short',
-    month: 'numeric',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: 'numeric',
-    hourCycle: 'h23',
-  });
+  let formatter = zonedFormatterCache.get(timezone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      weekday: 'short',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: 'numeric',
+      hourCycle: 'h23',
+    });
+    zonedFormatterCache.set(timezone, formatter);
+  }
 
   const parts = Object.fromEntries(
     formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]),

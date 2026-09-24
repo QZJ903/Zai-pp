@@ -228,3 +228,116 @@ export function disableZaiNativeWebSearch(body: Record<string, unknown>): boolea
   body.features = mergeZaiNativeSearchDisabled(body.features);
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// 自动化任务的模型选择：把任务选定的模型写进请求体。
+// 自动化只在 chat 模式生效，agent 模式的模型由服务端按 `general_agent` 装配，
+// 覆写会与页面自己的取值打架 —— 所以这里不带 agent 判定，判定留在调用方
+// （只有非 agent 轮才调用这些函数）。
+//
+// 两个路由的模型**落点不同**，是两个函数而不是一个：
+//   - completion：顶层 `model`（字符串）
+//   - chats/new：`chat.models`（数组）+ 首条 user 消息的 `models`（数组）
+// ---------------------------------------------------------------------------
+
+/**
+ * 覆写 completion body 顶层的 `model`（原地写，返回是否写入）。
+ *
+ * **只在 body 本来就有 `model` 时才覆写**：凭空往里加一个页面没发过的字段，
+ * 历史上正是 400 的来源（`chat.features` 那次）。
+ */
+export function applyZaiModelOverride(
+  body: Record<string, unknown>,
+  model: string | null | undefined,
+): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const next = normalizeZaiModelOverride(model);
+  if (!next) return false;
+  if (!Object.hasOwn(body, 'model')) return false;
+  if (body.model === next) return false;
+  body.model = next;
+  return true;
+}
+
+/**
+ * 覆写 `/api/v1/chats/new` body 的模型（原地写，返回是否写入）。
+ *
+ * **建会话的模型不在顶层** —— 它在 `chat.models`（数组），且首条 user 消息自己也带
+ * 一份 `models`；真机抓包两者始终同值，这里一起写，与页面自身行为保持一致。
+ *
+ * ⚠️ **这一步不能省。** 会话模型是**建会话那一刻**定下的：只在 completion 阶段写
+ * `model` 改不动已有会话，页面仍显示默认模型。
+ *
+ * 同样只在字段已存在时覆写 —— 页面没发过的字段不凭空造。
+ */
+export function applyZaiChatNewModelOverride(
+  body: Record<string, unknown>,
+  model: string | null | undefined,
+): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const next = normalizeZaiModelOverride(model);
+  if (!next) return false;
+  const chat = readRecord(body.chat);
+  if (!chat) return false;
+
+  let changed = false;
+  if (Array.isArray(chat.models) && !isSingleModel(chat.models, next)) {
+    chat.models = [next];
+    changed = true;
+  }
+  // 首条 user 消息自带一份 models，与 chat.models 保持同值（页面自身也这么发）。
+  const history = readRecord(chat.history);
+  const messages = history ? readRecord(history.messages) : null;
+  if (messages) {
+    for (const value of Object.values(messages)) {
+      const message = readRecord(value);
+      if (!message || !Array.isArray(message.models)) continue;
+      if (isSingleModel(message.models, next)) continue;
+      message.models = [next];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** 读当前 `/chats/new` body 里的会话模型（诊断与测试用）。 */
+export function readZaiChatNewModel(body: Record<string, unknown>): unknown {
+  const chat = readRecord(body.chat);
+  return chat?.models ?? null;
+}
+
+/** 模型落点由**路由**决定，与调用点在代码里的位置无关。 */
+export type ZaiModelRoute = 'chatNew' | 'completion';
+
+/**
+ * 按路由把任务选定的模型写进请求体 —— **唯一入口**。
+ *
+ * 两个路由的落点不同（见上面两个函数），但「该用哪个落点」的依据是**路由本身**，
+ * 不是「调用点恰好写在哪个分支里」。分散调用时这两者只是碰巧一致，新加注入点很容易
+ * 挑错写入函数，而挑错的表现是**静默失效**（模型没被应用，请求照发）。
+ */
+export function applyZaiModelOverrideForRoute(
+  body: Record<string, unknown>,
+  route: ZaiModelRoute,
+  model: string | null | undefined,
+): boolean {
+  return route === 'chatNew'
+    ? applyZaiChatNewModelOverride(body, model)
+    : applyZaiModelOverride(body, model);
+}
+
+/** 按路由读当前的模型落点（诊断用）。 */
+export function readZaiModelForRoute(
+  body: Record<string, unknown>,
+  route: ZaiModelRoute,
+): unknown {
+  return route === 'chatNew' ? readZaiChatNewModel(body) : (body.model ?? null);
+}
+
+function normalizeZaiModelOverride(model: string | null | undefined): string {
+  return typeof model === 'string' ? model.trim() : '';
+}
+
+function isSingleModel(models: readonly unknown[], model: string): boolean {
+  return models.length === 1 && models[0] === model;
+}

@@ -5,11 +5,16 @@ import {
   resignZaiCompletionRequest,
 } from '../core/zai/sign';
 import {
+  applyZaiChatNewModelOverride,
+  applyZaiModelOverride,
+  applyZaiModelOverrideForRoute,
   matchZaiChatNewRoute,
   matchZaiCompletionRoute,
   parseZaiBody,
   parseZaiChatNewBody,
+  readZaiChatNewModel,
   readZaiLastUserMessageText,
+  readZaiModelForRoute,
   rewriteZaiChatNewUserMessages,
   rewriteZaiLastUserMessage,
 } from '../core/zai/request-codec';
@@ -166,6 +171,126 @@ describe('zai request codec', () => {
     };
     const next = rewriteZaiChatNewUserMessages(body, ['augmented']);
     expect(parseZaiChatNewBody(next)!.userMessageTexts).toEqual(['augmented']);
+  });
+});
+
+describe('zai model override', () => {
+  it('overwrites an existing model field', () => {
+    const body = { model: 'x-preview-l', messages: [] };
+    expect(applyZaiModelOverride(body, 'glm-5.3-flash')).toBe(true);
+    expect(body.model).toBe('glm-5.3-flash');
+  });
+
+  it('trims the requested id and skips no-op writes', () => {
+    const body = { model: 'glm-5.3' };
+    expect(applyZaiModelOverride(body, '  glm-5.3  ')).toBe(false);
+    expect(body.model).toBe('glm-5.3');
+  });
+
+  it('never invents a model field the page did not send', () => {
+    const body: Record<string, unknown> = { chat: { type: 'general_agent' } };
+    expect(applyZaiModelOverride(body, 'glm-5.3')).toBe(false);
+    expect(Object.hasOwn(body, 'model')).toBe(false);
+  });
+
+  it('ignores empty and non-string requests', () => {
+    const body = { model: 'x-preview-l' };
+    expect(applyZaiModelOverride(body, null)).toBe(false);
+    expect(applyZaiModelOverride(body, '   ')).toBe(false);
+    expect(body.model).toBe('x-preview-l');
+  });
+});
+
+describe('zai chatNew model override', () => {
+  /** 真机抓包的精简版建会话 body：模型在 chat.models，首条 user 消息自己也带一份。 */
+  function chatNewBody(models: string[] = ['x-preview-l']): Record<string, unknown> {
+    return {
+      chat: {
+        id: '',
+        title: '新聊天',
+        models: [...models],
+        params: {},
+        history: {
+          messages: {
+            'msg-1': {
+              id: 'msg-1',
+              parentId: null,
+              childrenIds: [],
+              role: 'user',
+              content: 'hi',
+              timestamp: 1790149542,
+              models: [...models],
+            },
+          },
+          currentId: 'msg-1',
+        },
+        flags: [],
+        auto_web_search: false,
+        message_version: 1,
+        type: 'default',
+      },
+    };
+  }
+
+  it('rewrites both the session models and the first message models', () => {
+    const body = chatNewBody();
+    expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(true);
+    const chat = body.chat as Record<string, unknown>;
+    expect(chat.models).toEqual(['glm-5.2']);
+    const messages = (chat.history as { messages: Record<string, { models: string[] }> }).messages;
+    expect(messages['msg-1']!.models).toEqual(['glm-5.2']);
+    expect(readZaiChatNewModel(body)).toEqual(['glm-5.2']);
+  });
+
+  it('trims the requested id and skips no-op writes', () => {
+    const body = chatNewBody(['glm-5.3']);
+    expect(applyZaiChatNewModelOverride(body, '  glm-5.3  ')).toBe(false);
+    expect(readZaiChatNewModel(body)).toEqual(['glm-5.3']);
+  });
+
+  it('never invents fields the page did not send', () => {
+    const body: Record<string, unknown> = { chat: { id: '', history: { messages: {} } } };
+    expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(false);
+    expect(Object.hasOwn(body.chat as object, 'models')).toBe(false);
+  });
+
+  it('leaves a message without its own models untouched', () => {
+    const body = chatNewBody();
+    const messages = ((body.chat as Record<string, unknown>).history as {
+      messages: Record<string, Record<string, unknown>>;
+    }).messages;
+    delete messages['msg-1']!.models;
+    expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(true);
+    expect(Object.hasOwn(messages['msg-1']!, 'models')).toBe(false);
+    expect(readZaiChatNewModel(body)).toEqual(['glm-5.2']);
+  });
+
+  it('ignores empty requests and bodies without a chat object', () => {
+    const body = chatNewBody();
+    expect(applyZaiChatNewModelOverride(body, null)).toBe(false);
+    expect(applyZaiChatNewModelOverride(body, '   ')).toBe(false);
+    expect(readZaiChatNewModel(body)).toEqual(['x-preview-l']);
+    expect(applyZaiChatNewModelOverride({}, 'glm-5.2')).toBe(false);
+    expect(readZaiChatNewModel({})).toBeNull();
+  });
+
+  it('routes to the right target through the single entry point', () => {
+    const chatNew = chatNewBody();
+    const completion = { model: 'x-preview-l', messages: [] };
+    expect(applyZaiModelOverrideForRoute(chatNew, 'chatNew', 'glm-5.2')).toBe(true);
+    expect(applyZaiModelOverrideForRoute(completion, 'completion', 'glm-5.2')).toBe(true);
+    // 各自写在自己的落点上，不串门。
+    expect(readZaiModelForRoute(chatNew, 'chatNew')).toEqual(['glm-5.2']);
+    expect(Object.hasOwn(chatNew, 'model')).toBe(false);
+    expect(readZaiModelForRoute(completion, 'completion')).toBe('glm-5.2');
+    expect(Object.hasOwn(completion, 'chat')).toBe(false);
+  });
+
+  it('reads the model target per route without inventing one', () => {
+    expect(readZaiModelForRoute({ model: 'glm-5.3' }, 'completion')).toBe('glm-5.3');
+    expect(readZaiModelForRoute({}, 'completion')).toBeNull();
+    expect(readZaiModelForRoute(chatNewBody(), 'chatNew')).toEqual(['x-preview-l']);
+    expect(readZaiModelForRoute({}, 'chatNew')).toBeNull();
   });
 });
 

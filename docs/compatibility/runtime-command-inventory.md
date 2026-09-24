@@ -1,20 +1,20 @@
 # Runtime Command Name Inventory
 
-This annex is the name-level authority for the runtime command surface. It freezes the 103 live names and 78 declared names, and documents the router/union split rather than collapsing it.
+This annex is the name-level authority for the runtime command surface. It freezes the 104 live names and 78 declared names, and documents the router/union split rather than collapsing it.
 
 ## Invariants
 
-- The production registry owns 101 live commands exactly once through typed handlers; no transitional case or legacy router remains.
+- The production registry owns 102 live commands exactly once through typed handlers; no transitional case or legacy router remains.
 - `core/types.ts::MessageAction` declares 76 unique command names.
-- Seventy-four names are shared, 27 are live-router-only, and two are declared-only.
+- Seventy-four names are shared, 28 are live-router-only, and two are declared-only.
 - A live name and its legal behavior remain compatible until an explicit migration changes the contract.
 - `TOOL_CALL_EXECUTED` and `MEMORIES_UPDATED` are client-only notifications, not live background commands; direct background dispatch rejects them with `runtime_command_unknown`.
-- The typed handler seam requires explicit unknown-command failure. The `2 / 51 / 32 / 5 / 11` slices below were migrated without changing the frozen live-name surface.
+- The typed handler seam requires explicit unknown-command failure. The `2 / 51 / 32 / 5 / 12` slices below were migrated without changing the frozen live-name surface.
 - The ownership ledger below is authoritative for scope. A live command appears exactly once; no command is owned by two groups.
 
-The production ownership model and the grouping ledger below serve different purposes. `core/messaging/runtime-command-contracts.ts` is the single 103-name metadata and current-owner authority (`101 typed / 0 legacy / 2 client-only`), consumed by the dispatch registry; the sections below retain the historical grouping (`2 / 51 / 32 / 5 / 11`). Contract tests fail on a duplicate, missing, or cross-owner name.
+The production ownership model and the grouping ledger below serve different purposes. `core/messaging/runtime-command-contracts.ts` is the single 104-name metadata and current-owner authority (`102 typed / 0 legacy / 2 client-only`), consumed by the dispatch registry; the sections below retain the historical grouping (`2 / 51 / 32 / 5 / 12`). Contract tests fail on a duplicate, missing, or cross-owner name.
 
-## Command Group Ledger — 101 Live Commands
+## Command Group Ledger — 102 Live Commands
 
 ### Group A — Typed seam bootstrap (2)
 
@@ -126,7 +126,7 @@ DOM_TASK_NEEDS_ACTION
 DOM_TASK_PROGRESS
 ```
 
-### Group E — Automation, usage, and lifecycle closure (11)
+### Group E — Automation, usage, models, and lifecycle closure (12)
 
 ```text
 RECORD_USAGE_TURN
@@ -139,12 +139,13 @@ UPDATE_AUTOMATION
 SET_AUTOMATION_STATUS
 DELETE_AUTOMATION
 RUN_AUTOMATION_NOW
+GET_ZAI_MODELS
 EXPORT_DIAGNOSTIC_LOGS
 ```
 
-`TOOL_CALL_EXECUTED` and `MEMORIES_UPDATED` remain declared-only compatibility records. They are not counted in the 103 live command owners and must be classified explicitly rather than given invented handlers.
+`TOOL_CALL_EXECUTED` and `MEMORIES_UPDATED` remain declared-only compatibility records. They are not counted in the 104 live command owners and must be classified explicitly rather than given invented handlers.
 
-## Live Background Router — 101
+## Live Background Router — 102
 
 ```text
 GET_MEMORIES
@@ -248,6 +249,7 @@ UPDATE_AUTOMATION
 SET_AUTOMATION_STATUS
 DELETE_AUTOMATION
 RUN_AUTOMATION_NOW
+GET_ZAI_MODELS
 ```
 
 ## Declared `MessageAction` Union — 76
@@ -331,7 +333,7 @@ SAVE_BACKGROUND
 CLEAR_BACKGROUND
 ```
 
-## Live Router Only — 27
+## Live Router Only — 28
 
 ```text
 TOUCH_MEMORIES
@@ -361,6 +363,7 @@ UPDATE_AUTOMATION
 SET_AUTOMATION_STATUS
 DELETE_AUTOMATION
 RUN_AUTOMATION_NOW
+GET_ZAI_MODELS
 ```
 
 ## Declared Only — 2
@@ -372,4 +375,4 @@ MEMORIES_UPDATED
 
 ## Validation Method
 
-`tests/runtime-command-contract.test.ts` derives the typed registry and literal `MessageAction` names, then compares them with this inventory and the production 103-name contract map. It freezes `101/76/74/27/2`, current `72/29` payload access, `101/0/2` ownership, and `67 decoded / 0 direct-cast / 0 delegated`; it also proves the historical `2/51/32/5/11` grouping partition. Serializable specimens cover every request/response/error family without creating another command-name authority.
+`tests/runtime-command-contract.test.ts` derives the typed registry and literal `MessageAction` names, then compares them with this inventory and the production 104-name contract map. It freezes `102/76/74/28/2`, current `72/30` payload access, `102/0/2` ownership, and `67 decoded / 0 direct-cast / 0 delegated`; it also proves the historical `2/51/32/5/12` grouping partition. Serializable specimens cover every request/response/error family without creating another command-name authority.

@@ -13,6 +13,10 @@ import {
 } from '../../../core/automation/storage-codec';
 import { validateAutomationSchedule } from '../../../core/automation/schedule';
 import { buildZaiChatSessionUrl } from '../../../core/zai/chat-session';
+import {
+  decodeZaiModelListResponse,
+  type ZaiModelOption,
+} from '../../../core/zai/models';
 import type { SupportedLocale } from '../../../core/i18n';
 import { createRequestGenerationFence } from '../async-state';
 import PageIntro from '../components/PageIntro';
@@ -32,6 +36,7 @@ const DEFAULT_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'As
 const AUTOMATION_UPDATE_EVENTS = ['AUTOMATIONS_UPDATED', 'AUTOMATION_RUNS_UPDATED'] as const;
 
 const DEFAULT_PROMPT_OPTIONS: AutomationPromptOptions = {
+  model: null,
   searchEnabled: false,
   fixedSession: false,
 };
@@ -42,6 +47,7 @@ type FormState = {
   scheduleKind: AutomationScheduleKind;
   expression: string;
   timezone: string;
+  model: string;
   searchEnabled: boolean;
   fixedSession: boolean;
 };
@@ -52,6 +58,7 @@ const EMPTY_FORM: FormState = {
   scheduleKind: 'manual',
   expression: '',
   timezone: DEFAULT_TIMEZONE,
+  model: '',
   searchEnabled: false,
   fixedSession: false,
 };
@@ -67,6 +74,8 @@ export default function AutomationPage() {
   const [loading, setLoading] = useState(true);
   const [hasConfirmedSnapshot, setHasConfirmedSnapshot] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [modelOptions, setModelOptions] = useState<ZaiModelOption[]>([]);
+  const [modelsFallback, setModelsFallback] = useState(false);
   const loadFence = useRef(createRequestGenerationFence());
   const banner = useBanner();
   const { confirm, node: confirmNode } = useConfirm();
@@ -75,6 +84,30 @@ export default function AutomationPage() {
     () => automations.filter((item) => item.status === 'active').length,
     [automations],
   );
+
+  // 模型清单：页面挂载时拉一次（后台带 5 分钟缓存，几乎不花钱），这样服务端上新模型后
+  // 无需重装扩展即可出现在下拉里。挂在「打开表单」那一刻会先渲染出兜底选项、等清单回来
+  // 再换成正式条目 —— 表现为下拉文字闪一下。
+  // 抓不到时后台回上一次缓存或内置兜底清单，两种都标成非 live，由提示行告知用户。
+  //
+  // 刻意**不**包 `useCallback`：它被三处调用（挂载 effect、startCreate、startEdit），
+  // 而挂载 effect 的依赖本就留空（只跑一次），包一层除了稳定引身没有别的收益。
+  const loadModels = async () => {
+    try {
+      const list = await sidepanelRuntimeClient.request(
+        { type: 'GET_ZAI_MODELS' },
+        {
+          unavailableMessage: t('sidepanel.automationPage.modelListLoadFailed'),
+          decode: (value) => decodeZaiModelListResponse(value, 'GET_ZAI_MODELS response'),
+        },
+      );
+      setModelOptions(list.models);
+      setModelsFallback(list.source !== 'live');
+    } catch {
+      // 传输层失败（扩展上下文失效等）：保留既有选项，只标提示。
+      setModelsFallback(true);
+    }
+  };
 
   const load = async () => {
     const generation = loadFence.current.begin();
@@ -122,6 +155,9 @@ export default function AutomationPage() {
 
   useEffect(() => {
     void load();
+    // 模型清单在挂载时就拉（后台带 5 分钟缓存，几乎不花钱）。挂在「打开表单」那一刻
+    // 会先渲染出兜底选项、等清单回来再换成正式条目 —— 表现为下拉文字闪一下。
+    void loadModels();
 
     const handleUpdate = (message: unknown) => {
       if (isSidepanelRuntimeEvent(message, AUTOMATION_UPDATE_EVENTS)) void load();
@@ -140,6 +176,8 @@ export default function AutomationPage() {
       document.removeEventListener('visibilitychange', refreshWhenVisible);
       window.removeEventListener('focus', refreshWhenVisible);
     };
+    // 依赖刻意留空：这个 effect 只负责「挂载时拉一次 + 注册监听」，
+    // 不跟随 `t` / `load` / `loadModels` 变化重跑（重跑会重复注册监听）。
   }, []);
 
   const startCreate = () => {
@@ -147,6 +185,7 @@ export default function AutomationPage() {
     setForm(EMPTY_FORM);
     banner.clear();
     setShowForm((prev) => !prev);
+    void loadModels();
   };
 
   const startEdit = (automation: Automation) => {
@@ -154,6 +193,7 @@ export default function AutomationPage() {
     setForm(fromAutomation(automation));
     banner.clear();
     setShowForm(true);
+    void loadModels();
   };
 
   const save = async () => {
@@ -184,7 +224,14 @@ export default function AutomationPage() {
         banner.show('error', response.error);
         return;
       }
-      if (response.lastError) {
+      // 只有**排期**错误才该挡住保存：那是 `refreshAutomationNextRunAt` 刚算出来的
+      // 「这条表达式无法解析」，属于本次保存的校验结果。
+      //
+      // 不能笼统地判 `lastError` 非空 —— 那个字段同时承载**上次运行的运行时错误**，
+      // 而手动触发的任务在 refreshAutomationNextRunAt 里不会被清（该分支只写 nextRunAt）。
+      // 一旦上次跑失败过，它就会永久挡住后续每一次保存，表单再也收不起来。
+      // 运行时错误照常显示在任务卡片上，信息不丢。
+      if (response.lastError?.phase === 'schedule') {
         banner.show('error', response.lastError.message);
         return;
       }
@@ -289,6 +336,8 @@ export default function AutomationPage() {
           <AutomationForm
             form={form}
             editing={editing}
+            modelOptions={modelOptions}
+            modelsFallback={modelsFallback}
             onChange={setForm}
             onSave={save}
             onCancel={() => { setShowForm(false); setEditing(null); banner.clear(); }}
@@ -332,12 +381,16 @@ export default function AutomationPage() {
 function AutomationForm({
   form,
   editing,
+  modelOptions,
+  modelsFallback,
   onChange,
   onSave,
   onCancel,
 }: {
   form: FormState;
   editing: Automation | null;
+  modelOptions: ZaiModelOption[];
+  modelsFallback: boolean;
   onChange: (form: FormState) => void;
   onSave: () => void;
   onCancel: () => void;
@@ -347,18 +400,43 @@ function AutomationForm({
     onChange({ ...form, [key]: value });
   };
   const isScheduled = form.scheduleKind !== 'manual';
+  // 已存但当前清单里没有的模型（服务端下架）也列出来，避免静默退回默认。
+  const missingModelOption = form.model && !modelOptions.some((option) => option.id === form.model)
+    ? <option value={form.model}>{form.model}</option>
+    : null;
 
   return (
     <div className="ds-form rounded-xl p-4 space-y-3">
-      <label className="space-y-1 block">
-        <span className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>{t('sidepanel.automationPage.form.name')}</span>
-        <input
-          value={form.name}
-          onChange={(e) => update('name', e.target.value)}
-          className="ds-input w-full px-3 py-2 text-xs rounded-lg"
-          placeholder={t('sidepanel.automationPage.form.namePlaceholder')}
-        />
-      </label>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="space-y-1">
+          <span className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>{t('sidepanel.automationPage.form.name')}</span>
+          <input
+            value={form.name}
+            onChange={(e) => update('name', e.target.value)}
+            className="ds-input w-full px-3 py-2 text-xs rounded-lg"
+            placeholder={t('sidepanel.automationPage.form.namePlaceholder')}
+          />
+        </label>
+        <label className="space-y-1">
+          <span className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>{t('sidepanel.automationPage.form.model')}</span>
+          <select
+            value={form.model}
+            onChange={(e) => update('model', e.target.value)}
+            className="ds-input w-full px-3 py-2 text-xs rounded-lg"
+          >
+            <option value="">{t('sidepanel.automationPage.form.defaultModel')}</option>
+            {missingModelOption}
+            {modelOptions.map((option) => (
+              <option key={option.id} value={option.id}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {modelsFallback && (
+        <div className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>
+          {t('sidepanel.automationPage.form.modelListFallback')}
+        </div>
+      )}
 
       <label className="space-y-1 block">
         <span className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>Prompt</span>
@@ -551,6 +629,7 @@ function fromAutomation(automation: Automation): FormState {
     scheduleKind: automation.schedule.kind,
     expression: automation.schedule.expression ?? '',
     timezone: automation.schedule.timezone || DEFAULT_TIMEZONE,
+    model: automation.promptOptions.model ?? '',
     searchEnabled: automation.promptOptions.searchEnabled ?? false,
     fixedSession: automation.promptOptions.fixedSession ?? false,
   };
@@ -564,6 +643,7 @@ function toAutomationInput(form: FormState): AutomationCreateInput {
     schedule,
     promptOptions: {
       ...DEFAULT_PROMPT_OPTIONS,
+      model: form.model.trim() || null,
       searchEnabled: form.searchEnabled,
       fixedSession: form.fixedSession,
     },

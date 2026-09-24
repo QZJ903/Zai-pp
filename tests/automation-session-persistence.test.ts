@@ -33,6 +33,7 @@ async function createTestAutomation() {
       minimumIntervalMinutes: 15,
     },
     promptOptions: {
+      model: null,
       searchEnabled: false,
       fixedSession: false,
     },

@@ -51,11 +51,13 @@ import {
 } from '../core/skill/auto-activation-settings';
 import { filterZaiModelFacingToolDescriptors } from '../core/zai/model-facing';
 import {
+  applyZaiModelOverrideForRoute,
   disableZaiNativeWebSearch,
   parseZaiBody,
   parseZaiChatNewBody,
   readZaiCurrentUserMessageParentId,
   readZaiLastUserMessageText,
+  readZaiModelForRoute,
   rewriteZaiChatNewUserMessages,
   rewriteZaiLastUserMessage,
 } from '../core/zai/request-codec';
@@ -160,6 +162,8 @@ interface ActiveDomTask {
   chatSessionId: string | null;
   /** 该任务是否开启 z.ai 联网搜索（命中归属后置请求体 features.web_search/auto_web_search）。 */
   searchEnabled: boolean;
+  /** 该任务选定的模型 id（chat 模式下覆写请求体的 model）；null = 跟随页面默认。 */
+  model: string | null;
   status: 'pending' | 'injected' | 'running' | 'done' | 'failed' | 'cancelled';
 }
 /** taskId → 任务现场。一 tab 同一时刻只跑一个后台任务（busy 锁）。 */
@@ -190,6 +194,8 @@ interface ContinuationLoop {
   isAgentTurn: boolean;
   /** 启动该循环的那轮是否开着原生联网：续跑/nudge 轮同样要据此放行 web 工具。 */
   nativeSearchOn: boolean;
+  /** 归属任务选定的模型 id：续跑轮也要把同一模型写回请求体。 */
+  model: string | null;
 }
 
 let continuationLoop: ContinuationLoop | null = null;
@@ -833,12 +839,23 @@ async function handleAugmentRequestBody(
       }
       // 诊断：确认 chatNew 顶层 auto_web_search 写进去了、task 是否命中。
       const searchTask = firstTaskId ? activeDomTasks.get(firstTaskId) : undefined;
+      // 模型覆写（chatNew 阶段）：会话模型在**建会话那一刻**定下 —— 落点是
+      // `chat.models`（与首条 user 消息的 `models` 同值），由路由决定，见
+      // `applyZaiModelOverrideForRoute`。这一步不能省：只在 completion 阶段写
+      // 改不动已有会话。agent 模式不碰（服务端按 general_agent 装配自己的模型）。
+      const chatNewModelBefore = readZaiModelForRoute(nextBody, 'chatNew');
+      const modelOverridden = !isAgentTurn
+        ? applyZaiModelOverrideForRoute(nextBody, 'chatNew', searchTask?.model ?? null)
+        : false;
       diag.augRequests?.push({
         at: Date.now(),
         route: 'chatNew-search',
         searchEnabled: searchTask?.searchEnabled ?? null,
         nativeSearchOn,
         autoWebSearchWrote: ((nextBody as { chat?: { auto_web_search?: unknown } }).chat?.auto_web_search) ?? null,
+        modelOverridden,
+        modelBefore: chatNewModelBefore,
+        modelAfter: readZaiModelForRoute(nextBody, 'chatNew'),
       });
       postToMainWorld({
         type: 'AUGMENT_REQUEST_BODY_RESULT',
@@ -905,11 +922,23 @@ async function handleAugmentRequestBody(
         matchedTask?.searchEnabled === true ||
         (continuationLoop?.taskId != null &&
           activeDomTasks.get(continuationLoop.taskId)?.searchEnabled === true);
+      // 续跑轮同样把任务选定的模型写回请求体：页面每轮都会重新带 model，
+      // 只在首条写会退回到页面默认。agent 轮不碰（与首条同口径）。
+      const loopTask = continuationLoop?.taskId != null
+        ? activeDomTasks.get(continuationLoop.taskId)
+        : undefined;
+      const continuationModel: string | null =
+        matchedTask?.model ?? loopTask?.model ?? continuationLoop?.model ?? null;
+      const modelOverrideEnabled = continuationLoop?.isAgentTurn !== true;
       let nextBodyStr = bodyStr;
-      if (searchEnabled) {
+      if (searchEnabled || (modelOverrideEnabled && continuationModel)) {
         const parsedBody = parseZaiBody(bodyStr);
         if (parsedBody) {
-          disableZaiNativeWebSearch(parsedBody);
+          if (searchEnabled) disableZaiNativeWebSearch(parsedBody);
+          // 续跑轮走 completion 端点 → 落点是顶层 `model`，由路由决定。
+          if (modelOverrideEnabled) {
+            applyZaiModelOverrideForRoute(parsedBody, 'completion', continuationModel);
+          }
           nextBodyStr = JSON.stringify(parsedBody);
         }
       }
@@ -977,6 +1006,11 @@ async function handleAugmentRequestBody(
     if (nativeSearchOn) {
       disableZaiNativeWebSearch(nextBody);
     }
+    // 模型覆写：请求归属到自动化任务时，在 chat 模式下覆写 body 的 model。
+    // agent 轮不碰 —— 那由服务端按 general_agent 装配。
+    const modelOverridden = isAgentTurn
+      ? false
+      : applyZaiModelOverrideForRoute(nextBody, 'completion', matchedTask?.model ?? null);
 
     // 诊断：记录 completion 首条/续跑的归属 + features 最终值，便于定位联网开关问题。
     diag.augRequests?.push({
@@ -986,6 +1020,8 @@ async function handleAugmentRequestBody(
       matched: matchedTaskId ?? null,
       searchEnabled: matchedTask?.searchEnabled ?? null,
       featuresAfter: (nextBody as { features?: unknown }).features ?? null,
+      modelOverridden,
+      modelAfter: readZaiModelForRoute(nextBody, 'completion'),
     });
 
     // 记忆命中 → 后台 touch。
@@ -1589,11 +1625,18 @@ async function handleResponseComplete(complete: ZaiResponseComplete): Promise<vo
     finalAssistantText: complete.assistantText,
     isAgentTurn: isAgentTurnByRequestId.get(complete.requestId) ?? false,
     nativeSearchOn: nativeSearchOnByRequestId.get(complete.requestId) ?? false,
+    model: resolveLoopModel(complete.requestId),
   };
   isAgentTurnByRequestId.delete(complete.requestId);
   nativeSearchOnByRequestId.delete(complete.requestId);
   stampLoopDiagnostic();
   await advanceContinuationLoop();
+}
+
+/** 取「这一轮该用的模型」：从请求归属的 DOM 任务上读（未归属则为 null）。 */
+function resolveLoopModel(requestId: string): string | null {
+  const taskId = taskIdByRequestId.get(requestId);
+  return taskId ? activeDomTasks.get(taskId)?.model ?? null : null;
 }
 
 async function advanceContinuationLoop(): Promise<void> {
@@ -1815,26 +1858,29 @@ async function submitAutomationPromptViaPage(
     // 触发面最小、原子，Z.ai 自己的 JS 处理后续 chatNew → 跳 /c/<id> → completion）。
     // 兜底：点 #send-message-button（type=submit，.click() 最终也走表单提交）。
     let submitPath = 'requestSubmit';
-    const form = textarea.closest('form');
-    if (form) {
-      try {
-        form.requestSubmit();
-      } catch {
-        /* requestSubmit 抛错不致命，落兜底点按钮 */
-      }
+    // 提交前重新取 textarea 与 form：写值后 Svelte 可能已重建这一小块 DOM，
+    // 早先抓到的引用会变成脱连节点（对它提交只报「form is not connected」且不发请求）。
+    const liveTextarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR) ?? textarea;
+    const submitOutcome = submitFormViaRequestSubmit(liveTextarea);
+    if (submitOutcome !== 'ok') {
+      diag.sendProbe?.push({ kind: 'automation-send', submitOutcome });
     }
     // requestSubmit 触发了，等 AUGMENT_REQUEST_BODY 真正被串行队列加工并记录（不一味 sleep）。
     const submitted = await waitForNewAugRequest(observedBefore);
 
-    if (!submitted && sendButton && !sendButton.disabled) {
-      // 兜底：按钮可点/点击能触发 → sendButton.click()。
-      submitPath = 'button-click';
-      try {
-        sendButton.click();
-      } catch {
-        /* ignore */
+    if (!submitted) {
+      // 兜底：按钮可点/点击能触发 → 点 send 按钮。
+      // 同样现取按钮：写值后 Svelte 可能已重建，早先抓到的引用会是脱连节点（点了没反应）。
+      const liveButton = document.querySelector<HTMLButtonElement>(SEND_BUTTON_SELECTOR);
+      if (liveButton && liveButton.isConnected && !liveButton.disabled) {
+        submitPath = 'button-click';
+        try {
+          liveButton.click();
+        } catch {
+          /* ignore */
+        }
+        await waitForNewAugRequest(observedBefore);
       }
-      await waitForNewAugRequest(observedBefore);
     }
 
     const requestFired = hasNewRequest();
@@ -1953,6 +1999,34 @@ async function waitForFormConnected(
   return !!form && form.isConnected;
 }
 
+/**
+ * 提交 textarea 所在的表单，**提交前重新取一次 form**。
+ *
+ * 不能提前把 form 存进变量：Svelte 会在输入框写值后重建这一小块 DOM，旧引用随即
+ * 变成「已脱连」的节点，对它 `requestSubmit()` 只会让浏览器报
+ * 「Form submission canceled because the form is not connected」且**不发出请求**。
+ * 所以每次提交都按 textarea 现取当前那个 form，并确认它仍在文档里。
+ *
+ * **异常在这里吞掉、转成 `'threw'`**：`requestSubmit()` 会同步跑页面的 submit 处理函数，
+ * 它抛错时异常若穿出去，会跳过调用方的按钮兜底点击（以及自动化的退避重试）。
+ * 提交没成功是要靠兜底补的，不是靠冒泡。
+ *
+ * 返回 `ok` 表示提交已触发；其余是失败码，供诊断与兜底分支使用。
+ */
+function submitFormViaRequestSubmit(
+  textarea: HTMLTextAreaElement,
+): 'ok' | 'no_form' | 'form_not_connected' | 'threw' {
+  const form = textarea.closest('form');
+  if (!form) return 'no_form';
+  if (!form.isConnected) return 'form_not_connected';
+  try {
+    form.requestSubmit();
+  } catch {
+    return 'threw';
+  }
+  return 'ok';
+}
+
 /** 从请求 body 字符串里读 user 消息的 prompt 头（chatNew 读 chat.history，completion 读 messages）。 */
 function readPromptHead(bodyStr: string, route: 'chatNew' | 'completion'): string {
   try {
@@ -2032,6 +2106,7 @@ async function runDomTask(input: {
   prompt: string;
   chatSessionId: string | null;
   searchEnabled: boolean;
+  model: string | null;
 }): Promise<{ ok: boolean; error?: string }> {
   if (!input.taskId || !input.prompt) {
     return { ok: false, error: 'missing_task_id_or_prompt' };
@@ -2058,6 +2133,7 @@ async function runDomTask(input: {
     prompt: input.prompt,
     chatSessionId: currentSessionId,
     searchEnabled: input.searchEnabled === true,
+    model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : null,
     status: 'pending',
   };
   activeDomTasks.set(input.taskId, task);
@@ -2082,11 +2158,6 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
     await waitForComposerReady();
     const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
     if (!textarea) return false;
-    const form = textarea.closest('form');
-    if (!form) {
-      diag.sendProbe?.push({ kind: 'form', missing: 'no form' });
-      return false;
-    }
 
     // 等上一轮生成结束，避免首页双提交（首条消息卡在首页的根因）。
     if (!(await waitForAgentIdle())) {
@@ -2111,11 +2182,11 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
       return false;
     }
 
-    try {
-      form.requestSubmit();
-    } catch {
+    // 异常已在 `submitFormViaRequestSubmit` 内部吞掉并转成 `'threw'`，这里只判结果。
+    const outcome = submitFormViaRequestSubmit(textarea);
+    if (outcome !== 'ok') {
       textarea.disabled = wasDisabled;
-      diag.sendProbe?.push({ kind: 'form', threw: true });
+      diag.sendProbe?.push({ kind: 'form', error: outcome });
       return false;
     }
 
@@ -2797,6 +2868,7 @@ export default defineContentScript({
                 typeof message.chatSessionId === 'string' ? message.chatSessionId : null,
               searchEnabled:
                 typeof message.searchEnabled === 'boolean' ? message.searchEnabled : false,
+              model: typeof message.model === 'string' ? message.model : null,
             });
             sendResponse(result);
           } catch (error) {

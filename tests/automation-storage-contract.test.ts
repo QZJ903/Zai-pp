@@ -186,6 +186,7 @@ function makeAutomation(): Automation {
       minimumIntervalMinutes: 0,
     },
     promptOptions: {
+      model: null,
       searchEnabled: false,
       fixedSession: false,
     },

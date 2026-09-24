@@ -161,6 +161,8 @@ import {
 } from '../core/automation/scheduler';
 import { createDomTaskCoordinator } from '../core/zai/dom-task-coordinator';
 import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
+import { loadZaiAuthFromStorage } from '../core/zai/auth';
+import { createZaiModelCatalog } from '../core/zai/models';
 import { createDomTaskRuntimeHandlers } from './background/dom-task-handlers';
 import { broadcastRuntimeUpdate } from '../core/messaging/broadcast';
 import { createBackgroundErrorResponse } from '../core/messaging/background-error';
@@ -215,6 +217,11 @@ const domTaskCoordinator = createDomTaskCoordinator({
   homeUrl: ZAI_HOME_URL,
   tabUrlPattern: ZAI_TAB_URL_PATTERN,
   reportError: reportBackgroundStartupError,
+});
+// 模型清单：token 取自内容脚本捕获的登录态；抓不到就退回内置清单。
+const zaiModelCatalog = createZaiModelCatalog({
+  loadToken: async () => (await loadZaiAuthFromStorage())?.token ?? null,
+  fetchImpl: (input, init) => fetch(input, init),
 });
 const externalPayloadAuthorizationCache = new ExternalPayloadAuthorizationCache();
 const {
@@ -455,6 +462,9 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         runAutomationNow,
         broadcastAutomationUpdate,
         broadcastAutomationRunsUpdate,
+      },
+      zaiModel: {
+        getModelList: () => zaiModelCatalog.list(),
       },
     }),
   ],
@@ -1008,6 +1018,8 @@ async function executeAutomationWithContext(
   // 联网与固定会话互不影响：联网走扩展自带的 web_search / web_fetch，由内容脚本
   // 每轮注入目录，复用会话续写时同样可用。
   const searchEnabled = request.promptOptions?.searchEnabled === true;
+  // 任务选定的模型（null = 跟随页面默认）。只在 chat 模式生效，判定在内容脚本。
+  const model = request.promptOptions?.model ?? null;
   const chatSessionId = request.promptOptions?.fixedSession === true
     ? request.chatSessionId
     : null;
@@ -1021,6 +1033,7 @@ async function executeAutomationWithContext(
         prompt,
         chatSessionId,
         searchEnabled,
+        model,
       },
       {
         signal: execution.signal,

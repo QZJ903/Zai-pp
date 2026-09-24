@@ -84,6 +84,8 @@ export interface DomTaskStartInput {
   chatSessionId: string | null;
   /** 自动化任务是否开启 z.ai 联网搜索（任务归属请求体里置 features.web_search/auto_web_search）。 */
   searchEnabled?: boolean;
+  /** 自动化任务选定的模型 id（chat 模式下覆写请求体的 model）；null = 跟随页面默认。 */
+  model?: string | null;
 }
 
 export interface DomTaskStartOptions {
@@ -260,6 +262,7 @@ export function createDomTaskCoordinator(
           prompt: input.prompt,
           chatSessionId: input.chatSessionId,
           searchEnabled: input.searchEnabled === true,
+          model: typeof input.model === 'string' ? input.model : null,
         });
         if (response && typeof response === 'object') {
           const record = response as { ok?: boolean; error?: string };

@@ -336,6 +336,7 @@ async function createTestAutomation(): Promise<Automation> {
       minimumIntervalMinutes: 15,
     },
     promptOptions: {
+      model: null,
       searchEnabled: false,
       fixedSession: false,
     },
@@ -354,6 +355,7 @@ async function createScheduledAutomation(): Promise<Automation> {
       minimumIntervalMinutes: 15,
     },
     promptOptions: {
+      model: null,
       searchEnabled: false,
       fixedSession: false,
     },

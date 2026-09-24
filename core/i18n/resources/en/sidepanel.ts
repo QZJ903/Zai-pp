@@ -602,6 +602,7 @@ export const sidepanel = {
     create: 'New',
     created: 'Automation created',
     loadFailed: 'Failed to load automation data',
+    modelListLoadFailed: 'Failed to load the model list',
     empty: 'No automations',
     emptyHelp: 'Create a task to track information, review content, or repeat a fixed prompt on schedule.',
     namePromptRequired: 'Name and prompt are required',
@@ -611,6 +612,9 @@ export const sidepanel = {
     form: {
       name: 'Name',
       namePlaceholder: 'Task name',
+      model: 'Model',
+      defaultModel: 'Default',
+      modelListFallback: 'The model list may be out of date and missing new models.',
       promptPlaceholder: 'Enter the content to send to Zai on schedule',
       trigger: 'Trigger',
       manual: 'Manual',

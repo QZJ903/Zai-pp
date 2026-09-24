@@ -5,6 +5,7 @@ import type {
   AutomationStatus,
   AutomationUpdateInput,
 } from '../automation/types';
+import type { ZaiModelList } from '../zai/models';
 import type {
   MessageAction,
 } from '../types';
@@ -74,5 +75,9 @@ export interface BackgroundRuntimeCommandContracts {
   RUN_AUTOMATION_NOW: {
     request: { type: 'RUN_AUTOMATION_NOW'; payload: { id: string } };
     response: AutomationRun | DomainFailure;
+  };
+  GET_ZAI_MODELS: {
+    request: { type: 'GET_ZAI_MODELS' };
+    response: ZaiModelList;
   };
 }

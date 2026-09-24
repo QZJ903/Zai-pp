@@ -602,6 +602,7 @@ export const sidepanel = {
     create: '新建',
     created: '自动化已创建',
     loadFailed: '自动化数据加载失败',
+    modelListLoadFailed: '模型清单加载失败',
     empty: '暂无自动化',
     emptyHelp: '新建任务后，可以让它定时跟踪信息、复盘内容或重复执行固定 Prompt。',
     namePromptRequired: '名称和 Prompt 不能为空',
@@ -611,6 +612,9 @@ export const sidepanel = {
     form: {
       name: '名称',
       namePlaceholder: '任务名称',
+      model: '模型',
+      defaultModel: '默认',
+      modelListFallback: '模型清单不是最新的，可能缺少新模型。',
       promptPlaceholder: '输入要定时发送到 Zai 的内容',
       trigger: '触发',
       manual: '手动',

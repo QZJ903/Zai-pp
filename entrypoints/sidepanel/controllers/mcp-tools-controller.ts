@@ -296,6 +296,23 @@ export function countEnabledMcpTools(
   return tools.filter((tool) => isMcpToolEnabled(server, tool)).length;
 }
 
+/**
+ * Presentation-only ordering for the discovered-tools list. Pinned tools float
+ * to the top; both groups keep the order the server reported, so the list stays
+ * stable while pins toggle. The prompt projection is unaffected — it keeps the
+ * original descriptor order regardless of pinning.
+ */
+export function orderMcpToolsByPin(
+  tools: readonly ToolDescriptor[],
+  pinnedDescriptorIds: readonly string[],
+): readonly ToolDescriptor[] {
+  if (pinnedDescriptorIds.length === 0) return tools;
+  const pinned = new Set(pinnedDescriptorIds);
+  const pinnedTools = tools.filter((tool) => pinned.has(tool.id));
+  if (pinnedTools.length === 0) return tools;
+  return [...pinnedTools, ...tools.filter((tool) => !pinned.has(tool.id))];
+}
+
 export function nextMcpToolAllowlist(
   allowlist: McpToolAllowlist,
   tool: ToolDescriptor,

@@ -151,13 +151,17 @@ function decodePromptOptions(value: unknown): AutomationPromptOptions {
   const options = recordValue(value, 'Automation prompt options');
   assertOnlyKeys(
     options,
-    ['searchEnabled', 'fixedSession'],
+    ['model', 'searchEnabled', 'fixedSession'],
     'Automation prompt options',
   );
   if (typeof options.searchEnabled !== 'boolean' || typeof options.fixedSession !== 'boolean') {
     throw new Error('Automation prompt flags must be booleans.');
   }
+  if (options.model !== undefined && options.model !== null && typeof options.model !== 'string') {
+    throw new Error('Automation model must be a string or null.');
+  }
   return {
+    model: typeof options.model === 'string' ? options.model.trim() || null : null,
     searchEnabled: options.searchEnabled,
     fixedSession: options.fixedSession,
   };

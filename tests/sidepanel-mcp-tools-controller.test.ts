@@ -10,6 +10,7 @@ import {
   isMcpToolSelected,
   nextMcpToolAllowlist,
   normalizeHostPermissionOrigin,
+  orderMcpToolsByPin,
 } from '../entrypoints/sidepanel/controllers/mcp-tools-controller';
 import { createSidepanelRuntimeClient } from '../entrypoints/sidepanel/runtime-client';
 
@@ -220,6 +221,27 @@ describe('sidepanel MCP and Tools controller', () => {
     expect(getAllowedMcpTransportKinds(['streamable_http', 'native_messaging'], null))
       .toEqual(['streamable_http']);
   });
+
+  it('floats pinned tools to the top of the list without reordering either group', () => {
+    const tools = ['alpha', 'beta', 'gamma', 'delta'].map(createListedTool);
+    const namesOf = (ordered: readonly ToolDescriptor[]) => ordered.map((tool) => tool.name);
+
+    expect(namesOf(orderMcpToolsByPin(tools, [])))
+      .toEqual(['alpha', 'beta', 'gamma', 'delta']);
+    expect(namesOf(orderMcpToolsByPin(tools, ['mcp:server-1:gamma', 'mcp:server-1:alpha'])))
+      .toEqual(['alpha', 'gamma', 'beta', 'delta']);
+    expect(namesOf(orderMcpToolsByPin(tools, ['mcp:server-1:gamma'])))
+      .toEqual(['gamma', 'alpha', 'beta', 'delta']);
+    expect(namesOf(orderMcpToolsByPin(tools, ['mcp:server-1:missing'])))
+      .toEqual(['alpha', 'beta', 'gamma', 'delta']);
+  });
+
+  it('returns the same array when nothing is pinned, so the list keeps its identity', () => {
+    const tools = ['alpha', 'beta'].map(createListedTool);
+
+    expect(orderMcpToolsByPin(tools, [])).toBe(tools);
+    expect(orderMcpToolsByPin(tools, ['mcp:server-1:missing'])).toBe(tools);
+  });
 });
 
 const server: McpServerConfig = {
@@ -261,6 +283,14 @@ const pythonTool = {
   name: 'python_exec',
   invocationName: 'python_exec',
 } as ToolDescriptor;
+
+function createListedTool(name: string): ToolDescriptor {
+  return {
+    id: `mcp:server-1:${name}`,
+    name,
+    invocationName: `mcp_server_1_${name}`,
+  } as ToolDescriptor;
+}
 
 const platform = {
   kind: 'browser_extension',
