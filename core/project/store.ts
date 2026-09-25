@@ -132,13 +132,20 @@ async function addConversationToProjectState(
   const now = Date.now();
   const conversationId = requiredTrimmed(input.conversationId, 'Conversation id');
   const existing = state.conversations.find((item) => item.conversationId === conversationId);
+  // 标题优先级：手动改名 > 已有的手动改名 > 页面自动回填。
+  // ⚠️ 自动回填每轮都会跑（`refreshProjectConversation`），所以手动改名必须留一道闸门，
+  // 否则改名活不过下一轮对话。
+  const manualTitle = input.titleEdited === true ? requiredTrimmed(input.title, 'Conversation title') : null;
+  const keepEdited = existing?.titleEdited === true;
   const conversation: ProjectConversation = {
     conversationId,
     projectId,
-    title: selectConversationTitle(input.title, existing?.title),
+    title: manualTitle
+      ?? (keepEdited ? existing!.title : selectConversationTitle(input.title, existing?.title)),
     url: normalizeConversationUrl(input.url ?? existing?.url),
     addedAt: existing?.addedAt ?? now,
     lastSeenAt: now,
+    ...(manualTitle !== null || keepEdited ? { titleEdited: true } : {}),
   };
 
   await writeProjectContextState({
@@ -148,7 +155,11 @@ async function addConversationToProjectState(
       ...state.conversations.filter((item) => item.conversationId !== conversationId),
       conversation,
     ],
-    pendingProjectId: state.pendingProjectId === projectId ? null : state.pendingProjectId,
+    // 纯改名（titleEdited）不该有绑定副作用：清 pending 是「加入会话」的语义，
+    // 而改名只是改标题 —— 顺手清掉会让用户刚设的「下一条新会话用此项目」莫名失效。
+    pendingProjectId: manualTitle !== null
+      ? state.pendingProjectId
+      : (state.pendingProjectId === projectId ? null : state.pendingProjectId),
   });
 
   return conversation;
@@ -165,7 +176,10 @@ export async function refreshProjectConversation(
     const now = Date.now();
     const conversation: ProjectConversation = {
       ...existing,
-      title: selectConversationTitle(input.title, existing.title),
+      // 手动改过名的会话只更新 lastSeenAt / url，标题不动。
+      title: existing.titleEdited
+        ? existing.title
+        : selectConversationTitle(input.title, existing.title),
       url: normalizeConversationUrl(input.url ?? existing.url),
       lastSeenAt: now,
     };

@@ -33,6 +33,7 @@ import { filterMemoriesByProjectScope } from '../core/memory/scope';
 import { getResolvedLocaleState } from '../core/i18n/store';
 import {
   DEFAULT_LOCALE,
+  translate,
   type SupportedLocale,
 } from '../core/i18n/background';
 import { parseSkillCommand } from '../core/skill/parser';
@@ -74,11 +75,19 @@ import {
   ZAI_CONTENT_TO_MAIN,
   ZAI_MAIN_TO_CONTENT,
 } from '../core/zai/messages';
+import { decodeZaiUsageSnapshot } from '../core/zai/stream-metrics';
 import {
   applyBackground,
   isBackgroundActive,
   patchContainerBackgrounds,
 } from '../core/zai/page-background';
+import {
+  startProjectPanel,
+  type ProjectPanelController,
+  type ProjectPanelLabels,
+} from '../core/zai/project-panel';
+import { decodeProjectContextState } from '../core/project/codec';
+import { isRuntimeFailure, RuntimeCommandError } from '../core/messaging/runtime-response';
 import {
   ZAI_AGENT_FLAG,
   ZAI_CHAT_INPUT_SELECTOR as CHAT_INPUT_SELECTOR,
@@ -116,6 +125,8 @@ let currentProjectId: string | null = null;
 let currentWebToolsEnabled = false;
 let currentRequestMessageCount = 0;
 let extensionContextValid = true;
+/** 侧边栏「项目」面板控制器（见 installProjectPanel）。 */
+let projectPanelController: ProjectPanelController | null = null;
 /** 已执行过工具的 toolCall 签名集合（防 TOOL_CALL 通道重复执行同一 XML）。 */
 const executedToolCallSignatures = new Set<string>();
 /** grantId → chatSessionId 映射：请求增广时记下每个授权绑定的会话，执行时校验一致。 */
@@ -272,10 +283,26 @@ function getCurrentChatSessionId(): string | null {
   return readZaiChatSessionId();
 }
 
+/**
+ * 取当前会话的标题。
+ *
+ * ⚠️ **不能读 `document.title`** —— z.ai 的站点标题是固定的
+ * 「Z.ai - Advanced AI Chatbot & Agent powered by …」，不随会话变，
+ * 拿它当会话名会让每个会话都叫同一个名字（真机踩过）。
+ *
+ * 真源是**侧边栏里被选中那一行**的标题节点（真机实测的 DOM 形状）：
+ * `button[data-selected="true"] > … > div.text-left.self-center.min-w-0`。
+ */
 function getCurrentConversationTitle(): string {
-  // z.ai 页面标题形如「xxx - chat.z.ai」，去掉「 - chat.z.ai」后缀取会话标题。
-  const title = document.title.replace(/\s*[-|]\s*chat\.z\.ai.*$/i, '').trim();
-  return title || '未命名对话';
+  const selected = document.querySelector<HTMLElement>(
+    'button[data-selected="true"] div.text-left.self-center.min-w-0',
+  );
+  const fromSidebar = selected?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+  if (fromSidebar) return fromSidebar;
+
+  // 兜底：页面标题去掉站点后缀（多数情况下拿不到真名字，但聊胜于无）。
+  const fromDocumentTitle = document.title.replace(/\s*[-|]\s*chat\.z\.ai.*$/i, '').trim();
+  return fromDocumentTitle || '未命名对话';
 }
 
 function isContinuationRequest(text: string): boolean {
@@ -336,11 +363,21 @@ async function sendRuntimeMessage<T>(message: unknown): Promise<T | undefined> {
   }
 }
 
+/**
+ * 发命令并**要求成功**。后台以 `{ ok: false, error }` 表示领域失败而**不是抛错**，
+ * 这里统一转成异常 —— 否则调用点会把失败当成功（表现：界面只是重绘一次、
+ * 什么都没变、也没有任何提示）。
+ */
 async function sendRuntimeMessageStrict<T>(
   message: unknown,
 ): Promise<T> {
   if (!hasLiveExtensionContext()) throw new Error('Extension context unavailable.');
-  return (await chrome.runtime.sendMessage(message)) as T;
+  const response = await chrome.runtime.sendMessage(message);
+  if (isRuntimeFailure(response)) {
+    const code = response.error === undefined ? 'runtime_command_failed' : String(response.error);
+    throw new RuntimeCommandError(code);
+  }
+  return response as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -460,16 +497,42 @@ async function resolveProjectContextForRequest(
 // 工具授权 + 执行中继
 // ---------------------------------------------------------------------------
 
+/** 工具授权创建失败的语义化错误（带后台给的原因码，便于诊断）。 */
+class ToolAuthorizationRequestError extends Error {
+  readonly code: string;
+
+  constructor(code: string) {
+    super(`Tool authorization request failed: ${code}`);
+    this.name = 'ToolAuthorizationRequestError';
+    this.code = code;
+  }
+}
+
+/**
+ * 建授权。**必须校验响应形状** —— 后台在参数不合法 / 描述符对不上时会返回
+ * `{ ok: false, error }` 而**不是抛错**；不校验就会把这个对象当成授权存进
+ * `activeToolAuthorizations`，之后 `authorization.id` 恒为 undefined，
+ * 表现为「工具一直执行不了、日志里只有一句 [object Object]」。
+ */
 async function createToolAuthorization(input: {
   requestId: string;
   chatSessionId: string | null;
   descriptorIds?: string[];
   toolIntent?: string;
 }): Promise<ToolAuthorizationGrantSummary> {
-  return sendRuntimeMessageStrict<ToolAuthorizationGrantSummary>({
+  const response = await sendRuntimeMessageStrict<unknown>({
     type: 'CREATE_TOOL_AUTHORIZATION',
     payload: { trigger: 'manual_chat', ...input },
   });
+  const grant = response as { id?: unknown } | null | undefined;
+  if (grant && typeof grant === 'object' && typeof grant.id === 'string' && grant.id) {
+    return response as ToolAuthorizationGrantSummary;
+  }
+  const code = response && typeof response === 'object'
+    && typeof (response as { error?: unknown }).error === 'string'
+    ? (response as { error: string }).error
+    : 'unrecognized_tool_authorization_response';
+  throw new ToolAuthorizationRequestError(code);
 }
 
 async function closeToolAuthorization(requestId: string): Promise<void> {
@@ -1111,6 +1174,10 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         await handleResponseComplete(data.payload as ZaiResponseComplete);
         return;
       }
+      case 'USAGE_SNAPSHOT': {
+        await handleUsageSnapshot(data.payload);
+        return;
+      }
       case 'REQUEST_TERMINAL': {
         const requestId = (data.payload as { requestId?: string } | undefined)?.requestId;
         // 关闭授权前，先等该 requestId 挂起的所有工具执行跑完。
@@ -1206,6 +1273,37 @@ async function executeDetectedFromDetected(
   }
 }
 
+/**
+ * 建授权，**描述符对不上时先刷新再重试一次**。
+ *
+ * `unknown_tool_authorization_descriptor` 表示我们这份 `currentToolDescriptors` 已经
+ * 过期（用户中途加了 skill / MCP，或后台重启后重算了 id）—— 把陈旧列表原样重发
+ * 只会得到同一个错，所以这里先 `loadAndSyncRuntimeState()` 拿最新清单再试一次。
+ */
+async function requestToolAuthorization(
+  requestId: string,
+  chatSessionId: string | null,
+): Promise<ToolAuthorizationGrantSummary> {
+  try {
+    return await createToolAuthorization({
+      requestId,
+      chatSessionId,
+      descriptorIds: currentToolDescriptors.map((d) => d.id),
+    });
+  } catch (error) {
+    if (!(error instanceof ToolAuthorizationRequestError)
+      || error.code !== 'unknown_tool_authorization_descriptor') {
+      throw error;
+    }
+    await loadAndSyncRuntimeState();
+    return createToolAuthorization({
+      requestId,
+      chatSessionId,
+      descriptorIds: currentToolDescriptors.map((d) => d.id),
+    });
+  }
+}
+
 async function executeDetected(call: ToolCall, requestId: string): Promise<ToolExecutionRecord | null> {
   // 授权：原生轮/续跑轮都可能因为请求已被 requestTerminal 关掉 grant 而查不到。
   // 这里做「懒建授权」——查不到就现场新建一个 grant，保证工具永远能执行。
@@ -1215,13 +1313,12 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
     const chatSessionId =
       chatSessionIdByRequestId.get(requestId) ?? readZaiChatSessionId();
     try {
-      authorization = await createToolAuthorization({
-        requestId,
-        chatSessionId,
-        descriptorIds: currentToolDescriptors.map((d) => d.id),
-      });
+      authorization = await requestToolAuthorization(requestId, chatSessionId);
       activeToolAuthorizations.set(requestId, authorization);
     } catch (error) {
+      const code = error instanceof ToolAuthorizationRequestError
+        ? error.code
+        : (error instanceof Error ? error.message : String(error));
       diag.toolCalls?.push({
         kind: 'executed',
         name: call.name,
@@ -1229,10 +1326,10 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
         authorizationId: null,
         ok: false,
         summary: '工具授权创建失败',
-        detail: error instanceof Error ? error.message : String(error),
-        error: { code: 'tool_authorization_create_failed', message: error instanceof Error ? error.message : String(error), retryable: false },
+        detail: code,
+        error: { code: 'tool_authorization_create_failed', message: code, retryable: false },
       });
-      console.warn('[GLM++] executeDetected: create auth failed', { name: call.name, requestId, error });
+      console.warn('[GLM++] executeDetected: create auth failed', { name: call.name, requestId, code });
       return null;
     }
   }
@@ -1330,6 +1427,45 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
     );
   }
   return execution;
+}
+
+/**
+ * 一轮 completion 的用量落库。
+ *
+ * 每个 completion 请求就是一次真实计费，所以**每轮各记一条**（`id` 用 requestId，
+ * 重复写入由后台按 id 合并）。中断的轮次也记 —— 消耗已经发生。
+ *
+ * ⚠️ `RECORD_USAGE_TURN` 必须写成**内联的对象字面量**：`tests/runtime-boundary.test.ts`
+ * 用 AST 从本文件抓「content 实际发出的命令字面量」，再与 `GLM_CONTENT_RUNTIME_COMMANDS`
+ * 做双向比对。抽成变量会让它抓不到 → 白名单不变式红。
+ */
+async function handleUsageSnapshot(raw: unknown): Promise<void> {
+  const snapshot = decodeZaiUsageSnapshot(raw);
+  if (!snapshot) return;
+  try {
+    await sendRuntimeMessage({
+      type: 'RECORD_USAGE_TURN',
+      payload: {
+        id: snapshot.requestId,
+        recordedAt: Date.now(),
+        source: 'glm-web',
+        // 会话 id 唯一真源是地址栏 `/c/<id>`（请求体里的 chat_id 与 URL 是否同值未经验证）。
+        chatSessionId: readZaiChatSessionId(),
+        // z.ai 的流里没有消息 id 概念，恒 null。
+        assistantMessageId: null,
+        modelType: snapshot.modelType,
+        totalTokens: snapshot.totalTokens,
+        tokenSource: snapshot.tokenSource,
+        tps: snapshot.tps,
+        speedSource: snapshot.speedSource,
+        elapsedMs: snapshot.elapsedMs,
+        // 与 ds++ 一致：每条记录固定算一问一答。
+        messageCount: 2,
+      },
+    });
+  } catch (error) {
+    console.error('[GLM++] usage record failed', error);
+  }
 }
 
 async function handleResponseComplete(complete: ZaiResponseComplete): Promise<void> {
@@ -2222,6 +2358,8 @@ function clearActiveDomTask(taskId: string): void {
  * 这里直接盯地址变化，`/c/<id>` 一出现就补报给后台。
  */
 let sessionWatchInstalled = false;
+/** 订阅「地址里的会话变了」的页面侧消费者（如项目面板的当前对话归属）。 */
+const sessionChangeListeners = new Set<() => void>();
 
 /** 把当前地址里的会话 id 补给所有还没拿到它的在跑任务（幂等：id 相同就跳过）。 */
 function reportLiveSessionToActiveTasks(): void {
@@ -2250,19 +2388,52 @@ function reportLiveSessionToActiveTasks(): void {
  *
  * 兜底再挂 popstate / hashchange，并把 1s 轮询留着：地址切换的时机是「模型开始
  * 回答前后」，远早于用户能按下暂停，1s 粒度足够；有任务在跑时才有开销。
+ *
+ * 两条消费者：后台任务归属（`reportLiveSessionToActiveTasks`，无任务时自短路）
+ * 与页面侧 UI（`notifySessionChange`，例如项目面板要跟着换「当前对话」）。
  */
 function installSessionWatch(ctx: { addEventListener: (t: Window, type: string, h: () => void) => void }): void {
   if (sessionWatchInstalled) return;
   sessionWatchInstalled = true;
+  const onLocationMaybeChanged = () => {
+    reportLiveSessionToActiveTasks();
+    notifySessionChange();
+  };
   try {
-    ctx.addEventListener(window, 'wxt:locationchange', reportLiveSessionToActiveTasks);
+    ctx.addEventListener(window, 'wxt:locationchange', onLocationMaybeChanged);
   } catch (error) {
     console.warn('[GLM++] locationchange listener unavailable', error);
   }
-  window.addEventListener('popstate', reportLiveSessionToActiveTasks);
-  window.addEventListener('hashchange', reportLiveSessionToActiveTasks);
-  setInterval(reportLiveSessionToActiveTasks, SESSION_WATCH_INTERVAL_MS);
+  window.addEventListener('popstate', onLocationMaybeChanged);
+  window.addEventListener('hashchange', onLocationMaybeChanged);
+  setInterval(onLocationMaybeChanged, SESSION_WATCH_INTERVAL_MS);
 }
+
+/** 订阅「地址里的会话变了」。返回取消订阅函数。 */
+function onZaiSessionChange(listener: () => void): () => void {
+  sessionChangeListeners.add(listener);
+  return () => {
+    sessionChangeListeners.delete(listener);
+  };
+}
+
+function notifySessionChange(): void {
+  // 1s 轮询会每秒调到这里，所以先比对会话 id —— 没真变就不打扰订阅者，
+  // 否则项目面板会被每秒重绘一次。
+  const sessionId = readZaiChatSessionId();
+  if (sessionId === lastNotifiedSessionId) return;
+  lastNotifiedSessionId = sessionId;
+  for (const listener of sessionChangeListeners) {
+    try {
+      listener();
+    } catch (error) {
+      console.warn('[GLM++] session change listener failed', error);
+    }
+  }
+}
+
+/** 上一次通知出去的会话 id（含 null：从会话页回到首页也算一次变化）。 */
+let lastNotifiedSessionId: string | null = null;
 
 const SESSION_WATCH_INTERVAL_MS = 1_000;
 
@@ -2293,6 +2464,182 @@ async function installBackgroundCapability(): Promise<void> {
   });
   const root = document.body ?? document.documentElement;
   if (root) observer.observe(root, { childList: true, subtree: true });
+}
+
+
+/**
+ * 侧边栏「项目」面板：把项目与会话管到 z.ai 页面自己的侧边栏里。
+ *
+ * 只从项目存储渲染 —— **不读页面原生历史列表**（z.ai 的会话行上没有会话 id，
+ * 认不出哪一行是哪个会话）。因此也不隐藏原生列表里的行：那需要行到 id 的映射，
+ * 映射错位的表现是「对话从侧边栏消失」，代价远高于「同一对话出现两次」。
+ */
+function installProjectPanel(): void {
+  const labels = (): ProjectPanelLabels => ({
+    title: translate(currentContentLocale, 'content.projectPanel.title'),
+    empty: translate(currentContentLocale, 'content.projectPanel.empty'),
+    conversationCount: (count) => translate(
+      currentContentLocale,
+      'content.projectPanel.conversationCount',
+      { count },
+    ),
+    expandProject: (name) => translate(
+      currentContentLocale,
+      'content.projectPanel.expandProject',
+      { name },
+    ),
+    collapseProject: (name) => translate(
+      currentContentLocale,
+      'content.projectPanel.collapseProject',
+      { name },
+    ),
+    showMore: translate(currentContentLocale, 'content.projectPanel.showMore'),
+    showLess: translate(currentContentLocale, 'content.projectPanel.showLess'),
+    moveCurrentToProject: (name) => translate(
+      currentContentLocale,
+      'content.projectPanel.moveCurrentToProject',
+      { name },
+    ),
+    removeCurrentFromProject: (name) => translate(
+      currentContentLocale,
+      'content.projectPanel.removeCurrentFromProject',
+      { name },
+    ),
+    newConversationInProject: (name) => translate(
+      currentContentLocale,
+      'content.projectPanel.newConversationInProject',
+      { name },
+    ),
+    useNextConversation: (name) => translate(
+      currentContentLocale,
+      'content.projectPanel.useNextConversation',
+      { name },
+    ),
+    cancelNextConversation: (name) => translate(
+      currentContentLocale,
+      'content.projectPanel.cancelNextConversation',
+      { name },
+    ),
+    pendingBadge: translate(currentContentLocale, 'content.projectPanel.pendingBadge'),
+    conversationActions: translate(currentContentLocale, 'content.projectPanel.conversationActions'),
+    removeFromProjectNamed: (name) => translate(
+      currentContentLocale,
+      'content.projectPanel.removeFromProjectNamed',
+      { name },
+    ),
+    renameConversation: translate(currentContentLocale, 'content.projectPanel.renameConversation'),
+    operationFailed: (message) => translate(
+      currentContentLocale,
+      'content.projectPanel.operationFailed',
+      { message },
+    ),
+    age: (timestamp) => formatProjectPanelAge(timestamp),
+  });
+
+  projectPanelController = startProjectPanel({
+    async loadState() {
+      const raw = await sendRuntimeMessage<unknown>({ type: 'GET_PROJECT_CONTEXT_STATE' });
+      if (raw === undefined) return null;
+      try {
+        return decodeProjectContextState(raw, 'projectPanelState');
+      } catch (error) {
+        console.warn('[GLM++] project panel state decode failed', error);
+        return null;
+      }
+    },
+    async addConversation({ projectId, conversation }) {
+      await sendRuntimeMessageStrict({
+        type: 'ADD_CONVERSATION_TO_PROJECT',
+        payload: { projectId, conversation },
+      });
+    },
+    async removeConversation(conversationId) {
+      await sendRuntimeMessageStrict({
+        type: 'REMOVE_CONVERSATION_FROM_PROJECT',
+        payload: { conversationId },
+      });
+    },
+    async renameConversation({ projectId, conversationId, title }) {
+      // 走 ADD（按会话 id upsert），带 titleEdited 闸门 —— 否则下一轮页面
+      // 自动回填标题就把手动改的名字盖掉了。
+      await sendRuntimeMessageStrict({
+        type: 'ADD_CONVERSATION_TO_PROJECT',
+        payload: {
+          projectId,
+          conversation: { conversationId, title, titleEdited: true },
+        },
+      });
+    },
+    async setPending(projectId) {
+      await sendRuntimeMessageStrict({
+        type: 'SET_PENDING_PROJECT_CONTEXT',
+        payload: { projectId },
+      });
+    },
+    getCurrentConversation() {
+      const conversationId = getCurrentChatSessionId();
+      if (!conversationId) return null;
+      return {
+        conversationId,
+        title: getCurrentConversationTitle(),
+        url: location.href,
+      };
+    },
+    openConversation(conversation) {
+      // 存储里的 url 可能来自同步快照导入（codec 只要求它是字符串），所以不能
+      // 直接 assign —— `javascript:` 之类会被执行。非同源一律回退到按 id 拼。
+      const stored = conversation.url;
+      let target = `/c/${encodeURIComponent(conversation.conversationId)}`;
+      if (stored) {
+        try {
+          const parsed = new URL(stored, location.origin);
+          if (parsed.origin === location.origin) target = parsed.href;
+        } catch {
+          // 解析不了就用上面的回退值。
+        }
+      }
+      window.location.assign(target);
+    },
+    startNewConversation() {
+      // 待绑已经在调用方置好；回首页让用户开新会话，首条消息会自动绑到该项目。
+      window.location.assign('/');
+    },
+    getLabels: labels,
+    onError(error) {
+      console.warn('[GLM++] project panel operation failed', error);
+    },
+  });
+
+  // 面板状态变了（侧边栏增删改）→ 重拉重绘。
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === 'PROJECT_CONTEXT_UPDATED') projectPanelController?.refresh();
+    return undefined;
+  });
+
+  // 切会话时「当前对话」的归属变了 → 只重绘，不必重拉。
+  // ⚠️ 必须走 installSessionWatch 的订阅，不能只听 popstate —— z.ai 切会话是
+  // **pushState**（SPA 导航），popstate 根本不触发。
+  onZaiSessionChange(() => projectPanelController?.render());
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) projectPanelController?.refresh();
+  });
+}
+
+function formatProjectPanelAge(timestamp: number): string {
+  const minutes = Math.floor((Date.now() - timestamp) / 60_000);
+  if (minutes < 1) return translate(currentContentLocale, 'content.projectPanel.age.justNow');
+  if (minutes < 60) {
+    return translate(currentContentLocale, 'content.projectPanel.age.minutesAgo', { count: minutes });
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return translate(currentContentLocale, 'content.projectPanel.age.hoursAgo', { count: hours });
+  }
+  return translate(
+    currentContentLocale,
+    'content.projectPanel.age.daysAgo',
+    { count: Math.floor(hours / 24) },
+  );
 }
 
 function finishContinuationLoop(loop: ContinuationLoop): void {
@@ -2914,6 +3261,7 @@ export default defineContentScript({
     installStopObserver();
     installSessionWatch(ctx);
     void installBackgroundCapability();
+    installProjectPanel();
 
     await loadAndSyncRuntimeState();
     stampLoopDiagnostic();

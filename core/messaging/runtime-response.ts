@@ -26,6 +26,21 @@ export function isRuntimeFailure(response: unknown): response is { ok: false; er
   );
 }
 
+/**
+ * 后台以 `{ ok: false, error }` 表示领域失败（**不是抛错**）。
+ * 统一成异常，让调用点能用 try/catch 而不是各自校验形状 —— 漏校验的表现是
+ * 「失败被当成功、界面只是重绘一次、没有任何提示」。
+ */
+export class RuntimeCommandError extends Error {
+  readonly code: string;
+
+  constructor(code: string) {
+    super(code);
+    this.name = 'RuntimeCommandError';
+    this.code = code;
+  }
+}
+
 export function getRuntimeErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

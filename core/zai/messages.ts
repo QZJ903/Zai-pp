@@ -38,6 +38,7 @@ export const ZAI_MAIN_TO_CONTENT_TYPES = [
   'REQUEST_TERMINAL',          // 请求结束/失败 → 关闭授权
   'HEADERS_CAPTURED',          // 捕获 Authorization / X-Signature / X-FE-Version
   'HTML_CHALLENGE',            // completion 返回 text/html → 推进续跑别挂死
+  'USAGE_SNAPSHOT',            // 一轮 completion 的用量快照 → 落库统计
 ] as const;
 
 /** 隔离世界向主世界发出的动作类型。 */

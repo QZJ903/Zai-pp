@@ -13,6 +13,7 @@ import {
   decodeProjectContextState,
 } from '../../../core/project/codec';
 import { PROJECT_CONTEXT_SCHEMA_VERSION } from '../../../core/project/types';
+import { ZAI_WEB_ORIGIN } from '../../../core/zai/contracts';
 import { createRequestGenerationFence } from '../async-state';
 import MemoryCard from '../components/MemoryCard';
 import MemoryForm from '../components/MemoryForm';
@@ -76,15 +77,35 @@ export default function ProjectsPage() {
     const handler = (message: unknown) => {
       if (isSidepanelRuntimeEvent(message, PROJECT_UPDATE_EVENTS)) {
         void loadAll().catch(showProjectError);
+        // 项目状态变了也可能改变「当前对话」的归属（加入 / 移出 / 待绑），一并刷新。
+        void refreshCurrentConversation();
       }
     };
     chrome.runtime.onMessage.addListener(handler);
     window.addEventListener('focus', refreshCurrentConversation);
+
+    // 页面内切换会话是 SPA 导航（pushState）：既不触发侧边栏的 focus，也**不会**
+    // 发 PROJECT_CONTEXT_UPDATED（切到未归入项目的会话时后台根本不广播）。
+    // 所以侧边栏得自己盯标签页的 URL 变化 —— 否则「当前对话」要等下一次点侧边栏
+    // 触发 focus 才更新。
+    const handleTabUpdated = (_tabId: number, changeInfo: chrome.tabs.OnUpdatedInfo) => {
+      if (!changeInfo.url || !isZaiPageUrl(changeInfo.url)) return;
+      void refreshCurrentConversation();
+    };
+    const handleTabActivated = () => {
+      void refreshCurrentConversation();
+    };
+    // 可选链：单测里的 chrome stub 不一定带 tabs。
+    chrome.tabs?.onUpdated?.addListener(handleTabUpdated);
+    chrome.tabs?.onActivated?.addListener(handleTabActivated);
+
     return () => {
       loadFence.current.invalidate();
       conversationFence.current.invalidate();
       chrome.runtime.onMessage.removeListener(handler);
       window.removeEventListener('focus', refreshCurrentConversation);
+      chrome.tabs?.onUpdated?.removeListener(handleTabUpdated);
+      chrome.tabs?.onActivated?.removeListener(handleTabActivated);
     };
   }, []);
 
@@ -599,6 +620,19 @@ function FolderIcon() {
       <path strokeLinecap="round" strokeLinejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
     </svg>
   );
+}
+
+/**
+ * 这个 URL 是不是 chat.z.ai 的页面。用来过滤 `chrome.tabs.onUpdated` ——
+ * 只要带 `url` 的变更（SPA 的 pushState 也会触发）都过一遍这个判断，
+ * 避免别的标签页导航时白刷一次。
+ */
+function isZaiPageUrl(url: string): boolean {
+  try {
+    return new URL(url).origin === new URL(ZAI_WEB_ORIGIN).origin;
+  } catch {
+    return false;
+  }
 }
 
 function decodeCurrentConversationResponse(value: unknown): CurrentGLMConversation | null {

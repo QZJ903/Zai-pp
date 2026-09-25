@@ -21,6 +21,8 @@ const CURRENT_CONVERSATION = {
 let container: HTMLDivElement;
 let root: Root | null;
 let runtimeListeners: Array<(message: unknown) => void>;
+let tabUpdatedListeners: Array<(tabId: number, changeInfo: { url?: string }) => void>;
+let tabActivatedListeners: Array<() => void>;
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -28,6 +30,8 @@ beforeEach(() => {
   document.body.append(container);
   root = null;
   runtimeListeners = [];
+  tabUpdatedListeners = [];
+  tabActivatedListeners = [];
 });
 
 afterEach(() => {
@@ -257,6 +261,96 @@ describe('ProjectsPage', () => {
     expect(container.textContent).toContain('Newest project');
     expect(container.textContent).not.toContain('Stale project');
   });
+
+  it('follows the active tab URL so switching chats updates the current conversation', async () => {
+    const project = createProject('project-1', 'Alpha');
+    const state: ProjectContextState = { ...EMPTY_PROJECT_STATE, projects: [project] };
+    let conversation: unknown = { ok: false, error: 'none' };
+    const sendMessage = vi.fn(async (message: { type: string }) => {
+      if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
+      if (message.type === 'GET_MEMORIES') return [];
+      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return conversation;
+      return { ok: true };
+    });
+
+    await renderProjectsPage(sendMessage);
+    expect(container.textContent).toContain('当前活动标签页不是 Zai 对话');
+
+    // 页面内切会话是 SPA 导航：侧边栏拿不到 focus，后台也不会广播 ——
+    // 只能靠标签页 URL 变化驱动。
+    conversation = { ok: true, conversation: CURRENT_CONVERSATION };
+    await act(async () => {
+      tabUpdatedListeners.forEach((listener) => listener(7, {
+        url: 'https://chat.z.ai/c/session-1',
+      }));
+    });
+    await settle();
+
+    expect(container.textContent).toContain('查看项目进展');
+    expect(container.textContent).not.toContain('当前活动标签页不是 Zai 对话');
+  });
+
+  it('ignores tab URL changes from unrelated sites', async () => {
+    const state: ProjectContextState = {
+      ...EMPTY_PROJECT_STATE,
+      projects: [createProject('project-1', 'Alpha')],
+    };
+    const sendMessage = vi.fn(async (message: { type: string }) => {
+      if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
+      if (message.type === 'GET_MEMORIES') return [];
+      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') {
+        return { ok: true, conversation: CURRENT_CONVERSATION };
+      }
+      return { ok: true };
+    });
+
+    await renderProjectsPage(sendMessage);
+    const before = sendMessage.mock.calls.filter(
+      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_GLM_CONVERSATION',
+    ).length;
+
+    await act(async () => {
+      tabUpdatedListeners.forEach((listener) => listener(9, { url: 'https://example.com/' }));
+      // 只有 changeInfo.url 才值得看；状态类变更（loading 等）不触发刷新。
+      tabUpdatedListeners.forEach((listener) => listener(9, {}));
+    });
+    await settle();
+
+    const after = sendMessage.mock.calls.filter(
+      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_GLM_CONVERSATION',
+    ).length;
+    expect(after).toBe(before);
+  });
+
+  it('refreshes the current conversation when the active tab changes', async () => {
+    const state: ProjectContextState = {
+      ...EMPTY_PROJECT_STATE,
+      projects: [createProject('project-1', 'Alpha')],
+    };
+    const sendMessage = vi.fn(async (message: { type: string }) => {
+      if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
+      if (message.type === 'GET_MEMORIES') return [];
+      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') {
+        return { ok: true, conversation: CURRENT_CONVERSATION };
+      }
+      return { ok: true };
+    });
+
+    await renderProjectsPage(sendMessage);
+    const before = sendMessage.mock.calls.filter(
+      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_GLM_CONVERSATION',
+    ).length;
+
+    await act(async () => {
+      tabActivatedListeners.forEach((listener) => listener());
+    });
+    await settle();
+
+    const after = sendMessage.mock.calls.filter(
+      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_GLM_CONVERSATION',
+    ).length;
+    expect(after).toBeGreaterThan(before);
+  });
 });
 
 async function renderProjectsPage(sendMessage: ReturnType<typeof vi.fn>) {
@@ -270,6 +364,20 @@ async function renderProjectsPage(sendMessage: ReturnType<typeof vi.fn>) {
         removeListener: vi.fn((listener: (message: unknown) => void) => {
           runtimeListeners = runtimeListeners.filter((item) => item !== listener);
         }),
+      },
+    },
+    tabs: {
+      onUpdated: {
+        addListener: vi.fn((listener: (tabId: number, changeInfo: { url?: string }) => void) => {
+          tabUpdatedListeners.push(listener);
+        }),
+        removeListener: vi.fn(),
+      },
+      onActivated: {
+        addListener: vi.fn((listener: () => void) => {
+          tabActivatedListeners.push(listener);
+        }),
+        removeListener: vi.fn(),
       },
     },
   });

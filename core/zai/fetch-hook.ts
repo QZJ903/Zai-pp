@@ -22,12 +22,18 @@ import {
   matchZaiCompletionRoute,
   parseZaiBody,
   readZaiLastUserMessageText,
+  readZaiModelForRoute,
 } from './request-codec';
 import {
   createZaiStreamAccumulator,
   type ZaiSseEvent,
+  type ZaiSseParseResult,
   type ZaiStreamAccumulator,
 } from './stream-codec';
+import {
+  createZaiUsageTracker,
+  type ZaiUsageSnapshot,
+} from './stream-metrics';
 import { resignZaiCompletionRequest } from './sign';
 
 export interface ZaiHookState {
@@ -42,6 +48,8 @@ export interface ZaiHookState {
   onResponseComplete: (complete: ZaiResponseCompletePayload) => void;
   onRequestTerminal: (terminal: { requestId: string }) => void;
   onHtmlChallenge: (payload: { requestId: string }) => void;
+  /** 一轮 completion 结束时的用量快照（含中断的轮次）。 */
+  onUsageSnapshot: (snapshot: ZaiUsageSnapshot) => void;
 }
 
 export interface ZaiRequestBodyModification {
@@ -68,6 +76,8 @@ interface ZaiRequestContext {
   requestId: string;
   originalPrompt: string;
   agentTaskPrompt: string;
+  /** completion 请求体顶层 `model`；取不到则 null（用量快照按模型归类用）。 */
+  modelType: string | null;
 }
 
 const HTML_CHALLENGE_MAX_RETRIES = 6;
@@ -100,6 +110,7 @@ function createEmptyHookState(): ZaiHookState {
     onResponseComplete: () => {},
     onRequestTerminal: () => {},
     onHtmlChallenge: () => {},
+    onUsageSnapshot: () => {},
   };
 }
 
@@ -258,7 +269,18 @@ function createRequestContext(bodyStr: string): ZaiRequestContext {
     requestId: crypto.randomUUID(),
     originalPrompt: prompt,
     agentTaskPrompt: prompt,
+    modelType: readRequestModelType(body),
   };
+}
+
+/**
+ * 读请求体里本轮实际使用的模型。**取增强后的 body** —— 自动化任务的模型覆写
+ * 发生在增广阶段，读原始 body 会把所有自动化轮次都记成页面默认模型。
+ */
+function readRequestModelType(body: Record<string, unknown> | null): string | null {
+  if (!body) return null;
+  const model = readZaiModelForRoute(body, 'completion');
+  return typeof model === 'string' && model.trim() ? model.trim() : null;
 }
 
 interface ZaiIntercepted {
@@ -288,6 +310,8 @@ async function prepareRequest(
       requestId: modified?.requestId ?? originalContext.requestId,
       originalPrompt: originalContext.originalPrompt,
       agentTaskPrompt: originalContext.agentTaskPrompt,
+      // 覆写发生在增广阶段 → 模型类型只能从**增广后**的 body 读。
+      modelType: readRequestModelType(parseZaiBody(requestBody)),
     },
     requestBody,
     requestInit: ({} as RequestInit),
@@ -495,10 +519,26 @@ async function interceptCompletionResponse(
   const decoder = new TextDecoder();
   const accumulator = createZaiStreamAccumulator();
   const detectedToolCalls: ZaiDetectedToolCall[] = [];
+  const usageTracker = createZaiUsageTracker(context.requestId, context.modelType);
+
+  const observeUsageFrames = (parsed: ZaiSseParseResult) => {
+    for (const event of parsed.events) usageTracker.observeEvent(event);
+    if (parsed.appendedText) usageTracker.appendText(parsed.appendedText);
+  };
+
   let terminalSent = false;
   const notifyTerminal = () => {
     if (terminalSent) return;
     terminalSent = true;
+    // 用量快照：正常结束 / 出错 / 被取消三条路都收敛到这里，恰好一次。
+    // 全程 try/catch —— 这是热路径，统计失败绝不能影响页面请求；onRequestTerminal
+    // 刻意留在 try 外面，快照出问题也不能让终态通知被吞掉。
+    try {
+      const snapshot = usageTracker.finish(accumulator.assistantText);
+      if (snapshot) hookState.onUsageSnapshot(snapshot);
+    } catch (error) {
+      console.error('[GLM++] usage snapshot failed', error);
+    }
     hookState.onRequestTerminal({ requestId: context.requestId });
   };
 
@@ -509,7 +549,7 @@ async function interceptCompletionResponse(
         if (done) {
           decoder.decode();
           // flush 掉最后一行未完结的 data: 行，补进累积文本。
-          accumulator.finish();
+          observeUsageFrames(accumulator.finish());
           const text = accumulator.assistantText;
           extractAndNotifyToolCalls(accumulator, detectedToolCalls, context.requestId);
           hookState.onResponseComplete({
@@ -532,7 +572,7 @@ async function interceptCompletionResponse(
         // 字节透传（原样回给页面）。
         controller.enqueue(value);
         // 增量解析 SSE 做工具识别（不改变页面收到的字节）。
-        accumulator.push(chunk);
+        observeUsageFrames(accumulator.push(chunk));
       } catch (error) {
         controller.error(error);
         notifyTerminal();

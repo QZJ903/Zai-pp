@@ -334,6 +334,10 @@ function decodeProjectConversationInput(value: unknown, path: string): Record<st
   nonEmptyString(conversation.conversationId, `${path}.conversationId`);
   optionalString(conversation.title, `${path}.title`);
   optionalString(conversation.url, `${path}.url`);
+  // 手动改名的标记：只有内容端显式传 true 才算，其余一律当自动回填。
+  if (conversation.titleEdited !== undefined && typeof conversation.titleEdited !== 'boolean') {
+    throw new Error(`${path}.titleEdited must be a boolean`);
+  }
   return conversation;
 }
 

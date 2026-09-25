@@ -124,6 +124,9 @@ export default defineContentScript({
       onHtmlChallenge(payload) {
         postToContent({ type: 'HTML_CHALLENGE', payload });
       },
+      onUsageSnapshot(snapshot) {
+        postToContent({ type: 'USAGE_SNAPSHOT', payload: snapshot });
+      },
     });
 
     installZaiFetchHook();
