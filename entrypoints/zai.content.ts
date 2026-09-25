@@ -87,6 +87,7 @@ import {
   type ProjectPanelLabels,
 } from '../core/zai/project-panel';
 import { decodeProjectContextState } from '../core/project/codec';
+import { PROJECT_UNTITLED_CONVERSATION } from '../core/project/title';
 import { isRuntimeFailure, RuntimeCommandError } from '../core/messaging/runtime-response';
 import {
   ZAI_AGENT_FLAG,
@@ -286,23 +287,20 @@ function getCurrentChatSessionId(): string | null {
 /**
  * 取当前会话的标题。
  *
- * ⚠️ **不能读 `document.title`** —— z.ai 的站点标题是固定的
- * 「Z.ai - Advanced AI Chatbot & Agent powered by …」，不随会话变，
- * 拿它当会话名会让每个会话都叫同一个名字（真机踩过）。
- *
  * 真源是**侧边栏里被选中那一行**的标题节点（真机实测的 DOM 形状）：
  * `button[data-selected="true"] > … > div.text-left.self-center.min-w-0`。
+ *
+ * ⚠️ **没有 `document.title` 兜底** —— z.ai 的站点标题是固定的
+ * 「Z.ai - Advanced AI Chatbot & Agent powered by …」，不随会话变，拿它当会话名
+ * 只会让每个会话同名。侧边栏还没渲染出来时**如实返回占位串**：
+ * 它是 `PROJECT_UNTITLED_CONVERSATION`，被 `isPlaceholderProjectConversationTitle`
+ * 认作占位 → 不会被当成真实标题落库，也不会挡住之后拿到的真名字。
  */
 function getCurrentConversationTitle(): string {
   const selected = document.querySelector<HTMLElement>(
     'button[data-selected="true"] div.text-left.self-center.min-w-0',
   );
-  const fromSidebar = selected?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-  if (fromSidebar) return fromSidebar;
-
-  // 兜底：页面标题去掉站点后缀（多数情况下拿不到真名字，但聊胜于无）。
-  const fromDocumentTitle = document.title.replace(/\s*[-|]\s*chat\.z\.ai.*$/i, '').trim();
-  return fromDocumentTitle || '未命名对话';
+  return selected?.textContent?.replace(/\s+/g, ' ').trim() || PROJECT_UNTITLED_CONVERSATION;
 }
 
 function isContinuationRequest(text: string): boolean {
