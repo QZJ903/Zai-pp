@@ -26,6 +26,7 @@ export const sidepanel = {
       namePlaceholder: 'Title',
       contentPlaceholder: 'Content',
       tagsPlaceholder: 'Tags, comma-separated',
+      requiredFields: 'Enter both a title and content.',
     },
     types: {
       user: 'User',

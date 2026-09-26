@@ -8,6 +8,8 @@ import {
 import type { ProjectContextState } from '../core/types';
 
 const PANEL_ID = 'dpp-project-panel';
+/** 补名延时那次的时长（`BACKFILL_RETRY_DELAYS_MS` 的第二档）。 */
+const BACKFILL_ADVANCE_MS = 2_500;
 const MENU_ID = 'dpp-project-panel-menu';
 
 const LABELS: ProjectPanelLabels = {
@@ -76,6 +78,7 @@ function createDependencies(
     addConversation: vi.fn(async () => {}),
     removeConversation: vi.fn(async () => {}),
     renameConversation: vi.fn(async () => {}),
+    backfillConversationTitle: vi.fn(async () => {}),
     setPending: vi.fn(async () => {}),
     getCurrentConversation: () => null,
     openConversation: vi.fn(),
@@ -84,6 +87,24 @@ function createDependencies(
     ...overrides,
   };
   return deps;
+}
+
+/**
+ * 推过补名延时那次（`BACKFILL_RETRY_DELAYS_MS` 的 2500ms）而不真等。
+ *
+ * ⚠️ **必须在 `backfillNow()` 之前**换成假计时器 —— 已经用真实 `setTimeout`
+ * 注册过的定时器不会被 `useFakeTimers()` 接管，那时再推时间也不会触发。
+ * 推完立刻换回真实计时器：`flush()` 依赖真实 `setTimeout(…, 0)`。
+ */
+async function withBackfillTimerAdvance<T>(run: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    const result = await run();
+    await vi.advanceTimersByTimeAsync(BACKFILL_ADVANCE_MS);
+    return result;
+  } finally {
+    vi.useRealTimers();
+  }
 }
 
 async function flush(times = 3): Promise<void> {
@@ -751,5 +772,314 @@ describe('zai project panel', () => {
     controller = startProjectPanel(createDependencies(createState()));
     await flush();
     expect(document.getElementById(PANEL_ID)).toBeNull();
+  });
+
+  it('backfills a placeholder title from the sidebar row', async () => {
+    mountSidebar();
+    const backfillConversationTitle = vi.fn(async () => {});
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      backfillConversationTitle,
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '真实会话名', url: '' }),
+    }));
+    await flush(4);
+
+    expect(backfillConversationTitle).toHaveBeenCalledWith({
+      projectId: 'p1',
+      conversationId: 'c1',
+      title: '真实会话名',
+    });
+  });
+
+  it('leaves a conversation that already has a real title alone', async () => {
+    mountSidebar();
+    const backfillConversationTitle = vi.fn(async () => {});
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          // 用户重命名过的标题 —— 绝不能被会话列表里的名字改回去。
+          title: '我改过的名字',
+          titleEdited: true,
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      backfillConversationTitle,
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '会话列表里的名字', url: '' }),
+    }));
+    await flush(4);
+
+    expect(backfillConversationTitle).not.toHaveBeenCalled();
+  });
+
+  it('does not backfill when the sidebar row is unavailable or itself a placeholder', async () => {
+    mountSidebar();
+    const backfillConversationTitle = vi.fn(async () => {});
+    const state = createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    });
+
+    // 侧边栏那行还没渲染出来 → getCurrentConversation 给的是占位串。
+    controller = startProjectPanel(createDependencies(state, {
+      backfillConversationTitle,
+      getCurrentConversation: () => ({
+        conversationId: 'c1',
+        title: 'Untitled conversation',
+        url: '',
+      }),
+    }));
+    await flush(4);
+    expect(backfillConversationTitle).not.toHaveBeenCalled();
+
+    // 不在任何会话里 → 同样不发。
+    controller.stop();
+    controller = startProjectPanel(createDependencies(state, {
+      backfillConversationTitle,
+      getCurrentConversation: () => null,
+    }));
+    await flush(4);
+    expect(backfillConversationTitle).not.toHaveBeenCalled();
+  });
+
+  it('attempts a stuck backfill only once, so a reload cannot loop', async () => {
+    mountSidebar();
+    // 后台没改动标题（占位串照旧）→ 重拉之后仍是占位，绝不能无限补。
+    const deps = createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '真实会话名', url: '' }),
+    });
+    controller = startProjectPanel(deps);
+    await flush(4);
+    // 每次 refresh 都会触发一次补名检查，但同一条会话只发一次 IPC。
+    controller.refresh();
+    await flush(4);
+    controller.refresh();
+    await flush(4);
+
+    expect(deps.backfillConversationTitle).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats every new-conversation temp name as a placeholder, not a real title', async () => {
+    // 建会话那一刻页面写进 `chat.title` 的就是这些临时名（页面自己的 i18n 词条），
+    // 它们与 `Untitled conversation` 同性质 —— 都要能被真名覆盖掉。
+    // ⚠️ 漏一项的后果是静默的：临时名被当真名落库后，闸门会从此拒绝真名。
+    const tempNames = ['新聊天', '新任务', '新会话', '新对话', 'New Chat', 'New Task'];
+
+    for (const tempName of tempNames) {
+      mountSidebar();
+      const backfillConversationTitle = vi.fn(async () => {});
+      controller = startProjectPanel(createDependencies(createState({
+        projects: [
+          { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+        ],
+        conversations: [
+          {
+            conversationId: 'c1',
+            projectId: 'p1',
+            title: tempName,
+            url: '',
+            addedAt: 1,
+            lastSeenAt: 5,
+          },
+        ],
+      }), {
+        backfillConversationTitle,
+        getCurrentConversation: () => ({ conversationId: 'c1', title: '真实会话名', url: '' }),
+      }));
+      await flush(4);
+
+      expect(backfillConversationTitle, tempName).toHaveBeenCalledWith({
+        projectId: 'p1',
+        conversationId: 'c1',
+        title: '真实会话名',
+      });
+      controller.stop();
+      controller = null;
+    }
+
+    // 反向：真名不该被当成占位（否则每轮都会被回写一次）。
+    mountSidebar();
+    const realTitleBackfill = vi.fn(async () => {});
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: '新聊天天文台', // 只是以「新聊天」开头，不是临时名本身
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      backfillConversationTitle: realTitleBackfill,
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '另一个名字', url: '' }),
+    }));
+    await flush(4);
+    expect(realTitleBackfill).not.toHaveBeenCalled();
+  });
+
+  it('retries the backfill when asked again, so the title can arrive after the first answer', async () => {
+    mountSidebar();
+    const state = createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    });
+    let sidebarTitle = '新会话';
+    const backfillConversationTitle = vi.fn(async () => {});
+    controller = startProjectPanel(createDependencies(state, {
+      backfillConversationTitle,
+      getCurrentConversation: () => ({ conversationId: 'c1', title: sidebarTitle, url: '' }),
+    }));
+    await flush(4);
+
+    // 此刻侧边栏那行还是临时名 → 不发（发了也只是把占位串原样回写）。
+    expect(backfillConversationTitle).not.toHaveBeenCalled();
+
+    // 首答完成后真名才出现；内容脚本在这时会调 backfillNow()。
+    sidebarTitle = '真实会话名';
+    controller.backfillNow();
+    await flush(4);
+
+    expect(backfillConversationTitle).toHaveBeenCalledWith({
+      projectId: 'p1',
+      conversationId: 'c1',
+      title: '真实会话名',
+    });
+  });
+
+  it('fires the deferred retry when the real name shows up right after the trigger', async () => {
+    mountSidebar();
+    let sidebarTitle = '新会话';
+    const backfillConversationTitle = vi.fn(async () => {});
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      backfillConversationTitle,
+      getCurrentConversation: () => ({ conversationId: 'c1', title: sidebarTitle, url: '' }),
+    }));
+    await flush(4);
+    expect(backfillConversationTitle).not.toHaveBeenCalled();
+
+    // 触发那一刻侧边栏还是临时名（跳过），但延时那次赶上了真名。
+    const panel = controller!;
+    await withBackfillTimerAdvance(async () => {
+      panel.backfillNow();
+      sidebarTitle = '真实会话名';
+    });
+    await flush(4);
+
+    expect(backfillConversationTitle).toHaveBeenCalledWith({
+      projectId: 'p1',
+      conversationId: 'c1',
+      title: '真实会话名',
+    });
+  });
+
+  it('cancels the deferred retry on stop so nothing fires after teardown', async () => {
+    mountSidebar();
+    let sidebarTitle = '新会话';
+    const backfillConversationTitle = vi.fn(async () => {});
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      backfillConversationTitle,
+      getCurrentConversation: () => ({ conversationId: 'c1', title: sidebarTitle, url: '' }),
+    }));
+    await flush(4);
+
+    controller.backfillNow();
+    sidebarTitle = '真实会话名';
+    const panel = controller!;
+    await withBackfillTimerAdvance(async () => {
+      panel.stop();
+      controller = null;
+    });
+    await flush(4);
+
+    expect(backfillConversationTitle).not.toHaveBeenCalled();
   });
 });

@@ -87,7 +87,10 @@ import {
   type ProjectPanelLabels,
 } from '../core/zai/project-panel';
 import { decodeProjectContextState } from '../core/project/codec';
+import { selectPendingProjectPrompt } from '../core/project/prompt-context';
 import { PROJECT_UNTITLED_CONVERSATION } from '../core/project/title';
+import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
+import { readZaiSidebarAgentMode, zaiNewConversationPath } from '../core/zai/mode';
 import { isRuntimeFailure, RuntimeCommandError } from '../core/messaging/runtime-response';
 import {
   ZAI_AGENT_FLAG,
@@ -464,10 +467,14 @@ interface ResolvedProjectAugmentationContext {
 }
 
 /**
- * 解析当前会话的项目上下文（ds++ resolveProjectContextForRequestBody 的 z.ai 简化版）。
- * z.ai 会话 id 从 location /c/<id> 读；首条消息 bindPendingProject=true。
- * conversation title/url 对归属判断非必需（后台按 conversationId 反查 membership），
- * 这里仅透传能拿到的字段。返回 null 表示该会话未绑定项目。
+ * 解析当前会话的项目上下文（对应 ds++ 的 `resolveProjectContextForRequestBody`）。
+ * z.ai 会话 id 从 location `/c/<id>` 读；首条消息 `bindPendingProject=true`。
+ *
+ * ⚠️ **title 与 url 都要传**（与上游一致）—— 后台拿它们写进 `ProjectConversation`：
+ * - 少了 `title`，绑定那一刻只能落成占位串，且**之后没有别的机会回填**；
+ * - 少了 `url`，侧边栏项目页的会话链接会落到空 href。
+ * `getCurrentConversationTitle()` 在侧边栏还没渲染出那一行时返回**占位串**，
+ * 后台的 `selectConversationTitle` 会拒绝占位串 —— 所以这里如实传即可。
  */
 async function resolveProjectContextForRequest(
   chatSessionId: string | null,
@@ -479,7 +486,11 @@ async function resolveProjectContextForRequest(
       type: 'GET_PROJECT_CONTEXT_FOR_CONVERSATION',
       payload: {
         bindPendingProject,
-        conversation: { conversationId: chatSessionId },
+        conversation: {
+          conversationId: chatSessionId,
+          title: getCurrentConversationTitle(),
+          url: buildZaiChatSessionUrl(chatSessionId),
+        },
       },
     });
     currentProjectId = result?.projectId ?? null;
@@ -793,6 +804,36 @@ function augmentPrompt(
   return result.augmented;
 }
 
+/**
+ * 首条建会话（`/chats/new`）时的项目上下文。
+ *
+ * ⚠️ **此刻地址栏还没有 `/c/<id>`** —— `resolveProjectContextForRequest` 第一条就是
+ * `if (!chatSessionId) return null`，所以那条路在首条必然空转。唯一已知的是**待绑项目**
+ * （`glm_pp_project_context` 的 `pendingProjectId`，「下一条新会话使用此项目」与面板的
+ * 「在项目下开启新会话」都会先置它）。
+ *
+ * 漏了这一步的后果是**静默的**：首条没有项目指令、且 `projectId` 为 null 会把
+ * **项目记忆整批过滤掉**（`filterMemoriesByProjectScope` 只保留 global），
+ * 要等第二轮拿到 `/c/<id>` 才恢复。
+ *
+ * 读的是 `GET_PROJECT_CONTEXT_STATE`（已在内容脚本白名单里，无需新增命令）。
+ * 失败一律当「没有项目」—— 与改动前行为一致，不会把请求搞砸。
+ */
+async function resolvePendingProjectContextForFirstMessage(): Promise<ResolvedProjectAugmentationContext | null> {
+  try {
+    const raw = await sendRuntimeMessage<unknown>({ type: 'GET_PROJECT_CONTEXT_STATE' });
+    if (raw === undefined) return null;
+    const state = decodeProjectContextState(raw, 'firstMessageProjectState');
+    const selection = selectPendingProjectPrompt(state);
+    if (!selection) return null;
+    return { projectId: selection.projectId, context: selection.context };
+  } catch (error) {
+    if (isExtensionInvalidatedError(error)) invalidateExtensionContext();
+    else console.warn('[GLM++] first-message project context failed', error);
+    return null;
+  }
+}
+
 async function handleAugmentRequestBody(
   message: Record<string, unknown>,
 ): Promise<void> {
@@ -874,6 +915,11 @@ async function handleAugmentRequestBody(
       });
       activeToolAuthorizations.set(requestId, authorization);
       grantChatSessionIdByAuthId.set(authorization.id, chatSessionId);
+      // 项目上下文（首条）：此刻**地址栏还没有 `/c/<id>`**，查不了会话归属，
+      // 唯一已知的是**待绑项目**（「下一条新会话使用此项目」与面板的「在项目下开启
+      // 新会话」都会先置 pending）。漏了这一步的后果是**静默的**：首条没有项目指令，
+      // 且 projectId 为 null 会把项目记忆整批过滤掉，要等第二轮才恢复。
+      const pendingProject = await resolvePendingProjectContextForFirstMessage();
       // 首条（chats/new）始终增强：把工具目录 + 记忆 + 联网引导注入，让模型在建会话
       // 那一刻就学会工具用法（web_search 搜、shell 写文件、memory 等）。首条注入不会污染
       // parent 链（首条是会话起点，无 parent），所以联网会话也照常注入。
@@ -883,6 +929,8 @@ async function handleAugmentRequestBody(
           isFirstMessage: true,
           isAgent: isAgentTurn,
           nativeSearchOn,
+          projectContext: pendingProject?.context ?? null,
+          projectId: pendingProject?.projectId ?? null,
         }),
       );
       const nextBody = rewriteZaiChatNewUserMessages(body, augmented);
@@ -1469,6 +1517,9 @@ async function handleUsageSnapshot(raw: unknown): Promise<void> {
 async function handleResponseComplete(complete: ZaiResponseComplete): Promise<void> {
   if (!complete?.requestId) return;
   respondedRequestIds.add(complete.requestId);
+  // 会话名要等**首答完成**才定下来（之前侧边栏那行是「新会话」这类临时名）。
+  // 这里再给项目面板一次补名机会 —— 它自己没法知道「回答结束了」这件事。
+  projectPanelController?.backfillNow();
   const pendingStop = manualStopTimers.get(complete.requestId);
   if (pendingStop) {
     clearTimeout(pendingStop);
@@ -2568,6 +2619,18 @@ function installProjectPanel(): void {
         },
       });
     },
+    async backfillConversationTitle({ projectId, conversationId, title }) {
+      // 补名走 ADD（按会话 id upsert），**不带 titleEdited** —— 这不是用户改名，
+      // 只是把占位串换成会话列表里的真名；后台的 selectConversationTitle 也只在
+      // 已有值是占位串时才会采用它。
+      await sendRuntimeMessageStrict({
+        type: 'ADD_CONVERSATION_TO_PROJECT',
+        payload: {
+          projectId,
+          conversation: { conversationId, title, url: location.href },
+        },
+      });
+    },
     async setPending(projectId) {
       await sendRuntimeMessageStrict({
         type: 'SET_PENDING_PROJECT_CONTEXT',
@@ -2599,8 +2662,11 @@ function installProjectPanel(): void {
       window.location.assign(target);
     },
     startNewConversation() {
-      // 待绑已经在调用方置好；回首页让用户开新会话，首条消息会自动绑到该项目。
-      window.location.assign('/');
+      // 待绑已经在调用方置好；开新会话时**沿用页面当前的模式**（chat / agent），
+      // 否则在 agent 模式下会静默掉回 chat —— 模式真源与判定见 `core/zai/mode.ts`。
+      // 走 `/?mode=agent` 是页面自己的入口：它读到 query 后设置场景并删除该参数，
+      // 与用户点侧边栏那个模式 tab 是同一条路。
+      window.location.assign(zaiNewConversationPath(readZaiSidebarAgentMode(document)));
     },
     getLabels: labels,
     onError(error) {
@@ -2614,10 +2680,15 @@ function installProjectPanel(): void {
     return undefined;
   });
 
-  // 切会话时「当前对话」的归属变了 → 只重绘，不必重拉。
+  // 切会话时「当前对话」的归属变了 → 重绘 + 重新安排补名。
   // ⚠️ 必须走 installSessionWatch 的订阅，不能只听 popstate —— z.ai 切会话是
   // **pushState**（SPA 导航），popstate 根本不触发。
-  onZaiSessionChange(() => projectPanelController?.render());
+  // ⚠️ 这里用 `backfillNow()` 而不是只 `render()`：新建会话的侧边栏那行**先是临时名**、
+  // 等模型第一次回答完才换成真名，所以要给补名留重试窗口（见该方法的说明）。
+  onZaiSessionChange(() => {
+    projectPanelController?.render();
+    projectPanelController?.backfillNow();
+  });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) projectPanelController?.refresh();
   });

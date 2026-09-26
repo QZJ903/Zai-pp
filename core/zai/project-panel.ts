@@ -18,12 +18,18 @@ import type {
   ProjectContextState,
   ProjectConversation,
 } from '../types';
+import { isPlaceholderProjectConversationTitle } from '../project/title';
+import { ZAI_PROJECT_PANEL_ATTR } from './contracts';
 
 /** 面板、样式与浮层的注入标记。 */
 const PANEL_ID = 'dpp-project-panel';
 const PANEL_STYLE_ID = 'dpp-project-panel-css';
 const MENU_ID = 'dpp-project-panel-menu';
-const PANEL_BOUND_ATTR = 'data-dpp-project-panel';
+/**
+ * 面板根节点与项目 section 的标记属性。真源在 `contracts.ts` —— 模式判定
+ * （`core/zai/mode.ts`）也要用它排除面板子树，见那里的说明。
+ */
+const PANEL_BOUND_ATTR = ZAI_PROJECT_PANEL_ATTR;
 
 /** z.ai 侧边栏根节点（真机实测带 id）。 */
 const SIDEBAR_ID = 'sidebar';
@@ -31,8 +37,18 @@ const SIDEBAR_ID = 'sidebar';
 /** 账号行上的用户菜单按钮 id；面板插在它所属的 `mt-auto` 容器之前。 */
 const USER_MENU_BUTTON_ID = 'nux-user-menu-btn';
 
-/** 单个项目默认展开显示的会话数，超出折叠（与上游取值一致）。 */
+/** 粒度：单个项目默认展开显示的会话数，超出折叠（与上游取值一致）。 */
 const CONVERSATION_LIMIT = 5;
+
+/**
+ * 补名的重试时点（毫秒，相对触发那一刻）。
+ *
+ * 为什么需要延迟重试：新建会话的侧边栏那行**先是临时名**（「新会话」这类占位），
+ * **等模型第一次回答完才换成真名**（真机观察）—— 而那一刻与「DOM 文本真的换掉」
+ * 之间还差一次 Svelte 重渲染。所以每次触发都留两个时点：先立刻看一眼，
+ * 再隔几秒兜一次。**只在触发时排，不做无限轮询。**
+ */
+const BACKFILL_RETRY_DELAYS_MS = [0, 2_500] as const;
 
 /** 面板最大高度：超出后内部滚动，不吃掉历史列表的空间。 */
 const PANEL_MAX_HEIGHT_PX = 240;
@@ -82,6 +98,18 @@ export interface ProjectPanelDependencies {
     conversationId: string;
     title: string;
   }) => Promise<void>;
+  /**
+   * 用会话列表里的真名补上占位标题（`Untitled conversation`）。
+   *
+   * 触发场景：**待绑新会话**绑定发生在首条消息那一刻，此时侧边栏还没渲染出那一行，
+   * `getCurrentConversationTitle()` 只能返回占位串 —— 而那一刻之后再没有别的回填机会。
+   * 面板挂着时由它补一次。**非占位标题不传**（见调用方）。
+   */
+  backfillConversationTitle: (input: {
+    projectId: string;
+    conversationId: string;
+    title: string;
+  }) => Promise<void>;
   setPending: (projectId: string | null) => Promise<void>;
   /** 当前打开的会话（从地址栏读，拿不到返回 null）。 */
   getCurrentConversation: () => ProjectPanelConversation | null;
@@ -98,6 +126,13 @@ export interface ProjectPanelController {
   refresh(): void;
   /** 只重绘（用缓存状态）—— 供「当前会话变了」这类不涉及状态拉取的变化调用。 */
   render(): void;
+  /**
+   * 立刻安排一次「补占位标题」检查，并**允许对当前会话重试**。
+   *
+   * 会话变化时必须调它：第一次补名尝试往往早于侧边栏渲染出那一行（拿不到真名就跳过），
+   * 所以切到这条会话时要再给一次机会。
+   */
+  backfillNow(): void;
   stop(): void;
 }
 
@@ -111,6 +146,10 @@ export function startProjectPanel(
   let openMenuConversationId: string | null = null;
   /** 当前菜单锚在哪个按钮上；用来区分「点别处」和「点锚点自己」。 */
   let openMenuAnchor: HTMLElement | null = null;
+  /** 已尝试补过名的会话 id（防同一条反复补；失败会从集合里移出以便下次重试）。 */
+  const backfillAttemptedIds = new Set<string>();
+  /** 待执行的补名重试定时器（会话切换时整体取消）。 */
+  const backfillTimers = new Set<ReturnType<typeof setTimeout>>();
   const expandedProjectIds = new Set<string>();
   const showAllProjectIds = new Set<string>();
 
@@ -147,6 +186,89 @@ export function startProjectPanel(
       if (!next.projects.some((project) => project.id === id)) showAllProjectIds.delete(id);
     }
     render();
+    backfillPlaceholderTitles();
+  };
+
+  /**
+   * 给**占位标题**的会话补上会话列表里的真名。
+   *
+   * 为什么需要：**待绑新会话**的绑定发生在首条消息那一刻（`bindPendingProject`），
+   * 此时页面还没跳 `/c/<id>`、侧边栏也没渲染出那一行 → `getCurrentConversationTitle()`
+   * 只能返回占位串（如实传、不编造）。而那一刻之后再没有别的回填机会
+   * （`refreshProjectConversation` 只在**已归入项目**的会话上跑，刚绑的那条正是它）。
+   * 面板挂着时由它补一次。
+   *
+   * ⚠️ **只处理占位标题** —— 判定与后台共用 `isPlaceholderProjectConversationTitle`：
+   * 已有真名（含用户重命名）的会话一律不动，否则改名会被顺手覆盖回去。
+   * ⚠️ 只在**侧边栏那行真的存在**时才发（`getCurrentConversation` 给的就是它），
+   * 拿不到真名就不发 —— 避免把占位串原样回写、白跑一次 IPC。
+   */
+  const backfillPlaceholderTitles = (): void => {
+    if (stopped || !state) return;
+    const current = dependencies.getCurrentConversation();
+    if (!current) return;
+    if (isPlaceholderProjectConversationTitle(current.title)) return;
+    const membership = state.conversations.find(
+      (item) => item.conversationId === current.conversationId,
+    );
+    if (!membership) return;
+    if (!isPlaceholderProjectConversationTitle(membership.title)) return;
+    if (backfillAttemptedIds.has(current.conversationId)) return;
+    void sendTitleBackfill(membership.projectId, current.conversationId, current.title);
+  };
+
+  /**
+   * 发一次补名，并登记「这条会话已尝试过」。失败时解除登记，让下次还有机会。
+   *
+   * ⚠️ **登记不等于永久放弃** —— `backfillNow()` 会先清掉当前会话的登记再重试，
+   * 因为第一次尝试通常发生在侧边栏还没渲染出那一行的时候（那次会被跳过、不登记）。
+   */
+  const sendTitleBackfill = (
+    projectId: string,
+    conversationId: string,
+    title: string,
+  ): void => {
+    backfillAttemptedIds.add(conversationId);
+    void dependencies.backfillConversationTitle({ projectId, conversationId, title })
+      .then(() => {
+        if (stopped) return;
+        refresh();
+      })
+      .catch(() => {
+        // 补名失败静默：它不改变任何用户可见的状态（标题仍是占位串，与补名之前一样）。
+        backfillAttemptedIds.delete(conversationId);
+      });
+  };
+
+  /**
+   * 安排一次补名：立刻试一次 + 隔几秒再试一次（见 `BACKFILL_RETRY_DELAYS_MS`）。
+   *
+   * ⚠️ 调用时机是「**有人告诉我们该看看了**」—— 切会话、或某一轮回答结束。
+   * 不做轮询：新建会话的真名要等首答完成才出现，而「回答结束」本身就是那个信号
+   * （内容脚本在 `handleResponseComplete` 里调它）。
+   */
+  const backfillNow = (): void => {
+    if (stopped) return;
+    clearBackfillTimers();
+    const current = dependencies.getCurrentConversation();
+    // 重新给这条会话一次机会：上次可能因为侧边栏那行还是临时名而被跳过（未登记）。
+    if (current) backfillAttemptedIds.delete(current.conversationId);
+    for (const delay of BACKFILL_RETRY_DELAYS_MS) {
+      if (delay === 0) {
+        backfillPlaceholderTitles();
+        continue;
+      }
+      const timer = setTimeout(() => {
+        backfillTimers.delete(timer);
+        backfillPlaceholderTitles();
+      }, delay);
+      backfillTimers.add(timer);
+    }
+  };
+
+  const clearBackfillTimers = (): void => {
+    for (const timer of backfillTimers) clearTimeout(timer);
+    backfillTimers.clear();
   };
 
   /** 改动类操作：等后台确认后重拉状态，而不是先改本地。 */
@@ -583,10 +705,12 @@ export function startProjectPanel(
   return {
     refresh,
     render,
+    backfillNow,
     stop() {
       if (stopped) return;
       stopped = true;
       observer.disconnect();
+      clearBackfillTimers();
       closeConversationMenu();
       document.getElementById(PANEL_ID)?.remove();
       document.getElementById(PANEL_STYLE_ID)?.remove();

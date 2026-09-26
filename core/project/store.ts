@@ -155,9 +155,16 @@ async function addConversationToProjectState(
       ...state.conversations.filter((item) => item.conversationId !== conversationId),
       conversation,
     ],
-    // 纯改名（titleEdited）不该有绑定副作用：清 pending 是「加入会话」的语义，
-    // 而改名只是改标题 —— 顺手清掉会让用户刚设的「下一条新会话用此项目」莫名失效。
-    pendingProjectId: manualTitle !== null
+    // 清 pending 的语义是「这次**真的**新绑了一条会话进来」，所以只有
+    // **本次新加入**（`existing === undefined`）才消费它。
+    //
+    // ⚠️ 另外两类写入都不能清：
+    // - **纯改名**（`titleEdited`）—— 改名只是改标题，顺手清掉会让用户刚设的
+    //   「下一条新会话用此项目」莫名失效；
+    // - **自动补名**（走 ADD、不带 `titleEdited`，但会话已在项目里）—— 它是
+    //   **后台自动发生**的，用户没做任何动作。按「已在项目里且 pending 同项目就清」
+    //   写，会把用户刚设的 pending 静默取消掉。
+    pendingProjectId: existing !== undefined || manualTitle !== null
       ? state.pendingProjectId
       : (state.pendingProjectId === projectId ? null : state.pendingProjectId),
   });
@@ -240,31 +247,44 @@ export async function getProjectForConversation(conversationId: string): Promise
   return state.projects.find((project) => project.id === membership.projectId) ?? null;
 }
 
+/**
+ * 挑选与呈现规则全部在 `prompt-context.ts`（纯函数，无 IO）—— 内容脚本也要用同一套，
+ * 否则就成了「生产端与判定端各写一遍」。这里只做转出 + 一层带 IO 的包装。
+ */
+export {
+  formatProjectPromptContext,
+  selectConversationProjectPrompt,
+  selectPendingProjectPrompt,
+  type ProjectPromptSelection,
+} from './prompt-context';
+import {
+  selectConversationProjectPrompt,
+  type ProjectPromptSelection,
+} from './prompt-context';
+
+/**
+ * 某会话的**项目指令上下文**：只在项目确实写了指令时非空。
+ *
+ * ⚠️ **这个函数的 null 不等于「没有项目」** —— 项目只存了记忆、没写指令时它也是 null。
+ * 需要「项目归属」用 `getProjectForConversation`；需要「喂给请求的 projectId」用
+ * `selectConversationProjectPrompt`（它的 selection 在没写指令时仍带 projectId）。
+ */
 export async function getProjectPromptContextForConversation(
   conversationId: string,
 ): Promise<ProjectPromptContext | null> {
   const state = await getProjectContextState();
-  const membership = state.conversations.find((item) => item.conversationId === conversationId);
-  if (!membership) return null;
-  const project = state.projects.find((item) => item.id === membership.projectId);
+  const selection: ProjectPromptSelection | null = selectConversationProjectPrompt(state, conversationId);
+  if (!selection?.context) return null;
+  // 防御性分支：`selection` 只在项目存在时才产生，所以这里理论上拿得到。
+  // 保留它不是死代码洁癖的反面 —— 它把「selection 与 state 必须同源」这个前提
+  // 显式写出来，将来若 selection 变成异步/缓存来源，这一步就是唯一的安全网。
+  const project = state.projects.find((item) => item.id === selection.projectId);
   if (!project) return null;
-  const instructions = project.instructions.trim();
-  if (!instructions) return null;
   return {
     projectId: project.id,
     projectName: project.name,
-    instructions,
+    instructions: project.instructions.trim(),
   };
-}
-
-export function formatProjectPromptContext(context: ProjectPromptContext): string {
-  return [
-    '## Project Context',
-    `Project: ${context.projectName}`,
-    '',
-    '### Project Instructions',
-    context.instructions,
-  ].join('\n').trim();
 }
 
 function requiredTrimmed(value: unknown, label: string): string {
@@ -281,10 +301,18 @@ function normalizeConversationTitle(value: unknown): string {
   return title;
 }
 
+/**
+ * 标题只在**已有值是占位串**时才接受页面回填 —— 即「**只针对占位标题做补名**」。
+ *
+ * ⚠️ **不能写成「incoming 优先」**（那会让每次回填都覆盖已有标题）：
+ * 会话一旦有了真名字（自动回填来的、或用户重命名来的），就不该再被会话列表里的名字
+ * 改写 —— 否则用户在项目里改的名字会被下一轮对话顺手改回去。
+ * 占位串（`Untitled conversation`）是唯一的例外：它不是「名字」，是「还没有名字」。
+ */
 function selectConversationTitle(incoming: unknown, existing: unknown): string {
-  const incomingTitle = typeof incoming === 'string' ? incoming.trim() : '';
-  if (incomingTitle && !isPlaceholderProjectConversationTitle(incomingTitle)) return incomingTitle;
-  return normalizeConversationTitle(existing);
+  const existingTitle = normalizeConversationTitle(existing);
+  if (existingTitle !== PROJECT_UNTITLED_CONVERSATION) return existingTitle;
+  return normalizeConversationTitle(incoming);
 }
 
 function normalizeConversationUrl(value: unknown): string {

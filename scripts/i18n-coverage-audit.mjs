@@ -44,6 +44,26 @@ const lineAllowlist = [
     reason: 'default GLM conversation title suffix detection',
   },
   {
+    path: 'core/project/title.ts',
+    includes: "'新会话'",
+    reason: 'z.ai new-conversation placeholder title matching data — must match the title the page writes into chats/new verbatim, so it cannot be locale-backed (same class as the local-skill scoring keywords below)',
+  },
+  {
+    path: 'core/project/title.ts',
+    includes: "'新对话'",
+    reason: 'z.ai new-conversation placeholder title matching data — must match the title the page writes into chats/new verbatim, so it cannot be locale-backed (same class as the local-skill scoring keywords below)',
+  },
+  {
+    path: 'core/project/title.ts',
+    includes: "'新聊天'",
+    reason: "z.ai new-conversation placeholder title matching data — this is the zh-CN projection of the page's own `New Chat` label, which is what `chat.title` actually carries on session creation (same class as the local-skill scoring keywords below)",
+  },
+  {
+    path: 'core/project/title.ts',
+    includes: "'新任务'",
+    reason: "z.ai new-conversation placeholder title matching data — this is the zh-CN projection of the page's own `New Task` label, used for agent-mode session creation (same class as the local-skill scoring keywords below)",
+  },
+  {
     path: 'scripts/automation-contract-smoke.mjs',
     includes: "['Agent', '任务']",
     reason: 'negative assertion checks README public-doc leakage fragments',

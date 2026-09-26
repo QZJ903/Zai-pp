@@ -20,11 +20,17 @@ export {
 } from './codec';
 
 export {
+  formatProjectPromptContext,
+  selectConversationProjectPrompt,
+  selectPendingProjectPrompt,
+  type ProjectPromptSelection,
+} from './prompt-context';
+
+export {
   addConversationToProject,
   bindPendingProjectConversation,
   createProjectContext,
   stageDeleteProjectContextAndMemoriesAlreadyLocked,
-  formatProjectPromptContext,
   getProjectContextState,
   getProjectContextStateAlreadyLocked,
   getProjectForConversation,

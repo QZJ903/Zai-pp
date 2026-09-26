@@ -14,6 +14,7 @@ import {
 } from '../../../core/project/codec';
 import { PROJECT_CONTEXT_SCHEMA_VERSION } from '../../../core/project/types';
 import { ZAI_WEB_ORIGIN } from '../../../core/zai/contracts';
+import { buildZaiChatSessionUrl } from '../../../core/zai/chat-session';
 import { createRequestGenerationFence } from '../async-state';
 import MemoryCard from '../components/MemoryCard';
 import MemoryForm from '../components/MemoryForm';
@@ -549,7 +550,7 @@ export default function ProjectsPage() {
                   <div className="space-y-1.5">
                     {projectConversations.map((conversation) => (
                       <div key={conversation.conversationId} className="flex items-center gap-2 rounded-lg border px-2.5 py-2" style={{ borderColor: 'var(--ds-border)', background: 'var(--ds-bg)' }}>
-                        <a href={conversation.url || '#'} target="_blank" rel="noreferrer" className="flex-1 min-w-0 text-[11px] truncate" style={{ color: 'var(--ds-text)' }}>
+                        <a href={conversationHref(conversation)} target="_blank" rel="noreferrer" className="flex-1 min-w-0 text-[11px] truncate" style={{ color: 'var(--ds-text)' }}>
                           {conversation.title}
                         </a>
                         <span className="text-[10px] shrink-0" style={{ color: 'var(--ds-text-tertiary)' }}>
@@ -620,6 +621,19 @@ function FolderIcon() {
       <path strokeLinecap="round" strokeLinejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
     </svg>
   );
+}
+
+/**
+ * 会话链接的目标。
+ *
+ * ⚠️ **不能直接 `href={conversation.url || '#'}`** —— `url` 可能是空的（旧记录、
+ * 或同步快照导入），那时链接会落到 `'#'`，点开是「侧边栏的放大版」而不是会话。
+ * 拿不到同源 url 就按会话 id 拼（`buildZaiChatSessionUrl` 是唯一真源）。
+ */
+function conversationHref(conversation: ProjectConversation): string {
+  const stored = conversation.url;
+  if (stored && isZaiPageUrl(stored)) return stored;
+  return buildZaiChatSessionUrl(conversation.conversationId);
 }
 
 /**

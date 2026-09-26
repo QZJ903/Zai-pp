@@ -26,6 +26,7 @@ export const sidepanel = {
       namePlaceholder: '标题',
       contentPlaceholder: '内容',
       tagsPlaceholder: '标签（逗号分隔）',
+      requiredFields: '请填写标题与内容。',
     },
     types: {
       user: '用户',
