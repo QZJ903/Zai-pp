@@ -33,7 +33,7 @@ const typesSource = readFileSync('core/types.ts', 'utf8');
 const inventorySource = readFileSync('docs/compatibility/runtime-command-inventory.md', 'utf8');
 const COMMAND_GROUP_SECTIONS = [
   ['Group A — Typed seam bootstrap (2)', 2],
-  ['Group B — Persistence, library, and local preferences (51)', 51],
+  ['Group B — Persistence, library, and local preferences (50)', 50],
   ['Group C — MCP, tool, browser control, and sandbox (32)', 32],
   ['Group D — GLM and export (5)', 5],
   ['Group E — Automation, usage, models, and lifecycle closure (12)', 12],
@@ -81,10 +81,10 @@ describe('runtime command compatibility contract', () => {
       expect(commands, heading).toHaveLength(count);
       return commands;
     });
-    expect(groupedLedger).toHaveLength(102);
+    expect(groupedLedger).toHaveLength(101);
     expect(new Set(groupedLedger).size).toBe(groupedLedger.length);
     expectSortedEqual(groupedLedger, live);
-    expect(registryEntries).toHaveLength(104);
+    expect(registryEntries).toHaveLength(103);
     for (const contract of liveContracts) {
       const registered = RUNTIME_COMMAND_CONTRACTS[contract.type as keyof typeof RUNTIME_COMMAND_CONTRACTS];
       expect(registered.owner).toBe(getRuntimeCommandOwner(contract.type));

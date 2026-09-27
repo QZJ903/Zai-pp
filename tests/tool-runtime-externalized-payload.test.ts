@@ -1,22 +1,13 @@
-import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ARTIFACT_PERSISTENCE_CONTRACT } from '../core/artifact/schema';
 import type { ToolCall } from '../core/tool/types';
-import { deleteIndexedDb } from './helpers/indexeddb';
 
 let storage: Record<string, unknown>;
-let artifact: typeof import('../core/artifact');
-let artifactStore: typeof import('../core/artifact/store');
 let externalizedPayload: typeof import('../core/tool/externalized-payload');
 let executeRuntimeToolCall: typeof import('./helpers/production-tool-runtime')['executeRuntimeToolCall'];
-let indexedDbFactory: IDBFactory;
 
 beforeEach(async () => {
   vi.resetModules();
   storage = {};
-  indexedDbFactory = new IDBFactory();
-  vi.stubGlobal('indexedDB', indexedDbFactory);
-  vi.stubGlobal('IDBKeyRange', IDBKeyRange);
   vi.stubGlobal('chrome', {
     storage: {
       local: {
@@ -36,13 +27,9 @@ beforeEach(async () => {
   });
   externalizedPayload = await import('../core/tool/externalized-payload');
   ({ executeRuntimeToolCall } = await import('./helpers/production-tool-runtime'));
-  artifact = await import('../core/artifact');
-  artifactStore = await import('../core/artifact/store');
 });
 
-afterEach(async () => {
-  artifactStore.db.close();
-  await deleteIndexedDb(ARTIFACT_PERSISTENCE_CONTRACT.databaseName);
+afterEach(() => {
   vi.unstubAllGlobals();
 });
 
@@ -56,66 +43,67 @@ describe('runtime externalized tool payloads', () => {
     expect(laterWrite).not.toHaveBeenCalled();
   });
 
-  it('rehydrates and executes large artifact payloads from chunk storage', async () => {
-    const callId = 'call-artifact-1';
+  it('rehydrates and executes a large payload from chunk storage', async () => {
+    const callId = 'call-external-1';
     const payloadText = JSON.stringify({
-      filename: 'reports/long.md',
-      content: '# Report\n' + '内容段落\n'.repeat(20000),
-      mimeType: 'text/markdown',
+      name: 'release-notes',
+      description: 'Draft release notes for the user to review.',
+      instructions: 'Write concise release notes.\n' + '细节段落\n'.repeat(20000),
     });
 
-    externalizedPayload.appendExternalizedToolPayloadChunk(callId, 'artifact_create', payloadText.slice(0, 50000));
-    externalizedPayload.appendExternalizedToolPayloadChunk(callId, 'artifact_create', payloadText.slice(50000));
+    externalizedPayload.appendExternalizedToolPayloadChunk(callId, 'skill_draft_create', payloadText.slice(0, 50000));
+    externalizedPayload.appendExternalizedToolPayloadChunk(callId, 'skill_draft_create', payloadText.slice(50000));
 
     const result = await executeRuntimeToolCall({
       id: callId,
-      name: 'artifact_create',
-      invocationName: 'artifact_create',
-      payload: externalizedPayload.createExternalizedToolPayload(callId, 'artifact_create'),
-      raw: '<artifact_create>\n...[payload externalized]\n</artifact_create>',
+      name: 'skill_draft_create',
+      invocationName: 'skill_draft_create',
+      payload: externalizedPayload.createExternalizedToolPayload(callId, 'skill_draft_create'),
+      raw: '<skill_draft_create>\n...[payload externalized]\n</skill_draft_create>',
     } satisfies ToolCall, 'manual_chat', 'en');
 
     expect(result.ok).toBe(true);
-    const output = result.output as { artifactId: string; filename: string };
-    expect(output.filename).toBe('reports/long.md');
-    const record = await artifact.getArtifact(output.artifactId);
-    expect(record?.content.startsWith('# Report')).toBe(true);
+    const output = result.output as { kind: string; draft: { name: string; instructions: string } };
+    expect(output.kind).toBe('skill_draft');
+    expect(output.draft.name).toBe('release-notes');
+    expect(output.draft.instructions.startsWith('Write concise release notes.')).toBe(true);
   });
 
   it('returns a retryable parse result without provider I/O when the payload chunk is missing', async () => {
-    const callId = 'call-artifact-missing';
+    const callId = 'call-external-missing';
 
     const result = await executeRuntimeToolCall({
       id: callId,
-      name: 'artifact_create',
-      invocationName: 'artifact_create',
-      payload: externalizedPayload.createExternalizedToolPayload(callId, 'artifact_create'),
-      raw: '<artifact_create>...[payload externalized]</artifact_create>',
+      name: 'skill_draft_create',
+      invocationName: 'skill_draft_create',
+      payload: externalizedPayload.createExternalizedToolPayload(callId, 'skill_draft_create'),
+      raw: '<skill_draft_create>...[payload externalized]</skill_draft_create>',
     } satisfies ToolCall, 'manual_chat', 'en');
 
     expect(result).toMatchObject({
       ok: false,
       error: { code: 'tool_call_external_payload_missing', retryable: true },
     });
-    expect(await artifact.getArtifacts()).toEqual([]);
+    // 没拿到 payload 就不该产出结构化结果（渲染层靠这个形状决定要不要画卡片）。
+    expect(result.output).toBeUndefined();
   });
 
   it('returns the released external-payload parse code without provider I/O for malformed chunks', async () => {
-    const callId = 'call-artifact-malformed';
-    externalizedPayload.appendExternalizedToolPayloadChunk(callId, 'artifact_create', '{"filename":');
+    const callId = 'call-external-malformed';
+    externalizedPayload.appendExternalizedToolPayloadChunk(callId, 'skill_draft_create', '{"name":');
 
     const result = await executeRuntimeToolCall({
       id: callId,
-      name: 'artifact_create',
-      invocationName: 'artifact_create',
-      payload: externalizedPayload.createExternalizedToolPayload(callId, 'artifact_create'),
-      raw: '<artifact_create>...[payload externalized]</artifact_create>',
+      name: 'skill_draft_create',
+      invocationName: 'skill_draft_create',
+      payload: externalizedPayload.createExternalizedToolPayload(callId, 'skill_draft_create'),
+      raw: '<skill_draft_create>...[payload externalized]</skill_draft_create>',
     } satisfies ToolCall, 'manual_chat', 'en');
 
     expect(result).toMatchObject({
       ok: false,
       error: { code: 'tool_call_external_payload_invalid', retryable: false },
     });
-    expect(await artifact.getArtifacts()).toEqual([]);
+    expect(result.output).toBeUndefined();
   });
 });

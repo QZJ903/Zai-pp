@@ -4,8 +4,7 @@
  * 只从「注入给模型的目录」中隐藏，执行 catalog 与 provider 注册表原样保留
  * （老会话里的 XML 仍要能解析执行）。分两类：
  *
- * 1. **永远裁掉**：artifact / skill 起草 / 记忆导入 / 本地 skill 预览 —— 这些能力由
- *    服务端或侧边栏自己的 UI 流程承担，模型调不到。
+ * 1. **永远裁掉**：本地 Skill 预览 —— 见下面那份名单的说明。
  * 2. **按条件裁掉 web 工具**（web_search / web_fetch）：
  *    - agent 模式恒裁 —— 其联网由服务端沙箱原生承担。
  *    - chat 模式：侧边栏的联网开关关着、且本轮也没开页面原生联网时裁掉；
@@ -16,12 +15,19 @@
 
 import type { ToolDescriptor } from '../tool/types';
 
-/** 永远裁掉的工具：能力由服务端或独立 UI 流程承担，模型调不到。 */
+/**
+ * 永远裁掉的工具：能力由独立 UI 流程承担，模型调不到。
+ *
+ * ⚠️ **只留 `local_skill_preview`** —— 它是本地 Skill 导入的**传输层**（由扩展自己
+ * 经 Shell MCP 调用，见 `core/skill/local-importer.ts`），对模型退役
+ * （`core/shell/contracts.ts` 的 `EXPOSED_SHELL_TOOL_NAMES` 同样把它摘掉）。
+ * 用户能用它，模型不能。
+ *
+ * ⚠️ **Skill 起草与记忆导入预览不在此列** —— 它们的结果是**结构化对象**，
+ * 由 `core/ui/tool-result-renderer.ts` 渲染成带「保存 / 导入」按钮的卡片，
+ * 需要模型主动调才可能出现。放进这份名单等于把它们的入口掐掉。
+ */
 const ALWAYS_FILTERED_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'artifact_create',
-  'artifact_bundle_create',
-  'skill_draft_create',
-  'memory_import_preview',
   'local_skill_preview',
 ]);
 

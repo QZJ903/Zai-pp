@@ -81,8 +81,6 @@ describe('tool provider routing', () => {
       'memory_delete',
       'web_search',
       'web_fetch',
-      'artifact_create',
-      'artifact_bundle_create',
       'skill_draft_create',
       'memory_import_preview',
       'mcp_discover',

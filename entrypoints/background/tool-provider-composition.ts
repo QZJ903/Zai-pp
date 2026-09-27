@@ -13,11 +13,6 @@ import {
 import { getAllMcpServers } from '../../core/mcp/store';
 import type { Memory, NewMemory } from '../../core/types';
 import {
-  ARTIFACT_TOOL_PROVIDER,
-  createArtifactToolDescriptors,
-  executeArtifactToolCall,
-} from '../../core/artifact';
-import {
   SKILL_CREATOR_TOOL_PROVIDER,
   createSkillCreatorToolDescriptors,
   executeSkillCreatorToolCall,
@@ -92,11 +87,6 @@ export function createProductionToolProviderRegistry(): ToolProviderRegistry {
       // 这个 provider 只负责给出描述符与执行，不做可见性裁剪。
       ({ locale }) => createWebSearchToolDescriptors(locale),
       (call, _descriptor, { locale, signal }) => executeWebSearchToolCall(call, locale, { signal }),
-    ),
-    createLocalProvider(
-      ARTIFACT_TOOL_PROVIDER.id,
-      ({ locale }) => createArtifactToolDescriptors(locale),
-      (call, _descriptor, { locale }) => executeArtifactToolCall(call, locale),
     ),
     createLocalProvider(
       SKILL_CREATOR_TOOL_PROVIDER.id,

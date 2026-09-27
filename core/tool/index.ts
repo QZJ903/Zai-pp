@@ -86,15 +86,6 @@ export {
 } from './web-fetch-permission';
 
 export {
-  ARTIFACT_TOOL_NAMES,
-  ARTIFACT_TOOL_PROVIDER,
-  createArtifactToolDescriptors,
-  executeArtifactToolCall,
-  isArtifactToolName,
-  type ArtifactToolName,
-} from '../artifact';
-
-export {
   SKILL_CREATOR_TOOL_NAMES,
   SKILL_CREATOR_TOOL_PROVIDER,
   createSkillCreatorToolDescriptors,

@@ -105,16 +105,6 @@ export type {
 } from './project/types';
 
 export type {
-  ArtifactFile,
-  ArtifactKind,
-  ArtifactOutput,
-  ArtifactPreviewMode,
-  ArtifactRecord,
-  ArtifactRuntimeLanguage,
-  ArtifactView,
-} from './artifact/types';
-
-export type {
   PromptInjectionSettings,
   PromptPresetCadence,
   ForcedResponseLanguage,
@@ -511,7 +501,6 @@ export type MessageAction =
   | { type: 'SET_PENDING_PROJECT_CONTEXT'; payload: { projectId: string | null } }
   | { type: 'GET_CURRENT_GLM_CONVERSATION' }
   | { type: 'GET_PROJECT_CONTEXT_FOR_CONVERSATION'; payload: { conversation: ProjectConversationInput; bindPendingProject?: boolean } }
-  | { type: 'GET_ARTIFACT'; payload: { id: string } }
   | { type: 'GET_CONFIG' }
   | { type: 'RECORD_USAGE_TURN'; payload: UsageTurnInputType }
   | { type: 'GET_USAGE_SUMMARY'; payload?: { rangeDays?: UsageRangeDaysType } }

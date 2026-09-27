@@ -1,5 +1,4 @@
 import type {
-  ArtifactRecord,
   BackgroundConfig,
   CurrentGLMConversation,
   GitHubSkillImportResult,
@@ -217,10 +216,6 @@ export interface PersistenceRuntimeCommandContracts {
   GET_PROJECT_CONTEXT_FOR_CONVERSATION: {
     request: DeclaredRuntimeRequest<'GET_PROJECT_CONTEXT_FOR_CONVERSATION'>;
     response: { projectId: string; context: string | null } | null;
-  };
-  GET_ARTIFACT: {
-    request: DeclaredRuntimeRequest<'GET_ARTIFACT'>;
-    response: { ok: true; artifact: ArtifactRecord } | { ok: false; error: 'artifact_not_found' };
   };
   GET_BACKGROUND: {
     request: DeclaredRuntimeRequest<'GET_BACKGROUND'>;

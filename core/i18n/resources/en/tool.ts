@@ -108,6 +108,14 @@ export const tool = {
     memoryDescription: 'Whether the Skill should receive memory context',
     draftReady: 'Skill draft ready',
     invalidDraft: 'Invalid Skill draft',
+    result: {
+      saveSkill: 'Save Skill',
+      saving: 'Saving...',
+      saved: 'Saved',
+      saveFailed: 'Save failed',
+      memoryOn: 'memory on',
+      memoryOff: 'memory off',
+    },
   },
   memoryImport: {
     title: 'Preview memory import',
@@ -118,6 +126,14 @@ export const tool = {
     previewReady: 'Memory import preview ready ({count})',
     previewDetail: '{duplicates} duplicates skipped, {rejected} rejected',
     failed: 'Memory import failed',
+    result: {
+      metaSummary: '{count} memories · {duplicates} duplicates',
+      importMemories: 'Import memories',
+      importing: 'Importing...',
+      imported: 'Imported {count}',
+      importFailed: 'Import failed',
+      invalidDrafts: 'These drafts cannot be imported',
+    },
   },
   mcpCapability: {
     providerName: 'MCP Capability Catalog',

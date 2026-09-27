@@ -92,7 +92,6 @@ import {
   setPendingProjectContext,
   updateProjectContext,
 } from '../core/project';
-import { getArtifact } from '../core/artifact';
 import {
   deleteSavedItem,
   getAllSavedItems,
@@ -352,7 +351,6 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         getProjectForConversation,
         getProjectPromptContextForConversation,
         formatProjectPromptContext,
-        getArtifact,
         notifyCommittedProjectContextUpdate,
         notifyCommittedStateUpdate,
       },

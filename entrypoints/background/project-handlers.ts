@@ -3,7 +3,6 @@ import {
   type RuntimeCommandHandler,
 } from '../../core/messaging/runtime-command-registry';
 import type {
-  ArtifactRecord,
   CurrentGLMConversation,
   ProjectContext,
   ProjectContextCreateInput,
@@ -36,7 +35,6 @@ export interface ProjectRuntimeHandlerDependencies {
   getProjectForConversation(conversationId: string): Promise<ProjectContext | null>;
   getProjectPromptContextForConversation(conversationId: string): Promise<ProjectPromptContext | null>;
   formatProjectPromptContext(context: ProjectPromptContext): string;
-  getArtifact(id: string): Promise<ArtifactRecord | null>;
   notifyCommittedProjectContextUpdate(excludeTabId?: number): Promise<void>;
   notifyCommittedStateUpdate(excludeTabId?: number): Promise<void>;
 }
@@ -103,12 +101,6 @@ export function createProjectRuntimeHandlers(
           ? dependencies.formatProjectPromptContext(projectContext)
           : null,
       };
-    }),
-    definePersistencePayloadRuntimeCommandHandler('GET_ARTIFACT', async (payload) => {
-      const artifact = await dependencies.getArtifact(payload.id);
-      return artifact
-        ? { ok: true as const, artifact }
-        : { ok: false as const, error: 'artifact_not_found' as const };
     }),
   ]);
 }

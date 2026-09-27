@@ -75,7 +75,7 @@ function normalizeRestoredOutput(output: JsonValue | undefined): JsonValue | und
 function isKnownStructuredToolOutput(value: JsonValue): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const kind = value.kind;
-  return kind === 'artifact' || kind === 'skill_draft' || kind === 'memory_import_preview';
+  return kind === 'skill_draft' || kind === 'memory_import_preview';
 }
 
 function safeStringify(value: JsonValue): string {

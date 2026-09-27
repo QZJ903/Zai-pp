@@ -78,7 +78,9 @@ function createDependencies(
     addConversation: vi.fn(async () => {}),
     removeConversation: vi.fn(async () => {}),
     renameConversation: vi.fn(async () => {}),
+    resolveConversationTitle: vi.fn(async () => null),
     backfillConversationTitle: vi.fn(async () => {}),
+    onBackfillDiagnostic: vi.fn(),
     setPending: vi.fn(async () => {}),
     getCurrentConversation: () => null,
     openConversation: vi.fn(),
@@ -804,6 +806,111 @@ describe('zai project panel', () => {
     });
   });
 
+  it('prefers the server-side title over the sidebar row', async () => {
+    mountSidebar();
+    const backfillConversationTitle = vi.fn(async () => {});
+    const resolveConversationTitle = vi.fn(async () => '服务端真名');
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      backfillConversationTitle,
+      resolveConversationTitle,
+      // 侧边栏那行**还是临时名**（页面没重拉列表）—— 服务端有真名就该用它。
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '新聊天', url: '' }),
+    }));
+    await flush(4);
+
+    expect(resolveConversationTitle).toHaveBeenCalledWith('c1');
+    expect(backfillConversationTitle).toHaveBeenCalledWith({
+      projectId: 'p1',
+      conversationId: 'c1',
+      title: '服务端真名',
+    });
+  });
+
+  it('falls back to the sidebar row when the server has no title yet', async () => {
+    mountSidebar();
+    const backfillConversationTitle = vi.fn(async () => {});
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      backfillConversationTitle,
+      resolveConversationTitle: vi.fn(async () => null),
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '侧边栏真名', url: '' }),
+    }));
+    await flush(4);
+
+    expect(backfillConversationTitle).toHaveBeenCalledWith({
+      projectId: 'p1',
+      conversationId: 'c1',
+      title: '侧边栏真名',
+    });
+  });
+
+  it('retries the backfill when the server had no title yet, then succeeds', async () => {
+    mountSidebar();
+    const backfillConversationTitle = vi.fn(async () => {});
+    // 第一次解析还没生成好标题 → null；第二次才有。
+    const resolveConversationTitle = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('服务端真名');
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      backfillConversationTitle,
+      resolveConversationTitle,
+      // 侧边栏也还没有真名 —— 这次解析应当**解除登记**，让下次还有机会。
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '新聊天', url: '' }),
+    }));
+    await flush(4);
+    expect(backfillConversationTitle).not.toHaveBeenCalled();
+
+    controller.backfillNow();
+    await flush(4);
+
+    expect(backfillConversationTitle).toHaveBeenCalledWith({
+      projectId: 'p1',
+      conversationId: 'c1',
+      title: '服务端真名',
+    });
+  });
+
   it('leaves a conversation that already has a real title alone', async () => {
     mountSidebar();
     const backfillConversationTitle = vi.fn(async () => {});
@@ -1081,5 +1188,319 @@ describe('zai project panel', () => {
     await flush(4);
 
     expect(backfillConversationTitle).not.toHaveBeenCalled();
+  });
+
+  it('does not start a second resolve while one is still in flight', async () => {
+    mountSidebar();
+    // 手控的解析：第一次调用挂住不返回，模拟「网络还在飞」。
+    // ⚠️ 用对象属性而不是裸变量 —— TS 的控制流分析看不到闭包里的赋值，
+    // 会把裸变量收窄成 `null` 并让 `?.()` 报「never 不可调用」。
+    const gate: { release: (() => void) | null } = { release: null };
+    let calls = 0;
+    const resolveConversationTitle = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        await new Promise<void>((resolve) => { gate.release = resolve; });
+      }
+      return '服务端真名';
+    });
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      resolveConversationTitle,
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '新聊天', url: '' }),
+    }));
+    await flush(4);
+    expect(resolveConversationTitle).toHaveBeenCalledTimes(1);
+
+    // 解析还在飞时又来一次触发（切会话 + 回答结束几乎同时到是常态）——
+    // 不能因为「清掉已尝试登记」而再发一个并发解析。
+    controller.backfillNow();
+    await flush(4);
+
+    expect(resolveConversationTitle).toHaveBeenCalledTimes(1);
+
+    gate.release?.();
+    await flush(4);
+  });
+
+  it('reports why a backfill was skipped, so "not triggered" is distinguishable', async () => {
+    mountSidebar();
+    const diagnostics: Array<{ kind: string; reason?: string }> = [];
+    // 会话不在任何项目里 —— 补名对它无意义。
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [],
+    }), {
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '真实会话名', url: '' }),
+      onBackfillDiagnostic: (event) => { diagnostics.push(event); },
+    }));
+    await flush(4);
+
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({ kind: 'skipped', reason: 'not-in-project' }),
+    );
+  });
+
+  it('reports a skip when the stored title is already real', async () => {
+    mountSidebar();
+    const diagnostics: Array<{ kind: string; reason?: string }> = [];
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: '真名',
+          titleEdited: true,
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '真名', url: '' }),
+      onBackfillDiagnostic: (event) => { diagnostics.push(event); },
+    }));
+    await flush(4);
+
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({ kind: 'skipped', reason: 'already-real-title' }),
+    );
+  });
+
+  it('reports an unresolved attempt when neither source has a title yet', async () => {
+    mountSidebar();
+    const diagnostics: Array<{ kind: string; serverTitle?: string | null }> = [];
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      resolveConversationTitle: vi.fn(async () => null),
+      // 侧边栏也还是临时名。
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '新聊天', url: '' }),
+      onBackfillDiagnostic: (event) => { diagnostics.push(event); },
+    }));
+    await flush(4);
+
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({ kind: 'unresolved', serverTitle: null }),
+    );
+  });
+
+  it('reports the resolved source and the sent backfill', async () => {
+    mountSidebar();
+    const diagnostics: Array<{ kind: string; from?: string; title?: string }> = [];
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      resolveConversationTitle: vi.fn(async () => '服务端真名'),
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '新聊天', url: '' }),
+      onBackfillDiagnostic: (event) => { diagnostics.push(event); },
+    }));
+    await flush(4);
+
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({ kind: 'resolved', from: 'server', title: '服务端真名' }),
+    );
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({ kind: 'sent', title: '服务端真名' }),
+    );
+  });
+  it('does not write a title back for a conversation removed while the resolve was in flight', async () => {
+    mountSidebar();
+    // 解析挂住不返回 —— 模拟「网络还在飞」。
+    const gate: { release: (() => void) | null } = { release: null };
+    let calls = 0;
+    const resolveConversationTitle = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        await new Promise<void>((resolve) => { gate.release = resolve; });
+      }
+      return '服务端真名';
+    });
+    const backfillConversationTitle = vi.fn(async () => {});
+    // 用户在这个窗口里把会话移出了项目 → 后续 loadState 不再含该 membership。
+    let removed = false;
+    const withMembership = createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    });
+    const withoutMembership = createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [],
+    });
+    controller = startProjectPanel(createDependencies(withMembership, {
+      loadState: async () => (removed ? withoutMembership : withMembership),
+      resolveConversationTitle,
+      backfillConversationTitle,
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '新聊天', url: '' }),
+    }));
+    await flush(4);
+    expect(resolveConversationTitle).toHaveBeenCalledTimes(1);
+
+    // 窗口内移除 + 让面板重拉状态。
+    removed = true;
+    controller.refresh();
+    await flush(4);
+
+    // 放行那次在飞解析 —— 写回走 ADD（按会话 id upsert），发之前必须复检归属。
+    gate.release?.();
+    await flush(6);
+
+    expect(backfillConversationTitle).not.toHaveBeenCalled();
+  });
+
+  it('reports a skip once per reason instead of flooding the diagnostic buffer', async () => {
+    mountSidebar();
+    const diagnostics: Array<{ kind: string; reason?: string }> = [];
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [],
+    }), {
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '真实会话名', url: '' }),
+      onBackfillDiagnostic: (event) => { diagnostics.push(event); },
+    }));
+    await flush(4);
+    // 每次 refresh 都会调补名检查 —— 不去重的话同一条 skip 会把 50 槽缓冲填满。
+    controller.refresh();
+    await flush(4);
+    controller.refresh();
+    await flush(4);
+
+    const notInProject = diagnostics.filter(
+      (event) => event.kind === 'skipped' && event.reason === 'not-in-project',
+    );
+    expect(notInProject).toHaveLength(1);
+  });
+  it('does not flood the buffer with repeated unresolved reports', async () => {
+    // ⚠️ 只对 `skipped` 去重是不够的 —— 拿不到 token 时 `resolve` 立即返回 null
+    // （不发请求、也没缓存可命中），于是每次 refresh 都报一条 `unresolved`。
+    // 50 槽缓冲照样被填满，只是填的内容从 skip 换成了 unresolved。
+    mountSidebar();
+    const diagnostics: Array<{ kind: string }> = [];
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      resolveConversationTitle: vi.fn(async () => null),
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '新聊天', url: '' }),
+      onBackfillDiagnostic: (event) => { diagnostics.push(event); },
+    }));
+    await flush(4);
+    controller.refresh();
+    await flush(4);
+    controller.refresh();
+    await flush(4);
+
+    const unresolved = diagnostics.filter((event) => event.kind === 'unresolved');
+    expect(unresolved).toHaveLength(1);
+  });
+
+  it('reports again once the conclusion actually changes', async () => {
+    // 去重的判据是「与上次**完全相同**」—— 结论一变就要放行，否则
+    // 「拿不到 → 拿到了」这种关键转折会被吞掉。
+    // ⚠️ **这条钉的是「kind 变化要放行」**，钉不住「签名字段一个都不能漏」
+    // （当前的事件集合里，同一会话同一 kind 而字段不同的情形不可复现 ——
+    // `unresolved` 恒为 null/null，`resolved`/`sent` 之后状态就变了会走别的分支）。
+    // 签名的实现用整条事件的 JSON，是为了将来新增字段时不必再想一遍。
+    mountSidebar();
+    const diagnostics: Array<{ kind: string; serverTitle?: string | null }> = [];
+    let serverTitle: string | null = null;
+    controller = startProjectPanel(createDependencies(createState({
+      projects: [
+        { id: 'p1', name: 'Work', description: '', instructions: '', createdAt: 1, updatedAt: 1 },
+      ],
+      conversations: [
+        {
+          conversationId: 'c1',
+          projectId: 'p1',
+          title: 'Untitled conversation',
+          url: '',
+          addedAt: 1,
+          lastSeenAt: 5,
+        },
+      ],
+    }), {
+      resolveConversationTitle: vi.fn(async () => serverTitle),
+      getCurrentConversation: () => ({ conversationId: 'c1', title: '新聊天', url: '' }),
+      onBackfillDiagnostic: (event) => { diagnostics.push(event); },
+    }));
+    await flush(4);
+    expect(diagnostics.filter((event) => event.kind === 'unresolved')).toHaveLength(1);
+
+    // 服务端这次给出了真名 —— 结论变了，必须报出来。
+    serverTitle = '服务端真名';
+    controller.backfillNow();
+    await flush(4);
+
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({ kind: 'resolved', title: '服务端真名' }),
+    );
   });
 });

@@ -134,7 +134,6 @@ export const RUNTIME_COMMAND_CONTRACTS = {
   SET_PENDING_PROJECT_CONTEXT: typedCommand('payload-decoded', 'ack'),
   GET_CURRENT_GLM_CONVERSATION: typedCommand('none', 'status-or-domain-error'),
   GET_PROJECT_CONTEXT_FOR_CONVERSATION: typedCommand('payload-decoded', 'nullable-value'),
-  GET_ARTIFACT: typedCommand('payload-decoded', 'status-or-domain-error'),
   GET_CONFIG: typedCommand('none', 'value'),
   WHATS_NEW_DISMISSED: typedCommand('none', 'ack', 'background-error', 'live-only'),
   EXPORT_DIAGNOSTIC_LOGS: typedCommand('none', 'value', 'background-error', 'live-only'),

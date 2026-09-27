@@ -6,21 +6,22 @@ import {
 import type { ToolExecutionRecord } from '../core/types';
 
 describe('tool execution restore storage', () => {
-  it('keeps structured artifact output as an object when persisting restore data', () => {
+  it('keeps structured skill draft output as an object when persisting restore data', () => {
     const execution: ToolExecutionRecord = {
-      name: 'artifact_create',
+      name: 'skill_draft_create',
       result: {
         ok: true,
-        summary: 'File ready',
-        detail: 'demo.html (32 bytes)',
+        summary: 'Skill draft ready',
+        detail: 'audit',
         output: {
-          kind: 'artifact',
-          artifactId: 'artifact-1',
-          artifactKind: 'file',
-          filename: 'demo.html',
-          mimeType: 'text/html',
-          sizeBytes: 32,
-          view: { previewMode: 'html', language: 'html' },
+          kind: 'skill_draft',
+          draft: {
+            name: 'audit',
+            description: 'Review contrast-sensitive output.',
+            instructions: 'Check dark theme text.',
+            memoryEnabled: true,
+          },
+          warnings: [],
         },
       },
     };
@@ -28,28 +29,24 @@ describe('tool execution restore storage', () => {
     const stored = sanitizeToolExecutionForRestoreStorage(execution);
 
     expect(stored.result.output).toMatchObject({
-      kind: 'artifact',
-      filename: 'demo.html',
-      view: { previewMode: 'html', language: 'html' },
+      kind: 'skill_draft',
+      draft: { name: 'audit' },
     });
     expect(typeof stored.result.output).toBe('object');
   });
 
-  it('rehydrates legacy JSON-stringified artifact outputs for rich renderers', () => {
+  it('rehydrates legacy JSON-stringified structured outputs for rich renderers', () => {
     const execution: ToolExecutionRecord = {
-      name: 'artifact_create',
+      name: 'memory_import_preview',
       result: {
         ok: true,
-        summary: 'File ready',
-        detail: 'demo.html (32 bytes)',
+        summary: 'Memory import preview ready (2)',
+        detail: '0 duplicates skipped, 0 rejected',
         output: JSON.stringify({
-          kind: 'artifact',
-          artifactId: 'artifact-legacy',
-          artifactKind: 'file',
-          filename: 'demo.html',
-          mimeType: 'text/html',
-          sizeBytes: 32,
-          view: { previewMode: 'html', language: 'html' },
+          kind: 'memory_import_preview',
+          memories: [{ name: 'alpha' }, { name: 'beta' }],
+          duplicates: 0,
+          rejected: 0,
         }),
       },
     };
@@ -57,9 +54,9 @@ describe('tool execution restore storage', () => {
     const restored = normalizeRestoredToolExecution(execution);
 
     expect(restored.result.output).toMatchObject({
-      kind: 'artifact',
-      artifactId: 'artifact-legacy',
-      filename: 'demo.html',
+      kind: 'memory_import_preview',
+      duplicates: 0,
+      rejected: 0,
     });
   });
 

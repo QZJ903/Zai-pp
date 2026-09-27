@@ -84,6 +84,41 @@ export interface ProjectPanelLabels {
   age: (timestamp: number) => string;
 }
 
+/**
+ * 补名决策的诊断事件。
+ *
+ * 补名有四个前置条件（面板在跑 / 有当前会话 / 会话已归入项目 / 存储里是占位标题），
+ * 任一不满足就静默跳过 —— 没有这份记录就分不清「没触发」与「触发了但拿不到」。
+ */
+export type ProjectPanelBackfillDiagnostic =
+  | {
+    kind: 'skipped';
+    reason: 'stopped' | 'state-not-loaded' | 'no-current-conversation' | 'not-in-project'
+      | 'already-real-title' | 'already-attempted';
+    conversationId?: string;
+  }
+  /** 服务端与侧边栏都没给出真名 —— 解除登记，等下次触发。 */
+  | {
+    kind: 'unresolved';
+    conversationId: string;
+    serverTitle: string | null;
+    sidebarTitle: string | null;
+  }
+  | { kind: 'resolved'; conversationId: string; title: string; from: 'server' | 'sidebar' }
+  | { kind: 'sent'; conversationId: string; title: string }
+  | { kind: 'failed'; conversationId: string };
+
+/**
+ * 一条诊断的**状态签名**：字段完全相同就是「没有新信息」，不必重复上报。
+ *
+ * ⚠️ **任何字段变化都要让它不同** —— 签名一旦漏掉某个字段，那个字段的变化
+ * 就会被去重吞掉（比如 `unresolved` 的 `sidebarTitle` 从 null 变成真名）。
+ * 所以这里用 JSON 序列化整条事件，而不是手挑几个字段拼串。
+ */
+function describeBackfillEvent(event: ProjectPanelBackfillDiagnostic): string {
+  return JSON.stringify(event);
+}
+
 export interface ProjectPanelDependencies {
   /** 读项目状态；失败返回 null（面板保留上一次的展示）。 */
   loadState: () => Promise<ProjectContextState | null>;
@@ -99,11 +134,19 @@ export interface ProjectPanelDependencies {
     title: string;
   }) => Promise<void>;
   /**
-   * 用会话列表里的真名补上占位标题（`Untitled conversation`）。
+   * 从**服务端**取某条会话的真名（`GET /api/v1/chats/{id}`）。
+   *
+   * 拿不到、或服务端给的仍是占位串时返回 `null` —— 调用方会退回侧边栏那行。
+   * ⚠️ **不要改成读 DOM**：侧边栏只是服务端列表的投影，而页面收到 `chat:title`
+   * 后那一次重拉不保证成立；读一个没更新的源，改多少次触发时点都一样。
+   */
+  resolveConversationTitle: (conversationId: string) => Promise<string | null>;
+  /**
+   * 用真名补上占位标题（`Untitled conversation`）。
    *
    * 触发场景：**待绑新会话**绑定发生在首条消息那一刻，此时侧边栏还没渲染出那一行，
-   * `getCurrentConversationTitle()` 只能返回占位串 —— 而那一刻之后再没有别的回填机会。
-   * 面板挂着时由它补一次。**非占位标题不传**（见调用方）。
+   * 标题只能落成占位串 —— 而那一刻之后再没有别的回填机会。面板挂着时由它补一次。
+   * **非占位标题不传**（见调用方）。
    */
   backfillConversationTitle: (input: {
     projectId: string;
@@ -119,6 +162,13 @@ export interface ProjectPanelDependencies {
   startNewConversation: (projectId: string) => void;
   getLabels: () => ProjectPanelLabels;
   onError?: (error: unknown) => void;
+  /**
+   * 补名决策的诊断上报（见 `ProjectPanelBackfillDiagnostic`）。
+   *
+   * ⚠️ **不是调试残留** —— 补名的四个前置条件都是静默 return，这条链路出问题时
+   * 「补不上名」与「压根没尝试」在外部表现完全相同。
+   */
+  onBackfillDiagnostic?: (event: ProjectPanelBackfillDiagnostic) => void;
 }
 
 export interface ProjectPanelController {
@@ -148,6 +198,15 @@ export function startProjectPanel(
   let openMenuAnchor: HTMLElement | null = null;
   /** 已尝试补过名的会话 id（防同一条反复补；失败会从集合里移出以便下次重试）。 */
   const backfillAttemptedIds = new Set<string>();
+  /**
+   * **正在解析中**的会话 id。
+   *
+   * 与 `backfillAttemptedIds` 分开的理由：那个是「已尝试过」的**持久**标记（只有
+   * 下次触发才清），这个是「此刻在飞」的**瞬时**标记（解析一结束就清）。
+   * 两者混用会出问题 —— `backfillNow()` 无条件清「已尝试」登记时，若那一刻正好有
+   * 一次解析在飞，本次触发会再发一个并发解析，两次各报一次结果。
+   */
+  const backfillInFlightIds = new Set<string>();
   /** 待执行的补名重试定时器（会话切换时整体取消）。 */
   const backfillTimers = new Set<ReturnType<typeof setTimeout>>();
   const expandedProjectIds = new Set<string>();
@@ -190,55 +249,185 @@ export function startProjectPanel(
   };
 
   /**
-   * 给**占位标题**的会话补上会话列表里的真名。
+   * 补名决策的诊断上报。
+   *
+   * ⚠️ **必须有**：补名有四个前置条件，任一不满足就**静默 return** ——
+   * 从外面看只是「没补上名」，分不清是「没触发」还是「触发了但拿不到」。
+   * 每次尝试都把结果与**跳过原因**记下来，一轮就能定位。
+   *
+   * ⚠️⚠️ **只在「状态真的变了」时上报** —— `applyState` 每次 refresh 都会调补名，
+   * 而 refresh 的触发源很密（visibilitychange、`PROJECT_CONTEXT_UPDATED`、切会话、
+   * 每轮回答结束）。每次都报的话，同一个结论会把诊断缓冲（50 槽）填满，把真正
+   * 有用的「解析到了什么」挤出去 —— 与「一眼定位」的意图相抵。
+   *
+   * ⚠️ **不能只对 `skipped` 去重** —— `unresolved` 同样会洪泛：拿不到 token 时
+   * `resolve` 立即返回 null（不发请求、也没缓存可命中），于是每次 refresh 都报一条
+   * `unresolved` + 一条解析器的 `no-token`。所以要按**整条结论**去重，而不是只按
+   * 跳过原因。
+   *
+   * 去重的判据是「这次结论与上次**完全相同**」：任何一个字段变了就放行
+   * （比如 `sidebarTitle` 从 null 变成真名、跳过原因从 `not-in-project` 变成
+   * `already-real-title`）。诊断缓冲表达的是**状态**，不是流水账。
+   */
+  const lastReportedSignature = new Map<string, string>();
+  const reportBackfill = (event: ProjectPanelBackfillDiagnostic): void => {
+    const signature = describeBackfillEvent(event);
+    if (lastReportedSignature.get(event.conversationId ?? '') === signature) return;
+    lastReportedSignature.set(event.conversationId ?? '', signature);
+    dependencies.onBackfillDiagnostic?.(event);
+  };
+
+  /**
+   * 给**占位标题**的会话补上真名。
    *
    * 为什么需要：**待绑新会话**的绑定发生在首条消息那一刻（`bindPendingProject`），
-   * 此时页面还没跳 `/c/<id>`、侧边栏也没渲染出那一行 → `getCurrentConversationTitle()`
-   * 只能返回占位串（如实传、不编造）。而那一刻之后再没有别的回填机会
+   * 此时页面还没跳 `/c/<id>`、侧边栏也没渲染出那一行 → 标题只能落成占位串
+   * （如实传、不编造）。而那一刻之后再没有别的回填机会
    * （`refreshProjectConversation` 只在**已归入项目**的会话上跑，刚绑的那条正是它）。
    * 面板挂着时由它补一次。
    *
    * ⚠️ **只处理占位标题** —— 判定与后台共用 `isPlaceholderProjectConversationTitle`：
    * 已有真名（含用户重命名）的会话一律不动，否则改名会被顺手覆盖回去。
-   * ⚠️ 只在**侧边栏那行真的存在**时才发（`getCurrentConversation` 给的就是它），
-   * 拿不到真名就不发 —— 避免把占位串原样回写、白跑一次 IPC。
+   * ⚠️ 真名从**服务端**取（`resolveConversationTitle`），侧边栏那行只作兜底 ——
+   * 它是服务端列表的投影，而页面收到 `chat:title` 后那一次重拉不保证成立。
    */
   const backfillPlaceholderTitles = (): void => {
-    if (stopped || !state) return;
+    if (stopped) {
+      reportBackfill({ kind: 'skipped', reason: 'stopped' });
+      return;
+    }
+    if (!state) {
+      // ⚠️ **与「面板停了」分开报** —— 状态还没加载完在启动期很常见，而两者
+      // 被去重固化成一条之后，用错的标签会一直留在诊断里。
+      reportBackfill({ kind: 'skipped', reason: 'state-not-loaded' });
+      return;
+    }
     const current = dependencies.getCurrentConversation();
-    if (!current) return;
-    if (isPlaceholderProjectConversationTitle(current.title)) return;
+    if (!current) {
+      reportBackfill({ kind: 'skipped', reason: 'no-current-conversation' });
+      return;
+    }
     const membership = state.conversations.find(
       (item) => item.conversationId === current.conversationId,
     );
-    if (!membership) return;
-    if (!isPlaceholderProjectConversationTitle(membership.title)) return;
-    if (backfillAttemptedIds.has(current.conversationId)) return;
-    void sendTitleBackfill(membership.projectId, current.conversationId, current.title);
+    if (!membership) {
+      // 会话不在任何项目里 —— 补名对它无意义（没有可写的归属）。
+      reportBackfill({
+        kind: 'skipped',
+        reason: 'not-in-project',
+        conversationId: current.conversationId,
+      });
+      return;
+    }
+    if (!isPlaceholderProjectConversationTitle(membership.title)) {
+      // 存储里已经是真名 —— 不用补，也**绝不能**补（会覆盖用户改过的名字）。
+      reportBackfill({
+        kind: 'skipped',
+        reason: 'already-real-title',
+        conversationId: current.conversationId,
+      });
+      return;
+    }
+    if (backfillAttemptedIds.has(current.conversationId)) {
+      reportBackfill({
+        kind: 'skipped',
+        reason: 'already-attempted',
+        conversationId: current.conversationId,
+      });
+      return;
+    }
+    void resolveTitleThenBackfill(membership.projectId, current.conversationId);
+  };
+
+  /**
+   * 取真名 → 回填。先问服务端，拿不到再退回侧边栏那行。
+   *
+   * ⚠️ **登记在解析开始时就打**（不是发出去才打）：一次解析要走一个网络往返，
+   * 期间可能有并发的触发（切会话 + 回答结束几乎同时到），不提前登记会重复发。
+   * **解析完发现没有真名就解除登记**，让下一次触发还有机会 —— 第一次尝试往往
+   * 早于服务端生成好标题。
+   */
+  const resolveTitleThenBackfill = async (
+    projectId: string,
+    conversationId: string,
+  ): Promise<void> => {
+    backfillAttemptedIds.add(conversationId);
+    backfillInFlightIds.add(conversationId);
+    let title: string | null = null;
+    try {
+      title = await dependencies.resolveConversationTitle(conversationId);
+    } catch {
+      title = null;
+    } finally {
+      backfillInFlightIds.delete(conversationId);
+    }
+    if (stopped) return;
+    const resolved = title ?? readSidebarTitle(conversationId);
+    if (!resolved) {
+      reportBackfill({
+        kind: 'unresolved',
+        conversationId,
+        serverTitle: title,
+        sidebarTitle: readSidebarTitle(conversationId),
+      });
+      backfillAttemptedIds.delete(conversationId);
+      return;
+    }
+    reportBackfill({
+      kind: 'resolved',
+      conversationId,
+      title: resolved,
+      from: title ? 'server' : 'sidebar',
+    });
+    await sendTitleBackfill(projectId, conversationId, resolved);
+  };
+
+  /** 侧边栏那行的标题；拿不到或本身是占位串时返回 null。 */
+  const readSidebarTitle = (conversationId: string): string | null => {
+    const current = dependencies.getCurrentConversation();
+    if (!current || current.conversationId !== conversationId) return null;
+    return isPlaceholderProjectConversationTitle(current.title) ? null : current.title;
   };
 
   /**
    * 发一次补名，并登记「这条会话已尝试过」。失败时解除登记，让下次还有机会。
    *
+   * ⚠️ **发之前必须复检归属** —— `projectId` 是**触发时**捕获的，而写回走
+   * `ADD_CONVERSATION_TO_PROJECT`（按会话 id **upsert**）。中间隔着一次解析往返，
+   * 用户在这个窗口里把会话移出项目时，这次写入会把它**加回来**。
+   * **不能指望后台兜**：`ADD` 的语义就是 upsert，它无从知道用户的意图。
+   *
    * ⚠️ **登记不等于永久放弃** —— `backfillNow()` 会先清掉当前会话的登记再重试，
-   * 因为第一次尝试通常发生在侧边栏还没渲染出那一行的时候（那次会被跳过、不登记）。
+   * 因为第一次尝试通常发生在服务端还没生成好标题的时候（那次会被跳过、不登记）。
    */
-  const sendTitleBackfill = (
+  const sendTitleBackfill = async (
     projectId: string,
     conversationId: string,
     title: string,
-  ): void => {
-    backfillAttemptedIds.add(conversationId);
-    void dependencies.backfillConversationTitle({ projectId, conversationId, title })
-      .then(() => {
-        if (stopped) return;
-        refresh();
-      })
-      .catch(() => {
-        // 补名失败静默：它不改变任何用户可见的状态（标题仍是占位串，与补名之前一样）。
-        backfillAttemptedIds.delete(conversationId);
-      });
+  ): Promise<void> => {
+    if (!stillInProject(projectId, conversationId)) {
+      reportBackfill({ kind: 'skipped', reason: 'not-in-project', conversationId });
+      backfillAttemptedIds.delete(conversationId);
+      return;
+    }
+    try {
+      await dependencies.backfillConversationTitle({ projectId, conversationId, title });
+      reportBackfill({ kind: 'sent', conversationId, title });
+      if (stopped) return;
+      refresh();
+    } catch {
+      // 补名失败静默：它不改变任何用户可见的状态（标题仍是占位串，与补名之前一样）。
+      reportBackfill({ kind: 'failed', conversationId });
+      backfillAttemptedIds.delete(conversationId);
+    }
   };
+
+  /** 这条会话此刻仍属于该项目吗（用**当前**状态，不是触发时捕获的那个）。 */
+  const stillInProject = (projectId: string, conversationId: string): boolean => (
+    state?.conversations.some(
+      (item) => item.conversationId === conversationId && item.projectId === projectId,
+    ) === true
+  );
 
   /**
    * 安排一次补名：立刻试一次 + 隔几秒再试一次（见 `BACKFILL_RETRY_DELAYS_MS`）。
@@ -246,13 +435,22 @@ export function startProjectPanel(
    * ⚠️ 调用时机是「**有人告诉我们该看看了**」—— 切会话、或某一轮回答结束。
    * 不做轮询：新建会话的真名要等首答完成才出现，而「回答结束」本身就是那个信号
    * （内容脚本在 `handleResponseComplete` 里调它）。
+   *
+   * ⚠️ **清登记必须避让在飞解析** —— 见 `backfillInFlightIds` 的说明。
    */
   const backfillNow = (): void => {
     if (stopped) return;
     clearBackfillTimers();
     const current = dependencies.getCurrentConversation();
-    // 重新给这条会话一次机会：上次可能因为侧边栏那行还是临时名而被跳过（未登记）。
-    if (current) backfillAttemptedIds.delete(current.conversationId);
+    // 重新给这条会话一次机会：上次可能因为服务端还没生成好标题而被跳过（未登记）。
+    // ⚠️ **但正在解析时不能清** —— 清掉会让本次触发再发一个解析，与在飞那次并发跑、
+    // 各报一次结果（表现为诊断里两条时间戳完全相同的条目，请求虽被在飞去重挡住，
+    // 但 IPC 与诊断都是双份）。
+    if (current && !backfillInFlightIds.has(current.conversationId)) {
+      backfillAttemptedIds.delete(current.conversationId);
+      // 重新给了机会 → 允许下次「已尝试过」再报一次（见 reportBackfill 的去重说明）。
+      lastReportedSignature.delete(current.conversationId);
+    }
     for (const delay of BACKFILL_RETRY_DELAYS_MS) {
       if (delay === 0) {
         backfillPlaceholderTitles();

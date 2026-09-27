@@ -108,6 +108,14 @@ export const tool = {
     memoryDescription: '是否给这个 Skill 注入记忆上下文',
     draftReady: 'Skill 草稿已就绪',
     invalidDraft: 'Skill 草稿无效',
+    result: {
+      saveSkill: '保存 Skill',
+      saving: '保存中...',
+      saved: '已保存',
+      saveFailed: '保存失败',
+      memoryOn: '记忆开',
+      memoryOff: '记忆关',
+    },
   },
   memoryImport: {
     title: '预览记忆导入',
@@ -118,6 +126,14 @@ export const tool = {
     previewReady: '记忆导入预览已就绪（{count}）',
     previewDetail: '跳过 {duplicates} 条重复，拒绝 {rejected} 条',
     failed: '记忆导入失败',
+    result: {
+      metaSummary: '{count} 条记忆 · {duplicates} 条重复',
+      importMemories: '导入记忆',
+      importing: '导入中...',
+      imported: '已导入 {count} 条',
+      importFailed: '导入失败',
+      invalidDrafts: '这些草稿无法导入',
+    },
   },
   mcpCapability: {
     providerName: 'MCP 能力目录',

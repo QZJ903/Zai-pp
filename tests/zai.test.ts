@@ -412,7 +412,7 @@ describe('zai model-facing filter', () => {
     expect(filtered.map((d) => d.name)).toEqual(['memory_save']);
   });
 
-  it('filters skill_draft/memory_import/local_skill_preview out of the model catalog', () => {
+  it('keeps skill_draft/memory_import in the model catalog and filters local_skill_preview out', () => {
     const descriptors = [
       mk('shell_exec', 'shell_exec'),
       mk('skill_draft_create', 'skill_draft_create'),
@@ -420,6 +420,13 @@ describe('zai model-facing filter', () => {
       mk('local_skill_preview', 'local_skill_preview'),
     ];
     const filtered = filterZaiModelFacingToolDescriptors(descriptors);
-    expect(filtered.map((d) => d.name)).toEqual(['shell_exec']);
+    // Skill 起草与记忆导入预览必须对模型可见 —— 它们的结果要渲染成带
+    // 「保存 / 导入」按钮的卡片，模型不调就永远不会出现。
+    // local_skill_preview 相反：它是本地 Skill 导入的传输层，只由扩展自己调用。
+    expect(filtered.map((d) => d.name)).toEqual([
+      'shell_exec',
+      'skill_draft_create',
+      'memory_import_preview',
+    ]);
   });
 });

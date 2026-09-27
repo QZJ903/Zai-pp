@@ -1,13 +1,13 @@
 export const RUNTIME_TOPOLOGY = {
-  liveCommands: 102,
-  declaredActions: 76,
-  shared: 74,
+  liveCommands: 101,
+  declaredActions: 75,
+  shared: 73,
   liveOnly: 28,
   declaredOnly: 2,
-  readsPayload: 72,
+  readsPayload: 71,
   ignoresPayload: 30,
   directPayloadCasts: 0,
-  decodedPayloads: 67,
+  decodedPayloads: 66,
   delegatedPayloads: 0,
 } as const;
 
@@ -74,14 +74,14 @@ export const RUNTIME_RESPONSE_FIXTURES = [
   {
     name: 'domain rejection',
     family: 'domain-error',
-    response: { ok: false, error: 'artifact_not_found' },
+    response: { ok: false, error: 'memory_not_found' },
   },
   {
     name: 'status or domain rejection',
     family: 'status-or-domain-error',
     response: [
-      { ok: true, artifact: { id: 'artifact-contract-1' } },
-      { ok: false, error: 'artifact_not_found' },
+      { ok: true, ids: [7, 8], count: 2 },
+      { ok: false, error: 'invalid_memories' },
     ],
   },
   {

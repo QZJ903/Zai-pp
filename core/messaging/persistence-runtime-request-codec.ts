@@ -296,9 +296,6 @@ export const PERSISTENCE_RUNTIME_PAYLOAD_DECODERS: PersistenceRuntimePayloadDeco
     );
     return typedPayload<'GET_PROJECT_CONTEXT_FOR_CONVERSATION'>({ ...payload, conversation });
   },
-  GET_ARTIFACT(value) {
-    return decodeNamedRecord<'GET_ARTIFACT'>(value, 'GET_ARTIFACT.payload', 'id');
-  },
   SAVE_BACKGROUND(value) {
     const payload = recordValue(value, 'SAVE_BACKGROUND.payload');
     booleanValue(payload.enabled, 'SAVE_BACKGROUND.payload.enabled');

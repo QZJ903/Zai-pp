@@ -90,6 +90,7 @@ import { decodeProjectContextState } from '../core/project/codec';
 import { selectPendingProjectPrompt } from '../core/project/prompt-context';
 import { PROJECT_UNTITLED_CONVERSATION } from '../core/project/title';
 import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
+import { createZaiConversationTitleResolver } from '../core/zai/conversation-title';
 import { readZaiSidebarAgentMode, zaiNewConversationPath } from '../core/zai/mode';
 import { isRuntimeFailure, RuntimeCommandError } from '../core/messaging/runtime-response';
 import {
@@ -103,7 +104,10 @@ import {
 } from '../core/zai/contracts';
 import { createToolInvocationCatalog } from '../core/tool/invocation';
 import { MCP_CAPABILITY_TOOL_PROVIDER_ID } from '../core/mcp/capability-contract';
+import { mountToolResultCards } from '../core/ui/tool-result-cards';
+import { injectInjectedThemeStyles, syncInjectedTheme } from '../core/ui/injected-theme';
 import {
+  loadZaiAuthFromStorage,
   mergeZaiAuthFromCapture,
   readZaiUserIdFromToken,
 } from '../core/zai/auth';
@@ -120,8 +124,6 @@ let currentSkillAutoActivation: SkillAutoActivationSettings = DEFAULT_SKILL_AUTO
 let currentActivePreset: SystemPromptPreset | null = null;
 let currentPromptSettings: PromptInjectionSettings = DEFAULT_PROMPT_INJECTION_SETTINGS;
 let currentContentLocale: SupportedLocale = DEFAULT_LOCALE;
-let currentProjectContext: string | null = null;
-let currentProjectId: string | null = null;
 /**
  * 侧边栏「联网搜索」开关的存储值。与「本轮是否开着页面原生联网」取或决定 web 工具
  * 是否进模型目录 —— 任一为真就放行，保证「用户想搜」时一定用扩展自己的搜索。
@@ -288,10 +290,11 @@ function getCurrentChatSessionId(): string | null {
 }
 
 /**
- * 取当前会话的标题。
+ * 取当前会话的标题，**读侧边栏里被选中那一行**。
  *
- * 真源是**侧边栏里被选中那一行**的标题节点（真机实测的 DOM 形状）：
- * `button[data-selected="true"] > … > div.text-left.self-center.min-w-0`。
+ * ⚠️ **这是二手源，只作兜底** —— 侧边栏只是服务端列表的投影：页面收到 WebSocket
+ * 的 `chat:title` 之后还要再重拉一次列表才会换名，而那一跳**不保证每次都成立**。
+ * 需要可靠标题的地方走 `core/zai/conversation-title.ts`（直接问服务端）。
  *
  * ⚠️ **没有 `document.title` 兜底** —— z.ai 的站点标题是固定的
  * 「Z.ai - Advanced AI Chatbot & Agent powered by …」，不随会话变，拿它当会话名
@@ -473,8 +476,12 @@ interface ResolvedProjectAugmentationContext {
  * ⚠️ **title 与 url 都要传**（与上游一致）—— 后台拿它们写进 `ProjectConversation`：
  * - 少了 `title`，绑定那一刻只能落成占位串，且**之后没有别的机会回填**；
  * - 少了 `url`，侧边栏项目页的会话链接会落到空 href。
- * `getCurrentConversationTitle()` 在侧边栏还没渲染出那一行时返回**占位串**，
- * 后台的 `selectConversationTitle` 会拒绝占位串 —— 所以这里如实传即可。
+ *
+ * 标题**用服务端缓存里的值**（`conversationTitleResolver.peek`），**不在这里等网络** ——
+ * 这条是每次发消息都要走的路径，为标题多一个往返不值得。缓存空时退回侧边栏那行
+ * （二手源，但此刻够用），同时**空跑一次解析**给下一轮预热。
+ * 两者都没有就如实传占位串：后台的 `selectConversationTitle` 会拒绝它
+ * （不会被落库，也不会挡住之后拿到的真名）。
  */
 async function resolveProjectContextForRequest(
   chatSessionId: string | null,
@@ -482,19 +489,22 @@ async function resolveProjectContextForRequest(
 ): Promise<ResolvedProjectAugmentationContext | null> {
   if (!chatSessionId) return null;
   try {
+    const cachedTitle = conversationTitleResolver.peek(chatSessionId);
+    if (!cachedTitle) {
+      // 空跑预热：不 await —— 这条路径不为标题阻塞。
+      void conversationTitleResolver.resolve(chatSessionId, 'prewarm');
+    }
     const result = await sendRuntimeMessageStrict<ResolvedProjectAugmentationContext | null>({
       type: 'GET_PROJECT_CONTEXT_FOR_CONVERSATION',
       payload: {
         bindPendingProject,
         conversation: {
           conversationId: chatSessionId,
-          title: getCurrentConversationTitle(),
+          title: cachedTitle ?? getCurrentConversationTitle(),
           url: buildZaiChatSessionUrl(chatSessionId),
         },
       },
     });
-    currentProjectId = result?.projectId ?? null;
-    currentProjectContext = result?.context ?? null;
     return result ?? null;
   } catch (error) {
     if (isExtensionInvalidatedError(error)) invalidateExtensionContext();
@@ -654,7 +664,8 @@ function isContinuableExecution(execution: ToolExecutionRecord): boolean {
   // 与 ds++ 的 selectContinuableToolExecutions 对齐：所有 MCP 工具（含用户自配）
   // + mcp capability + web + browser 都算可续跑；本地执行类工具（shell_/local_file_/python_）
   // 也一并算（它们在 z.ai 里是 Shell Local MCP server 的工具，provider.kind 是 mcp）。
-  // 终态工具（memory_save/update/delete、artifact 等）不在此列 → 自然不可续跑。
+  // 终态工具（memory_save/update/delete、skill_draft_create、memory_import_preview 等）
+  // 不在此列 → 自然不可续跑。
   return Boolean(
     !execution.pending &&
       (execution.provider?.kind === 'mcp' ||
@@ -706,8 +717,11 @@ function augmentPrompt(
     { isAgent, webToolsEnabled: currentWebToolsEnabled, nativeSearchOn },
   );
   const locale = currentContentLocale ?? DEFAULT_LOCALE;
-  const projectId = options?.projectId ?? currentProjectId ?? null;
-  const projectContext = options?.projectContext ?? currentProjectContext ?? null;
+  // 项目上下文**只由调用方显式传入**，没有模块级兜底：两个调用点（首条建会话读待绑项目、
+  // completion 读会话归属）各自拿得到正确的源。用模块状态兜底会让「调用方明确传 null」
+  // 与「调用方没传」变成同一件事，首条建会话于是继承上一个会话的项目。
+  const projectId = options?.projectId ?? null;
+  const projectContext = options?.projectContext ?? null;
   // 项目作用域记忆：只带全局 + 属于当前 project 的 project-scoped 记忆（ds++ filterMemoriesByProjectScope）。
   const scopedMemories = filterMemoriesByProjectScope(currentMemories, projectId);
 
@@ -1514,6 +1528,42 @@ async function handleUsageSnapshot(raw: unknown): Promise<void> {
   }
 }
 
+/**
+ * 卡片动作的两条落库通道（注入给 `core/ui/tool-result-cards`）。
+ *
+ * ⚠️ **命令字面量必须留在本文件**：`tests/runtime-boundary.test.ts` 用 AST 从内容脚本
+ * 抓「实际发出的命令」，与白名单做双向比对。这两个字面量若挪进 `core/ui/`，AST 抓不到
+ * → 白名单不变式红。所以这里只做一层转发，不把命令写进 UI 模块。
+ *
+ * ⚠️ **两者都要判 `ok`，不能只 try/catch** —— 后台的领域失败返回 `{ok:false,error}`
+ * 而不是抛错（见 `sendRuntimeMessageStrict` 那条注释），不判就会把失败当成功。
+ */
+async function saveSkillDraftFromCard(
+  draft: Skill,
+): Promise<{ ok?: boolean; error?: string } | undefined> {
+  try {
+    return await sendRuntimeMessage<{ ok?: boolean; error?: string }>({
+      type: 'SAVE_SKILL',
+      payload: draft,
+    });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function importMemoryDraftsFromCard(
+  memories: unknown[],
+): Promise<{ ok?: boolean; count?: number; error?: string } | undefined> {
+  try {
+    return await sendRuntimeMessage<{ ok?: boolean; count?: number; error?: string }>({
+      type: 'IMPORT_MEMORY_DRAFTS',
+      payload: { memories },
+    });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 async function handleResponseComplete(complete: ZaiResponseComplete): Promise<void> {
   if (!complete?.requestId) return;
   respondedRequestIds.add(complete.requestId);
@@ -1635,6 +1685,14 @@ async function handleResponseComplete(complete: ZaiResponseComplete): Promise<vo
     // 续跑轮每轮更新最终回传正文（方案 §4.1）。
     continuationLoop.finalAssistantText = complete.assistantText;
 
+    // 结构化结果（Skill 起草 / 记忆导入预览）挂成卡片。**尽力而为** ——
+    // 找不到助手消息锚点就不挂，不影响执行链与续跑判定。
+    mountToolResultCards(executedThisTurn, {
+      getLocale: () => currentContentLocale,
+      saveSkill: saveSkillDraftFromCard,
+      importMemories: importMemoryDraftsFromCard,
+    });
+
     // 核心判定：本轮模型有没有「可续跑」的工具。
     const continuable = executedThisTurn.filter(isContinuableExecution);
     if (continuable.length > 0) {
@@ -1709,6 +1767,14 @@ async function handleResponseComplete(complete: ZaiResponseComplete): Promise<vo
       if (execution) executions.push(execution);
     }
   }
+
+  // 结构化结果挂卡片（与续跑轮同一入口）。原生轮是「模型直接答完、不续跑」的形态，
+  // 正是 Skill 起草 / 记忆导入预览这类终态工具最常见的落点。
+  mountToolResultCards(executions, {
+    getLocale: () => currentContentLocale,
+    saveSkill: saveSkillDraftFromCard,
+    importMemories: importMemoryDraftsFromCard,
+  });
 
   const continuable = executions.filter(isContinuableExecution);
   if (continuable.length === 0) {
@@ -2523,6 +2589,60 @@ async function installBackgroundCapability(): Promise<void> {
  * 认不出哪一行是哪个会话）。因此也不隐藏原生列表里的行：那需要行到 id 的映射，
  * 映射错位的表现是「对话从侧边栏消失」，代价远高于「同一对话出现两次」。
  */
+/**
+ * 会话标题的**一手源**（服务端）。模块级单例：解析器内部有成功值缓存与在飞去重，
+ * 每次装面板新建一个会让缓存失效、并发的两次触发各发一个请求。
+ *
+ * ⚠️ 内容脚本在隔离世界，它的 `fetch` **不是**页面那个被我们 hook 过的
+ * `window.fetch` —— 不会被自己的 hook 拦到，所以不需要绕过标记。
+ */
+const conversationTitleResolver = createZaiConversationTitleResolver({
+  loadToken: async () => {
+    const auth = await loadZaiAuthFromStorage();
+    if (auth?.token) return auth.token;
+    // 缓存里没有就现读页面 localStorage（与 refreshZaiAuth 同一条兜底路径）。
+    return typeof localStorage === 'undefined' ? null : localStorage.getItem('token');
+  },
+  fetchImpl: (input, init) => fetch(input, init),
+  onDiagnostic: (event) => {
+    reportTitleLookup(event);
+  },
+});
+
+/**
+ * 标题链路的诊断上报（解析结果 + 补名决策）。
+ *
+ * ⚠️ **不能走 `syncDiagnosticsToMainWorld()`** —— 那个通道的合并是**追加**语义
+ * （`[...current, ...incoming]`）而隔离侧发的是整个数组，每次调用都会把已有条目
+ * 再追加一遍。这条链路触发很密（每次发消息都会问一次标题），走那条路会平方级重复。
+ * 所以单独开一条消息**逐条上报**。
+ */
+function reportTitleLookup(entry: unknown): void {
+  postToMainWorld({ type: 'TITLE_LOOKUP', entry });
+}
+
+/**
+ * 注入 UI 的主题跟随：把 z.ai 页面的 `html.light` / `html.dark` 投影成
+ * `body.dpp-theme-dark` / `dpp-theme-light`。
+ *
+ * ⚠️ **不能只靠 `prefers-color-scheme`** —— 页面主题与系统主题会分叉（页面深色 +
+ * 系统浅色是最常见的一种）。此时若走浅色变量块，卡片用近黑的字配近透明的底，
+ * 落在深色页面上就看不见了。
+ *
+ * ⚠️ **只盯 `class` 属性** —— `attributeFilter: ['class']` 让 observer 忽略页面上
+ * 每秒几十次的其它 DOM 变动（消息流式输出），代价可忽略。
+ */
+function installInjectedThemeWatch(): void {
+  injectInjectedThemeStyles();
+  syncInjectedTheme();
+  const root = document.documentElement;
+  if (!root) return;
+  new MutationObserver(syncInjectedTheme).observe(root, {
+    attributes: true,
+    attributeFilter: ['class'],
+  });
+}
+
 function installProjectPanel(): void {
   const labels = (): ProjectPanelLabels => ({
     title: translate(currentContentLocale, 'content.projectPanel.title'),
@@ -2621,15 +2741,25 @@ function installProjectPanel(): void {
     },
     async backfillConversationTitle({ projectId, conversationId, title }) {
       // 补名走 ADD（按会话 id upsert），**不带 titleEdited** —— 这不是用户改名，
-      // 只是把占位串换成会话列表里的真名；后台的 selectConversationTitle 也只在
-      // 已有值是占位串时才会采用它。
+      // 只是把占位串换成真名；后台的 selectConversationTitle 也只在已有值是
+      // 占位串时才会采用它。
+      //
+      // ⚠️ **url 按会话 id 重拼，不用 `location.href`** —— 补名可能发生在会话已经
+      // 切走之后（`backfillNow` 有 2.5 秒的延迟重试），那时地址栏指向的是**别的**
+      // 会话；写进去会让侧边栏项目页里这条会话的链接指向错误的对话。
       await sendRuntimeMessageStrict({
         type: 'ADD_CONVERSATION_TO_PROJECT',
         payload: {
           projectId,
-          conversation: { conversationId, title, url: location.href },
+          conversation: { conversationId, title, url: buildZaiChatSessionUrl(conversationId) },
         },
       });
+    },
+    async resolveConversationTitle(conversationId) {
+      return conversationTitleResolver.resolve(conversationId, 'panel-backfill');
+    },
+    onBackfillDiagnostic(event) {
+      reportTitleLookup({ ...event, at: Date.now() });
     },
     async setPending(projectId) {
       await sendRuntimeMessageStrict({
@@ -3253,18 +3383,23 @@ export default defineContentScript({
       }
       if (message.type === 'GET_CURRENT_GLM_CONVERSATION') {
         const conversationId = getCurrentChatSessionId();
-        sendResponse(
-          conversationId
-            ? {
-                ok: true,
-                conversation: {
-                  conversationId,
-                  title: getCurrentConversationTitle(),
-                  url: location.href,
-                },
-              }
-            : { ok: false, error: 'no_current_conversation' },
-        );
+        if (!conversationId) {
+          sendResponse({ ok: false, error: 'no_current_conversation' });
+          return true;
+        }
+        // 标题优先问服务端（侧边栏那行是二手源，见 conversationTitleResolver 的说明）；
+        // 拿不到再退回侧边栏，仍拿不到就是占位串 —— 后台的闸门会拒绝它，不会被落库。
+        void (async () => {
+          const resolved = await conversationTitleResolver.resolve(conversationId, 'sidebar-read');
+          sendResponse({
+            ok: true,
+            conversation: {
+              conversationId,
+              title: resolved ?? getCurrentConversationTitle(),
+              url: buildZaiChatSessionUrl(conversationId),
+            },
+          });
+        })();
         return true;
       }
       if (message.type === 'INSERT_PROMPT_TEXT') {
@@ -3330,6 +3465,7 @@ export default defineContentScript({
     installStopObserver();
     installSessionWatch(ctx);
     void installBackgroundCapability();
+    installInjectedThemeWatch();
     installProjectPanel();
 
     await loadAndSyncRuntimeState();

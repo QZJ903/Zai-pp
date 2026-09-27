@@ -8,7 +8,7 @@ describe('external payload authorization cache', () => {
     const binding = {
       grantId: 'grant-1',
       callId: 'call-1',
-      invocationName: 'artifact_create',
+      invocationName: 'skill_draft_create',
       subject: makeSubject(),
     };
     cache.remember(binding, 2_000, 1_000);
@@ -24,7 +24,7 @@ describe('external payload authorization cache', () => {
     const binding = {
       grantId: 'grant-1',
       callId: 'call-1',
-      invocationName: 'artifact_create',
+      invocationName: 'skill_draft_create',
       subject: makeSubject(),
     };
     cache.remember(binding, 2_000, 1_000);
@@ -38,7 +38,7 @@ describe('external payload authorization cache', () => {
     const first = {
       grantId: 'grant-1',
       callId: 'call-1',
-      invocationName: 'artifact_create',
+      invocationName: 'skill_draft_create',
       subject: makeSubject(),
     };
     const second = { ...first, callId: 'call-2' };
