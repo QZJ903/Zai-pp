@@ -14,7 +14,7 @@
 
 import { DEFAULT_LOCALE, translate, type SupportedLocale } from '../i18n/background';
 import type { Skill, ToolCardResult } from '../types';
-import { injectInjectedThemeStyles } from './injected-theme';
+import { injectInjectedThemeStyles, syncInjectedTheme } from './injected-theme';
 
 export type ToolResultRendererInput = {
   target: HTMLElement;
@@ -312,8 +312,15 @@ function createSmallButton(text: string): HTMLButtonElement {
 
 const RESULT_STYLE_ID = 'dpp-result-css';
 
+/**
+ * 变量块与主题同步都在这里自己调一次，不依赖内容脚本启动时的
+ * `installInjectedThemeWatch()` —— 那样卡片就隐式依赖「谁先谁后」，顺序一变
+ * 所有 `var(--dpp-ui-*)` 都会解析成空值（深色页面上表现为卡片整体看不见）。
+ * 两处调用都是幂等的（样式节点按 id 去重、同步是纯赋值），重复调用没有代价。
+ */
 function ensureResultStyles(): void {
   injectInjectedThemeStyles();
+  syncInjectedTheme();
   if (document.getElementById(RESULT_STYLE_ID)) return;
   const style = document.createElement('style');
   style.id = RESULT_STYLE_ID;

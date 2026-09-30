@@ -1,24 +1,20 @@
+/**
+ * MCP 的活体往返冒烟：起一个本地 mock MCP server，走真实 HTTP + JSON-RPC，
+ * 验证 `initialize` / `tools/list` / `tools/call` 三条方法以及本脚本自己的
+ * XML 工具调用提取与剥离。
+ *
+ * ⚠️ **不要在此复刻续跑提示词的文案** —— 手抄一份拼成仿制提示词、再断言自己那份，
+ * 断言只能证明副本没变，测不到真源；两份文案会各自演进且没有任何报错。
+ * 续跑提示词的契约由 `tests/zai-continuation-prompt.test.ts` 对着真源测。
+ *
+ * ⚠️ **本脚本不 import 任何 `core/` 模块**（只依赖 `node:http` 与 `node:assert`），
+ * 所以它验证的是「MCP 传输形状 + 本脚本的解析」这一层，不覆盖扩展内的执行链。
+ */
 import http from 'node:http';
 import assert from 'node:assert/strict';
 
 const TOOL_NAME = 'echo';
 const INVOCATION_NAME = 'mcp_mock_echo';
-const PROMPT_COPY = {
-  en: {
-    runner: 'You are now the GLM++ managed automation continuation runner, taking over the next execution steps in the web chat.',
-    task: 'Keep advancing the same original user task until it is complete, deliverable, or blocked by an unrecoverable issue.',
-    results: 'These are the MCP tool results that were just executed automatically. Continue completing the user task based on these results.',
-    enough: 'If the results are enough, give the final answer directly. Only continue calling available MCP tools when more information, verification, or file changes are truly needed.',
-    noPseudo: 'Do not output pseudo tool-call JSON. When a tool call is needed, output only executable XML tool tags.',
-  },
-  'zh-CN': {
-    runner: '你现在是 GLM++ 托管自动化续跑器，正在接管网页对话区的后续执行。',
-    task: '请持续围绕同一个原始用户任务推进，直到任务完成、达到可交付状态，或遇到不可恢复阻塞。',
-    results: '以下是刚才自动执行的 MCP 工具结果。请基于这些结果继续完成用户任务。',
-    enough: '如果结果已经足够，请直接给出最终回答；只有确实需要更多信息、继续验证或继续修改文件时，才继续调用可用 MCP 工具。',
-    noPseudo: '不要输出伪工具调用 JSON；需要调用工具时只输出可执行 XML 工具标签。',
-  },
-};
 
 const serverConfig = {
   id: 'mock',
@@ -75,37 +71,32 @@ if (process.argv.includes('--serve')) {
   });
 } else {
   try {
-    await verifyManualContinuation();
-    await verifyAutomationContinuation();
-    console.log('mcp live mock: manual continuation ok');
-    console.log('mcp live mock: automation continuation/history ok');
+    await verifyToolCallRoundTrip();
+    await verifyAutomationHistory();
+    console.log('mcp live mock: tool-call round trip ok');
+    console.log('mcp live mock: automation history accumulation ok');
     console.log(`mcp live mock: server ${url}`);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 }
 
-async function verifyManualContinuation() {
+async function verifyToolCallRoundTrip() {
   const assistantText = `Need data.\n<${INVOCATION_NAME}>{"text":"manual"}</${INVOCATION_NAME}>`;
   const executions = await executeToolCalls(assistantText, 'manual_chat');
   assert.equal(executions.length, 1);
   assert.equal(executions[0].result.ok, true);
   assert.equal(executions[0].result.output.echoed, 'manual');
-
-  const continuation = buildToolResultsPrompt('Create a file and verify it.', executions, 'en');
-  assert.match(continuation, /<tool_results>/);
-  assert.match(continuation, /<original_user_task>/);
-  assert.match(continuation, /Create a file and verify it/);
-  assert.match(continuation, /manual/);
-  assert.match(continuation, /continue calling available MCP tools/);
-  assert.match(buildToolResultsPrompt('创建并验证文件。', executions, 'zh-CN'), /继续调用可用 MCP 工具/);
+  assert.equal(executions[0].call.provider.kind, 'mcp');
+  assert.equal(executions[0].call.source.trigger, 'manual_chat');
+  // 手动轮次不自动续跑：该入口在 mock 里恒返回空。
   assert.equal(executeToolCallsInManualContinuation(
     '<memory_save>{"type":"topic","name":"n","content":"c","tags":[]}</memory_save>',
   ).length, 0);
   assert.equal(stripToolCalls(assistantText).trim(), 'Need data.');
 }
 
-async function verifyAutomationContinuation() {
+async function verifyAutomationHistory() {
   const history = [];
   let assistantText = `Run automation tool.\n<${INVOCATION_NAME}>{"text":"automation"}</${INVOCATION_NAME}>`;
   const allExecutions = [];
@@ -120,9 +111,6 @@ async function verifyAutomationContinuation() {
       result: execution.result,
     })));
 
-    const continuation = buildToolResultsPrompt('Run automation and produce the final answer.', executions, 'en');
-    assert.match(continuation, /<original_user_task>/);
-    assert.match(continuation, /automation/);
     assistantText = 'Final answer after tool results.';
   }
 
@@ -183,34 +171,6 @@ async function callMcpTool(call) {
     descriptorId: call.descriptorId,
     name: call.name,
   };
-}
-
-function buildToolResultsPrompt(originalTask, executions, locale = 'en') {
-  const copy = PROMPT_COPY[locale] ?? PROMPT_COPY.en;
-  const lines = executions.map((execution, index) => JSON.stringify({
-    index: index + 1,
-    tool: execution.call.name,
-    provider: execution.call.provider.displayName,
-    ok: execution.result.ok,
-    summary: execution.result.summary,
-    output: execution.result.output,
-  }));
-  return [
-    copy.runner,
-    copy.task,
-    '',
-    '<original_user_task>',
-    originalTask,
-    '</original_user_task>',
-    '',
-    copy.results,
-    copy.enough,
-    copy.noPseudo,
-    '',
-    '<tool_results>',
-    lines.join('\n'),
-    '</tool_results>',
-  ].join('\n');
 }
 
 function startMockMcpServer() {

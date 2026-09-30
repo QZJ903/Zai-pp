@@ -32,7 +32,6 @@ const pathAllowlist = new Map([
   ['core/skill/github-importer.ts', 'GitHub Skill import combines source-authored prompt content and diagnostics; surrounding import UI is locale-backed'],
   ['core/shell/contracts.ts', 'Shell MCP tool metadata mirrors the native-host contract; sidepanel Shell UI is locale-backed'],
   ['scripts/i18n-coverage-audit.mjs', 'audit allowlist contains Chinese fragments that it is designed to detect elsewhere'],
-  ['scripts/mcp-live-mock.mjs', 'mock explicitly validates zh-CN continuation prompt behavior'],
   ['scripts/shell-smoke.mjs', 'unicode stdout fixture intentionally verifies non-ASCII shell output'],
   ['scripts/web-search-smoke.mjs', 'legacy smoke fixture intentionally simulates zh-CN web-search prompts and output'],
 ]);

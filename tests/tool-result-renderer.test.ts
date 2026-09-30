@@ -65,6 +65,8 @@ describe('tool result renderer registry', () => {
     vi.useRealTimers();
     document.head.innerHTML = '';
     document.body.innerHTML = '';
+    document.documentElement.classList.remove('dark', 'light');
+    document.body.classList.remove('dpp-theme-dark', 'dpp-theme-light');
   });
 
   it('renders a Skill draft card with a save action', () => {
@@ -359,6 +361,32 @@ describe('tool result renderer registry', () => {
 
     expect(rendered).toBe(false);
     expect(target.childElementCount).toBe(0);
+  });
+
+  it('syncs the theme class itself instead of relying on the global theme watch', () => {
+    // 卡片路径不经过 `installInjectedThemeWatch()`：变量块注入了、但 `body` 上的
+    // `dpp-theme-*` 类没人写的话，`var(--dpp-ui-*)` 会落到浅色那一套 ——
+    // 深色页面上就是「深色底 + 深色字」。所以卡片必须自己同步一次。
+    document.documentElement.classList.add('dark');
+    registerDefaultToolResultRenderers(createActions());
+    const target = document.createElement('div');
+
+    renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
+
+    expect(document.body.classList.contains('dpp-theme-dark')).toBe(true);
+    expect(document.body.classList.contains('dpp-theme-light')).toBe(false);
+  });
+
+  it('leaves the theme class off when the page expresses no theme', () => {
+    // 页面两个类都不在时要摘掉我们的类，交回 `prefers-color-scheme` 兜底；
+    // 留着旧类会盖住媒体查询（两者特异度相同、后者在样式表后面）。
+    document.body.classList.add('dpp-theme-dark');
+    registerDefaultToolResultRenderers(createActions());
+    const target = document.createElement('div');
+
+    renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
+
+    expect(document.body.classList.contains('dpp-theme-dark')).toBe(false);
   });
 
   it('paints the card action label from the theme, never from a literal white', () => {
