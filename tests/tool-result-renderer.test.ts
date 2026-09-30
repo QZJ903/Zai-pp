@@ -360,4 +360,22 @@ describe('tool result renderer registry', () => {
     expect(rendered).toBe(false);
     expect(target.childElementCount).toBe(0);
   });
+
+  it('paints the card action label from the theme, never from a literal white', () => {
+    // ⚠️ 实心 accent 底上写死白色是读不出来的：浅色 accent 上白字只有 3.74:1，
+    // 深色 accent 上只有 2.27:1（`injected-theme-contrast.test.ts` 算的是配色本身，
+    // 这里守的是「代码里确实用了那个 token」）。
+    registerDefaultToolResultRenderers(createActions());
+    const target = document.createElement('div');
+    renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
+
+    const css = document.getElementById('dpp-result-css')?.textContent ?? '';
+    const actionBlock = css.slice(
+      css.indexOf('.dpp-result-action {'),
+      css.indexOf('.dpp-result-action:disabled'),
+    );
+    expect(actionBlock.length).toBeGreaterThan(0);
+    expect(actionBlock).toContain('color: var(--dpp-ui-accent-contrast)');
+    expect(actionBlock).not.toMatch(/color:\s*(white|#|rgb|hsl|oklch)/i);
+  });
 });

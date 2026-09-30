@@ -162,6 +162,7 @@ function createProjectDeletionDependencies(
     getProjectForConversation: async () => unusedDependency(),
     getProjectPromptContextForConversation: async () => unusedDependency(),
     formatProjectPromptContext: () => unusedDependency(),
+    getLocale: () => unusedDependency(),
     notifyCommittedProjectContextUpdate: vi.fn(async () => {
       notifications.push('project-notify');
     }),

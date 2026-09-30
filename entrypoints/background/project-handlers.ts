@@ -12,6 +12,7 @@ import type {
   ProjectConversationInput,
   ProjectPromptContext,
 } from '../../core/types';
+import type { SupportedLocale } from '../../core/i18n/background';
 import { definePersistencePayloadRuntimeCommandHandler } from './runtime-handler';
 
 type CurrentConversationResponse =
@@ -34,7 +35,12 @@ export interface ProjectRuntimeHandlerDependencies {
   refreshProjectConversation(conversation: ProjectConversationInput): Promise<ProjectConversation | null>;
   getProjectForConversation(conversationId: string): Promise<ProjectContext | null>;
   getProjectPromptContextForConversation(conversationId: string): Promise<ProjectPromptContext | null>;
-  formatProjectPromptContext(context: ProjectPromptContext): string;
+  /**
+   * `locale` 决定那几行标题（`## 项目背景` / `### 项目指令`）的语言 ——
+   * 它们走 i18n 资源，与提示词其它段落同源。
+   */
+  formatProjectPromptContext(context: ProjectPromptContext, locale: SupportedLocale): string;
+  getLocale(): SupportedLocale;
   notifyCommittedProjectContextUpdate(excludeTabId?: number): Promise<void>;
   notifyCommittedStateUpdate(excludeTabId?: number): Promise<void>;
 }
@@ -98,7 +104,7 @@ export function createProjectRuntimeHandlers(
       return {
         projectId: project.id,
         context: projectContext
-          ? dependencies.formatProjectPromptContext(projectContext)
+          ? dependencies.formatProjectPromptContext(projectContext, dependencies.getLocale())
           : null,
       };
     }),

@@ -79,7 +79,7 @@ describe('session-based project context', () => {
 
     expect(conversation?.projectId).toBe(project.id);
     expect(state.pendingProjectId).toBeNull();
-    expect(formatProjectPromptContext(context!)).toContain('Project: Plotforge');
+    expect(formatProjectPromptContext(context!)).toContain('项目：Plotforge');
     expect(formatProjectPromptContext(context!)).toContain('Keep track of story continuity.');
   });
 

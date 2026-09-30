@@ -69,8 +69,16 @@ export function buildPromptAugmentation(
     ? formatMemoriesBlock(selected, locale)
     : translate(locale, 'prompt.memoryDisabled');
   const toolsBlock = systemPromptEnabled ? renderToolSchemas(toolDescriptors, locale) : '';
+  // ⚠️ **沙箱段的位置在 `systemChat` 模板里**（`{sandboxHost}` 占位，落在「已有记忆」
+  // 之后、`## Tools` 之前）—— 这样它才与工具用法同处一段、且排在工具清单之前。
+  // chat 模式该函数返回空串，占位替换成空串 ⇒ **chat 模式的提示词逐字节不变**。
+  const sandboxHost = renderSandboxHostGuidance(isAgent, toolDescriptors, locale);
   const baseSystem = systemPromptEnabled
-    ? translate(locale, 'prompt.systemChat', { memories: memBlock, tools: toolsBlock })
+    ? translate(locale, 'prompt.systemChat', {
+      memories: memBlock,
+      tools: toolsBlock,
+      sandboxHost: sandboxHost ? `\n\n${sandboxHost}` : '',
+    })
     : '';
   const standaloneMemories = !systemPromptEnabled && memoryEnabled
     ? translate(locale, 'prompt.standaloneMemories', { memories: memBlock })
@@ -79,9 +87,11 @@ export function buildPromptAugmentation(
     baseSystem,
     skillSystemContext ? renderSkillSystemContext(skillSystemContext, locale) : '',
     standaloneMemories,
+    // `systemPromptEnabled=false` 时 `systemChat` 整段不注入，沙箱段在那个模板里就没有
+    // 落脚点了 —— 单独补一条，保持「沙箱段与 systemPrompt 开关无关」这个既有行为。
+    systemPromptEnabled ? '' : sandboxHost,
     renderProjectContext(projectContext),
     systemPromptEnabled ? renderWebSearchGuidance(isAgent, toolDescriptors, locale) : '',
-    renderSandboxHostGuidance(isAgent, toolDescriptors, locale),
     renderForcedResponseLanguage(forceResponseLanguage, locale),
   ].filter(Boolean).join('\n\n');
   const presetPrefix = presetContent ? `${presetContent}\n\n---\n\n` : '';

@@ -91,8 +91,8 @@ describe('project prompt context selection', () => {
     );
 
     expect(selection?.projectId).toBe('project-with-instructions');
-    expect(selection?.context).toContain('## Project Context');
-    expect(selection?.context).toContain('Project: 指令项目');
+    expect(selection?.context).toContain('## 项目背景');
+    expect(selection?.context).toContain('项目：指令项目');
     expect(selection?.context).toContain('总是用中文回答');
   });
 
@@ -124,6 +124,21 @@ describe('project prompt context selection', () => {
       projectName: 'Alpha',
       instructions: 'Keep it short.',
     })).toBe([
+      '## 项目背景',
+      '项目：Alpha',
+      '',
+      '### 项目指令',
+      'Keep it short.',
+    ].join('\n'));
+  });
+
+  it('renders the same block in the other locale instead of a hardcoded heading', () => {
+    // 标题走 i18n 资源，不是写死在代码里的常量 —— 换 locale 就该换标题。
+    expect(formatProjectPromptContext({
+      projectId: 'p',
+      projectName: 'Alpha',
+      instructions: 'Keep it short.',
+    }, 'en')).toBe([
       '## Project Context',
       'Project: Alpha',
       '',

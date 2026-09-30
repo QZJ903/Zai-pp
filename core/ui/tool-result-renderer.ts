@@ -342,7 +342,10 @@ function ensureResultStyles(): void {
   border: 0;
   border-radius: 7px;
   background: var(--dpp-ui-accent);
-  color: white;
+  /* ⚠️ **不能写 white** —— 两套主题的 accent 都偏亮（浅色 #497ef7 / 深色 #80acff），
+   * 白字压上去分别只有 3.74:1 与 2.27:1，深色下基本读不出来。
+   */
+  color: var(--dpp-ui-accent-contrast);
   font-size: 11px;
   font-weight: 600;
   padding: 5px 9px;

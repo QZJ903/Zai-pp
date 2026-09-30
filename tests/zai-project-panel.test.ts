@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import * as t from '@babel/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   startProjectPanel,
@@ -6,6 +8,7 @@ import {
   type ProjectPanelLabels,
 } from '../core/zai/project-panel';
 import type { ProjectContextState } from '../core/types';
+import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-source';
 
 const PANEL_ID = 'dpp-project-panel';
 /** 补名延时那次的时长（`BACKFILL_RETRY_DELAYS_MS` 的第二档）。 */
@@ -1504,3 +1507,145 @@ describe('zai project panel', () => {
     );
   });
 });
+
+describe('zai project panel theme', () => {
+  /**
+   * 面板原先写死了浅色值（`#1f1f1f` 文字配 `#ffffff` 底），页面切深色后
+   * 对比度掉到 1.10:1 —— 深色底上写深色字，等于看不见。
+   * 现在色值一律走 `--dpp-ui-*`，由 `core/ui/injected-theme.ts` 按页面主题切换。
+   *
+   * ⚠️ 这组断言针对**注入后的样式文本**（不是源码字符串）—— 注释里的示例色值
+   * 不该让断言变红，而运行时会真的生效的那些才该。
+   */
+  it('leaves no hardcoded color in the injected stylesheet', async () => {
+    mountSidebar();
+    controller = startProjectPanel(createDependencies(createState()));
+    await flush();
+
+    const css = document.getElementById(`${PANEL_ID}-css`)?.textContent ?? '';
+    expect(css.length).toBeGreaterThan(0);
+    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    expect(css).not.toMatch(/\brgba?\(/);
+    expect(css).not.toMatch(/\bhsla?\(/);
+    expect(css).not.toMatch(/\boklch\(/);
+  });
+
+  it('routes the surfaces that must follow the page theme through shared variables', async () => {
+    mountSidebar();
+    controller = startProjectPanel(createDependencies(createState()));
+    await flush();
+
+    const css = document.getElementById(`${PANEL_ID}-css`)?.textContent ?? '';
+    const panelBlock = blockOf(css, `#${PANEL_ID} {`);
+    const menuBlock = blockOf(css, `#${MENU_ID} {`);
+
+    // 正文色、分隔线、hover 叠加层 —— 这四处原先全是写死的。
+    expect(panelBlock).toContain('color: var(--dpp-ui-text)');
+    expect(panelBlock).toContain('border-top: 1px solid var(--dpp-ui-border)');
+    expect(css).toContain('.dpp-project-panel__project-row:hover {\n      background: var(--dpp-ui-overlay-hover)');
+    // 浮层（菜单、改名输入框）必须用 raised 面，不能与页面底色同值。
+    expect(menuBlock).toContain('background: var(--dpp-ui-surface-raised)');
+    expect(renameBlock(css)).toContain('background: var(--dpp-ui-surface-raised)');
+    // 状态行与激活态图标是语义色，不是装饰色。
+    expect(css).toContain('color: var(--dpp-ui-error)');
+    expect(css).toContain('color: var(--dpp-ui-accent-strong)');
+  });
+
+  it('references no theme variable that the theme does not define', async () => {
+    // ⚠️⚠️ **这条比「有没有裸色值」更要紧** —— 裸色值正则会放过写错的变量名，
+    // 而 `var(--dpp-ui-accentt)` 这种拼错**不会报任何错**：声明在 computed-value
+    // 阶段失效、颜色静默消失。逐名核对是唯一拦得住它的形态。
+    mountSidebar();
+    controller = startProjectPanel(createDependencies(createState()));
+    await flush();
+
+    const css = document.getElementById(`${PANEL_ID}-css`)?.textContent ?? '';
+    const referenced = new Set([...css.matchAll(/var\((--dpp-ui-[a-z-]+)\)/g)].map((m) => m[1]!));
+    expect(referenced.size).toBeGreaterThan(0);
+
+    const defined = new Set(
+      [...(document.getElementById('dpp-injected-theme-css')?.textContent ?? '')
+        .matchAll(/(--dpp-ui-[a-z-]+)\s*:/g)].map((m) => m[1]!),
+    );
+    expect([...referenced].filter((name) => !defined.has(name))).toEqual([]);
+  });
+
+  it('brings the shared theme variables in from injectStyles, not from the caller', async () => {
+    mountSidebar();
+    controller = startProjectPanel(createDependencies(createState()));
+    await flush();
+
+    // 变量块必须已经注入 —— 面板只写 `var(--dpp-ui-*)` 的话，没有变量就是全空。
+    expect(document.getElementById('dpp-injected-theme-css')).not.toBeNull();
+  });
+
+  it('calls the theme injection from inside injectStyles, not merely imports it', () => {
+    // ⚠️⚠️ **不能用 `source.includes('injectInjectedThemeStyles()')`** —— 函数定义体
+    // 自己就含这个子串（导入语句也算），把调用点整行删掉它照样为 true，等于没守。
+    // 所以走 AST：在 `injectStyles` 的函数体范围内找这两次调用。
+    const program = parseTypeScriptSource(
+      'core/zai/project-panel.ts',
+      readFileSync('core/zai/project-panel.ts', 'utf8'),
+    );
+    const range = findFunctionRange(program, 'injectStyles');
+    expect(range, 'injectStyles 没找到').not.toBeNull();
+
+    const calls: string[] = [];
+    walkSourceAst(program, (node) => {
+      if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+      const start = node.start ?? -1;
+      if (start < range!.start || start > range!.end) return;
+      calls.push(node.callee.name);
+    });
+
+    expect(calls).toContain('injectInjectedThemeStyles');
+    expect(calls).toContain('syncInjectedTheme');
+
+    // ⚠️ 光「出现过」还不够 —— 调用若被塞进 `if (false)` 或放在函数体第一条
+    // `return` 之后，上面两条仍然为真。这里再钉一次**位置**：它们必须是函数体
+    // 最前面两条语句（这两次调用是幂等的，放最前是刻意的语义）。
+    const injectStylesBody = findFunctionBody(program, 'injectStyles');
+    expect(injectStylesBody, 'injectStyles 的函数体没找到').not.toBeNull();
+    const leadingCalls = injectStylesBody!.body.body.slice(0, 2).map((statement) => (
+      t.isExpressionStatement(statement) && t.isCallExpression(statement.expression) &&
+        t.isIdentifier(statement.expression.callee)
+        ? statement.expression.callee.name
+        : null
+    ));
+    expect(leadingCalls).toEqual(['injectInjectedThemeStyles', 'syncInjectedTheme']);
+  });
+});
+
+/** `selector` 那个规则块的内容（不含选择器行与闭合括号）。 */
+function blockOf(css: string, selector: string): string {
+  const start = css.indexOf(selector);
+  expect(start, `样式表里没有 ${selector}`).toBeGreaterThanOrEqual(0);
+  const end = css.indexOf('\n    }', start);
+  expect(end, `${selector} 没有闭合`).toBeGreaterThan(start);
+  return css.slice(start, end);
+}
+
+/** 改名输入框那条规则块（它的选择器带 `#id .class` 前缀，单独取一次）。 */
+function renameBlock(css: string): string {
+  return blockOf(css, `#${PANEL_ID} .dpp-project-panel__rename-input {`);
+}
+
+/** 顶层函数声明的函数体字符区间。 */
+function findFunctionRange(program: t.Program, name: string): { start: number; end: number } | null {
+  return findFunctionBody(program, name)?.range ?? null;
+}
+
+/** 顶层函数声明的 AST 函数体与它的字符区间。 */
+function findFunctionBody(
+  program: t.Program,
+  name: string,
+): { body: t.BlockStatement; range: { start: number; end: number } } | null {
+  let found: { body: t.BlockStatement; range: { start: number; end: number } } | null = null;
+  walkSourceAst(program, (node) => {
+    if (found || !t.isFunctionDeclaration(node)) return;
+    if (!t.isIdentifier(node.id, { name })) return;
+    if (node.body.start == null || node.body.end == null) return;
+    found = { body: node.body, range: { start: node.body.start, end: node.body.end } };
+  });
+  return found;
+}

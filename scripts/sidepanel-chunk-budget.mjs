@@ -19,7 +19,11 @@ if (requestedBrowsers.some((browser) => !browser)) {
 // allowance for gzip, so the guardrail stays meaningful without being brittle
 // across zlib releases.
 const BASELINE = Object.freeze({
-  initialShell: { raw: 332_966, gzip: 102_185 },
+  // ⚠️ **重新测量过一次**（2.15.12）：`prompt.sandboxHostSection` 两套语言合计
+  // 增加约 8.8KB 原始字节，而这段资源经由 `core/i18n/index.ts` 进了侧边栏初始 shell
+  // （侧边栏只用到它的类型与几个键，但资源是整个 section 一起打包的）。
+  // 这是**有意增长**，不是意外膨胀 —— 再改这段提示词要连带重测这里。
+  initialShell: { raw: 342_009, gzip: 106_022 },
   routeChunks: {
     CapabilitiesPage: { raw: 1_568, gzip: 669 },
     SettingsPage: { raw: 2_118, gzip: 855 },
@@ -34,9 +38,14 @@ const BASELINE = Object.freeze({
 // bound this encoder-only variance to a small fixed allowance.
 const GZIP_ENCODER_VARIANCE_BYTES = 256;
 
+// ⚠️ `initialShell` 的 raw 也是**实测精确值**，但它的主要成分是提示词资源
+// （`core/i18n` 整份 section 都进初始 shell），改一句提示词就会动它。
+// 留一点固定余量，免得每次微调文案都要重测这两个数字。
+const INITIAL_SHELL_RAW_ALLOWANCE_BYTES = 512;
+
 const BUDGET = Object.freeze({
   initialShell: {
-    raw: BASELINE.initialShell.raw,
+    raw: BASELINE.initialShell.raw + INITIAL_SHELL_RAW_ALLOWANCE_BYTES,
     gzip: BASELINE.initialShell.gzip + GZIP_ENCODER_VARIANCE_BYTES,
   },
   routeChunks: {

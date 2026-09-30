@@ -16,6 +16,7 @@ export {
   LOCAL_FILE_SHELL_TOOL_NAMES,
   LOCAL_SKILL_SHELL_TOOL_NAMES,
   buildShellAllowlistUpgrade,
+  buildShellToolLimitUpgrade,
   createShellMcpPresetInput,
   isShellMcpServer,
 } from './policy';

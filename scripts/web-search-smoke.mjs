@@ -172,27 +172,28 @@ async function performWebSearch(query, topK) {
 }
 
 // =========================================================================
-// 第四步：模拟续跑 prompt 构建（与 z.ai 独立版 buildZaiContinuationPrompt 逻辑一致）
+// 第四步：模拟续跑 prompt 构建（只复刻**结构契约**，不复刻提示词措辞与字段）
+//
+// ⚠️ **不要再把提示词正文抄一份到这里。** 曾经抄过，结果是它和真源悄悄漂移
+// （这句 intro 少了「请像真正的 Agent 一样」而没人发现）—— 因为这个脚本只断言
+// 自己那份副本，真源改了它不会红。
+//
+// ⚠️ **字段形状也不在这里复刻** —— 同样会漂移：真源加了 `error` / `truncated`
+// / `windowed` 之后，手抄的字段映射不会跟着变、也不会红。
+// 措辞与字段一律由 `tests/zai-continuation-prompt.test.ts` 直接 import 真源覆盖。
+//
+// 这里只验证本脚本关心的那一件事：**搜索结果确实进入了续跑结果结构**。
 // =========================================================================
 
 function buildContinuationPrompt(originalTask, executions) {
-  const results = executions.map((e) => ({
-    tool: e.name,
-    provider: e.provider?.displayName,
-    ok: e.result.ok,
-    summary: e.result.summary,
-    detail: e.result.detail?.slice(0, 4000),
-    output: e.result.output ? JSON.stringify(e.result.output).slice(0, 8000) : undefined,
-  }));
   return [
-    '以下是工具续跑任务刚刚执行的工具结果。请基于原始任务和这些工具结果继续推进。',
-    '',
     '<original_task>',
-    originalTask.slice(0, 8000),
+    originalTask,
     '</original_task>',
     '',
     '<tool_results>',
-    JSON.stringify(results, null, 2),
+    // 刻意不做字段映射：只把结果原样序列化，验证「结果进了结构」这一件事。
+    JSON.stringify(executions.map((e) => ({ tool: e.name, result: e.result })), null, 2),
     '</tool_results>',
   ].join('\n');
 }

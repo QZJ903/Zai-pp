@@ -99,13 +99,16 @@ export const tool = {
     offscreenUnavailableDetail: '当前浏览器没有暴露隔离执行 JavaScript 和 TypeScript 所需的 MV3 offscreen API。',
     runtimeUnavailableDetail: '浏览器沙箱执行器只能从扩展 background runtime 调用。',
   },
+  // ⚠️ 本块里 **喂给模型 schema 的键刻意用英文**（title / description / 各参数描述）——
+  // 它们只出现在提示词的 `### Tool <name>` 段里，不进任何用户界面。与 en 版同值是有意的，
+  // 别按「zh 资源不该有英文」把它改回去。
   skillCreator: {
-    title: '起草 Skill',
-    description: '创建待用户审阅的自定义 Skill 草稿。用户确认前不会保存。',
-    nameDescription: '小写 Skill 触发名',
-    descriptionDescription: '这个 Skill 适合何时使用',
-    instructionsDescription: 'Skill 的 Markdown 指令',
-    memoryDescription: '是否给这个 Skill 注入记忆上下文',
+    title: 'Draft a Skill',
+    description: 'Create a custom Skill draft for user review. The draft is not saved until the user approves it.',
+    nameDescription: 'Lowercase Skill trigger name',
+    descriptionDescription: 'When this Skill should be used',
+    instructionsDescription: 'Markdown instructions for the Skill',
+    memoryDescription: 'Whether the Skill should receive memory context',
     draftReady: 'Skill 草稿已就绪',
     invalidDraft: 'Skill 草稿无效',
     result: {
@@ -117,12 +120,13 @@ export const tool = {
       memoryOff: '记忆关',
     },
   },
+  // ⚠️ 同 skillCreator：schema 键（title / description / 各参数描述）刻意与 en 版同值。
   memoryImport: {
-    title: '预览记忆导入',
-    description: '把其他 AI 工作流导出或笔记转换为记忆草稿。导入预览前不会保存。',
-    contentDescription: 'JSON、Markdown 或纯文本记忆来源',
-    typeDescription: '默认记忆类型：user、feedback、topic 或 reference',
-    tagsDescription: '附加到导入记忆的标签',
+    title: 'Preview memory import',
+    description: 'Convert another AI workflow export or notes into memory drafts. Nothing is saved until the user imports the preview.',
+    contentDescription: 'JSON, Markdown, or plain-text memory source',
+    typeDescription: 'Default memory type: user, feedback, topic, or reference',
+    tagsDescription: 'Tags to add to imported memories',
     previewReady: '记忆导入预览已就绪（{count}）',
     previewDetail: '跳过 {duplicates} 条重复，拒绝 {rejected} 条',
     failed: '记忆导入失败',

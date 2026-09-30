@@ -19,6 +19,7 @@ import type {
   ProjectConversation,
 } from '../types';
 import { isPlaceholderProjectConversationTitle } from '../project/title';
+import { injectInjectedThemeStyles, syncInjectedTheme } from '../ui/injected-theme';
 import { ZAI_PROJECT_PANEL_ATTR } from './contracts';
 
 /** 面板、样式与浮层的注入标记。 */
@@ -1016,8 +1017,31 @@ const ICON_RENAME = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 /**
  * 面板样式。刻意全部自包含（`dpp-project-panel__*` 前缀 + 自己的 style 节点），
  * 不继承页面 Tailwind 类，免得 z.ai 改版时样式跟着漂。
+ *
+ * ⚠️ **色值一律走 `--dpp-ui-*`，不写死颜色** —— 页面有深色模式，写死浅色值
+ * （原来的 `#1f1f1f` 文字配 `#ffffff` 底）在深色页面上就是「深色底 + 深色字」，
+ * 对比度 1.10:1，等于看不见。变量由 `core/ui/injected-theme.ts` 按页面主题切换，
+ * 这里只消费。
+ *
+ * ⚠️ **深色下不能继续用 `rgba(0, 0, 0, …)` 表达 hover** —— 黑叠黑不产生任何变化。
+ * 所以 hover / active 走 `--dpp-ui-overlay-*`（用文字色配低透明度，方向随主题反转）。
+ *
+ * ⚠️ **浮层（菜单、改名输入框）要用 `--dpp-ui-surface-raised`，不是 `surface`** ——
+ * 深色下 `surface` 与页面底色几乎同值，浮层会糊在页面上；`raised` 亮一档才立得起来。
+ *
+ * ⚠️ **变量块与主题同步都要在这里自己调一次**，不能只依赖内容脚本启动时的
+ * `installInjectedThemeWatch()` —— 那样面板就隐式依赖「谁先谁后」，一旦顺序变了
+ * （或面板在测试里单独起）所有 `var(--dpp-ui-*)` 都会解析成空值。两处调用都是
+ * 幂等的（样式节点按 id 去重、同步是纯赋值），重复调用没有代价。
+ *
+ * ⚠️ **这两次调用依赖「`document.body` 已存在」** —— `syncInjectedTheme()` 在 body
+ * 缺失时**静默 return**，而主题观察者只盯 `html` 的 `class`，不盯 body 的出现。
+ * 内容脚本当前是 `document_idle`（`entrypoints/zai.content.ts` 的 `runAt`），
+ * 所以成立；**若改成 `document_start`，面板会静默失去主题且不报任何错**。
  */
 function injectStyles(): void {
+  injectInjectedThemeStyles();
+  syncInjectedTheme();
   if (document.getElementById(PANEL_STYLE_ID)) return;
   const style = document.createElement('style');
   style.id = PANEL_STYLE_ID;
@@ -1032,9 +1056,9 @@ function injectStyles(): void {
       max-height: ${PANEL_MAX_HEIGHT_PX}px;
       margin: 0 6px 4px;
       padding: 4px 0;
-      border-top: 1px solid rgba(0, 0, 0, 0.08);
+      border-top: 1px solid var(--dpp-ui-border);
       font-size: 12px;
-      color: #1f1f1f;
+      color: var(--dpp-ui-text);
     }
 
     /* 侧边栏收起时整块隐藏，避免溢出。 */
@@ -1081,7 +1105,7 @@ function injectStyles(): void {
     }
 
     #${PANEL_ID} .dpp-project-panel__project-row:hover {
-      background: rgba(0, 0, 0, 0.05);
+      background: var(--dpp-ui-overlay-hover);
     }
 
     #${PANEL_ID} .dpp-project-panel__project-toggle {
@@ -1150,12 +1174,12 @@ function injectStyles(): void {
 
     #${PANEL_ID} .dpp-project-panel__icon-button:hover,
     #${PANEL_ID} .dpp-project-panel__icon-button[data-active="true"] {
-      background: rgba(0, 0, 0, 0.08);
+      background: var(--dpp-ui-overlay-active);
       opacity: 1;
     }
 
     #${PANEL_ID} .dpp-project-panel__icon-button[data-active="true"] {
-      color: #2563eb;
+      color: var(--dpp-ui-accent-strong);
     }
 
     #${PANEL_ID} .dpp-project-panel__icon-button svg {
@@ -1167,8 +1191,8 @@ function injectStyles(): void {
       margin: 1px 8px 3px;
       padding: 2px 6px;
       border-radius: 5px;
-      background: rgba(59, 130, 246, 0.12);
-      color: #2563eb;
+      background: var(--dpp-ui-accent-soft);
+      color: var(--dpp-ui-accent-strong);
       font-size: 10px;
     }
 
@@ -1185,7 +1209,7 @@ function injectStyles(): void {
     }
 
     #${PANEL_ID} .dpp-project-panel__conversation:hover {
-      background: rgba(0, 0, 0, 0.05);
+      background: var(--dpp-ui-overlay-hover);
     }
 
     #${PANEL_ID} .dpp-project-panel__conversation-title {
@@ -1222,12 +1246,15 @@ function injectStyles(): void {
       border-radius: 6px;
       background: transparent;
       color: inherit;
-      opacity: 0.45;
+      /* 0.5 而不是项目行图标的 0.55：这里的字形是三个直径 1.8 单位的点，
+         显示出来只有 1px 左右，比项目行那些有线长的路径更弱；而 0.45 在浅色
+         页面上只有 2.78:1，低于非文本 UI 的 3:1 门槛。 */
+      opacity: 0.5;
       cursor: pointer;
     }
 
     #${PANEL_ID} .dpp-project-panel__conversation-menu-button:hover {
-      background: rgba(0, 0, 0, 0.08);
+      background: var(--dpp-ui-overlay-active);
       opacity: 1;
     }
 
@@ -1241,9 +1268,9 @@ function injectStyles(): void {
       min-width: 0;
       margin: 1px 0;
       padding: 3px 5px;
-      border: 1px solid rgba(59, 130, 246, 0.55);
+      border: 1px solid var(--dpp-ui-accent);
       border-radius: 6px;
-      background: #ffffff;
+      background: var(--dpp-ui-surface-raised);
       font: inherit;
       color: inherit;
       outline: none;
@@ -1266,14 +1293,14 @@ function injectStyles(): void {
     }
 
     #${PANEL_ID} .dpp-project-panel__more:hover {
-      background: rgba(0, 0, 0, 0.05);
+      background: var(--dpp-ui-overlay-hover);
       opacity: 0.9;
     }
 
     #${PANEL_ID} .dpp-project-panel__status {
       padding: 3px 8px 1px;
       font-size: 10px;
-      color: #dc2626;
+      color: var(--dpp-ui-error);
     }
 
     #${MENU_ID} {
@@ -1283,11 +1310,11 @@ function injectStyles(): void {
       min-width: 178px;
       padding: 4px;
       border-radius: 10px;
-      border: 1px solid rgba(0, 0, 0, 0.1);
-      background: #ffffff;
-      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+      border: 1px solid var(--dpp-ui-border);
+      background: var(--dpp-ui-surface-raised);
+      box-shadow: var(--dpp-ui-shadow-lg);
       font-size: 12px;
-      color: #1f1f1f;
+      color: var(--dpp-ui-text);
     }
 
     #${MENU_ID} .dpp-project-panel__menu-item {
@@ -1307,7 +1334,7 @@ function injectStyles(): void {
     }
 
     #${MENU_ID} .dpp-project-panel__menu-item:hover {
-      background: rgba(0, 0, 0, 0.06);
+      background: var(--dpp-ui-overlay-hover);
     }
 
     #${MENU_ID} .dpp-project-panel__menu-item svg {

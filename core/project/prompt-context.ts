@@ -7,6 +7,7 @@
  * 而让它自己写一遍挑选逻辑，就成了「生产端与判定端各写一遍」（静默失效的温床）。
  * 所以规则只有这一处定义。
  */
+import { DEFAULT_LOCALE, translate, type SupportedLocale } from '../i18n/background';
 import type { ProjectContextState, ProjectPromptContext } from './types';
 
 /**
@@ -24,14 +25,19 @@ export interface ProjectPromptSelection {
   context: string | null;
 }
 
-/** 某条会话所属项目的选择结果。会话未归入项目时返回 null。 */
+/**
+ * 某条会话所属项目的选择结果。会话未归入项目时返回 null。
+ *
+ * `locale` 只影响 `context` 里那几行标题的语言（见 `formatProjectPromptContext`）。
+ */
 export function selectConversationProjectPrompt(
   state: ProjectContextState,
   conversationId: string,
+  locale: SupportedLocale = DEFAULT_LOCALE,
 ): ProjectPromptSelection | null {
   const membership = state.conversations.find((item) => item.conversationId === conversationId);
   if (!membership) return null;
-  return selectProject(state, membership.projectId);
+  return selectProject(state, membership.projectId, locale);
 }
 
 /**
@@ -43,18 +49,29 @@ export function selectConversationProjectPrompt(
  */
 export function selectPendingProjectPrompt(
   state: ProjectContextState,
+  locale: SupportedLocale = DEFAULT_LOCALE,
 ): ProjectPromptSelection | null {
   if (!state.pendingProjectId) return null;
-  return selectProject(state, state.pendingProjectId);
+  return selectProject(state, state.pendingProjectId, locale);
 }
 
-/** 项目指令在提示词里的呈现格式。 */
-export function formatProjectPromptContext(context: ProjectPromptContext): string {
+/**
+ * 项目指令在提示词里的呈现格式。
+ *
+ * ⚠️ **标题走 i18n 资源（`prompt.projectContext*`），不硬编码在代码里** ——
+ * 与提示词里其它段落（`## 网络搜索规则`、`## 沙盒与宿主机`）一致：它们全部定义在
+ * `core/i18n/resources/<locale>/prompt.ts`，由 locale 决定。硬编码会让「中文标题」
+ * 变成与语言无关的常量，而这条链路本来就是按用户语言走的。
+ */
+export function formatProjectPromptContext(
+  context: ProjectPromptContext,
+  locale: SupportedLocale = DEFAULT_LOCALE,
+): string {
   return [
-    '## Project Context',
-    `Project: ${context.projectName}`,
+    translate(locale, 'prompt.projectContextHeader'),
+    translate(locale, 'prompt.projectContextLabel', { name: context.projectName }),
     '',
-    '### Project Instructions',
+    translate(locale, 'prompt.projectInstructionsHeader'),
     context.instructions,
   ].join('\n').trim();
 }
@@ -62,6 +79,7 @@ export function formatProjectPromptContext(context: ProjectPromptContext): strin
 function selectProject(
   state: ProjectContextState,
   projectId: string,
+  locale: SupportedLocale,
 ): ProjectPromptSelection | null {
   const project = state.projects.find((item) => item.id === projectId);
   if (!project) return null;
@@ -73,7 +91,7 @@ function selectProject(
         projectId: project.id,
         projectName: project.name,
         instructions,
-      })
+      }, locale)
       : null,
   };
 }

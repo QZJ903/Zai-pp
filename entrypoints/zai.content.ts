@@ -199,7 +199,7 @@ interface ContinuationLoop {
   status: 'running' | 'idle';
   activeRequestId: string | null;
   pendingPrompt: string | null;
-  /** 已用掉的 nudge（无工具纠正）次数。 */
+  /** 已用掉的 nudge（无工具调用纠偏）次数。 */
   nudgeCount: number;
   /** 上一轮模型回复正文（供 nudge 时回看）。 */
   lastVisibleText: string;
@@ -838,7 +838,8 @@ async function resolvePendingProjectContextForFirstMessage(): Promise<ResolvedPr
     const raw = await sendRuntimeMessage<unknown>({ type: 'GET_PROJECT_CONTEXT_STATE' });
     if (raw === undefined) return null;
     const state = decodeProjectContextState(raw, 'firstMessageProjectState');
-    const selection = selectPendingProjectPrompt(state);
+    // 标题语言跟内容脚本自己的 locale 走（与提示词其它段落同一套资源）。
+    const selection = selectPendingProjectPrompt(state, currentContentLocale);
     if (!selection) return null;
     return { projectId: selection.projectId, context: selection.context };
   } catch (error) {
@@ -858,12 +859,24 @@ async function handleAugmentRequestBody(
 
   // 归属诊断：AUGMENT_REQUEST_BODY 一进来就登记 route + 原 prompt 头（不含隐私），
   // 即使下面 parse/归属失败，也能从 augRequests 看到页面到底发了什么请求、prompt 是什么样。
+  //
+  // ⚠️ **这里必须记 `isAgent`** —— 它决定「沙盒与宿主机」那段注不注入。
+  // 没有这一项时，「chat 模式里看到了沙箱段」无法区分「判定错了」与「看的是别的轮次」，
+  // 只能靠读代码推（而那正是本项目踩过的坑）。
+  // ⚠️ 此处早于下面的 `const body = parseZaiBody(bodyStr)`，所以**自己解析一次**
+  // （纯函数、无副作用），不能引用后面那个 `body`。
+  const diagnosticBody = parseZaiBody(bodyStr);
   diag.augRequests?.push({
     at: Date.now(),
     route,
     hasBody: !!bodyStr,
     promptHead: readPromptHead(bodyStr, route),
     userMessageCount: readUserMessageCount(bodyStr),
+    isAgent: diagnosticBody
+      ? (route === 'chatNew'
+        ? (parseZaiChatNewBody(diagnosticBody)?.isAgent ?? null)
+        : readZaiAgentFlag(diagnosticBody))
+      : null,
   });
 
   if (!id) return;
@@ -1736,6 +1749,8 @@ async function handleResponseComplete(complete: ZaiResponseComplete): Promise<vo
         continuationLoop.toolExecutions,
         continuationLoop.nudgeCount,
         nudgeToolNames,
+        // 沙箱措辞分模式 —— agent 模式下服务端沙箱是原生通路，不能喊「别用沙箱工具」。
+        { isAgent: continuationLoop.isAgentTurn },
       );
       console.log('[GLM++] nudge continuation', {
         step: continuationLoop.stepCount,
@@ -1912,7 +1927,13 @@ async function advanceContinuationLoop(): Promise<void> {
       nativeSearchOn: loop.nativeSearchOn,
     },
   ));
-  const prompt = buildZaiContinuationPrompt(loop.originalTask, loop.toolExecutions, toolNames);
+  const prompt = buildZaiContinuationPrompt(
+    loop.originalTask,
+    loop.toolExecutions,
+    toolNames,
+    // 与 nudge 那条同源：沙箱措辞必须跟着模式走。
+    { isAgent: loop.isAgentTurn },
+  );
   loop.pendingPrompt = prompt;
   loop.stepCount += 1;
   stampLoopDiagnostic();

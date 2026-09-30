@@ -26,7 +26,7 @@ export const BUILTIN_SKILLS: Skill[] = [
   {
     name: 'shell',
     description: '本地命令行助手：通过 Native Messaging 在用户本机执行 shell 命令。适用于文件操作、脚本运行、系统管理等任何需要命令行的场景。',
-    instructions: `你正在通过 Zai++ Shell MCP 执行本地命令。可用工具：${EXPOSED_SHELL_TOOL_NAMES.join('、')}。
+    instructions: `你正在通过 Zai++ Shell MCP 扩展执行本地命令。可用工具：${EXPOSED_SHELL_TOOL_NAMES.join('、')}。
 
 ## 执行边界
 
@@ -93,7 +93,7 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
 const ENGLISH_BUILTIN_SKILL_TEXT: Record<string, BuiltinSkillText> = {
   shell: {
     description: 'Local command-line assistant: run shell commands on the user machine through Native Messaging. Use for file operations, script execution, system inspection, and any task that requires a terminal.',
-    instructions: `You are executing local shell commands through the Zai++ Shell MCP. Available tools: ${EXPOSED_SHELL_TOOL_NAMES.join(', ')}.
+    instructions: `You are executing local shell commands through the Zai++ Shell MCP extension. Available tools: ${EXPOSED_SHELL_TOOL_NAMES.join(', ')}.
 
 ## Execution Boundaries
 

@@ -135,6 +135,7 @@ import { refreshMcpServerDiscovery } from '../core/mcp/discovery';
 import { getMcpOriginPattern, hasMcpServerOriginPermission } from '../core/mcp/transports';
 import {
   buildShellAllowlistUpgrade,
+  buildShellToolLimitUpgrade,
   createShellMcpPresetInput,
   isShellMcpServer,
 } from '../core/shell';
@@ -351,6 +352,7 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         getProjectForConversation,
         getProjectPromptContextForConversation,
         formatProjectPromptContext,
+        getLocale: () => currentBackgroundLocale,
         notifyCommittedProjectContextUpdate,
         notifyCommittedStateUpdate,
       },
@@ -611,10 +613,15 @@ async function ensureBuiltInMcpPresets() {
 
 async function ensureShellMcpCompatibility(server: McpServerConfig) {
   let nextServer = server;
+  // ⚠️ **工具上限与 allowlist 都要升** —— 只升 allowlist 的话，默认值改了也只对新装生效：
+  // 存量记录的 `limits` 由 `normalizeServerForMutation` 从存储原样读出，
+  // 而 `maxToolCount` 小于 host 工具总数时，尾部工具会在发现阶段被静默截断。
+  const upgradedLimits = buildShellToolLimitUpgrade(server.limits);
   const upgradedAllowlist = buildShellAllowlistUpgrade(server.allowlist);
-  if (upgradedAllowlist) {
+  if (upgradedLimits || upgradedAllowlist) {
     nextServer = await updateMcpServer(server.id, {
-      allowlist: upgradedAllowlist,
+      ...(upgradedLimits ? { limits: upgradedLimits } : {}),
+      ...(upgradedAllowlist ? { allowlist: upgradedAllowlist } : {}),
     }) ?? server;
   }
 
@@ -623,7 +630,7 @@ async function ensureShellMcpCompatibility(server: McpServerConfig) {
   }
 
   const hasCache = Boolean(await getMcpToolCache(nextServer.id));
-  if (!hasCache && !upgradedAllowlist) return;
+  if (!hasCache && !upgradedAllowlist && !upgradedLimits) return;
 
   try {
     await refreshMcpServerDiscovery(nextServer.id);

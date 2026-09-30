@@ -1,15 +1,37 @@
+import { SUPPORTED_LOCALES, translate } from '../i18n/background';
+
 export const VISIBLE_USER_PROMPT_START = '<!-- glm-visible-user-prompt:start -->';
 export const VISIBLE_USER_PROMPT_END = '<!-- glm-visible-user-prompt:end -->';
 const VISIBLE_USER_PROMPT_METADATA_PREFIX = '<!-- glm-visible-user-prompt:value=';
 const VISIBLE_USER_PROMPT_METADATA_SUFFIX = ' -->';
 
-const TOOL_REMINDER_HEADING = 'Tool call format reminder:';
-const TOOL_REMINDER_REQUIRED_LINE = 'Available tool tag names:';
+/**
+ * 提醒段的识别特征，**按 locale 从资源派生**（标题行 + 必现行）。
+ *
+ * ⚠️ **不能在这里另抄一份字面量** —— 曾经抄过，en 的标题改成
+ * 「Local tool call format reminder:」之后这份常量没跟上，于是
+ * `containsToolFormatReminder` 对 en 恒为 false，剥离守卫静默失效。
+ * 更早还漏了「必现行」也是分语言的（zh 是「可用工具标签名：」）。
+ * 文案由 `core/i18n/resources/<locale>/prompt.ts` 决定，这里只做投影。
+ */
+const TOOL_REMINDER_SIGNATURES: readonly { heading: string; requiredLine: string }[] =
+  SUPPORTED_LOCALES.flatMap((locale) => {
+    const lines = translate(locale, 'prompt.toolFormatReminder').split('\n');
+    // 模板首行是 `---` 分隔符，标题在第 2 行、必现行在第 3 行。
+    const heading = lines[1]?.trim() ?? '';
+    const requiredLine = lines[2]?.trim() ?? '';
+    // 必现行带 `{names}` 占位，比对时只用占位之前的部分。
+    const literal = requiredLine.split('{')[0]!.trim();
+    return heading && literal ? [{ heading, requiredLine: literal }] : [];
+  });
+
 const TOOL_REMINDER_FRAGMENT_PREFIXES = [
-  TOOL_REMINDER_HEADING,
-  TOOL_REMINDER_REQUIRED_LINE,
+  ...TOOL_REMINDER_SIGNATURES.map((signature) => signature.heading),
+  ...TOOL_REMINDER_SIGNATURES.map((signature) => signature.requiredLine),
   'These listed tools are executable by the extension.',
-  'To call a tool, use ONLY the direct XML tag',
+  // ⚠️ 前缀要跟着文案走：这句从「To call a tool」变成了「To call a local tool」。
+  // 取共同前缀，免得每次给动词加限定都要同步这里。
+  'To call a',
   'For MCP tools, prefer the short tag name',
   'For local file paths, use forward slashes',
   'Do not use <invoke name="...">',
@@ -96,11 +118,24 @@ function trimSingleBoundaryNewline(text: string): string {
 }
 
 function containsToolFormatReminder(text: string): boolean {
-  return text.includes(TOOL_REMINDER_HEADING) && text.includes(TOOL_REMINDER_REQUIRED_LINE);
+  return TOOL_REMINDER_SIGNATURES.some((signature) => (
+    text.includes(signature.heading) && text.includes(signature.requiredLine)
+  ));
+}
+
+/** 文本里第一个提醒段标题的位置；没有任何一套 locale 的标题命中时返回 -1。 */
+function findToolReminderHeading(text: string): number {
+  let earliest = -1;
+  for (const signature of TOOL_REMINDER_SIGNATURES) {
+    const index = text.indexOf(signature.heading);
+    if (index === -1) continue;
+    if (earliest === -1 || index < earliest) earliest = index;
+  }
+  return earliest;
 }
 
 function stripToolFormatReminder(text: string): string {
-  const headingIndex = text.indexOf(TOOL_REMINDER_HEADING);
+  const headingIndex = findToolReminderHeading(text);
   if (headingIndex === -1) return text;
 
   const delimiterIndex = text.lastIndexOf('\n---', headingIndex);

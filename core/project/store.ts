@@ -273,6 +273,9 @@ export async function getProjectPromptContextForConversation(
   conversationId: string,
 ): Promise<ProjectPromptContext | null> {
   const state = await getProjectContextState();
+  // `locale` 用缺省值即可：这里只拿 `selection.context` 判**有没有指令**，
+  // 渲染好的那个字符串随即被丢掉，真正的渲染发生在 handler 里
+  // （`formatProjectPromptContext(projectContext)` 带 locale 那一次）。
   const selection: ProjectPromptSelection | null = selectConversationProjectPrompt(state, conversationId);
   if (!selection?.context) return null;
   // 防御性分支：`selection` 只在项目存在时才产生，所以这里理论上拿得到。

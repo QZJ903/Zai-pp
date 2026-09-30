@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildShellAllowlistUpgrade,
+  buildShellToolLimitUpgrade,
   createShellMcpPresetInput,
   DEFAULT_SHELL_MCP_ALLOWLIST_TOOL_NAMES,
   isShellMcpServer,
@@ -34,6 +35,32 @@ describe('createShellMcpPresetInput', () => {
     expect(SHELL_TOOL_NAMES).toContain('shell_session_begin');
     expect(SHELL_TOOL_NAMES).toContain('shell_session_exec');
     expect(SHELL_TOOL_NAMES).toContain('shell_session_end');
+  });
+
+  it('discovers every shell tool the host exposes, not just the first few', () => {
+    // ⚠️⚠️ **这条守的是「静默截断」** —— 发现阶段的 `listMcpTools` 按服务端返回顺序
+    // `slice(0, maxToolCount)`，而这一步在 allowlist 过滤**之前**。上限小于工具总数时，
+    // 排在后面的工具会被无声丢弃：模型看不到、MCP 页也列不出来（用户想手动勾都勾不到）。
+    //
+    // 曾经是 8，于是 local_file_write 与三个 shell_session_* 一直不可达，
+    // 而提示词却在教模型用它们。**症状是「模型说没有这个工具」，没有任何报错。**
+    const preset = createShellMcpPresetInput();
+    expect(preset.limits?.maxToolCount).toBeGreaterThanOrEqual(SHELL_TOOL_NAMES.length);
+  });
+
+  it('upgrades persisted Shell tool limits that would truncate the tool list', () => {
+    // ⚠️ 光改 preset 默认值**只对新装生效** —— 存量记录的 limits 由
+    // `normalizeServerForMutation` 从存储原样读出，`ensureShellMcpCompatibility`
+    // 此前只升 allowlist。所以升级函数必须能把已落库的小值抬上来。
+    expect(buildShellToolLimitUpgrade({ maxResultBytes: 128_000, maxToolCount: 8 }))
+      .toEqual({ maxResultBytes: 128_000, maxToolCount: SHELL_TOOL_NAMES.length });
+
+    // 已经够大时不动（幂等，避免每次启动都写一次存储）。
+    expect(buildShellToolLimitUpgrade({
+      maxResultBytes: 128_000,
+      maxToolCount: SHELL_TOOL_NAMES.length,
+    })).toBeNull();
+    expect(buildShellToolLimitUpgrade({ maxResultBytes: 64_000, maxToolCount: 128 })).toBeNull();
   });
 
   it('upgrades legacy read-only Shell allowlists with local file tools too', () => {
