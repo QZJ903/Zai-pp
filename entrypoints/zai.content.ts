@@ -74,6 +74,7 @@ import {
 import {
   ZAI_CONTENT_TO_MAIN,
   ZAI_MAIN_TO_CONTENT,
+  isZaiBridgeMessage,
 } from '../core/zai/messages';
 import { decodeZaiUsageSnapshot } from '../core/zai/stream-metrics';
 import {
@@ -103,6 +104,7 @@ import {
   ZAI_DIAG_TOOL_RESULT_ATTR,
 } from '../core/zai/contracts';
 import { createToolInvocationCatalog } from '../core/tool/invocation';
+import { createLatestSyncGate } from '../core/tool/latest-sync';
 import { MCP_CAPABILITY_TOOL_PROVIDER_ID } from '../core/mcp/capability-contract';
 import { mountToolResultCards } from '../core/ui/tool-result-cards';
 import { injectInjectedThemeStyles, syncInjectedTheme } from '../core/ui/injected-theme';
@@ -133,10 +135,14 @@ let currentRequestMessageCount = 0;
 let extensionContextValid = true;
 /** 侧边栏「项目」面板控制器（见 installProjectPanel）。 */
 let projectPanelController: ProjectPanelController | null = null;
-/** 已执行过工具的 toolCall 签名集合（防 TOOL_CALL 通道重复执行同一 XML）。 */
-const executedToolCallSignatures = new Set<string>();
-/** grantId → chatSessionId 映射：请求增广时记下每个授权绑定的会话，执行时校验一致。 */
-const grantChatSessionIdByAuthId = new Map<string, string | null>();
+/**
+ * requestId → 该请求已执行过的 toolCall 签名（防 TOOL_CALL 通道重复执行同一 XML）。
+ *
+ * ⚠️ **按 requestId 分桶**，而不是一个扁平 Set —— 签名里含 XML 原文（`local_file_write`
+ * 的 content 上限 900KB），扁平结构既没法按请求释放、又会让每轮各留一份大串。
+ * 释放见 `releaseRequestState`。
+ */
+const executedToolCallSignatures = new Map<string, Set<string>>();
 /** requestId → chatSessionId 映射：执行时补全 source.chatSessionId 用。 */
 const chatSessionIdByRequestId = new Map<string, string | null>();
 /** requestId → 是否 agent 轮：启动续跑循环时记下，循环内复用同一套裁剪口径。 */
@@ -145,8 +151,35 @@ const isAgentTurnByRequestId = new Map<string, boolean>();
 const nativeSearchOnByRequestId = new Map<string, boolean>();
 /** requestId → 本轮已完成的工具执行记录（TOOL_CALL 通道执行后写入，response 里读取续跑判定）。 */
 const executionsByRequest = new Map<string, ToolExecutionRecord[]>();
-/** 待完成的工具执行 promise（REQUEST_TERMINAL 关闭授权前要等它们先跑完）。 */
-const pendingToolExecutionsByRequest = new Map<string, Set<Promise<unknown>>>();
+
+/**
+ * 释放某个请求的全部请求级状态。**在 `REQUEST_TERMINAL` 分支末尾调用一次**。
+ *
+ * 选这个点的依据：`REQUEST_TERMINAL` 由 `notifyTerminal` 发出、带 `terminalSent` 幂等守卫，
+ * **每条请求恰好一次**；而它天然排在 `RESPONSE_COMPLETE` 之后（fetch hook 先发后者），
+ * 这几个容器的最后一个读者都在 `handleResponseComplete` 里 —— 即「读完才删」，
+ * 不会让某次执行被判成重复而跳过。
+ *
+ * ⚠️ **`respondedRequestIds` 刻意不在这里释放。** 它有一个**延迟读者**：
+ * `armManualStopDetection` 会遍历在跑的任务，把「不在这个集合里」的 requestId 挂上
+ * 4 秒的宽限窗口，到期判为「用户手动停止」并回 `DOM_TASK_FAILED`。一旦在这里删掉条目，
+ * 之后任何一次扫描都会把**已经正常完成**的请求重新当成待挂窗口 —— 若那个任务正在
+ * 续跑循环里，就会被误杀。它每轮只占一个 UUID，泄漏量与其他几项不在一个量级。
+ * 要清也得按时间老化（等宽限窗口确定跑完），不能按 requestId 删。
+ *
+ * ⚠️ **没有 `REQUEST_TERMINAL` 的两条路径会留下残余**：HTML 挑战页与响应直接 reject
+ * （fetch hook 在这两条路上只发各自的回调）。但这两条路都没有流、也就没有工具执行，
+ * 所以真正占内存的两个容器根本不会被写；残留的只有三个小条目。**这是有意接受的**：
+ * 让 terminal 在这两条路上也发出会连带触发 `armManualStopDetection`，可能给高峰挑战
+ * 误报一次 `DOM_TASK_FAILED` —— 那是行为改动，不该混在内存清理里。
+ */
+function releaseRequestState(requestId: string): void {
+  executedToolCallSignatures.delete(requestId);
+  executionsByRequest.delete(requestId);
+  chatSessionIdByRequestId.delete(requestId);
+  isAgentTurnByRequestId.delete(requestId);
+  nativeSearchOnByRequestId.delete(requestId);
+}
 /** 主世界消息串行队列：保证 TOOL_CALL → RESPONSE_COMPLETE → REQUEST_TERMINAL 按顺序执行。 */
 let mainWorldMessageQueue: Promise<void> = Promise.resolve();
 /** 续跑请求观察计数：AUGMENT_REQUEST_BODY 收到续跑请求时 +1，用于检测 DOM 注入是否真的发出了请求。 */
@@ -432,7 +465,37 @@ function syncHookState(): void {
   postToMainWorld({ type: 'SYNC_HOOK_STATE', toolDescriptorNames: names });
 }
 
-async function loadAndSyncRuntimeState(): Promise<void> {
+/**
+ * 运行时状态同步（记忆 / 技能 / 工具目录 / 预设 / 联网开关）。
+ *
+ * ⚠️ **两次同步并发时，必须只有最新那次能落到模块状态上。** 触发源分布在两条不同的
+ * 时间线上：`chrome.runtime.onMessage` 的广播监听（`STATE_UPDATED` 与
+ * `TOOL_DESCRIPTORS_UPDATED` 落进同一个分支，而后台侧这两条是**背靠背**发的）、
+ * 自动化发送前、启动、以及主世界消息串行队列内的续跑/纠偏注入。它们各自的
+ * `GET_TOOL_DESCRIPTORS` 往返顺序**没有保证** —— 先发起的后返回时，旧目录会盖掉新目录；
+ * 更糟的是**过期的失败会把更新的成功清掉**（失败路径落成空数组 = fail-closed 清空目录，
+ * 方向本身是对的，但由过期结果触发就是错的）。
+ *
+ * ⚠️ **需要「这次拿到的就一定算数」的调用方，请用返回值，不要去读模块状态** ——
+ * 模块状态按「最新一次生效」的闸门落地，某一次调用的结果可能被更新的同步顶掉。
+ * 返回值永远是本次调用的结果（见 `requestToolAuthorization` 的授权重试）。
+ */
+const toolDescriptorSyncGate = createLatestSyncGate();
+
+interface LoadedRuntimeState {
+  descriptors: ToolDescriptor[];
+  /**
+   * 本次同步看到的「联网开关」存储值（任一开关开着即为 true）。
+   *
+   * ⚠️ **调用方要「我这次拿到的」时，必须读这个返回值，不能读 `currentWebToolsEnabled`** ——
+   * 模块状态按「只有最新一次同步生效」落地（见 `loadAndSyncRuntimeState` 的说明），
+   * 本次结果可能被一条更新的同步顶掉，那时读模块状态会拿到更旧的快照。
+   */
+  webToolsEnabled: boolean;
+}
+
+async function loadAndSyncRuntimeState(): Promise<LoadedRuntimeState> {
+  const syncLease = toolDescriptorSyncGate.begin();
   const [memories, descriptors, skills, skillAutoActivation, activePreset, promptSettings, webToolSettings, resolvedLocale] = await Promise.all([
     sendRuntimeMessage<Memory[]>({ type: 'GET_MEMORIES' }).then((v) => (Array.isArray(v) ? v : [])),
     sendRuntimeMessage<ToolDescriptor[]>({ type: 'GET_TOOL_DESCRIPTORS' }).then((v) => (Array.isArray(v) ? v : [])),
@@ -450,18 +513,23 @@ async function loadAndSyncRuntimeState(): Promise<void> {
     sendRuntimeMessage<Record<string, unknown>>({ type: 'GET_WEB_TOOL_SETTINGS' }),
     getResolvedLocaleState(),
   ]);
-  currentMemories = memories;
-  currentToolDescriptors = descriptors;
-  currentSkills = skills;
-  currentSkillAutoActivation = skillAutoActivation;
-  currentActivePreset = activePreset;
-  currentPromptSettings = promptSettings;
-  // 任一工具开关开着就算「联网可用」；读取失败时保持上一次的值。
-  if (webToolSettings && typeof webToolSettings === 'object') {
-    currentWebToolsEnabled = webToolSettings.web_search === true || webToolSettings.web_fetch === true;
-  }
-  currentContentLocale = resolvedLocale.locale;
-  syncHookState();
+  // 任一工具开关开着就算「联网可用」；**读取失败时沿用上一次的值**（沿用语义，别改成 false）。
+  const webToolsEnabled = webToolSettings && typeof webToolSettings === 'object'
+    ? webToolSettings.web_search === true || webToolSettings.web_fetch === true
+    : currentWebToolsEnabled;
+  // 只有最新一次同步能落地；被顶掉时静默放弃（旧数据不该覆盖新数据）。
+  syncLease.commit(() => {
+    currentMemories = memories;
+    currentToolDescriptors = descriptors;
+    currentSkills = skills;
+    currentSkillAutoActivation = skillAutoActivation;
+    currentActivePreset = activePreset;
+    currentPromptSettings = promptSettings;
+    currentWebToolsEnabled = webToolsEnabled;
+    currentContentLocale = resolvedLocale.locale;
+    syncHookState();
+  });
+  return { descriptors, webToolsEnabled };
 }
 
 interface ResolvedProjectAugmentationContext {
@@ -941,7 +1009,6 @@ async function handleAugmentRequestBody(
         toolIntent: firstText.slice(0, 16_000),
       });
       activeToolAuthorizations.set(requestId, authorization);
-      grantChatSessionIdByAuthId.set(authorization.id, chatSessionId);
       // 项目上下文（首条）：此刻**地址栏还没有 `/c/<id>`**，查不了会话归属，
       // 唯一已知的是**待绑项目**（「下一条新会话使用此项目」与面板的「在项目下开启
       // 新会话」都会先置 pending）。漏了这一步的后果是**静默的**：首条没有项目指令，
@@ -1050,7 +1117,6 @@ async function handleAugmentRequestBody(
         descriptorIds: currentToolDescriptors.map((d) => d.id),
       });
       activeToolAuthorizations.set(requestId, auth);
-      grantChatSessionIdByAuthId.set(auth.id, chatSessionId);
       // 续跑轮也保持「原生联网关闭」：归属任务开启搜索时（matchedTask 或续跑循环所属任务），
       // 给透传 body 补上 features.auto_web_search=false + features.web_search=false，
       // 确保整条会话始终走扩展自带的 web_search / web_fetch。
@@ -1098,7 +1164,6 @@ async function handleAugmentRequestBody(
       toolIntent: originalPrompt.slice(0, 16_000),
     });
     activeToolAuthorizations.set(requestId, auth);
-    grantChatSessionIdByAuthId.set(auth.id, chatSessionId);
     const parentId = readZaiCurrentUserMessageParentId(body);
     const isFirstMessage = parentId === null || parentId === undefined;
     // completion 路由的 agent 判定：features.flags 里含 general_agent。
@@ -1253,13 +1318,12 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
       }
       case 'REQUEST_TERMINAL': {
         const requestId = (data.payload as { requestId?: string } | undefined)?.requestId;
-        // 关闭授权前，先等该 requestId 挂起的所有工具执行跑完。
-        if (requestId) {
-          const pending = pendingToolExecutionsByRequest.get(requestId);
-          if (pending && pending.size > 0) {
-            await Promise.allSettled([...pending]);
-          }
-        }
+        // 这里不需要「等在飞的工具执行跑完」：`executeDetected` 的每个调用点都在
+        // `mainWorldMessageQueue` 内被 await，而本分支排在同一条队列的 TOOL_CALL /
+        // RESPONSE_COMPLETE 之后，所以走到这里不可能还有在飞的执行。
+        // ⚠️ **这条顺序保证是「不用等」的全部依据** —— 若把某个 `executeDetected`
+        // 调用点改成不 await 的并发派发，就得把等待加回来（见
+        // `tests/zai-content-tool-execution-contract.test.ts`）。
         if (requestId && activeToolAuthorizations.has(requestId)) {
           await closeToolAuthorization(requestId);
         }
@@ -1270,6 +1334,8 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         if (requestId && !respondedRequestIds.has(requestId)) {
           armManualStopDetection();
         }
+        // 释放这一轮的请求级状态。放最后：上面的判定都读完了才清。
+        if (requestId) releaseRequestState(requestId);
         return;
       }
       case 'HTML_CHALLENGE': {
@@ -1349,9 +1415,14 @@ async function executeDetectedFromDetected(
 /**
  * 建授权，**描述符对不上时先刷新再重试一次**。
  *
- * `unknown_tool_authorization_descriptor` 表示我们这份 `currentToolDescriptors` 已经
- * 过期（用户中途加了 skill / MCP，或后台重启后重算了 id）—— 把陈旧列表原样重发
- * 只会得到同一个错，所以这里先 `loadAndSyncRuntimeState()` 拿最新清单再试一次。
+ * `unknown_tool_authorization_descriptor` 表示我们这份工具目录已经过期
+ * （用户中途加了 skill / MCP，或后台重启后重算了 id）—— 把陈旧列表原样重发
+ * 只会得到同一个错，所以这里先同步一次运行时状态、拿最新清单再试一次。
+ *
+ * ⚠️ **重试用的是本次同步的返回值，不是 `currentToolDescriptors`** —— 模块状态按
+ * 「最新一次同步生效」落地，而本次同步完全可能被一条更新的同步顶掉；那时去读模块状态
+ * 会拿到别的东西（可能还是旧清单），重试就白做了，且失败是静默的（第二次照样报同一个错）。
+ * 这条重试在串行队列内，它要的是「我这次拿到的这一份」。
  */
 async function requestToolAuthorization(
   requestId: string,
@@ -1368,18 +1439,30 @@ async function requestToolAuthorization(
       || error.code !== 'unknown_tool_authorization_descriptor') {
       throw error;
     }
-    await loadAndSyncRuntimeState();
+    const { descriptors } = await loadAndSyncRuntimeState();
     return createToolAuthorization({
       requestId,
       chatSessionId,
-      descriptorIds: currentToolDescriptors.map((d) => d.id),
+      descriptorIds: descriptors.map((d) => d.id),
     });
   }
 }
 
 async function executeDetected(call: ToolCall, requestId: string): Promise<ToolExecutionRecord | null> {
-  // 授权：原生轮/续跑轮都可能因为请求已被 requestTerminal 关掉 grant 而查不到。
-  // 这里做「懒建授权」——查不到就现场新建一个 grant，保证工具永远能执行。
+  // 授权：正常情况下每条路由在请求增广时就建好了 grant（chatNew / completion / 续跑各一处）。
+  // 查不到时这里现场新建一个，保证工具仍能执行。
+  //
+  // 走到这里的原因只有一类：这一轮的增广没能建授权。具体是 `handleAugmentRequestBody`
+  // 的几条提前返回（id / body 缺失、body 解析失败）与外层 catch（增广抛错 → 主世界收到
+  // `ok:false` → 原样放行请求）。这些情况下请求带着**未经增广的 body** 发出，模型没有
+  // 我们的工具目录，但仍可能照会话历史里的标签名吐出 XML。
+  //
+  // ⚠️ 不能拿「续跑轮的 grant 被 requestTerminal 提前关掉」解释这条路径：`RESPONSE_COMPLETE`
+  // 与 `REQUEST_TERMINAL` 在 fetch hook 的同一次 pull 里先后发出（done 分支），隔离世界按
+  // 到达顺序处理，所以 `handleResponseComplete` 里的兜底解析跑完之前 grant 一定还在。
+  //
+  // ⚠️ 这条懒建等价于**在内容脚本里给自己发许可**；上游没有它（上游查不到 grant 时把空的
+  // authorizationId 交给后台，由后台拒绝）。它同时是「伪造一条桥消息即可执行任意工具」的放大器。
   let authorization = activeToolAuthorizations.get(requestId);
   const authId = authorization?.id;
   if (!authId) {
@@ -1441,11 +1524,13 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
   // 消息、raw 各自不同，但 parseToolXml 对「单条 raw」重解析时 id 恒为 xml:0 —— 若签名只用
   // id，三条 memory_save 会撞同一个签名、只剩第一条执行。用 raw 区分，每个工具天然唯一。
   const signature = `${requestId}:${callWithSource.raw ?? callWithSource.invocationName}:${callWithSource.id}`;
-  if (executedToolCallSignatures.has(signature)) {
+  const signaturesForRequest = executedToolCallSignatures.get(requestId) ?? new Set<string>();
+  if (signaturesForRequest.has(signature)) {
     diag.toolCalls?.push({ kind: 'skipped_duplicate_call', name: call.name, requestId, signature });
     return null;
   }
-  executedToolCallSignatures.add(signature);
+  signaturesForRequest.add(signature);
+  executedToolCallSignatures.set(requestId, signaturesForRequest);
 
   const effectiveAuthId = authorization?.id;
   if (!effectiveAuthId) {
@@ -1734,12 +1819,13 @@ async function handleResponseComplete(complete: ZaiResponseComplete): Promise<vo
     if (shouldNudgeNow) {
       continuationLoop.nudgeCount += 1;
       // 实时拉取最新工具目录，nudge 轮注入的「可用工具清单」同样实时。
-      await loadAndSyncRuntimeState();
+      // ⚠️ 用返回值而不是模块状态：模块状态按「最新一次同步生效」落地，本次可能被顶掉。
+      const nudgeState = await loadAndSyncRuntimeState();
       const nudgeToolNames = catalogNamesFor(filterZaiModelFacingToolDescriptors(
-        currentToolDescriptors,
+        nudgeState.descriptors,
         {
           isAgent: continuationLoop.isAgentTurn,
-          webToolsEnabled: currentWebToolsEnabled,
+          webToolsEnabled: nudgeState.webToolsEnabled,
           nativeSearchOn: continuationLoop.nativeSearchOn,
         },
       ));
@@ -1893,8 +1979,9 @@ async function handleResponseComplete(complete: ZaiResponseComplete): Promise<vo
     nativeSearchOn: nativeSearchOnByRequestId.get(complete.requestId) ?? false,
     model: resolveLoopModel(complete.requestId),
   };
-  isAgentTurnByRequestId.delete(complete.requestId);
-  nativeSearchOnByRequestId.delete(complete.requestId);
+  // 这里不再单独清 `isAgentTurnByRequestId` / `nativeSearchOnByRequestId` ——
+  // 释放统一由 `releaseRequestState` 在 `REQUEST_TERMINAL` 做。原先只在这个分支里清，
+  // 而原生轮的三条提前 return 都漏掉了（那才是真正的残留来源）。
   stampLoopDiagnostic();
   await advanceContinuationLoop();
 }
@@ -1918,12 +2005,13 @@ async function advanceContinuationLoop(): Promise<void> {
 
   // 实时拉取最新工具目录，续跑轮注入的「可用工具清单」始终是当前真实状态
   // （用户新增 skill / MCP 后，续跑轮立刻能用到，而非首条消息时的快照）。
-  await loadAndSyncRuntimeState();
+  // ⚠️ 用返回值而不是模块状态：模块状态按「最新一次同步生效」落地，本次可能被顶掉。
+  const loopState = await loadAndSyncRuntimeState();
   const toolNames = catalogNamesFor(filterZaiModelFacingToolDescriptors(
-    currentToolDescriptors,
+    loopState.descriptors,
     {
       isAgent: loop.isAgentTurn,
-      webToolsEnabled: currentWebToolsEnabled,
+      webToolsEnabled: loopState.webToolsEnabled,
       nativeSearchOn: loop.nativeSearchOn,
     },
   ));
@@ -3370,9 +3458,9 @@ export default defineContentScript({
 
     window.addEventListener('message', (event) => {
       if (event.source !== window) return;
-      const data = event.data as Record<string, unknown> | undefined;
-      if (!data || data.source !== ZAI_MAIN_TO_CONTENT) return;
-      void dispatchMainWorldMessage(data);
+      // 信封校验（source + type 形状）走共用判定，与协议清单同源。
+      if (!isZaiBridgeMessage(event.data, ZAI_MAIN_TO_CONTENT)) return;
+      void dispatchMainWorldMessage(event.data);
     });
 
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

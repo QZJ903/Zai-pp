@@ -587,11 +587,21 @@ async function interceptCompletionResponse(
   headers.delete('content-length');
   headers.delete('content-encoding');
 
-  return new Response(stream, {
+  const rebuilt = new Response(stream, {
     headers,
     status: response.status,
     statusText: response.statusText,
   });
+  // Response 构造函数没有 url 选项；重建后要把**最终（重定向后）URL**补回去，
+  // 否则页面代码读 `response.url` 会拿到空串 —— 这是它唯一还能看到真实端点的地方。
+  if (response.url) {
+    Object.defineProperty(rebuilt, 'url', {
+      value: response.url,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return rebuilt;
 }
 
 function registerToolCall(call: ZaiDetectedToolCall): void {
