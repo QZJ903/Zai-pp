@@ -1,13 +1,13 @@
 export const RUNTIME_TOPOLOGY = {
-  liveCommands: 101,
-  declaredActions: 75,
-  shared: 73,
+  liveCommands: 100,
+  declaredActions: 74,
+  shared: 72,
   liveOnly: 28,
   declaredOnly: 2,
-  readsPayload: 71,
+  readsPayload: 70,
   ignoresPayload: 30,
   directPayloadCasts: 0,
-  decodedPayloads: 66,
+  decodedPayloads: 65,
   delegatedPayloads: 0,
 } as const;
 
@@ -39,14 +39,6 @@ export const RUNTIME_REQUEST_FIXTURES = [
         raw: '<unsupported_contract_tool>{}</unsupported_contract_tool>',
         source: { trigger: 'manual_chat', requestId: 'request-contract-1' },
       },
-    },
-  },
-  {
-    name: 'sandbox execution command',
-    family: 'sandbox-request',
-    message: {
-      type: 'RUN_ARTIFACT_CODE',
-      payload: { language: 'javascript', code: 'return 42;', timeoutMs: 5_000 },
     },
   },
 ] as const;

@@ -232,7 +232,6 @@ describe('runtime sender and envelope boundary', () => {
 
   it('gates background dispatch before its privileged handlers', () => {
     const background = readFileSync('entrypoints/background.ts', 'utf8');
-    const offscreen = readFileSync('entrypoints/sandbox-offscreen/main.ts', 'utf8');
 
     expectInOrder(background, [
       'decodeRuntimeMessageEnvelope(message)',
@@ -240,7 +239,6 @@ describe('runtime sender and envelope boundary', () => {
       'authorizeRuntimeMessage(envelope, context)',
       'handleMessage(envelope, currentContext)',
     ]);
-    expect(offscreen).toContain('createExtensionRuntimeMessageContext(port.sender ?? {}');
   });
 
 });

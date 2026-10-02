@@ -113,7 +113,6 @@ describe('real tool authorization handler composition', () => {
       appendExternalizedToolPayloadChunk,
       clearExternalizedToolPayloadNamespace,
       executeToolCall: runtime.executeToolCall,
-      runSandbox: vi.fn(async () => ({ ok: true, summary: 'sandbox done' })),
       // mock 的本地目录校验默认信任（本用例不针对该校验逻辑）。
       validateLocalSkillDirectory: vi.fn(async () => true),
       getToolCallHistory,
@@ -140,7 +139,6 @@ describe('real tool authorization handler composition', () => {
       }),
       createRequestId: () => 'trusted-request-id',
       now: () => 1_000,
-      sandboxInvalidRequestSummary: () => 'Invalid sandbox request',
       broadcastToolDescriptorsUpdate: vi.fn(async () => undefined),
       broadcastMcpServersUpdate: vi.fn(async () => undefined),
       broadcastToolCallHistoryUpdate: vi.fn(async () => undefined),

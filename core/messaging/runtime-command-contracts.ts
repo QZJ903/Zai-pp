@@ -121,7 +121,6 @@ export const RUNTIME_COMMAND_CONTRACTS = {
     'status-or-domain-error-or-tool-result',
   ),
   EXECUTE_TOOL_CALL: typedCommand('payload-decoded', 'tool-result', 'tool-error'),
-  RUN_ARTIFACT_CODE: typedCommand('payload-decoded', 'tool-result'),
   GET_TOOL_CALL_HISTORY: typedCommand('payload-decoded', 'value', 'background-error', 'live-and-declared', 'optional'),
   CLEAR_TOOL_CALL_HISTORY: typedCommand('none', 'ack'),
   GET_PLATFORM_CAPABILITIES: typedCommand('none', 'value'),

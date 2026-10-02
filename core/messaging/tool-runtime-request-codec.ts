@@ -2,8 +2,6 @@ import type {
   McpServerCreateInput,
   McpServerUpdateInput,
 } from '../mcp/types';
-import { normalizeSandboxRunRequest } from '../sandbox/tool';
-import type { SandboxRunRequest } from '../sandbox/types';
 import type { ToolCall } from '../tool/types';
 import { WEB_SEARCH_TOOL_NAMES } from '../tool/web-search';
 import { isPlainRuntimeRecord } from './runtime-boundary';
@@ -40,10 +38,6 @@ export type DecodedDomainPayload<TPayload> =
   | ValidDecodedPayload<TPayload>
   | InvalidDecodedPayload;
 
-export type DecodedSandboxPayload =
-  | ValidDecodedPayload<SandboxRunRequest>
-  | { ok: false; detail: string };
-
 export type DecodedToolCallPayload =
   | { ok: true; call: ToolCall; authorizationId?: string }
   | { ok: false; call: unknown };
@@ -73,7 +67,6 @@ interface SpecialDecodedPayloads {
     chunk: string;
   }>;
   EXECUTE_TOOL_CALL: DecodedToolCallPayload;
-  RUN_ARTIFACT_CODE: DecodedSandboxPayload;
 }
 
 export type ToolRuntimeDecodedPayload<TType extends ToolRuntimePayloadCommandType> =
@@ -262,16 +255,6 @@ export const TOOL_RUNTIME_PAYLOAD_DECODERS: ToolRuntimePayloadDecoderMap = {
       authorizationId: typeof authorizationId === 'string' ? authorizationId : undefined,
       call: call as unknown as ToolCall,
     };
-  },
-  RUN_ARTIFACT_CODE(value) {
-    try {
-      return validDecodedPayload(normalizeSandboxRunRequest(value));
-    } catch (error) {
-      return {
-        ok: false,
-        detail: error instanceof Error ? error.message : String(error),
-      };
-    }
   },
   GET_TOOL_CALL_HISTORY(value) {
     if (value === undefined) return undefined;

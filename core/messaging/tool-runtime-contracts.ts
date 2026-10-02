@@ -12,7 +12,6 @@ import type {
   BrowserControlTarget,
 } from '../browser-control/types';
 import type { PlatformEnvironment } from '../platform/capabilities';
-import type { SandboxRunRequest } from '../sandbox/types';
 import type {
   MessageAction,
   ToolAuthorizationGrantSummary,
@@ -187,10 +186,6 @@ export interface ToolRuntimeCommandContracts {
   };
   EXECUTE_TOOL_CALL: {
     request: DeclaredRuntimeRequest<'EXECUTE_TOOL_CALL'>;
-    response: ToolResult;
-  };
-  RUN_ARTIFACT_CODE: {
-    request: { type: 'RUN_ARTIFACT_CODE'; payload: SandboxRunRequest };
     response: ToolResult;
   };
   GET_TOOL_CALL_HISTORY: {

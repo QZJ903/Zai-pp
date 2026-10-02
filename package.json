@@ -3,7 +3,7 @@
   "description": "Agentic memory, skills, agentic execution, automation, and MCP tools for Z.ai",
   "private": true,
   "license": "Apache-2.0",
-  "version": "2.15.15",
+  "version": "2.15.17",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -27,9 +27,8 @@
     "verify:extension-utf8": "node scripts/verify-extension-utf8.mjs",
     "verify:sidepanel-chunks": "node scripts/sidepanel-chunk-budget.mjs",
     "verify:release-assets": "node scripts/release-assets-check.mjs",
-    "smoke:pyodide": "node scripts/pyodide-offline-smoke.mjs",
     "verify:i18n": "node scripts/i18n-locale-check.mjs && node scripts/i18n-coverage-audit.mjs",
-    "ci:quality": "npm run verify:workflows && npm run audit:prod && npm run prompt:freeze && npm run compile && npm test && npm run verify:automation && npm run smoke:mcp && npm run verify:mcp:mock && npm run smoke:shell && npm run build:all && npm run verify:sidepanel-chunks && npm run verify:extension-utf8 && npm run verify:manifest-policy && npm run zip:all && npm run verify:release-assets && npm run smoke:pyodide",
+    "ci:quality": "npm run verify:workflows && npm run audit:prod && npm run prompt:freeze && npm run compile && npm test && npm run verify:automation && npm run smoke:mcp && npm run verify:mcp:mock && npm run smoke:shell && npm run build:all && npm run verify:sidepanel-chunks && npm run verify:extension-utf8 && npm run verify:manifest-policy && npm run zip:all && npm run verify:release-assets",
     "shell:install": "node scripts/install-shell-host.mjs",
     "smoke:web": "node scripts/web-search-smoke.mjs",
     "prompt:freeze": "node scripts/prompt-freeze.mjs",
@@ -41,10 +40,8 @@
     "postinstall": "wxt prepare"
   },
   "dependencies": {
-    "pyodide": "^314.0.0",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "sucrase": "^3.35.1"
+    "react-dom": "^19.2.4"
   },
   "devDependencies": {
     "@babel/parser": "^7.29.2",

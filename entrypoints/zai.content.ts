@@ -74,7 +74,13 @@ import {
 import {
   ZAI_CONTENT_TO_MAIN,
   ZAI_MAIN_TO_CONTENT,
+  decodeZaiHtmlChallengeMessage,
+  decodeZaiRequestTerminalMessage,
+  decodeZaiResponseCompleteMessage,
+  decodeZaiToolCallMessage,
   isZaiBridgeMessage,
+  type ZaiDetectedToolCall,
+  type ZaiResponseCompletePayload,
 } from '../core/zai/messages';
 import { decodeZaiUsageSnapshot } from '../core/zai/stream-metrics';
 import {
@@ -1253,14 +1259,6 @@ async function handleAugmentRequestBody(
 // 主世界消息分发
 // ---------------------------------------------------------------------------
 
-interface ZaiResponseComplete {
-  requestId: string;
-  originalPrompt: string;
-  agentTaskPrompt: string;
-  assistantText: string;
-  toolCalls: Array<{ name: string; raw: string; requestId: string }>;
-}
-
 async function dispatchMainWorldMessage(data: Record<string, unknown>): Promise<void> {
   // 同步探测续跑请求：必须在串行队列外、消息抵达瞬间就标记，否则 waitForRequestObserved
   // 因串行队列阻塞而永远看不到 AUGMENT_REQUEST_BODY（自锁）。这里只看一眼 body 是否续跑模板。
@@ -1305,11 +1303,25 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         return;
       }
       case 'TOOL_CALL': {
-        await handleDetectedToolCall(data.data as { name: string; raw: string; requestId: string });
+        // 载荷必须过 decoder：这条**有执行语义**（→ parseToolXml → executeDetected，
+        // 而那里查不到 grant 会现场建一个）。非法载荷一律丢弃，不新造拒绝分支。
+        const call = decodeZaiToolCallMessage(data.data);
+        if (!call) {
+          diag.errors?.push({ kind: 'tool_call_payload_rejected' });
+          return;
+        }
+        await handleDetectedToolCall(call);
         return;
       }
       case 'RESPONSE_COMPLETE': {
-        await handleResponseComplete(data.payload as ZaiResponseComplete);
+        // ⚠️ 这条**同样有执行语义** —— handleResponseComplete 会在
+        // executionsByRequest 为空时拿 assistantText 跑 parseToolXml 兜底执行工具。
+        const complete = decodeZaiResponseCompleteMessage(data.payload);
+        if (!complete) {
+          diag.errors?.push({ kind: 'response_complete_payload_rejected' });
+          return;
+        }
+        await handleResponseComplete(complete);
         return;
       }
       case 'USAGE_SNAPSHOT': {
@@ -1317,30 +1329,41 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         return;
       }
       case 'REQUEST_TERMINAL': {
-        const requestId = (data.payload as { requestId?: string } | undefined)?.requestId;
+        const terminal = decodeZaiRequestTerminalMessage(data.payload);
+        if (!terminal) {
+          diag.errors?.push({ kind: 'request_terminal_payload_rejected' });
+          return;
+        }
+        const requestId = terminal.requestId;
         // 这里不需要「等在飞的工具执行跑完」：`executeDetected` 的每个调用点都在
         // `mainWorldMessageQueue` 内被 await，而本分支排在同一条队列的 TOOL_CALL /
         // RESPONSE_COMPLETE 之后，所以走到这里不可能还有在飞的执行。
         // ⚠️ **这条顺序保证是「不用等」的全部依据** —— 若把某个 `executeDetected`
         // 调用点改成不 await 的并发派发，就得把等待加回来（见
         // `tests/zai-content-tool-execution-contract.test.ts`）。
-        if (requestId && activeToolAuthorizations.has(requestId)) {
+        // ⚠️ decoder 已保证 requestId 是非空字符串，下面的判定不必再判空。
+        if (activeToolAuthorizations.has(requestId)) {
           await closeToolAuthorization(requestId);
         }
         // 流终止但这一轮从未产出 RESPONSE_COMPLETE = 页面侧把读取流 abort 了
         // （用户点 Stop，或读取中途出错）。这比「等 Stop 按钮消失」更直接，
         // 这里立刻挂上手动停止宽限窗口，不必再等 180s 执行租约超时。
         // 正常结束的轮次不走这里：fetch hook 先发 RESPONSE_COMPLETE 再发 REQUEST_TERMINAL。
-        if (requestId && !respondedRequestIds.has(requestId)) {
+        if (!respondedRequestIds.has(requestId)) {
           armManualStopDetection();
         }
         // 释放这一轮的请求级状态。放最后：上面的判定都读完了才清。
-        if (requestId) releaseRequestState(requestId);
+        releaseRequestState(requestId);
         return;
       }
       case 'HTML_CHALLENGE': {
         // completion 返回 HTML：推进续跑而不是干等。
-        const requestId = (data.payload as { requestId?: string } | undefined)?.requestId;
+        const challenge = decodeZaiHtmlChallengeMessage(data.payload);
+        if (!challenge) {
+          diag.errors?.push({ kind: 'html_challenge_payload_rejected' });
+          return;
+        }
+        const requestId = challenge.requestId;
         if (continuationLoop?.status === 'running' && continuationLoop.activeRequestId === requestId) {
           const expectedLoop = continuationLoop;
           setTimeout(() => {
@@ -1365,8 +1388,10 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
 // ---------------------------------------------------------------------------
 
 async function handleDetectedToolCall(
-  detected: { name: string; raw: string; requestId: string },
+  detected: ZaiDetectedToolCall,
 ): Promise<void> {
+  // 载荷已过 `decodeZaiToolCallMessage`（name / raw / requestId 都是字符串、name 非空），
+  // 这里的判空只作为防御性兜底保留。
   if (!detected?.name) return;
   // 诊断：记录识别命中的工具（含 requestId 与 raw，方便定位 XML 归属）。
   diag.toolCalls?.push({
@@ -1389,7 +1414,7 @@ async function handleDetectedToolCall(
 }
 
 async function executeDetectedFromDetected(
-  detected: { name: string; raw: string; requestId: string },
+  detected: ZaiDetectedToolCall,
 ): Promise<void> {
   // 注意：不能用 requestId 粒度去重！fetch-hook 对同一条模型回复里的每个工具
   // 单独发一条 TOOL_CALL 消息（requestId 相同、raw 不同）。若按 requestId 去重，
@@ -1662,7 +1687,7 @@ async function importMemoryDraftsFromCard(
   }
 }
 
-async function handleResponseComplete(complete: ZaiResponseComplete): Promise<void> {
+async function handleResponseComplete(complete: ZaiResponseCompletePayload): Promise<void> {
   if (!complete?.requestId) return;
   respondedRequestIds.add(complete.requestId);
   // 会话名要等**首答完成**才定下来（之前侧边栏那行是「新会话」这类临时名）。

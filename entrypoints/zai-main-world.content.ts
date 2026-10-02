@@ -19,6 +19,8 @@ import {
 import {
   ZAI_CONTENT_TO_MAIN,
   ZAI_MAIN_TO_CONTENT,
+  decodeZaiSyncHookStateMessage,
+  decodeZaiTitleLookupMessage,
   isZaiBridgeMessage,
 } from '../core/zai/messages';
 
@@ -125,22 +127,29 @@ window.addEventListener('message', (event) => {
     return;
   }
   if (data.type === 'SYNC_HOOK_STATE') {
-    const names = Array.isArray(data.toolDescriptorNames)
-      ? (data.toolDescriptorNames as string[])
-      : [];
-    updateZaiHookState({ toolDescriptorNames: new Set(names) });
+    // ⚠️ **元素类型必须校验**：这些名字会被逐个喂给 `escapeRegExp`（`value.replace`），
+    // 非字符串会抛 TypeError → 走到 `controller.error` → **打断回给页面的响应流**。
+    // `new Set()` 不做类型收敛，别指望它兜。
+    const state = decodeZaiSyncHookStateMessage(data);
+    if (!state) return;
+    updateZaiHookState({ toolDescriptorNames: new Set(state.toolDescriptorNames) });
     return;
   }
   if (data.type === 'TITLE_LOOKUP') {
     // 会话标题解析的**逐条上报**（不是整数组同步）—— 那条链路的触发很密，
     // 走 DIAG_SYNC 的「整数组 + 追加合并」语义会平方级重复。
+    //
+    // 载荷过 decoder（只要求是对象 + `at` 是有限数字）—— 这条只进诊断数组、
+    // 没有执行语义，所以校验强度按「挡掉形状垃圾」定，不复刻联合类型。
+    const entry = decodeZaiTitleLookupMessage(data.entry);
+    if (!entry) return;
     const target = (window as unknown as Record<string, unknown>);
     // 主世界的诊断对象由 fetch-hook 建立，但它可能还没跑到 —— 这里兜一下，
     // 否则「页面刚打开就发生的标题解析」会被静默丢掉。
     const existing = (target['__GLMPP_DIAG__'] ??= {}) as Record<string, unknown>;
     const current = Array.isArray(existing.titleLookups) ? (existing.titleLookups as unknown[]) : [];
     // 只留最近 50 条：每次发消息都会问一次标题。
-    existing.titleLookups = [...current, data.entry].slice(-50);
+    existing.titleLookups = [...current, entry].slice(-50);
     return;
   }
   if (data.type === 'DIAG_SYNC') {

@@ -29,7 +29,6 @@ const SCAN_PATHS = [
   'core/browser-control',
   'core/network',
   'core/interceptor',
-  'core/sandbox',
   'core/ui',
   'core/project',
   'core/saved-items',

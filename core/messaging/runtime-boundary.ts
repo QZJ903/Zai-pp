@@ -252,7 +252,7 @@ export function createRuntimeBoundaryErrorResponse(
     ? error.code
     : RUNTIME_BOUNDARY_ERROR_CODES.invalidMessage;
   const message = error instanceof Error ? error.message : 'Runtime message rejected.';
-  if (envelope?.type === 'EXECUTE_TOOL_CALL' || envelope?.type === 'RUN_ARTIFACT_CODE') {
+  if (envelope?.type === 'EXECUTE_TOOL_CALL') {
     return {
       ok: false,
       summary: 'Runtime request rejected',

@@ -91,7 +91,7 @@ const call: ToolCall = {
 };
 
 describe('tool runtime handler ownership', () => {
-  it('creates exactly the 32 inventory-assigned handlers without duplicate ownership', () => {
+  it('creates exactly the 31 inventory-assigned handlers without duplicate ownership', () => {
     const handlers = createToolRuntimeHandlers({
       mcp: createMcpDependencies(),
       browser: createBrowserDependencies(),
@@ -99,11 +99,11 @@ describe('tool runtime handler ownership', () => {
     });
     const types = handlers.map((handler) => handler.type);
     const expected = readInventoryCommands(
-      'Group C — MCP, tool, browser control, and sandbox (32)',
+      'Group C — MCP, tool, browser control, and sandbox (31)',
     );
 
-    expect(types).toHaveLength(32);
-    expect(new Set(types).size).toBe(32);
+    expect(types).toHaveLength(31);
+    expect(new Set(types).size).toBe(31);
     expect([...types].sort()).toEqual([...expected].sort());
     for (const type of types) expect(getRuntimeCommandOwner(type)).toBe('typed-handler');
 
@@ -113,7 +113,7 @@ describe('tool runtime handler ownership', () => {
       .filter((type) => expected.includes(type))
       .sort();
     expect(Object.keys(TOOL_RUNTIME_PAYLOAD_DECODERS).sort()).toEqual(decodedTypes);
-    expect(decodedTypes).toHaveLength(22);
+    expect(decodedTypes).toHaveLength(21);
   });
 
   it('rejects malformed nested MCP input before persistence or external I/O', async () => {
@@ -707,33 +707,6 @@ describe('tool execution runtime handlers', () => {
     expect(events).toEqual(['close', 'cache:delete-grant', 'payload:clear']);
   });
 
-  it('normalizes valid sandbox input and rejects invalid input before runtime I/O', async () => {
-    const dependencies = createExecutionDependencies();
-    const handlers = createToolExecutionRuntimeHandlers(dependencies);
-
-    await expect(dispatch(handlers, {
-      type: 'RUN_ARTIFACT_CODE',
-      payload: { language: 'javascript', code: 'return 1' },
-    })).resolves.toEqual({ ok: true, summary: 'sandbox done' });
-    expect(dependencies.runSandbox).toHaveBeenCalledWith({
-      language: 'javascript',
-      code: 'return 1',
-      input: undefined,
-      timeoutMs: 5_000,
-    });
-
-    vi.mocked(dependencies.runSandbox).mockClear();
-    await expect(dispatch(handlers, {
-      type: 'RUN_ARTIFACT_CODE',
-      payload: { language: 'ruby', code: 'puts 1' },
-    })).resolves.toMatchObject({
-      ok: false,
-      summary: 'Invalid sandbox request',
-      error: { code: 'sandbox_invalid_request', retryable: false },
-    });
-    expect(dependencies.runSandbox).not.toHaveBeenCalled();
-  });
-
   it('preserves history limits, notification order, and platform capabilities', async () => {
     const dependencies = createExecutionDependencies();
     const history = createHistoryRecord();
@@ -868,13 +841,11 @@ function createExecutionDependencies(): ToolExecutionRuntimeHandlerDependencies 
       ok: true,
       summary: 'done',
     })),
-    runSandbox: vi.fn(async () => ({ ok: true, summary: 'sandbox done' })),
     getToolCallHistory: vi.fn(async () => []),
     clearToolCallHistory: vi.fn(async () => undefined),
     getPlatformEnvironment: vi.fn(() => createPlatformEnvironment()),
     createRequestId: vi.fn(() => 'generated-request-id'),
     now: vi.fn(() => 1_000),
-    sandboxInvalidRequestSummary: vi.fn(() => 'Invalid sandbox request'),
     broadcastToolDescriptorsUpdate: vi.fn(async () => undefined),
     broadcastMcpServersUpdate: vi.fn(async () => undefined),
     broadcastToolCallHistoryUpdate: vi.fn(async () => undefined),

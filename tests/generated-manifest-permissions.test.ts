@@ -6,7 +6,6 @@ const CHROMIUM_PERMISSIONS = [
   'storage',
   'alarms',
   'nativeMessaging',
-  'offscreen',
   'debugger',
   'tabs',
   'sidePanel',

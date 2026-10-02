@@ -17,7 +17,6 @@ import type {
 } from './project/types';
 import type { PromptInjectionSettings as PromptInjectionSettingsType } from './prompt/settings';
 import type { SkillAutoActivationSettings } from './skill/auto-activation-settings';
-import type { SandboxRunRequest as SandboxRunRequestType } from './sandbox/types';
 import type {
   SavedItemInput,
 } from './saved-items/types';
@@ -128,12 +127,6 @@ export type {
   UsageTurnInput,
   UsageTurnRecord,
 } from './usage/types';
-
-export type {
-  SandboxExecutionResult,
-  SandboxLanguage,
-  SandboxRunRequest,
-} from './sandbox/types';
 
 export type {
   PlatformCapability,
@@ -488,7 +481,6 @@ export type MessageAction =
   | { type: 'CLOSE_TOOL_AUTHORIZATION'; payload: { authorizationId: string } }
   | { type: 'APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK'; payload: { authorizationId: string; callId: string; invocationName: string; chunk: string } }
   | { type: 'EXECUTE_TOOL_CALL'; payload: ToolCall & { authorizationId?: string } }
-  | { type: 'RUN_ARTIFACT_CODE'; payload: SandboxRunRequestType }
   | { type: 'GET_TOOL_CALL_HISTORY'; payload?: { limit?: number } }
   | { type: 'CLEAR_TOOL_CALL_HISTORY' }
   | { type: 'GET_PLATFORM_CAPABILITIES' }

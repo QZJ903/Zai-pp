@@ -4,7 +4,6 @@ import {
   type RuntimeCommandHandler,
 } from '../../core/messaging/runtime-command-registry';
 import type { PlatformEnvironment } from '../../core/platform/capabilities';
-import type { SandboxRunRequest } from '../../core/sandbox/types';
 import type {
   CreateToolAuthorizationInput,
 } from '../../core/tool/authorization';
@@ -68,13 +67,11 @@ export interface ToolExecutionRuntimeHandlerDependencies {
     authorization: RuntimeToolAuthorizationContext,
     locale: SupportedLocale,
   ): Promise<ToolResult>;
-  runSandbox(request: SandboxRunRequest): Promise<ToolResult>;
   getToolCallHistory(limit?: number): Promise<ToolCallHistoryRecord[]>;
   clearToolCallHistory(): Promise<void>;
   getPlatformEnvironment(): PlatformEnvironment;
   createRequestId(): string;
   now(): number;
-  sandboxInvalidRequestSummary(): string;
   broadcastToolDescriptorsUpdate(excludeTabId?: number): Promise<void>;
   broadcastMcpServersUpdate(excludeTabId?: number): Promise<void>;
   broadcastToolCallHistoryUpdate(excludeTabId?: number): Promise<void>;
@@ -220,24 +217,6 @@ export function createToolExecutionRuntimeHandlers(
         await dependencies.notifyStateCommitted(context.tabId);
       }
       return result;
-    }),
-    defineToolPayloadRuntimeCommandHandler('RUN_ARTIFACT_CODE', (decoded) => {
-      if (decoded.ok === true) return dependencies.runSandbox(decoded.payload);
-      const now = dependencies.now();
-      return {
-        ok: false,
-        summary: dependencies.sandboxInvalidRequestSummary(),
-        detail: decoded.detail,
-        error: {
-          code: 'sandbox_invalid_request',
-          message: decoded.detail,
-          retryable: false,
-        },
-        startedAt: now,
-        completedAt: now,
-        durationMs: 0,
-        truncated: false,
-      };
     }),
     defineToolPayloadRuntimeCommandHandler('GET_TOOL_CALL_HISTORY', (payload) => (
       dependencies.getToolCallHistory(payload?.limit)

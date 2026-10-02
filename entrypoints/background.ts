@@ -106,16 +106,6 @@ import {
   getSkillAutoActivationSettings,
   saveSkillAutoActivationSettings,
 } from '../core/skill/auto-activation-settings';
-import {
-  normalizeSandboxExecutionResult,
-  parseSandboxEnvelope,
-  readSandboxRequestId,
-  SANDBOX_MESSAGE_TYPES,
-  SANDBOX_OFFSCREEN_PORT,
-  type SandboxExecutionResult,
-  type SandboxRunRequest,
-  type SandboxToolRuntime,
-} from '../core/sandbox';
 import { getCurrentPlatformEnvironment } from '../core/platform';
 import { readOptionalChromeApi } from '../core/platform/chrome-api';
 import {
@@ -234,7 +224,6 @@ const {
 });
 let currentBackgroundLocale: SupportedLocale = DEFAULT_LOCALE;
 let currentBackgroundTranslator = createTranslator(DEFAULT_LOCALE);
-let sandboxOffscreenCreation: Promise<void> | null = null;
 const syncLocalRecoveryBarrier = createSyncRecoveryBarrier({
   recover: recoverPendingSyncLocalApply,
   async notifyRecovered() {
@@ -268,10 +257,6 @@ const persistenceMutations = createPersistenceMutationBindings({
   updateGitHubSkillSource,
   executeLocalSkillImporterToolCall,
 });
-const SANDBOX_OFFSCREEN_URL = 'sandbox-offscreen.html';
-const browserSandboxRuntime: SandboxToolRuntime = {
-  runSandbox: (request) => runBrowserSandboxToolResult(request),
-};
 const runtimeCommandRegistry = createRuntimeCommandRegistry({
   typedHandlers: [
     ...createDomTaskRuntimeHandlers({ coordinator: domTaskCoordinator }),
@@ -431,13 +416,11 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         appendExternalizedToolPayloadChunk,
         clearExternalizedToolPayloadNamespace,
         executeToolCall: executeRuntimeToolCall,
-        runSandbox: runBrowserSandboxToolResult,
         getToolCallHistory,
         clearToolCallHistory,
         getPlatformEnvironment: getCurrentPlatformEnvironment,
         createRequestId: () => crypto.randomUUID(),
         now: () => Date.now(),
-        sandboxInvalidRequestSummary: () => backgroundT('tool.sandbox.invalidRequest'),
         broadcastToolDescriptorsUpdate,
         broadcastMcpServersUpdate,
         broadcastToolCallHistoryUpdate,
@@ -846,138 +829,6 @@ async function getPromptToolDescriptors(
   return projectMcpCapabilityDescriptors({ descriptors, settings, intent }).descriptors;
 }
 
-async function runBrowserSandboxToolResult(request: SandboxRunRequest): Promise<ToolResult> {
-  const startedAt = Date.now();
-  const result = await requestOffscreenSandboxRun(request);
-  const completedAt = Date.now();
-  const detail = result.ok
-    ? result.result || result.stdout || ''
-    : result.stderr || result.error || backgroundT('tool.sandbox.failed');
-
-  return {
-    ok: result.ok,
-    summary: result.ok ? backgroundT('tool.sandbox.executed') : backgroundT('tool.sandbox.failed'),
-    detail,
-    output: sandboxExecutionResultToJson(result),
-    error: result.ok ? undefined : {
-      code: result.error || 'sandbox_execution_failed',
-      message: detail,
-      retryable: result.error === 'sandbox_timeout' || result.error === 'sandbox_frame_timeout',
-    },
-    startedAt,
-    completedAt,
-    durationMs: result.durationMs,
-    truncated: result.truncated,
-  };
-}
-
-async function requestOffscreenSandboxRun(request: SandboxRunRequest): Promise<SandboxExecutionResult> {
-  if (!chrome.offscreen?.createDocument || !chrome.offscreen?.hasDocument) {
-    return createSandboxFailure(
-      backgroundT('tool.sandbox.offscreenUnavailableDetail'),
-      'sandbox_offscreen_unavailable',
-    );
-  }
-
-  try {
-    await ensureSandboxOffscreenDocument();
-  } catch (error) {
-    return createSandboxFailure(
-      error instanceof Error ? error.message : String(error),
-      'sandbox_offscreen_create_failed',
-    );
-  }
-
-  return sendSandboxRunToOffscreen(request);
-}
-
-async function ensureSandboxOffscreenDocument(): Promise<void> {
-  if (await chrome.offscreen.hasDocument()) return;
-
-  if (!sandboxOffscreenCreation) {
-    sandboxOffscreenCreation = chrome.offscreen.createDocument({
-      url: SANDBOX_OFFSCREEN_URL,
-      reasons: [chrome.offscreen.Reason.IFRAME_SCRIPTING, chrome.offscreen.Reason.WORKERS],
-      justification: 'Run Zai-requested JavaScript, TypeScript, Python, and HTML in an isolated extension sandbox instead of the Zai page.',
-    }).finally(() => {
-      sandboxOffscreenCreation = null;
-    });
-  }
-
-  await sandboxOffscreenCreation;
-}
-
-function sendSandboxRunToOffscreen(request: SandboxRunRequest): Promise<SandboxExecutionResult> {
-  const requestId = crypto.randomUUID();
-  const timeoutMs = Math.max(2_000, request.timeoutMs + 2_000);
-
-  return new Promise((resolve) => {
-    let settled = false;
-    const port = chrome.runtime.connect({ name: SANDBOX_OFFSCREEN_PORT });
-    const settle = (result: SandboxExecutionResult) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      try {
-        port.disconnect();
-      } catch (error) {
-        reportBackgroundStartupError('offscreen_port_disconnect_cleanup_failed', error);
-      }
-      resolve(result);
-    };
-    const timeout = setTimeout(() => {
-      settle(createSandboxFailure('Sandbox offscreen document timed out.', 'sandbox_offscreen_timeout', timeoutMs));
-    }, timeoutMs);
-
-    port.onMessage.addListener((message: unknown) => {
-      const envelope = parseSandboxEnvelope(message, SANDBOX_MESSAGE_TYPES.offscreenResult, requestId);
-      if (!envelope) {
-        if (readSandboxRequestId(message, SANDBOX_MESSAGE_TYPES.offscreenResult) === requestId) {
-          settle(createSandboxFailure('Invalid sandbox offscreen result.', 'sandbox_invalid_result'));
-        }
-        return;
-      }
-      settle(normalizeSandboxExecutionResult(envelope.result));
-    });
-
-    port.onDisconnect.addListener(() => {
-      const lastError = chrome.runtime.lastError?.message;
-      if (settled) return;
-      settle(createSandboxFailure(lastError || 'Sandbox offscreen document disconnected.', 'sandbox_offscreen_disconnected'));
-    });
-
-    port.postMessage({
-      type: SANDBOX_MESSAGE_TYPES.offscreenRun,
-      requestId,
-      payload: request,
-    });
-  });
-}
-
-function createSandboxFailure(message: string, code: string, durationMs = 0): SandboxExecutionResult {
-  return {
-    ok: false,
-    stdout: '',
-    stderr: message,
-    durationMs,
-    truncated: false,
-    error: code,
-  };
-}
-
-function sandboxExecutionResultToJson(result: SandboxExecutionResult): Record<string, string | number | boolean> {
-  return {
-    ok: result.ok,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    result: result.result ?? '',
-    html: result.html ?? '',
-    previewText: result.previewText ?? '',
-    durationMs: result.durationMs,
-    truncated: result.truncated,
-    error: result.error ?? '',
-  };
-}
 
 async function scanDueAutomationsFromWake() {
   const result = await scanDueAutomations(executeAutomationWithContext);

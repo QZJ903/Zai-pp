@@ -3,12 +3,7 @@ import tailwindcss from '@tailwindcss/vite';
 import type { Plugin } from 'vite';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import {
-  copyFileSync,
-  mkdirSync,
-  readFileSync,
-} from 'node:fs';
-import pyodidePackagePolicy from './scripts/pyodide-package-policy.json';
+import { readFileSync } from 'node:fs';
 
 const rootDir = dirname(fileURLToPath(import.meta.url));
 const safeWxtBrowser = resolve(rootDir, 'core/browser/safe-wxt-browser.ts');
@@ -17,25 +12,6 @@ const extensionVersion = readPackageVersion();
 const MANIFEST_NAME = '__MSG_extension_name__';
 const MANIFEST_DESCRIPTION = '__MSG_extension_description__';
 const MANIFEST_ACTION_TITLE = '__MSG_extension_action_title__';
-const SANDBOX_CSP = [
-  'sandbox allow-scripts',
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
-  'worker-src blob:',
-  "child-src 'self' blob: data:",
-  "frame-src 'self' blob: data:",
-  "connect-src 'self' blob:",
-  // img-src / style-src are pinned so sandboxed HTML cannot use remote
-  // images or CSS url() as network beacons (M13); media-src / font-src are
-  // pinned for the same reason (video/audio/@font-face are the remaining
-  // fetch-directive beacon vectors without a default-src). Local and inline
-  // content (data:/blob: URLs, inline styles) remains supported.
-  "img-src 'self' blob: data:",
-  "style-src 'self' 'unsafe-inline'",
-  "media-src 'self' blob: data:",
-  "font-src 'self' blob: data:",
-  "object-src 'none'",
-].join('; ');
-const PYODIDE_ASSET_FILES = pyodidePackagePolicy.assets.map(({ file }) => file);
 
 function readPackageVersion(): string {
   const packageJson = JSON.parse(
@@ -52,7 +28,7 @@ function readPackageVersion(): string {
 export function createManifest(env: ConfigEnv): UserManifest {
   const isChromiumTarget = CHROMIUM_BROWSERS.has(env.browser);
   const basePermissions = ['storage', 'alarms', 'nativeMessaging'];
-  const chromiumPermissions = [...basePermissions, 'offscreen', 'debugger', 'tabs'];
+  const chromiumPermissions = [...basePermissions, 'debugger', 'tabs'];
 
   return {
     default_locale: 'en',
@@ -77,10 +53,6 @@ export function createManifest(env: ConfigEnv): UserManifest {
     ],
     content_security_policy: {
       extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
-      sandbox: SANDBOX_CSP,
-    },
-    sandbox: {
-      pages: ['sandbox-runner.html'],
     },
     // web_accessible_resources is intentionally omitted:
     // only that feature needed sidepanel.html exposed to every page for iframe
@@ -118,21 +90,6 @@ function asciiJavaScriptOutputPlugin(): Plugin {
   };
 }
 
-function copyPyodideAssets(
-  outputDir: string,
-  publicAssets: Array<{ type: 'asset'; fileName: string }>,
-): void {
-  const sourceDir = resolve(rootDir, 'node_modules/pyodide');
-  const targetDir = resolve(outputDir, 'pyodide');
-  mkdirSync(targetDir, { recursive: true });
-
-  for (const file of PYODIDE_ASSET_FILES) {
-    const fileName = `pyodide/${file}`;
-    copyFileSync(resolve(sourceDir, file), resolve(outputDir, fileName));
-    publicAssets.push({ type: 'asset', fileName });
-  }
-}
-
 function escapeNonAsciiJavaScript(source: string): string {
   let escaped = '';
   for (const char of source) {
@@ -160,11 +117,6 @@ export default defineConfig({
   targetBrowsers: ['chrome', 'edge'],
   modules: ['@wxt-dev/module-react'],
   manifest: createManifest,
-  hooks: {
-    'build:done'(wxt, output) {
-      copyPyodideAssets(wxt.config.outDir, output.publicAssets);
-    },
-  },
   vite: () => ({
     plugins: [tailwindcss(), asciiJavaScriptOutputPlugin()],
     build: {
