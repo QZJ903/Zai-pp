@@ -87,6 +87,79 @@ export function isWebSearchToolName(name: string): name is WebSearchToolName {
   return (WEB_SEARCH_TOOL_NAMES as readonly string[]).includes(name);
 }
 
+/**
+ * 扩展 web 工具单次响应体的**字节上限**（内存保护）。
+ *
+ * `web_search` 与 `web_fetch` 共用这一个值：两者都是「取回一份文档再解析」，
+ * 而实测 Bing 搜索页约 96 KB、普通网页的 HTML 文档多在数百 KB 量级 ——
+ * 2 MiB 相对正常流量有 10~40 倍余量。这一层拦的是**异常大的响应**，
+ * 不是正常流量；正常页面永远不会碰到它。
+ *
+ * 为什么需要它：`await response.text()` 会把**整个**响应先读进内存，
+ * 之后那句 `slice(0, 50_000)` 只是截断**结果**，拦不住读取阶段的内存占用。
+ * 这里改成边读边判上限，超过就停止读取并取消 body。
+ */
+export const WEB_TOOL_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+interface WebResponseBodyRead {
+  text: string;
+  /** 是否因为超过 `WEB_TOOL_MAX_RESPONSE_BYTES` 而**提前停止读取**（不是读完了才截断）。 */
+  byteLimited: boolean;
+}
+
+/**
+ * 按字节上限流式读取响应体。
+ *
+ * ⚠️ **这个实现刻意留在本文件内**，没有复用 `core/mcp/transports/common.ts` 的
+ * `readResponseTextWithLimit` —— 那一份与上游逐字相同，把它的语义改成共用会把
+ * 「移植件」的边界再开一个口子（同 `core/sandbox/` 的取舍）。两者需求也不同：
+ * MCP 那份要「超限即报错」（协议响应完整性），这里要「超限即截断后继续解析」。
+ *
+ * 中文/emoji 等多字节字符可能跨块，所以解码走 `{ stream: true }` 并在末尾 flush
+ * —— 在截断点切到半个字符时，flush 会产出替换字符，属预期。
+ */
+async function readWebResponseBody(
+  response: Response,
+  maxBytes: number = WEB_TOOL_MAX_RESPONSE_BYTES,
+): Promise<WebResponseBodyRead> {
+  // 没有可流式读取的 body 时（测试替身、特殊响应）退回一次性读取并跳过上限判定
+  // —— 没有 body 就没有「边读边判」的落点，这与改动前的行为一致。
+  if (!response.body) {
+    return { text: await response.text(), byteLimited: false };
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const decoded: string[] = [];
+  let totalBytes = 0;
+  let byteLimited = false;
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      // 先判上限、再决定要不要这段：宁可少读一块，也不让单块把缓冲顶穿上限。
+      if (totalBytes + value.byteLength > maxBytes) {
+        byteLimited = true;
+        break;
+      }
+      totalBytes += value.byteLength;
+      decoded.push(decoder.decode(value, { stream: true }));
+    }
+  } finally {
+    // 提前 break 时必须取消上游 body，否则这条连接会挂着等 GC
+    // —— `abortScope.cleanup()` 只清超时定时器，**不**中止请求。
+    // 取消失败是良性的（我们已经有要的文本了），故不打印噪音。
+    if (byteLimited) {
+      await reader.cancel().catch(() => undefined);
+    }
+  }
+
+  decoded.push(decoder.decode());
+  return { text: decoded.join(''), byteLimited };
+}
+
 export async function executeWebSearchToolCall(
   call: ToolCall,
   locale: SupportedLocale = DEFAULT_LOCALE,
@@ -246,11 +319,18 @@ async function bingSearch(
     }
 
     let html: string;
+    let byteLimited: boolean;
     try {
-      html = await response.text();
+      ({ text: html, byteLimited } = await readWebResponseBody(response));
     } catch {
       throwIfWebToolAborted(signal);
       throw new Error(`${domain} response body unreadable`);
+    }
+    // 搜索页按上限截断就是不可信的输入：实测正常 Bing SERP 约 96 KB，
+    // 真顶到 2 MiB 的只可能是插页/错误页。宁可报错换域重试，也不拿半截 HTML 解析出
+    // 「看起来有结果、其实被切掉一半」的假结果。
+    if (byteLimited) {
+      throw new Error(`${domain} response exceeded ${WEB_TOOL_MAX_RESPONSE_BYTES} bytes`);
     }
     if (html.length < 200) {
       throw new Error(`${domain} returned an empty or blocked response (${html.length} bytes)`);
@@ -375,9 +455,12 @@ async function performWebFetch(
 
       const contentType = response.headers.get('content-type') || '';
       let text: string;
+      let byteLimited: boolean;
 
       if (contentType.includes('text/html') || contentType.includes('text/plain') || contentType.includes('application/json')) {
-        text = await response.text();
+        // 流式读取 + 字节上限：`await response.text()` 会先把整个响应读进内存，
+        // 之后那句 `slice(0, 50_000)` 只截断结果、拦不住读取阶段。
+        ({ text, byteLimited } = await readWebResponseBody(response));
       } else {
         await cancelUnusedWebResponseBody(response);
         return {
@@ -392,10 +475,9 @@ async function performWebFetch(
 
       const extracted = contentType.includes('text/html') ? extractTextFromHtml(text) : text;
       const maxLength = 50_000;
-      const truncated = extracted.length > maxLength;
-      const outputText = truncated
-        ? extracted.slice(0, maxLength) +
-          translate(locale, 'tool.web.truncated', { count: extracted.length })
+      const truncated = extracted.length > maxLength || byteLimited;
+      const outputText = extracted.length > maxLength
+        ? extracted.slice(0, maxLength) + translate(locale, 'tool.web.truncated', { count: extracted.length })
         : extracted;
 
       return {
@@ -403,9 +485,17 @@ async function performWebFetch(
         name: call.name,
         provider: call.provider ?? createWebSearchToolProviderIdentity(locale),
         summary: translate(locale, 'tool.web.fetchComplete', { url }),
-        detail: truncated
-          ? translate(locale, 'tool.web.fetchTruncatedDetail', { length: extracted.length, maxLength })
-          : translate(locale, 'tool.web.fetchLengthDetail', { length: extracted.length }),
+        // 顶层 `truncated` 会经 `core/zai/continuation.ts` 的 `renderToolResult` 传给模型
+        // —— 让它知道「拿到的是残篇」，别把截断当成页面全部内容。
+        truncated,
+        detail: byteLimited
+          ? translate(locale, 'tool.web.fetchByteLimitedDetail', {
+            length: extracted.length,
+            maxBytes: WEB_TOOL_MAX_RESPONSE_BYTES,
+          })
+          : extracted.length > maxLength
+            ? translate(locale, 'tool.web.fetchTruncatedDetail', { length: extracted.length, maxLength })
+            : translate(locale, 'tool.web.fetchLengthDetail', { length: extracted.length }),
         output: { url, content: outputText, contentType, truncated } as unknown as JsonValue,
       };
     } finally {

@@ -610,6 +610,38 @@ export const sidepanel = {
     expressionRequired: 'Enter a schedule expression',
     runFailed: 'Run failed',
     deleteConfirm: 'Delete automation "{name}"?',
+    // Failed-run **error code → copy** map (see entrypoints/sidepanel/automation-error-message.ts).
+    // ⚠️ Add an entry here when a new failure code appears, or users see a snake_case identifier
+    // or a raw English sentence on the card.
+    error: {
+      runFailedWithCode: 'Run failed ({code})',
+      // ── schedule validation ──
+      scheduleTooFrequent: 'Schedule is too frequent — 15 minutes minimum',
+      scheduleNoNextRun: 'This expression has no runnable time within the next year',
+      scheduleInvalidCron: 'Cron expression could not be parsed; check the minute / hour / day / month / weekday fields',
+      scheduleInvalidRrule: 'RRULE could not be parsed; only MINUTELY / HOURLY / DAILY are supported',
+      scheduleUnsupported: 'Unsupported schedule kind',
+      scheduleMissingExpression: 'Enter a schedule expression',
+      scheduleInvalidTimezone: 'Invalid timezone',
+      // ── run lifecycle ──
+      runTimeout: 'Run timed out and was ended automatically',
+      runCancelled: 'Run cancelled',
+      runLeaseLost: 'Run interrupted (the background execution lease was lost)',
+      runExecutorFailed: 'Run failed without a usable result',
+      runInterrupted: 'Run interrupted (the extension background was recycled before the outcome was confirmed)',
+      // ── page execution ──
+      pageFailed: 'Page execution failed',
+      pageInjectFailed: 'Could not fill the page input box — make sure the Zai page has fully loaded',
+      pageNoInput: 'Page input box not found — reload the Zai page and retry',
+      pageBusy: 'The page is busy — retry after the current answer finishes',
+      pageWrongConversation: 'The page was showing a different conversation, so this task did not run',
+      pageHandshakeTimeout: 'Timed out connecting to the page — make sure a Zai tab is open',
+      pageStopped: 'Stopped manually',
+      pageContinuationBroken: 'The execution chain broke (continuation state was lost) — please retry',
+      pageSessionMissing: 'Could not resolve the current conversation — reload the Zai page and retry',
+      pageTaskParamsMissing: 'Task parameters are incomplete — save the task again before running',
+      pageTaskAlreadyRunning: 'This task is already running',
+    },
     form: {
       name: 'Name',
       namePlaceholder: 'Task name',

@@ -22,12 +22,18 @@ export function StatusMessage({
     >
       <div className="flex-1 min-w-0">{children}</div>
       {onDismiss && (
+        // ⚠️ **`lineHeight: 'inherit'` 不能改成 `leading-none`（或任何固定行高）**。
+        // 容器是 `items-start` ⇒ 按钮与正文的**顶边**对齐，而正文的行盒高度由
+        // `html,:host` 的 `line-height: 1.5` 决定（11px 字号 ⇒ 16.5px 行盒，
+        // 字形在其中垂直居中，上下各留 ~2.75px）。按钮若把行高压到 1，
+        // 它的字形就顶在行盒最上沿 ⇒ **× 比正文首行高约 2.75px**，看起来"浮"在上面。
+        // 继承同一个行高后两者行盒等高，× 才与首行文字齐平。
         <button
           type="button"
           onClick={onDismiss}
           aria-label="dismiss"
-          className="shrink-0 leading-none opacity-60 hover:opacity-100"
-          style={{ color: palette.color }}
+          className="shrink-0 opacity-60 hover:opacity-100"
+          style={{ color: palette.color, lineHeight: 'inherit' }}
         >
           ×
         </button>

@@ -20,6 +20,14 @@ export interface AutomationRuntimeHandlerDependencies {
   createAutomation(input: AutomationCreateInput): Promise<Automation>;
   updateAutomation(id: string, patch: AutomationUpdateInput): Promise<Automation | null>;
   setAutomationStatus(id: string, status: AutomationStatus): Promise<Automation | null>;
+  /**
+   * 只写 `lastError: null`，**不碰 nextRunAt**。
+   *
+   * ⚠️ 与 `updateAutomation` 分开是因为它们的 patch 类型不同：
+   * `lastError` 属 `AutomationRuntimeUpdate`，不在 `UPDATE_AUTOMATION` 的
+   * patch 白名单里（那是用户编辑字段）。
+   */
+  clearAutomationError(id: string): Promise<Automation | null>;
   deleteAutomation(id: string): Promise<void>;
   refreshAutomationNextRunAt(id: string): Promise<Automation | null>;
   cancelActiveAutomationRun(id: string): void;
@@ -64,6 +72,23 @@ export function createAutomationRuntimeHandlers(
       await dependencies.deleteAutomation(id);
       await dependencies.broadcastAutomationUpdate(context.tabId);
       await dependencies.broadcastAutomationRunsUpdate(context.tabId);
+      return { ok: true as const };
+    }),
+    /**
+     * 清掉任务的失败记录（用户在卡片上按「关闭」）。
+     *
+     * ⚠️ **不能复用 `SET_AUTOMATION_STATUS`**：那条会连带 `refreshAutomationNextRunAt`，
+     * 而它对「排期无效」的任务会**立刻把 schedule 错误写回 `lastError`** ——
+     * 用户按了关闭、红条马上又出现。这里只写 `lastError: null`，不碰 nextRunAt。
+     * ⚠️ 也不走 `UPDATE_AUTOMATION`：那个 patch 的白名单里没有 `lastError`
+     * （它是运行期字段，不是用户编辑字段）。
+     * ⚠️ **幂等**：任务不存在也回 `{ ok: true }`（契约族是 `ack`，没有域失败位；
+     * 而「关掉一条已删任务的错误」本来就无事可做）。下一轮 `GET_AUTOMATIONS` 会把
+     * 真实列表带回来，UI 不需要靠这条的返回值判断。
+     */
+    defineBackgroundPayloadRuntimeCommandHandler('CLEAR_AUTOMATION_ERROR', async ({ id }, context) => {
+      await dependencies.clearAutomationError(id);
+      await dependencies.broadcastAutomationUpdate(context.tabId);
       return { ok: true as const };
     }),
     defineBackgroundPayloadRuntimeCommandHandler('RUN_AUTOMATION_NOW', ({ id }, context) => (

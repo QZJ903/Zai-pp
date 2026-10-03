@@ -19,16 +19,26 @@ export type AutomationTrigger = 'manual' | 'schedule' | 'retry';
 
 export type AutomationScheduleKind = 'manual' | 'cron' | 'rrule';
 
+/**
+ * 自动化失败的**阶段**（用于区分「错在哪一环」，不是给用户看的文案）。
+ *
+ * ⚠️ **这份清单只保留本项目真会产生的值** —— 上游还有 `auth` / `session` / `pow` /
+ * `completion` / `history` / `storage` 六档，它们全部由 `core/deepseek/` 的四个错误类
+ * （`DeepSeekAuthError` / `SessionError` / `PowError` / `PayloadError`）决定，
+ * 而那个目录在本项目**不存在**（DOM 注入替代了 HTTP 直连）⇒ 六档在本项目**零生产者**。
+ * 留着只会误导「本项目有这些失败面」。
+ *
+ * ⚠️ **`unknown` 是唯一一个「不是生产者产出、而是读回时兜底」的值** ——
+ * `storage-codec` 读到不认识的 phase 一律归它（宽容读回，见那里的说明）。
+ * 已落库的旧记录（含上游迁移来的 `pow` 等值）因此仍能加载。
+ */
 export type AutomationFailurePhase =
   | 'schedule'
-  | 'storage'
   | 'tab'
   | 'bridge'
-  | 'auth'
-  | 'session'
   | 'runner'
-  | 'completion'
-  | 'history'
+  /** 用户主动停止（点 Stop / 关标签页 / 手动暂停）。 */
+  | 'cancelled'
   | 'unknown';
 
 export interface AutomationSchedule {

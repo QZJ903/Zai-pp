@@ -610,6 +610,37 @@ export const sidepanel = {
     expressionRequired: '请填写定时表达式',
     runFailed: '运行失败',
     deleteConfirm: '删除自动化「{name}」？',
+    // 失败记录的**错误码 → 文案**映射（见 entrypoints/sidepanel/automation-error-message.ts）。
+    // ⚠️ 新增失败码要在这里补一条，否则用户在卡片上看到的是蛇形标识符或英文句子。
+    error: {
+      runFailedWithCode: '运行失败（{code}）',
+      // ── 排期校验 ──
+      scheduleTooFrequent: '排期间隔太短，最少 15 分钟',
+      scheduleNoNextRun: '这条表达式在未来一年内没有可运行的时间点',
+      scheduleInvalidCron: 'Cron 表达式无法解析，请检查分 / 时 / 日 / 月 / 周的写法',
+      scheduleInvalidRrule: 'RRULE 表达式无法解析，仅支持 MINUTELY / HOURLY / DAILY',
+      scheduleUnsupported: '不支持的排期类型',
+      scheduleMissingExpression: '请填写定时表达式',
+      scheduleInvalidTimezone: '时区无效',
+      // ── 运行期 ──
+      runTimeout: '运行超时，已自动结束',
+      runCancelled: '运行已取消',
+      runLeaseLost: '运行中断（后台执行租约丢失）',
+      runExecutorFailed: '运行失败，未收到可用的结果',
+      runInterrupted: '运行中断（扩展后台被回收，结果未能确认）',
+      // ── 页面执行 ──
+      pageFailed: '页面执行失败',
+      pageInjectFailed: '无法把内容填入页面输入框，请确认 Zai 页面已完全加载',
+      pageNoInput: '找不到页面输入框，请刷新 Zai 页面后重试',
+      pageBusy: '页面正忙，请等当前回答结束后重试',
+      pageWrongConversation: '页面停在别的对话上，未执行本次任务',
+      pageHandshakeTimeout: '与页面建立连接超时，请确认 Zai 标签页已打开',
+      pageStopped: '已手动停止',
+      pageContinuationBroken: '执行链中断（续跑状态丢失），请重试',
+      pageSessionMissing: '拿不到当前会话，请刷新 Zai 页面后重试',
+      pageTaskParamsMissing: '任务参数不完整，请重新保存任务后再运行',
+      pageTaskAlreadyRunning: '该任务已在运行中',
+    },
     form: {
       name: '名称',
       namePlaceholder: '任务名称',

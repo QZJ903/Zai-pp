@@ -35,7 +35,6 @@ vi.mock('../core/mcp/discovery', () => ({
 
 import type { ToolCall, ToolResult } from '../core/types';
 import { parseSkillDoc } from '../core/skill/local-importer';
-import { parsePiSkillMarkdown, readPiSkillFrontmatter } from '../core/skill/pi-importer';
 
 describe('SKILL.md parsing contract (pi-ecosystem format)', () => {
   it('parses frontmatter name/description and body', () => {
@@ -145,7 +144,6 @@ describe('pi-field bridge contract', () => {
     // never be imported or called from production code.
     const sources = [
       '../core/skill/local-importer.ts',
-      '../core/skill/pi-importer.ts',
       '../core/skill/github-importer.ts',
       '../core/skill/codec.ts',
       '../core/skill/registry.ts',
@@ -161,52 +159,6 @@ describe('pi-field bridge contract', () => {
       expect(source).not.toMatch(/import[^;]*formatSkillInvocation/);
       expect(source).not.toMatch(/from\s+['"]@earendil-works\//);
     }
-  });
-});
-
-describe('pi-importer bridge', () => {
-  it('parsePiSkillMarkdown delegates to the shared parser truth', () => {
-    const raw = [
-      '---',
-      'name: bridged-skill',
-      'description: Bridged via pi-importer',
-      '---',
-      'Body.',
-    ].join('\n');
-    const direct = parseSkillDoc(raw, '/skills/bridged-skill/SKILL.md');
-    const bridged = parsePiSkillMarkdown(raw, '/skills/bridged-skill/SKILL.md');
-    expect(bridged).toEqual(direct);
-  });
-
-  it('readPiSkillFrontmatter exposes pi fields metadata-preservingly', () => {
-    const raw = [
-      '---',
-      'name: flagged-skill',
-      'description: With pi flag',
-      'disable-model-invocation: true',
-      '---',
-      'Body.',
-    ].join('\n');
-    const frontmatter = readPiSkillFrontmatter(raw);
-    expect(frontmatter.name).toBe('flagged-skill');
-    expect(frontmatter.description).toBe('With pi flag');
-    expect(frontmatter.disableModelInvocation).toBe(true);
-  });
-
-  it('readPiSkillFrontmatter reports disableModelInvocation false when absent', () => {
-    const frontmatter = readPiSkillFrontmatter('---\nname: plain\ndescription: Plain\n---\nBody.');
-    expect(frontmatter.disableModelInvocation).toBe(false);
-  });
-
-  it('pi-importer module has zero @earendil-works dependency', () => {
-    const source = readFileSync(
-      resolve(import.meta.dirname, '../core/skill/pi-importer.ts'),
-      'utf8',
-    );
-    expect(source).not.toMatch(/from\s+['"]@earendil-works\//);
-    expect(source).not.toMatch(/import[^;]*loadSkills/);
-    expect(source).not.toMatch(/import[^;]*formatSkillsForSystemPrompt/);
-    expect(source).not.toMatch(/import[^;]*formatSkillInvocation/);
   });
 });
 

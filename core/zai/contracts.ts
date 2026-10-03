@@ -79,3 +79,13 @@ export const ZAI_DIAG_GLOBAL = '__GLMPP_DIAG__';
  * 两处各写一遍属性名就是「生产端与判定端各写一遍」。
  */
 export const ZAI_PROJECT_PANEL_ATTR = 'data-dpp-project-panel';
+
+/**
+ * 内容脚本用 `DOM_TASK_FAILED` 回传「用户主动停止」时带的错误码。
+ *
+ * ⚠️ **必须两处同源**：生产端（`zai.content.ts` 的 `terminateDomTaskAsStopped` 与
+ * `CANCEL_DOM_TASK` handler）发它，判定端（`dom-task-coordinator` 的 `onFailed`）
+ * 靠它把 `phase` 定成 `'cancelled'`。**两边各写一遍字面量就是「生产端与判定端
+ * 各写一遍」的老形态** —— 改一处另一处不报错、只是那一档静默失效。
+ */
+export const ZAI_DOM_TASK_CANCELLED_CODE = 'cancelled';

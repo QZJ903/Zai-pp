@@ -65,6 +65,7 @@ export const tool = {
     truncated: '\n\n... [内容已截断，共 {count} 字符]',
     fetchComplete: '已获取 {url}',
     fetchTruncatedDetail: '页面长度 {length} 字符，已截断至 {maxLength} 字符',
+    fetchByteLimitedDetail: '页面超过 {maxBytes} 字节上限，已停止读取并保留前 {length} 字符',
     fetchLengthDetail: '页面长度 {length} 字符',
     fetchFailed: '获取页面失败',
     missingHostPermission: '无法访问 {url}，缺少主机权限。',

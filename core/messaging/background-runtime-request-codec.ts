@@ -25,6 +25,7 @@ interface DecodedBackgroundRuntimePayloads {
   UPDATE_AUTOMATION: AutomationUpdateRequest;
   SET_AUTOMATION_STATUS: AutomationStatusRequest;
   DELETE_AUTOMATION: AutomationIdRequest;
+  CLEAR_AUTOMATION_ERROR: AutomationIdRequest;
   RUN_AUTOMATION_NOW: AutomationIdRequest;
 }
 
@@ -52,6 +53,9 @@ export const BACKGROUND_RUNTIME_PAYLOAD_DECODERS: BackgroundRuntimePayloadDecode
   SET_AUTOMATION_STATUS: decodeAutomationStatusRequest,
   DELETE_AUTOMATION(value) {
     return decodeAutomationIdRequest(value, 'DELETE_AUTOMATION');
+  },
+  CLEAR_AUTOMATION_ERROR(value) {
+    return decodeAutomationIdRequest(value, 'CLEAR_AUTOMATION_ERROR');
   },
   RUN_AUTOMATION_NOW(value) {
     return decodeAutomationIdRequest(value, 'RUN_AUTOMATION_NOW');

@@ -19,6 +19,7 @@ import {
 } from '../../../core/zai/models';
 import type { SupportedLocale } from '../../../core/i18n';
 import { createRequestGenerationFence } from '../async-state';
+import { formatAutomationError } from '../automation-error-message';
 import PageIntro from '../components/PageIntro';
 import {
   SkeletonList,
@@ -232,7 +233,7 @@ export default function AutomationPage() {
       // 一旦上次跑失败过，它就会永久挡住后续每一次保存，表单再也收不起来。
       // 运行时错误照常显示在任务卡片上，信息不丢。
       if (response.lastError?.phase === 'schedule') {
-        banner.show('error', response.lastError.message);
+        banner.show('error', formatAutomationError(response.lastError, t));
         return;
       }
       banner.show('success', editing ? t('common.saveChanges') : t('sidepanel.automationPage.created'));
@@ -255,7 +256,12 @@ export default function AutomationPage() {
       if (run && 'error' in run && typeof run.error === 'string') {
         banner.show('error', run.error);
       } else if (run && 'status' in run && (run.status === 'failed' || run.status === 'timeout')) {
-        banner.show('error', run.error?.message ?? t('sidepanel.automationPage.runFailed'));
+        banner.show(
+          'error',
+          run.error
+            ? formatAutomationError(run.error, t)
+            : t('sidepanel.automationPage.runFailed'),
+        );
       }
     } catch (error) {
       banner.show('error', getRuntimeErrorMessage(error));
@@ -274,6 +280,25 @@ export default function AutomationPage() {
       await sidepanelRuntimeClient.request({
         type: 'SET_AUTOMATION_STATUS',
         payload: { id: automation.id, status: automation.status === 'active' ? 'paused' : 'active' },
+      });
+      await load();
+    } catch (error) {
+      banner.show('error', getRuntimeErrorMessage(error));
+    }
+  };
+
+  /**
+   * 关掉卡片上的失败记录。
+   *
+   * ⚠️ **必须落库**（不能只在前端藏起来）—— `AutomationCard` 是纯展示组件，
+   * 每次 `load()` 都从后台重取列表；只在本地藏的话，下一次轮询/切页/回答结束
+   * 触发的刷新就会让红条**自己回来**。
+   */
+  const dismissError = async (automation: Automation) => {
+    try {
+      await sidepanelRuntimeClient.request({
+        type: 'CLEAR_AUTOMATION_ERROR',
+        payload: { id: automation.id },
       });
       await load();
     } catch (error) {
@@ -370,6 +395,7 @@ export default function AutomationPage() {
               onEdit={() => startEdit(automation)}
               onDelete={() => remove(automation)}
               onOpenSession={() => openSession(automation)}
+              onDismissError={() => dismissError(automation)}
             />
           ))}
         </div>
@@ -517,6 +543,7 @@ function AutomationCard({
   onEdit,
   onDelete,
   onOpenSession,
+  onDismissError,
 }: {
   automation: Automation;
   runs: AutomationRun[];
@@ -526,6 +553,8 @@ function AutomationCard({
   onEdit: () => void;
   onDelete: () => void;
   onOpenSession: () => void;
+  /** 清掉失败记录（卡片上红条的关闭按钮）。 */
+  onDismissError: () => void;
 }) {
   const { t, locale } = useI18n();
   const latestRun = runs[0];
@@ -564,9 +593,9 @@ function AutomationCard({
       </div>
 
       {automation.lastError && (
-        <div className="rounded-lg px-2.5 py-2 text-[11px]" style={{ color: 'var(--ds-danger)', background: 'var(--ds-danger-bg)' }}>
-          {automation.lastError.message}
-        </div>
+        <StatusMessage tone="error" onDismiss={onDismissError}>
+          {formatAutomationError(automation.lastError, t)}
+        </StatusMessage>
       )}
 
       <div className="flex items-center justify-between gap-2">

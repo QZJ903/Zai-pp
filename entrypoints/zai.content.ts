@@ -108,6 +108,7 @@ import {
   ZAI_DIAG_LOOP_CHECK_ATTR,
   ZAI_DIAG_STEP_ATTR,
   ZAI_DIAG_TOOL_RESULT_ATTR,
+  ZAI_DOM_TASK_CANCELLED_CODE,
 } from '../core/zai/contracts';
 import { createToolInvocationCatalog } from '../core/tool/invocation';
 import { createLatestSyncGate } from '../core/tool/latest-sync';
@@ -3124,7 +3125,7 @@ async function terminateDomTaskAsStopped(taskId: string, requestId: string): Pro
   void sendRuntimeMessage({
     type: 'DOM_TASK_FAILED',
     taskId,
-    error: 'cancelled',
+    error: ZAI_DOM_TASK_CANCELLED_CODE,
     chatSessionId: liveSessionId,
   });
 }
@@ -3585,7 +3586,7 @@ export default defineContentScript({
           void sendRuntimeMessage({
             type: 'DOM_TASK_FAILED',
             taskId,
-            error: 'cancelled',
+            error: ZAI_DOM_TASK_CANCELLED_CODE,
             chatSessionId: readZaiChatSessionId(),
           });
         }

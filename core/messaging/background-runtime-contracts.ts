@@ -72,6 +72,10 @@ export interface BackgroundRuntimeCommandContracts {
     request: { type: 'DELETE_AUTOMATION'; payload: { id: string } };
     response: Ack;
   };
+  CLEAR_AUTOMATION_ERROR: {
+    request: { type: 'CLEAR_AUTOMATION_ERROR'; payload: { id: string } };
+    response: Ack;
+  };
   RUN_AUTOMATION_NOW: {
     request: { type: 'RUN_AUTOMATION_NOW'; payload: { id: string } };
     response: AutomationRun | DomainFailure;

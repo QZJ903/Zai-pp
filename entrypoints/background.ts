@@ -439,6 +439,7 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         createAutomation,
         updateAutomation,
         setAutomationStatus,
+        clearAutomationError: (id) => updateAutomationRuntime(id, { lastError: null }),
         deleteAutomation,
         refreshAutomationNextRunAt,
         cancelActiveAutomationRun,

@@ -36,7 +36,7 @@ const COMMAND_GROUP_SECTIONS = [
   ['Group B — Persistence, library, and local preferences (50)', 50],
   ['Group C — MCP, tool, browser control, and sandbox (31)', 31],
   ['Group D — GLM and export (5)', 5],
-  ['Group E — Automation, usage, models, and lifecycle closure (12)', 12],
+  ['Group E — Automation, usage, models, and lifecycle closure (13)', 13],
 ] as const;
 
 describe('runtime command compatibility contract', () => {
@@ -81,10 +81,10 @@ describe('runtime command compatibility contract', () => {
       expect(commands, heading).toHaveLength(count);
       return commands;
     });
-    expect(groupedLedger).toHaveLength(100);
+    expect(groupedLedger).toHaveLength(101);
     expect(new Set(groupedLedger).size).toBe(groupedLedger.length);
     expectSortedEqual(groupedLedger, live);
-    expect(registryEntries).toHaveLength(102);
+    expect(registryEntries).toHaveLength(103);
     for (const contract of liveContracts) {
       const registered = RUNTIME_COMMAND_CONTRACTS[contract.type as keyof typeof RUNTIME_COMMAND_CONTRACTS];
       expect(registered.owner).toBe(getRuntimeCommandOwner(contract.type));

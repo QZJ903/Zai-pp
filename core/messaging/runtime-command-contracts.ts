@@ -148,6 +148,7 @@ export const RUNTIME_COMMAND_CONTRACTS = {
   UPDATE_AUTOMATION: typedCommand('payload-decoded', 'value-or-domain-error', 'background-error', 'live-only'),
   SET_AUTOMATION_STATUS: typedCommand('payload-decoded', 'value-or-domain-error', 'background-error', 'live-only'),
   DELETE_AUTOMATION: typedCommand('payload-decoded', 'ack', 'background-error', 'live-only'),
+  CLEAR_AUTOMATION_ERROR: typedCommand('payload-decoded', 'ack', 'background-error', 'live-only'),
   RUN_AUTOMATION_NOW: typedCommand('payload-decoded', 'value', 'background-error', 'live-only'),
   GET_ZAI_MODELS: typedCommand('none', 'value', 'background-error', 'live-only'),
   TOOL_CALL_EXECUTED: command('client-only', 'payload-cast', 'unrouted', 'none', 'declared-only'),

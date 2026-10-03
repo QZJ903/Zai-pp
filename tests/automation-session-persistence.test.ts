@@ -44,11 +44,14 @@ function failureWithSession(
   request: AutomationRunnerRequest,
   chatSessionId: string | null,
 ): AutomationRunnerResult {
+  // 模拟「内容脚本回传 error: 'cancelled'」经 coordinator 定档后的真实形状：
+  // code 仍是 `dom_automation_cancelled`（background 拼的），**phase 是 `'cancelled'`**
+  // —— `scheduler.completeRun` 现在只认 phase（见那里的说明）。
   return createAutomationRunnerFailure(
     request,
     'dom_automation_cancelled',
     'cancelled',
-    'runner',
+    'cancelled',
     false,
     Date.now(),
     { externalOutcome: 'ambiguous', retrySafe: false },

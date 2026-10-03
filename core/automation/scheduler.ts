@@ -234,12 +234,15 @@ async function completeRun(
   result: AutomationRunnerResult,
   trigger: AutomationTrigger,
 ): Promise<AutomationRun | null> {
+  // ⚠️ 超时**没有独立 phase**（它是 `runner` 阶段里的一种结果，靠 code 区分）；
+  // 而「取消」有 —— 两个来源（后台 lease 被取消 / 内容脚本回传用户停止）都走
+  // `phase: 'cancelled'`。**判定端只认 phase**，不再去比 `dom_automation_cancelled`
+  // 这个拼出来的 code（那是「判定端抄生产端字面量」的老形态）。
   const status = result.ok
     ? 'succeeded'
     : result.error.code === 'automation_run_timeout'
       ? 'timeout'
-      : result.error.code === 'automation_run_cancelled' ||
-          result.error.code === 'dom_automation_cancelled'
+      : result.error.phase === 'cancelled'
         ? 'cancelled'
         : 'failed';
   const finalized = await finalizeAutomationRun({
@@ -412,7 +415,7 @@ function createStoppedRunFailure(
         : cancelled
           ? 'Automation run was cancelled.'
           : 'Automation run lost its execution lease.',
-      'runner',
+      cancelled ? 'cancelled' : 'runner',
       false,
       now,
       { externalOutcome: 'ambiguous', retrySafe: false },

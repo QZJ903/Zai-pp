@@ -16,6 +16,7 @@
 
 import type { ToolExecutionRecord } from '../types';
 import { buildZaiChatSessionUrl } from './chat-session';
+import { ZAI_DOM_TASK_CANCELLED_CODE } from './contracts';
 
 export type DomTaskKind = 'automation';
 
@@ -67,7 +68,16 @@ export type DomTaskOutcome =
       ok: false;
       taskId: string;
       error: string;
-      phase: 'tab' | 'bridge' | 'runner';
+      /**
+       * 失败发生的环节。
+       *
+       * ⚠️ **`'cancelled'` 只由 `onFailed` 产出**（内容脚本回传 `error: 'cancelled'`），
+       * 判据是**错误码本身**而不是「谁调用的」—— 因为其余失败码与取消码走的是同一条
+       * 回传通道，只有码能区分。它存在的意义是把「用户主动停止」从 `'runner'` 里分出来：
+       * 否则 `scheduler.completeRun` 只能靠 `code === 'dom_automation_cancelled'` 特判
+       * （那是**判定端与生产端各写一遍**的老形态）。
+       */
+      phase: 'tab' | 'bridge' | 'runner' | 'cancelled';
       retrySafe?: boolean;
       /**
        * 失败时页面上已经建立的会话 id（来自 DOM_TASK_STARTED）。
@@ -428,7 +438,9 @@ export function createDomTaskCoordinator(
       ok: false,
       taskId: event.taskId,
       error: event.error || 'dom_task_failed',
-      phase: 'runner',
+      // 用户主动停止（点 Stop / 关标签页 / 手动暂停）走的是同一条回传通道，
+      // 只有**错误码**能把它与其它失败区分开 ⇒ 在这里定档，不让判定端再去比 code。
+      phase: event.error === ZAI_DOM_TASK_CANCELLED_CODE ? 'cancelled' : 'runner',
       retrySafe,
       chatSessionId: event.chatSessionId ?? entry.startedChatSessionId,
     });

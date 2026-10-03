@@ -23,7 +23,20 @@ const BASELINE = Object.freeze({
   // 增加约 8.8KB 原始字节，而这段资源经由 `core/i18n/index.ts` 进了侧边栏初始 shell
   // （侧边栏只用到它的类型与几个键，但资源是整个 section 一起打包的）。
   // 这是**有意增长**，不是意外膨胀 —— 再改这段提示词要连带重测这里。
-  initialShell: { raw: 342_009, gzip: 106_022 },
+  //
+  // ⚠️ **2026-10-03 再测（2.15.19）**：`tool.web.*` 新增一个键
+  // （`fetchByteLimitedDetail`，两套语言）后实测 raw 341907 / gzip 106255。
+  // ⚠️ **这一档的 gzip 余量本来就很紧**（预算 = 基线 + 256）—— 本次实测已贴到
+  // 只剩 23 字节，所以才把基线同步过来。**往 `tool` 段加键就会动这里**，
+  // 因为整份 `tool` section 都进侧边栏初始 shell（同 `prompt.sandboxHostSection` 那条）。
+  //
+  // ⚠️⚠️ **2026-10-03 三测（2.15.21）**：自动化失败的**错误码 → 文案**映射
+  // （`automationPage.error.*`，中英各 **24 键**）进 `sidepanel` 段，
+  // 实测 raw 346096 / gzip 107600 —— **一次 +4189 raw / +1345 gzip**，
+  // 是本文件历史上单次涨幅最大的一次（比 2.15.12 的提示词那次还大）。
+  // **判据**：`core/i18n/resources/*/sidepanel.ts` 是**整份**进初始 shell 的，
+  // 所以**往任何一段加键都会全文计入** —— 加文案前先想一下值不值。
+  initialShell: { raw: 346_096, gzip: 107_600 },
   routeChunks: {
     CapabilitiesPage: { raw: 1_568, gzip: 669 },
     SettingsPage: { raw: 2_118, gzip: 855 },

@@ -65,6 +65,7 @@ export const tool = {
     truncated: '\n\n... [Content truncated, {count} characters total]',
     fetchComplete: 'Fetched {url}',
     fetchTruncatedDetail: 'Page length {length} characters, truncated to {maxLength} characters',
+    fetchByteLimitedDetail: 'Page exceeded the {maxBytes}-byte limit; stopped reading after {length} characters',
     fetchLengthDetail: 'Page length {length} characters',
     fetchFailed: 'Failed to fetch page',
     missingHostPermission: 'Cannot access {url}; host permission is missing.',

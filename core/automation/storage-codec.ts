@@ -8,6 +8,7 @@ import type {
   Automation,
   AutomationGLMSession,
   AutomationErrorState,
+  AutomationFailurePhase,
   AutomationHistorySnapshot,
   AutomationPromptContext,
   AutomationPromptOptions,
@@ -35,17 +36,18 @@ const AUTOMATION_RUN_STATUSES = new Set([
 ]);
 const AUTOMATION_TRIGGERS = new Set(['manual', 'schedule', 'retry']);
 const AUTOMATION_SCHEDULE_KINDS = new Set(['manual', 'cron', 'rrule']);
+/**
+ * **已知**的失败阶段（= `AutomationFailurePhase` 的全部取值）。
+ *
+ * ⚠️ 这**不是**读取时的白名单 —— 读到不认识的值**不报错**，归一成 `'unknown'`
+ * （见 `readFailurePhase` 的说明）。它只用于「这个值是不是我们认识的那些」这一个判断。
+ */
 const AUTOMATION_FAILURE_PHASES = new Set([
   'schedule',
-  'storage',
   'tab',
   'bridge',
-  'auth',
-  'session',
   'runner',
-  'pow',
-  'completion',
-  'history',
+  'cancelled',
   'unknown',
 ]);
 const SUPPORTED_LOCALE_SET: ReadonlySet<string> = new Set(SUPPORTED_LOCALES);
@@ -372,10 +374,30 @@ function decodeError(raw: unknown, path: string): AutomationErrorState {
     ...value,
     code: nonEmptyString(value.code, `${path}.code`),
     message: stringValue(value.message, `${path}.message`),
-    phase: enumValue(value.phase, AUTOMATION_FAILURE_PHASES, `${path}.phase`),
+    phase: readFailurePhase(value.phase, `${path}.phase`),
     retryable: booleanValue(value.retryable, `${path}.retryable`),
     at: finiteNumber(value.at, `${path}.at`),
   } as AutomationErrorState;
+}
+
+/**
+ * **宽容读回**失败阶段：不认识的字符串一律归 `'unknown'`，不判 corrupt。
+ *
+ * **为什么要宽容**：`phase` 的取值集合会随版本收缩（本项目就删掉了上游那六档
+ * 无生产者的值），而**已落库的记录不会跟着改**。若这里判 corrupt，用户升级后
+ * 整份自动化存储会直接抛 `AutomationStorageContractError`、**全部任务打不开** ——
+ * 那是一次升级换一次数据不可用，代价远高于「某一档显示成未知」。
+ *
+ * ⚠️ **非字符串仍然是 corrupt** —— 那是真的数据损坏，不是版本差异。
+ * ⚠️ **`code` / `message` 保持严格** —— 它们没有类似的收缩场景。
+ */
+function readFailurePhase(raw: unknown, path: string): AutomationFailurePhase {
+  // 非字符串 = 真的数据损坏（数字 / 对象 / null 出现在 phase 位上），不是版本差异 ⇒ 照旧严格。
+  if (typeof raw !== 'string') {
+    corrupt(path, `Expected one of: ${[...AUTOMATION_FAILURE_PHASES].join(', ')}.`);
+  }
+  // 是字符串但不在已知集合里 = 版本差异（本项目删了几档上游的值，旧记录不会跟着改）⇒ 归一。
+  return AUTOMATION_FAILURE_PHASES.has(raw) ? raw as AutomationFailurePhase : 'unknown';
 }
 
 function requireStorageVersion(value: unknown, path: string): void {
