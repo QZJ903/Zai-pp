@@ -123,23 +123,12 @@ export function decodeZaiResponseCompleteMessage(
   if (typeof value.originalPrompt !== 'string') return null;
   if (typeof value.agentTaskPrompt !== 'string') return null;
   if (typeof value.assistantText !== 'string') return null;
-  if (!Array.isArray(value.toolCalls)) return null;
-
-  const toolCalls: ZaiDetectedToolCall[] = [];
-  for (const item of value.toolCalls) {
-    const call = decodeZaiToolCallMessage(item);
-    // 元素形状非法时**整条丢弃**而不是「跳过这个元素」—— 后者会让
-    // 「本轮到底执行过什么」与 fetch hook 的认知不一致，宁可整条不认。
-    if (!call) return null;
-    toolCalls.push(call);
-  }
 
   return {
     requestId: value.requestId,
     originalPrompt: value.originalPrompt,
     agentTaskPrompt: value.agentTaskPrompt,
     assistantText: value.assistantText,
-    toolCalls,
   };
 }
 

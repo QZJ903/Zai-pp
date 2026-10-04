@@ -6,7 +6,7 @@
  *    并重算 X-Signature）→ 字节透传回页面。
  * 2. 拦截 /chats/new 请求 → 增强首条 user 消息（首条不走 completion）。
  * 3. 解析响应 SSE → 流式工具 XML 识别 → 通知 isolated 执行 → 字节透传。
- * 4. HTML 挑战页检测（completion 返回 text/html 时重发）。
+ * 4. HTML 挑战页检测（completion 返回 text/html 时透传原响应，并通知内容脚本）。
  *
  * 与 glm 版 fetch-hook 最大区别：续跑不在这里直接 fetch（z.ai 有 captcha
  * 墙），改由 DOM 注入让页面自己发。本文件只管「读流 + 识别 + 透传」。
@@ -69,7 +69,6 @@ export interface ZaiResponseCompletePayload {
   originalPrompt: string;
   agentTaskPrompt: string;
   assistantText: string;
-  toolCalls: ZaiDetectedToolCall[];
 }
 
 interface ZaiRequestContext {
@@ -80,7 +79,6 @@ interface ZaiRequestContext {
   modelType: string | null;
 }
 
-const HTML_CHALLENGE_MAX_RETRIES = 6;
 const FETCH_HOOK_MARKER = Symbol.for('zai-pp.fetch-hook-installed');
 const XHR_HOOK_MARKER = Symbol.for('zai-pp.xhr-hook-installed');
 
@@ -509,7 +507,9 @@ async function interceptCompletionResponse(
   if (contentType.includes('text/html')) {
     // HTML 挑战页（peak 高峰服务端对 completion 返回 HTML）。这里只是透传原始响应，
     // 页面按 JSON 解析会打 `Unexpected token '<'`（z.ai 前端自己打的，消不掉）。
-    // stateless 续跑侧的 html 重发在 completion.ts / zai.content.ts 处理，这里只记录诊断。
+    // 这里不重发：请求由页面发出，本 hook 只读流与透传，没有可原样重放的 body。
+    // 改为发信号让内容脚本把在飞的那一轮推进下去，避免整条续跑循环干等。
+    // ⚠️ 该信号只在续跑轮有落点（内容脚本按 `activeRequestId` 认领）；原生轮只留诊断。
     diag.failures?.push({ requestId: context.requestId, kind: 'html_challenge' });
     hookState.onHtmlChallenge({ requestId: context.requestId });
     return response;
@@ -518,7 +518,6 @@ async function interceptCompletionResponse(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const accumulator = createZaiStreamAccumulator();
-  const detectedToolCalls: ZaiDetectedToolCall[] = [];
   const usageTracker = createZaiUsageTracker(context.requestId, context.modelType);
 
   const observeUsageFrames = (parsed: ZaiSseParseResult) => {
@@ -551,13 +550,12 @@ async function interceptCompletionResponse(
           // flush 掉最后一行未完结的 data: 行，补进累积文本。
           observeUsageFrames(accumulator.finish());
           const text = accumulator.assistantText;
-          extractAndNotifyToolCalls(accumulator, detectedToolCalls, context.requestId);
+          extractAndNotifyToolCalls(accumulator, context.requestId);
           hookState.onResponseComplete({
             requestId: context.requestId,
             originalPrompt: context.originalPrompt,
             agentTaskPrompt: context.agentTaskPrompt,
             assistantText: text,
-            toolCalls: detectedToolCalls,
           });
           diag.responses?.push({
             requestId: context.requestId,
@@ -616,7 +614,6 @@ function registerToolCall(call: ZaiDetectedToolCall): void {
 
 function extractAndNotifyToolCalls(
   accumulator: ZaiStreamAccumulator,
-  already: ZaiDetectedToolCall[],
   requestId: string,
 ): void {
   // 记录识别现场：names 为空意味着隔离世界还没把工具目录推过来，
@@ -634,7 +631,9 @@ function extractAndNotifyToolCalls(
     });
   }
   if (!names || names.size === 0) return;
-  const known = new Set(already.map((call) => call.raw + requestId));
+  // 同一次扫描内按 `raw + requestId` 去重。工具名来自 descriptor 集合、各自独立匹配，
+  // 正常情况下不会命中；留着是防御 —— 名字互为前缀时（`shell` 与 `shell.exec`）正则可能重叠。
+  const known = new Set<string>();
   // 用简单正则找完整 `<tool>...</tool>` 块，避免半截标签误报。
   for (const name of names) {
     const re = new RegExp(`<${escapeRegExp(name)}\\b[^>]*>[\\s\\S]*?<\\/${escapeRegExp(name)}>`, 'g');

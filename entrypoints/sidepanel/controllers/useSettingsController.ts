@@ -46,19 +46,28 @@ export function useSettingsController() {
   const [bgEnabled, setBgEnabled] = useState(false);
   const [bgType, setBgType] = useState<'upload' | 'url'>('upload');
   const [bgUrl, setBgUrl] = useState('');
+  /**
+   * **已保存**的 URL，与输入框的实时值 `bgUrl` 分开。
+   *
+   * ⚠️ 预览不能用 `bgUrl` —— 那样每敲一个字符都会把半截 URL 当成图片地址去加载，
+   * 而加载失败的 `onError` 会把输入框清空，形成「打字即被抹掉、永远填不完」的死循环。
+   * 预览只反映已落库的配置，输入过程与它无关。
+   */
+  const [bgConfirmedUrl, setBgConfirmedUrl] = useState('');
   const [bgImageData, setBgImageData] = useState('');
   const [bgOpacity, setBgOpacity] = useState(DEFAULT_BACKGROUND_OPACITY);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bgConfigRef = useRef<BackgroundConfig>(DEFAULT_BACKGROUND_CONFIG);
 
-  const bgPreview = bgType === 'url' ? bgUrl : bgImageData;
+  const bgPreview = bgType === 'url' ? bgConfirmedUrl : bgImageData;
 
   const syncBgState = useCallback((config: BackgroundConfig) => {
     bgConfigRef.current = config;
     setBgEnabled(config.enabled);
     setBgType(config.type);
     setBgUrl(config.url ?? '');
+    setBgConfirmedUrl(config.url ?? '');
     setBgImageData(config.imageData ?? '');
     setBgOpacity(config.opacity);
   }, []);
@@ -100,6 +109,9 @@ export function useSettingsController() {
     if (!config) return;
     bgConfigRef.current = config;
     await sidepanelRuntimeClient.request({ type: 'SAVE_BACKGROUND', payload: config });
+    // 落库成功才推进「已保存的 URL」—— 预览与开关的可用性都跟着它走，
+    // 保证它们描述的是**实际生效**的背景，而不是输入框里正在打的字。
+    setBgConfirmedUrl(config.url ?? '');
   }, []);
 
   const handleBgToggle = useCallback(
@@ -195,6 +207,7 @@ export function useSettingsController() {
     setBgEnabled(false);
     setBgType('upload');
     setBgUrl('');
+    setBgConfirmedUrl('');
     setBgImageData('');
     setBgOpacity(DEFAULT_BACKGROUND_OPACITY);
     bgConfigRef.current = DEFAULT_BACKGROUND_CONFIG;

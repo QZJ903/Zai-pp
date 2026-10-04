@@ -368,3 +368,149 @@ describe('request-scoped state is released once per request', () => {
     expect(calledInTerminal, 'releaseRequestState 必须在 REQUEST_TERMINAL 分支内被调用').toBe(1);
   });
 });
+
+/**
+ * 状态同步**失败时不能中断主流程，也不能清空工具目录**。
+ *
+ * ⚠️⚠️ **这个 catch 当前静态不可达** —— `Promise.all` 八条腿里唯一可能 reject 的
+ * `getResolvedLocaleState` 已收敛为**永不 reject**（读失败吞成默认值、超时只 resolve），
+ * 其余七条走 `sendRuntimeMessage`（自带 try/catch 成 `undefined`），两个 `normalize*` 都是纯函数。
+ * **所以这三条断言测的是「万一将来某条腿会抛」时的兜底行为，不是活路径** ——
+ * 它们会在这个死分支上照样绿，别把它当成「这条路径被验证过」。
+ *
+ * 两条断言各守一个后果，都是静默的：
+ * - **往外抛** ⇒ `advanceContinuationLoop` 在取数之后还有「注入下一轮 / 收尾」，
+ *   中断会让 `continuationLoop` 停在 `running`，只能等后台 180s 执行租约兜底；
+ * - **commit 空目录** ⇒ `currentCatalogNames` 被清空并推到主世界，而 fetch hook 的
+ *   `extractAndNotifyToolCalls` 在名字集合为空时**直接 return、一个工具都不识别**。
+ */
+describe('runtime state sync failure keeps the flow and the catalog', () => {
+  function findSyncBody(program: t.Program): t.BlockStatement {
+    let body: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'loadAndSyncRuntimeState') body = node.body;
+    });
+    expect(body, '应当存在 loadAndSyncRuntimeState').toBeDefined();
+    return body!;
+  }
+
+  function catchClausesOf(body: t.BlockStatement): t.CatchClause[] {
+    const found: t.CatchClause[] = [];
+    walkSourceAst(body, (node) => {
+      if (t.isCatchClause(node)) found.push(node);
+    });
+    return found;
+  }
+
+  it('catches the sync failure instead of letting it escape', () => {
+    const catches = catchClausesOf(findSyncBody(readContentProgram()));
+    expect(catches.length, '取数必须包在 try/catch 里').toBeGreaterThan(0);
+  });
+
+  it('does not commit a fallback snapshot when the sync fails', () => {
+    const body = findSyncBody(readContentProgram());
+    for (const clause of catchClausesOf(body)) {
+      // ⚠️ catch 里既不能 `throw`（中断调用方主流程），也不能调 `commit`
+      // （清空 `currentCatalogNames` 会连带关掉工具标签识别）。
+      let throws = 0;
+      let commits = 0;
+      walkSourceAst(clause, (node) => {
+        if (t.isThrowStatement(node)) throws += 1;
+        if (t.isCallExpression(node) && t.isMemberExpression(node.callee)
+          && t.isIdentifier(node.callee.property) && node.callee.property.name === 'commit') {
+          commits += 1;
+        }
+      });
+      expect(throws, 'catch 里不能重新抛出（会让续跑循环停在 running、等 180s 租约）').toBe(0);
+      expect(commits, 'catch 里不能 commit（会清空工具目录并关掉标签识别）').toBe(0);
+    }
+  });
+
+  it('reports the failure so it is not silent', () => {
+    const body = findSyncBody(readContentProgram());
+    let reported = 0;
+    const countPush = (node: t.Node) => {
+      // ⚠️ `diag.failures?.push(...)` 在 Babel 里是 `OptionalCallExpression`
+      // （callee 是 `OptionalMemberExpression`），只认 `CallExpression` 会漏掉它。
+      if (!t.isCallExpression(node) && !t.isOptionalCallExpression(node)) return;
+      const callee = node.callee;
+      if (!t.isMemberExpression(callee) && !t.isOptionalMemberExpression(callee)) return;
+      if (t.isIdentifier(callee.property) && callee.property.name === 'push') reported += 1;
+    };
+    for (const clause of catchClausesOf(body)) walkSourceAst(clause, countPush);
+    expect(reported, 'catch 里要记一条诊断 —— 不抛就只剩它可见').toBeGreaterThan(0);
+  });
+});
+
+/**
+ * 授权重试**必须只在拿到新目录时才重发**。
+ *
+ * 它进 catch 分支的唯一原因是 `unknown_tool_authorization_descriptor`（我们这份目录过期了），
+ * 所以它要的是**新目录**。取数失败时 `loadAndSyncRuntimeState` 返回的是沿用值（旧目录），
+ * 再发一遍只会拿到同一个错 —— 或者更糟：后台按 id 过滤，
+ * `descriptors.length === requestedDescriptorIds.size` **判不出「少了新增的工具」**，
+ * 于是安静地建成一个不含新工具的 grant，模型调用它时才失败。
+ *
+ * ⚠️ **`fresh` 的判据是「取数没抛错 **且** 目录非空」** —— 只看「没抛错」不够：
+ * `GET_TOOL_DESCRIPTORS` 失败会被 `.then(v => Array.isArray(v) ? v : [])` **收敛成空数组**，
+ * 那条路上不会抛，空目录会被当成新目录 ⇒ 建出一个**不含任何工具**的 grant，正是要挡的事。
+ */
+describe('authorization retry only resends a freshly synced catalog', () => {
+  /** 找出 `loadAndSyncRuntimeState` 的函数体。 */
+  function findSyncBody(program: t.Program): t.BlockStatement {
+    let body: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'loadAndSyncRuntimeState') body = node.body;
+    });
+    expect(body, '应当存在 loadAndSyncRuntimeState').toBeDefined();
+    return body!;
+  }
+
+  it('bails out when the sync did not produce fresh data', () => {
+    const program = readContentProgram();
+    let retryBody: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'requestToolAuthorization') {
+        retryBody = node.body;
+      }
+    });
+    expect(retryBody, '应当存在 requestToolAuthorization').toBeDefined();
+
+    // catch 分支里必须先判 `fresh`，且判为假时抛出。
+    let guardsFresh = false;
+    walkSourceAst(retryBody!, (node) => {
+      if (!t.isIfStatement(node)) return;
+      if (!t.isUnaryExpression(node.test) || node.test.operator !== '!') return;
+      if (!t.isIdentifier(node.test.argument) || node.test.argument.name !== 'fresh') return;
+      if (!t.isThrowStatement(node.consequent)) return;
+      guardsFresh = true;
+    });
+    expect(guardsFresh, 'catch 里必须有 `if (!fresh) throw error;`').toBe(true);
+  });
+
+  it('derives fresh from a non-empty catalog, not from "the fetch did not throw"', () => {
+    // ⚠️ 写死 `fresh: true` 是最容易犯的错，而且**看不出来**：`GET_TOOL_DESCRIPTORS`
+    // 失败时 `sendRuntimeMessage` 返回 `undefined`、被 `.then(v => Array.isArray(v) ? v : [])`
+    // 收敛成空数组 —— 那条路上不抛，于是「没抛错」与「拿到了目录」被混为一谈，
+    // 授权重试会带 `descriptorIds: []` 重发并建成空 grant。
+    const body = findSyncBody(readContentProgram());
+    const freshValues: t.Expression[] = [];
+    walkSourceAst(body, (node) => {
+      if (!t.isObjectProperty(node)) return;
+      if (!t.isIdentifier(node.key) || node.key.name !== 'fresh') return;
+      if (t.isExpression(node.value)) freshValues.push(node.value);
+    });
+    expect(freshValues.length, '应当有两处返回 fresh（成功路径 + catch 兜底）').toBe(2);
+
+    // 成功路径那处必须是 `descriptors.length > 0` 形态，不能是字面量 `true`。
+    const derived = freshValues.some((value) => (
+      t.isBinaryExpression(value)
+      && ['>', '!=='].includes(value.operator)
+      && t.isMemberExpression(value.left)
+      && t.isIdentifier(value.left.object)
+      && value.left.object.name === 'descriptors'
+    ));
+    expect(derived, '成功路径的 fresh 必须由 descriptors 长度派生（`descriptors.length > 0`）').toBe(true);
+  });
+});
+

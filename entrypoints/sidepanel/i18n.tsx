@@ -19,6 +19,7 @@ import {
   type SupportedLocale,
 } from '../../core/i18n';
 import {
+  LOCALE_READ_TIMEOUT_MS,
   getLocalePreference,
   saveLocalePreference,
   watchLocalePreference,
@@ -61,9 +62,15 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    getLocalePreference()
+    // ⚠️ 两处细节：① 读 locale 要带上界（storage 半死时它永不落地，
+    // `.finally` 就永远不执行、`ready` 永远停在 false）；② `.finally` **不改 rejection**，
+    // 少了 `.catch` 会留下一条未处理拒绝。
+    getLocalePreference(LOCALE_READ_TIMEOUT_MS)
       .then((nextPreference) => {
         if (!cancelled) setPreferenceState(nextPreference);
+      })
+      .catch((error) => {
+        console.error('[GLM++] Failed to load locale preference.', error);
       })
       .finally(() => {
         if (!cancelled) setReady(true);

@@ -58,16 +58,15 @@ describe('decodeZaiResponseCompleteMessage', () => {
     originalPrompt: 'hi',
     agentTaskPrompt: 'hi',
     assistantText: 'done',
-    toolCalls: [VALID_TOOL_CALL],
   };
 
   it('passes a legal payload through', () => {
     expect(decodeZaiResponseCompleteMessage(legal)).toEqual(legal);
   });
 
-  it('accepts an empty toolCalls array', () => {
-    expect(decodeZaiResponseCompleteMessage({ ...legal, toolCalls: [] }))
-      .toEqual({ ...legal, toolCalls: [] });
+  it('ignores unknown extra fields rather than rejecting', () => {
+    // 载荷里多出来的字段一律忽略 —— 主世界与隔离世界版本可能不同步。
+    expect(decodeZaiResponseCompleteMessage({ ...legal, toolCalls: [] })).toEqual(legal);
   });
 
   it.each([
@@ -80,19 +79,8 @@ describe('decodeZaiResponseCompleteMessage', () => {
     ['non-string assistantText', { ...legal, assistantText: { text: 'x' } }],
     ['missing originalPrompt', { ...legal, originalPrompt: undefined }],
     ['non-string agentTaskPrompt', { ...legal, agentTaskPrompt: null }],
-    ['missing toolCalls', { ...legal, toolCalls: undefined }],
-    ['non-array toolCalls', { ...legal, toolCalls: 'none' }],
   ])('rejects malformed payload: %s', (_label, value) => {
     expect(decodeZaiResponseCompleteMessage(value)).toBeNull();
-  });
-
-  it('rejects the whole payload when one tool call inside is malformed', () => {
-    // 不能「跳过坏元素、保留好元素」—— 那会让「本轮执行过什么」与 fetch hook
-    // 的认知不一致，宁可整条不认。
-    expect(decodeZaiResponseCompleteMessage({
-      ...legal,
-      toolCalls: [VALID_TOOL_CALL, { name: 'shell_exec', raw: 7, requestId: 'r-2' }],
-    })).toBeNull();
   });
 });
 

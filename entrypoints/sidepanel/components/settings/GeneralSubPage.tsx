@@ -110,11 +110,16 @@ export default function GeneralSubPage({ state }: { state: SettingsState }) {
             className="relative rounded-lg overflow-hidden border"
             style={{ borderColor: 'var(--ds-border)', height: '120px' }}
           >
+            {/*
+             * 预览读的是**已保存**的地址（`bgPreview` 不从输入框的实时值派生），
+             * 加载失败只说明那个地址取不到图，**不能在 `onError` 里动输入框** ——
+             * 预览跟随输入框时，每敲一个字符都会拿半截 URL 去加载、失败即清空，
+             * URL 永远填不完，且开关与清除按钮会随预览一起消失。
+             */}
             <img
               src={state.bgPreview}
               alt={t('sidepanel.settings.backgroundPreviewAlt')}
               className="w-full h-full object-cover"
-              onError={() => { state.setBgUrl(''); }}
             />
             <div
               className="absolute inset-0 flex items-center justify-center text-[10px]"

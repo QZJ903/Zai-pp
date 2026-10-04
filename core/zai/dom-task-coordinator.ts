@@ -7,8 +7,12 @@
  *
  *   1. resolveTab：找/开 chat.z.ai 标签页（优先复用空闲后台 tab，busy 一 tab 一任务）；
  *   2. startTask：握手（RUN_DOM_TASK，退避重试）→ 登记 pending → 等终态事件；
- *   3. cancelTask：发 CANCEL_DOM_TASK；
- *   4. on*Event：消费 content 回传的 DOM_TASK_STARTED/COMPLETE/FAILED/NEEDS_ACTION/PROGRESS。
+ *   3. on*Event：消费 content 回传的 DOM_TASK_STARTED/COMPLETE/FAILED/NEEDS_ACTION/PROGRESS。
+ *
+ * 取消只有一条路：`startTask` 收到的 `signal` 被 abort 时发 `CANCEL_DOM_TASK`，
+ * 以及 `deadlineAt` 到点时同样发一条。**没有独立的 cancelTask 入口** ——
+ * 这个 signal 由 `scheduler` 的租约持有，三种情况会 abort 它：运行超时、租约丢失、
+ * 以及用户在侧边栏删掉这条自动化（`DELETE_AUTOMATION`）。
  *
  * 工具执行与续跑仍由 content 自闭环（zai.content.ts 现状），本模块只做「工具执行器
  * （EXECUTE_TOOL_CALL handler 现状）＋ 最终结果消费者（收 DOM_TASK_COMPLETE）」。
@@ -129,7 +133,6 @@ export interface DomTaskCoordinator {
     input: DomTaskStartInput,
     options?: DomTaskStartOptions,
   ): Promise<DomTaskOutcome>;
-  cancelTask(taskId: string): void;
   onStarted(event: DomTaskStartedEvent): void;
   onComplete(event: DomTaskCompleteEvent): void;
   onFailed(event: DomTaskFailedEvent): void;
@@ -395,11 +398,6 @@ export function createDomTaskCoordinator(
     });
   }
 
-  function cancelTask(taskId: string): void {
-    const entry = pending.get(taskId);
-    if (entry) void cancelDomTaskMessage(entry.tabId, taskId);
-  }
-
   function onStarted(event: DomTaskStartedEvent): void {
     const entry = pending.get(event.taskId);
     if (!entry) return;
@@ -463,7 +461,6 @@ export function createDomTaskCoordinator(
 
   return Object.freeze({
     startTask,
-    cancelTask,
     onStarted,
     onComplete,
     onFailed,

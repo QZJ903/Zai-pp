@@ -151,7 +151,7 @@ import {
 } from '../core/automation/scheduler';
 import { createDomTaskCoordinator } from '../core/zai/dom-task-coordinator';
 import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
-import { loadZaiAuthFromStorage } from '../core/zai/auth';
+import { AUTH_READ_TIMEOUT_MS, loadZaiAuthFromStorage } from '../core/zai/auth';
 import { createZaiModelCatalog } from '../core/zai/models';
 import { createDomTaskRuntimeHandlers } from './background/dom-task-handlers';
 import { broadcastRuntimeUpdate } from '../core/messaging/broadcast';
@@ -184,6 +184,7 @@ import {
   type SupportedLocale,
 } from '../core/i18n/background';
 import {
+  LOCALE_READ_TIMEOUT_MS,
   getResolvedLocaleState,
   watchLocalePreference,
 } from '../core/i18n/store';
@@ -209,8 +210,10 @@ const domTaskCoordinator = createDomTaskCoordinator({
   reportError: reportBackgroundStartupError,
 });
 // 模型清单：token 取自内容脚本捕获的登录态；抓不到就退回内置清单。
+// ⚠️ 读 token 要带上界：`inFlight` 槽位在 `fetchLive` 的 `finally` 里释放，
+// 而 storage 半死时那个 await 永不落地 ⇒ 槽位永久占住、清单再也刷不出来。
 const zaiModelCatalog = createZaiModelCatalog({
-  loadToken: async () => (await loadZaiAuthFromStorage())?.token ?? null,
+  loadToken: async () => (await loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS))?.token ?? null,
   fetchImpl: (input, init) => fetch(input, init),
 });
 const externalPayloadAuthorizationCache = new ExternalPayloadAuthorizationCache();
@@ -459,7 +462,9 @@ function backgroundT(key: LocaleMessageKey, params?: MessageParams): string {
 }
 
 async function refreshBackgroundLocale(): Promise<void> {
-  const resolved = await getResolvedLocaleState();
+  // ⚠️ 读 locale 要带上界：storage 半死时那个 await 永不落地 ⇒ 这句之后的
+  // `currentBackgroundLocale` 与 broadcast 全都不执行。
+  const resolved = await getResolvedLocaleState(LOCALE_READ_TIMEOUT_MS);
   currentBackgroundLocale = resolved.locale;
   currentBackgroundTranslator = createTranslator(resolved.locale);
 }

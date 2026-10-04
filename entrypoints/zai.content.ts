@@ -30,7 +30,7 @@ import {
   type PromptInjectionSettings,
 } from '../core/prompt/settings';
 import { filterMemoriesByProjectScope } from '../core/memory/scope';
-import { getResolvedLocaleState } from '../core/i18n/store';
+import { LOCALE_READ_TIMEOUT_MS, getResolvedLocaleState } from '../core/i18n/store';
 import {
   DEFAULT_LOCALE,
   translate,
@@ -116,6 +116,7 @@ import { MCP_CAPABILITY_TOOL_PROVIDER_ID } from '../core/mcp/capability-contract
 import { mountToolResultCards } from '../core/ui/tool-result-cards';
 import { injectInjectedThemeStyles, syncInjectedTheme } from '../core/ui/injected-theme';
 import {
+  AUTH_READ_TIMEOUT_MS,
   loadZaiAuthFromStorage,
   mergeZaiAuthFromCapture,
   readZaiUserIdFromToken,
@@ -499,27 +500,90 @@ interface LoadedRuntimeState {
    * 本次结果可能被一条更新的同步顶掉，那时读模块状态会拿到更旧的快照。
    */
   webToolsEnabled: boolean;
+  /**
+   * 本次拿到的目录是否**可用作「新目录」**（`false` = 不可用，调用方别拿它当「最新」）。
+   *
+   * ⚠️ **只有「必须拿到一份新的」的调用方需要读它** —— 目前是
+   * `requestToolAuthorization` 的授权重试：它进这条路的唯一原因就是
+   * `unknown_tool_authorization_descriptor`（= 我们这份目录过期了），所以它要的是**新目录**。
+   *
+   * ⚠️⚠️ **它的判据是「取数没抛错 **且** 目录非空」，不只是「没抛错」** ——
+   * `GET_TOOL_DESCRIPTORS` 失败时 `sendRuntimeMessage` 返回 `undefined`、被
+   * `.then(v => Array.isArray(v) ? v : [])` **收敛成空数组**，这条路上不会抛。
+   * 若只看「没抛错」，那个空目录会被当成新目录 ⇒ 授权重试带 `descriptorIds: []` 重发，
+   * 后台按 id 过滤后 `0 === 0` 判不出异常，**安静地建成一个不含任何工具的 grant** ——
+   * 正是这个字段要挡的事。
+   * ⚠️ 代价：**后台确实一个工具都没有**时也会判成 `false` ⇒ 重试直接抛错而非重发。
+   * 方向是安全的（fail-fast 优于建空 grant）。
+   *
+   * ⚠️ **列提示词清单的调用方（续跑轮 / nudge 轮）不要读它** —— 它们要的是
+   * 「有一份能用的目录」，沿用值正好。
+   */
+  fresh: boolean;
 }
 
 async function loadAndSyncRuntimeState(): Promise<LoadedRuntimeState> {
   const syncLease = toolDescriptorSyncGate.begin();
-  const [memories, descriptors, skills, skillAutoActivation, activePreset, promptSettings, webToolSettings, resolvedLocale] = await Promise.all([
-    sendRuntimeMessage<Memory[]>({ type: 'GET_MEMORIES' }).then((v) => (Array.isArray(v) ? v : [])),
-    sendRuntimeMessage<ToolDescriptor[]>({ type: 'GET_TOOL_DESCRIPTORS' }).then((v) => (Array.isArray(v) ? v : [])),
-    sendRuntimeMessage<Skill[]>({ type: 'GET_SKILLS' }).then((v) => (Array.isArray(v) ? v : [])),
-    sendRuntimeMessage<SkillAutoActivationSettings>({ type: 'GET_SKILL_AUTO_ACTIVATION_SETTINGS' }).then(
-      (v) => normalizeSkillAutoActivationSettings(v),
-    ),
-    sendRuntimeMessage<SystemPromptPreset | null>({ type: 'GET_ACTIVE_PRESET' }).then(
-      (v) => (v && typeof v === 'object' ? (v as SystemPromptPreset) : null),
-    ),
-    sendRuntimeMessage<PromptInjectionSettings>({ type: 'GET_PROMPT_INJECTION_SETTINGS' }).then(
-      (v) => normalizePromptInjectionSettings(v),
-    ),
-    // 联网开关的存储值：决定 web 工具是否进模型目录（见 augmentPrompt 的 modelFacing）。
-    sendRuntimeMessage<Record<string, unknown>>({ type: 'GET_WEB_TOOL_SETTINGS' }),
-    getResolvedLocaleState(),
-  ]);
+  let loaded: [
+    Memory[],
+    ToolDescriptor[],
+    Skill[],
+    SkillAutoActivationSettings,
+    SystemPromptPreset | null,
+    PromptInjectionSettings,
+    Record<string, unknown> | undefined,
+    Awaited<ReturnType<typeof getResolvedLocaleState>>,
+  ];
+  try {
+    loaded = await Promise.all([
+      sendRuntimeMessage<Memory[]>({ type: 'GET_MEMORIES' }).then((v) => (Array.isArray(v) ? v : [])),
+      sendRuntimeMessage<ToolDescriptor[]>({ type: 'GET_TOOL_DESCRIPTORS' }).then((v) => (Array.isArray(v) ? v : [])),
+      sendRuntimeMessage<Skill[]>({ type: 'GET_SKILLS' }).then((v) => (Array.isArray(v) ? v : [])),
+      sendRuntimeMessage<SkillAutoActivationSettings>({ type: 'GET_SKILL_AUTO_ACTIVATION_SETTINGS' }).then(
+        (v) => normalizeSkillAutoActivationSettings(v),
+      ),
+      sendRuntimeMessage<SystemPromptPreset | null>({ type: 'GET_ACTIVE_PRESET' }).then(
+        (v) => (v && typeof v === 'object' ? (v as SystemPromptPreset) : null),
+      ),
+      sendRuntimeMessage<PromptInjectionSettings>({ type: 'GET_PROMPT_INJECTION_SETTINGS' }).then(
+        (v) => normalizePromptInjectionSettings(v),
+      ),
+      // 联网开关的存储值：决定 web 工具是否进模型目录（见 augmentPrompt 的 modelFacing）。
+      sendRuntimeMessage<Record<string, unknown>>({ type: 'GET_WEB_TOOL_SETTINGS' }),
+      getResolvedLocaleState(LOCALE_READ_TIMEOUT_MS),
+    ]);
+  } catch (error) {
+    // ⚠️⚠️ **这里刻意不往外抛，也刻意不 commit。**
+    //
+    // ⚠️ **当前静态不可达** —— 八条腿里唯一可能 reject 的 `getResolvedLocaleState`
+    // 已收敛为**永不 reject**（读失败吞成默认值、超时只 resolve），
+    // 其余七条走 `sendRuntimeMessage`（自带 try/catch 成 `undefined`），
+    // 两个 `normalize*` 都是纯函数。**所以这是防御性兜底，不是活路径** ——
+    // 留着是为了「将来有人给某条腿加一个会抛的实现」时不至于把整个同步炸掉。
+    // ⚠️ 下面两条决策的**理由**仍然成立（它们说的是「万一抛了会怎样」）：
+    //
+    // 不抛：调用方里有三处是「状态同步失败也不该中断主流程」的 ——
+    // `advanceContinuationLoop` 在取数之后还要注入下一轮 / 收尾，抛出去会让
+    // `continuationLoop` 停在 `running`、只能等后台 180s 执行租约兜底；
+    // `submitDomTaskPrompt` 抛出去会让这一次自动化运行直接失败。
+    // 把一次状态同步失败放大成「自动化卡 180 秒」不划算。
+    //
+    // 不 commit：模块状态与 `currentCatalogNames` 停在**上一次成功的值**，
+    // 而不是被清空。⚠️ 这条是有意的 —— `currentCatalogNames` 会推到主世界供
+    // fetch hook 识别工具标签，而 `extractAndNotifyToolCalls` 在名字集合为空时
+    // **直接 return、一个工具都不识别**。清空等于把「识别」整条关掉。
+    // 沿用旧值的口径与 `currentWebToolsEnabled` 一致（「读取失败时沿用上一次的值」）。
+    diag.failures?.push({
+      kind: 'runtime_state_sync_failed',
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      descriptors: currentToolDescriptors,
+      webToolsEnabled: currentWebToolsEnabled,
+      fresh: false,
+    };
+  }
+  const [memories, descriptors, skills, skillAutoActivation, activePreset, promptSettings, webToolSettings, resolvedLocale] = loaded;
   // 任一工具开关开着就算「联网可用」；**读取失败时沿用上一次的值**（沿用语义，别改成 false）。
   const webToolsEnabled = webToolSettings && typeof webToolSettings === 'object'
     ? webToolSettings.web_search === true || webToolSettings.web_fetch === true
@@ -536,7 +600,9 @@ async function loadAndSyncRuntimeState(): Promise<LoadedRuntimeState> {
     currentContentLocale = resolvedLocale.locale;
     syncHookState();
   });
-  return { descriptors, webToolsEnabled };
+  // ⚠️ `fresh` 的判据是「取数没抛错**且**目录非空」—— 只看「没抛错」不够：
+  // `GET_TOOL_DESCRIPTORS` 失败会被收敛成空数组、这条路上不会抛（见 `fresh` 字段的说明）。
+  return { descriptors, webToolsEnabled, fresh: descriptors.length > 0 };
 }
 
 interface ResolvedProjectAugmentationContext {
@@ -1465,7 +1531,15 @@ async function requestToolAuthorization(
       || error.code !== 'unknown_tool_authorization_descriptor') {
       throw error;
     }
-    const { descriptors } = await loadAndSyncRuntimeState();
+    const { descriptors, fresh } = await loadAndSyncRuntimeState();
+    // ⚠️ **重试的前提是「这次真的拿到了一份可用的新目录」** —— 进这个分支的唯一原因就是
+    // 后台说我们这份目录过期了。取数失败时返回的是**沿用值**（旧目录），再发一遍
+    // 只会拿到同一个错、或者更糟：安静地建成一个**不含新工具**的 grant
+    // （后台按 id 过滤，`descriptors.length === requestedDescriptorIds.size` 判不出差异）。
+    // ⚠️ `fresh` 同时挡住「取数没抛错、但目录是空数组」那条 —— 它同样是残缺目录。
+    // 所以这里把那个错原样抛回去 —— 它本来就会被 `executeDetected` 的 catch
+    // 归类成 `tool_authorization_create_failed`，回到「显式失败」那条路上。
+    if (!fresh) throw error;
     return createToolAuthorization({
       requestId,
       chatSessionId,
@@ -1703,12 +1777,10 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     requestId: complete.requestId,
     textLength: complete.assistantText.length,
     assistantText: complete.assistantText,
-    detectedToolCalls: complete.toolCalls,
   });
   console.log('[GLM++] response complete', {
     requestId: complete.requestId,
     textLength: complete.assistantText.length,
-    detectedToolCalls: complete.toolCalls.map((tc) => tc.name),
   });
 
   // 首条请求发出后，页面 SPA 可能已经从首页跳到 /c/<id>（新建会话场景）。
@@ -2733,7 +2805,11 @@ async function installBackgroundCapability(): Promise<void> {
  */
 const conversationTitleResolver = createZaiConversationTitleResolver({
   loadToken: async () => {
-    const auth = await loadZaiAuthFromStorage();
+    // ⚠️ 读 token 要带上界：解析器的 `inFlight` 在 `fetchTitle` 之后才释放，
+    // 而 storage 半死时那个 await 永不落地 ⇒ 槽位永久占住、之后每次触发都落
+    // 「已尝试」跳过分支、**不自愈**。超时返回 null 后会走下面的 localStorage 兜底，
+    // 那是同步读、不受影响。
+    const auth = await loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS);
     if (auth?.token) return auth.token;
     // 缓存里没有就现读页面 localStorage（与 refreshZaiAuth 同一条兜底路径）。
     return typeof localStorage === 'undefined' ? null : localStorage.getItem('token');
@@ -3492,7 +3568,11 @@ export default defineContentScript({
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (!message || typeof message !== 'object') return undefined;
       if (message.type === 'STATE_UPDATED' || message.type === 'TOOL_DESCRIPTORS_UPDATED') {
-        void loadAndSyncRuntimeState();
+        // ⚠️ `void` 的 rejection 没人接 —— 这条广播监听是 fire-and-forget，
+        // 不该指望被调函数永不抛（后台的 `refreshBackgroundLocale` 也是自带 `.catch`）。
+        void loadAndSyncRuntimeState().catch((error) => {
+          console.error('[GLM++] runtime state sync failed', error);
+        });
         sendResponse({ ok: true });
         return true;
       }
