@@ -338,6 +338,7 @@ describe('request-scoped state is released once per request', () => {
       'executionsByRequest',
       'isAgentTurnByRequestId',
       'nativeSearchOnByRequestId',
+      'requestToolDescriptorsByRequestId',
     ]);
     expect(released, 'respondedRequestIds 有延迟读者，不能按 requestId 释放')
       .not.toContain('respondedRequestIds');
@@ -511,6 +512,106 @@ describe('authorization retry only resends a freshly synced catalog', () => {
       && value.left.object.name === 'descriptors'
     ));
     expect(derived, '成功路径的 fresh 必须由 descriptors 长度派生（`descriptors.length > 0`）').toBe(true);
+  });
+});
+
+describe('tool tag recognition uses the descriptors injected into this request', () => {
+  /**
+   * 识别 XML 标签用的名单必须**与提示词同源** —— 即本请求授权返回的 `descriptors`，
+   * 而不是全局 `currentCatalogNames` / `currentToolDescriptors`（那是「上次同步」）。
+   *
+   * **为什么**：提示词里的工具清单来自 `createToolAuthorization` 的后台**实时**投影。
+   * 用户刚加 MCP 工具、`TOOL_DESCRIPTORS_UPDATED` 广播还没落地时，全局快照与提示词会分叉
+   * —— 提示词列了 A、识别器不认 A，模型调它**静默不执行**（不报错、不失败）。
+   *
+   * 修法（B）：把授权返回的 `descriptors` 随增广结果回传，主世界识别与内容脚本兜底
+   * `parseToolXml` 都用它；全局快照降级为「未增广请求」的兜底。
+   *
+   * ⚠️ **只断言接线**（回传值来自 `descriptors`、兜底解析读 `requestToolDescriptorsByRequestId`），
+   * 不断言具体函数名 —— 后者用 `includes` 就能过。
+   */
+  it('returns this request\'s authorized descriptor names in the augment result', () => {
+    const program = readContentProgram();
+    let body: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'handleAugmentRequestBody') body = node.body;
+    });
+    expect(body, '应当存在 handleAugmentRequestBody').toBeDefined();
+
+    // 收集所有 `toolDescriptorNames:` 的值，断言它们都是 `catalogNamesFor(<某>.descriptors)`，
+    // 没有一处回落到 `currentCatalogNames`。
+    const sources: string[] = [];
+    let usesGlobalCatalogNames = false;
+    walkSourceAst(body!, (node) => {
+      if (!t.isObjectProperty(node)) return;
+      if (!t.isIdentifier(node.key) || node.key.name !== 'toolDescriptorNames') return;
+      const value = node.value;
+      if (t.isIdentifier(value) && value.name === 'currentCatalogNames') {
+        usesGlobalCatalogNames = true;
+        return;
+      }
+      if (t.isCallExpression(value) && t.isIdentifier(value.callee)
+        && value.callee.name === 'catalogNamesFor') {
+        const arg = value.arguments[0];
+        if (t.isMemberExpression(arg) && t.isIdentifier(arg.property)
+          && arg.property.name === 'descriptors') {
+          sources.push('descriptors');
+          return;
+        }
+      }
+      sources.push('<非预期来源>');
+    });
+
+    expect(sources.length, '应当有多处回传 toolDescriptorNames（chatNew / 续跑 / completion）').toBeGreaterThanOrEqual(3);
+    expect(sources.every((s) => s === 'descriptors'), `toolDescriptorNames 必须来自本请求的 descriptors，实际：${sources.join(', ')}`).toBe(true);
+    expect(usesGlobalCatalogNames, '不得回传全局 currentCatalogNames（那是上次同步，会与提示词分叉）').toBe(false);
+  });
+
+  it('parses fallback tool XML with the per-request descriptors, not the global snapshot', () => {
+    const program = readContentProgram();
+    // 所有 `parseToolXml(<text>, <第二参>)` 调用点，收集第二参是不是**裸** `currentToolDescriptors`。
+    const bareGlobalArgs: number[] = [];
+    const callLines: number[] = [];
+    walkSourceAst(program, (node) => {
+      if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+      if (node.callee.name !== 'parseToolXml') return;
+      callLines.push(node.loc?.start.line ?? -1);
+      const second = node.arguments[1];
+      if (t.isIdentifier(second) && second.name === 'currentToolDescriptors') {
+        bareGlobalArgs.push(node.loc?.start.line ?? -1);
+      }
+    });
+    expect(callLines.length, '应当有 parseToolXml 调用点').toBeGreaterThan(0);
+    // 不得有任何一处把裸 `currentToolDescriptors` 当目录 —— 那正是要消除的分叉。
+    expect(bareGlobalArgs, `这些行的 parseToolXml 用了裸 currentToolDescriptors（会与提示词分叉）：${bareGlobalArgs.join(', ')}`).toEqual([]);
+
+    // 且必须真的用到了按请求的 Map（要么直接、要么经 `const descriptors = … ?? currentToolDescriptors`）。
+    const source = readFileSync(CONTENT_SOURCE, 'utf8');
+    // ⚠️ **写入点恰好 3 个**（续跑 / completion / 懒建）—— **chatNew 刻意不写**：它没有终态
+    // 事件（`fetch-hook` 只在 completion 路由发 `onRequestTerminal`），与随后的 completion 是
+    // 两个不同 requestId ⇒ 写了既**无人释放**（孤儿泄漏）、也**无人读**（Map 的读点读的都是
+    // completion 的 requestId）。这条钉住「别把 chatNew 那行加回来」。
+    const setCalls = source.match(/requestToolDescriptorsByRequestId\.set\(/g) ?? [];
+    expect(setCalls.length, '写入点必须恰好 3 个（chatNew 刻意不写，见注释）').toBe(3);
+  });
+
+  it('releases the per-request descriptor map alongside the other request-scoped state', () => {
+    const program = readContentProgram();
+    let body: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'releaseRequestState') body = node.body;
+    });
+    expect(body, '应当存在 releaseRequestState').toBeDefined();
+
+    let released = false;
+    walkSourceAst(body!, (node) => {
+      if (!t.isCallExpression(node) || !t.isMemberExpression(node.callee)) return;
+      const object = node.callee.object;
+      if (t.isIdentifier(object) && object.name === 'requestToolDescriptorsByRequestId') {
+        released = true;
+      }
+    });
+    expect(released, 'requestToolDescriptorsByRequestId 必须在 releaseRequestState 里释放（否则按 requestId 增长）').toBe(true);
   });
 });
 

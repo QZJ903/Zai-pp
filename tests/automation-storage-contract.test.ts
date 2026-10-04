@@ -44,6 +44,7 @@ describe('automation storage contract', () => {
           prompt: 'Run',
           trigger: 'manual',
           chatSessionId: null,
+          // 上游遗留字段：本项目已删，解码器必须**容忍但不读取**（旧记录里可能还带着）。
           parentMessageId: '42',
           promptOptions: makeAutomation().promptOptions,
           requestedAt,
@@ -52,16 +53,11 @@ describe('automation storage contract', () => {
           ok: true,
           chatSessionId: 'chat-1',
           sessionUrl: null,
+          // 同上：已删字段，容忍不报错。
           parentMessageId: '',
           assistantMessageId: '',
+          history: { chatSessionId: 'chat-1', messageCount: 2, verifiedAt: requestedAt + 10 },
           assistantText: 'done',
-          history: {
-            chatSessionId: 'chat-1',
-            parentMessageId: '8',
-            assistantMessageId: null,
-            messageCount: 2,
-            verifiedAt: requestedAt + 10,
-          },
           completedAt: requestedAt + 10,
         } as never,
         completedAt: requestedAt + 10,
@@ -73,19 +69,15 @@ describe('automation storage contract', () => {
       .toEqual({ retained: true });
     expect(decoded.automations[0].glm).toEqual({
       chatSessionId: null,
-      parentMessageId: null,
       sessionUrl: null,
-      lastHistorySyncedAt: null,
     });
+    // 遗留的 deadlineAt 别名仍投影（这个别名还在用）。
     expect(decoded.runs[0].request).toMatchObject({
       deadlineAt: requestedAt + 180_000,
-      parentMessageId: 42,
     });
-    expect(decoded.runs[0].result).toMatchObject({
-      parentMessageId: 0,
-      assistantMessageId: null,
-      history: { parentMessageId: 8 },
-    });
+    // 已删字段不再被校验/投影为类型化字段 —— 旧记录里的值原样透传（`...value`），
+    // 解码不报错即可（容忍不读取）。
+    expect(decoded.runs[0].result).toMatchObject({ chatSessionId: 'chat-1', assistantText: 'done' });
   });
 
   it('preserves root and record additions through an authorized mutation', async () => {
@@ -192,9 +184,7 @@ function makeAutomation(): Automation {
     },
     glm: {
       chatSessionId: null,
-      parentMessageId: null,
       sessionUrl: null,
-      lastHistorySyncedAt: null,
     },
     createdAt: 1_000,
     updatedAt: 1_000,

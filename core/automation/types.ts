@@ -62,9 +62,7 @@ export interface AutomationPromptOptions {
 
 export interface AutomationGLMSession {
   chatSessionId: string | null;
-  parentMessageId: number | null;
   sessionUrl: string | null;
-  lastHistorySyncedAt: number | null;
 }
 
 export interface AutomationErrorState {
@@ -109,7 +107,6 @@ export interface AutomationRunnerRequest {
   prompt: string;
   trigger: AutomationTrigger;
   chatSessionId: string | null;
-  parentMessageId: number | null;
   promptOptions: AutomationPromptOptions;
   locale?: SupportedLocale;
   promptContext?: AutomationPromptContext;
@@ -123,30 +120,18 @@ export interface AutomationPromptContext {
   toolDescriptors?: ToolDescriptor[];
 }
 
-export interface AutomationHistorySnapshot {
-  chatSessionId: string;
-  parentMessageId: number | null;
-  assistantMessageId: number | null;
-  messageCount: number;
-  verifiedAt: number;
-}
-
 export interface AutomationRunnerSuccess {
   ok: true;
   chatSessionId: string;
   sessionUrl: string | null;
-  parentMessageId: number;
-  assistantMessageId: number | null;
   assistantText: string;
   toolExecutions?: ToolExecutionRecord[];
-  history: AutomationHistorySnapshot | null;
   completedAt: number;
 }
 
 export interface AutomationRunnerFailure {
   ok: false;
   chatSessionId: string | null;
-  parentMessageId: number | null;
   error: AutomationErrorState;
   completedAt: number;
 }

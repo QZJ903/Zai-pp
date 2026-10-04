@@ -285,7 +285,12 @@ interface ZaiIntercepted {
   context: ZaiRequestContext;
   requestBody: string;
   requestInit: RequestInit;
-  toolNames: string[];
+  /**
+   * 本请求注入提示词的工具标签名。**`undefined` = 未增广**（增广失败 / 结果非法），
+   * 与「增广成功但目录为空」（`[]`）是两回事 —— 后者必须按空目录处理、**不能回落全局快照**，
+   * 否则会识别出「本请求提示词里根本没列」的标签并执行（见 `extractAndNotifyToolCalls`）。
+   */
+  toolNames: readonly string[] | undefined;
 }
 
 async function prepareRequest(
@@ -300,7 +305,10 @@ async function prepareRequest(
     console.error('[GLM++] request augmentation failed; sending original request', error);
   }
 
-  const toolNames = modified?.toolDescriptorNames ?? [];
+  // ⚠️ **保留 `undefined` 与 `[]` 的区别**：`modified` 为 null 只发生在「增广失败 / 结果非法」
+  // （`decodeAugmentResult` 的四种拒绝）⇒ 那时才该回落全局快照；增广成功但目录为空时
+  // `toolDescriptorNames` 是 `[]`，必须按空目录处理。
+  const toolNames = modified?.toolDescriptorNames;
   const requestBody = modified?.body ?? body;
 
   return {
@@ -410,6 +418,7 @@ function hookFetch(): () => void {
       return interceptCompletionResponse(
         prepared.context,
         originalFetch.call(this, signed.url || url, requestInit),
+        prepared.toolNames,
       );
     }
 
@@ -496,6 +505,7 @@ function hookXHR(): () => void {
 async function interceptCompletionResponse(
   context: ZaiRequestContext,
   responsePromise: Promise<Response>,
+  requestToolNames: readonly string[] | undefined,
 ): Promise<Response> {
   const response = await responsePromise;
   const contentType = response.headers.get('content-type') ?? '';
@@ -550,7 +560,7 @@ async function interceptCompletionResponse(
           // flush 掉最后一行未完结的 data: 行，补进累积文本。
           observeUsageFrames(accumulator.finish());
           const text = accumulator.assistantText;
-          extractAndNotifyToolCalls(accumulator, context.requestId);
+          extractAndNotifyToolCalls(accumulator, context.requestId, requestToolNames);
           hookState.onResponseComplete({
             requestId: context.requestId,
             originalPrompt: context.originalPrompt,
@@ -615,10 +625,19 @@ function registerToolCall(call: ZaiDetectedToolCall): void {
 function extractAndNotifyToolCalls(
   accumulator: ZaiStreamAccumulator,
   requestId: string,
+  requestToolNames: readonly string[] | undefined,
 ): void {
-  // 记录识别现场：names 为空意味着隔离世界还没把工具目录推过来，
-  // 此时 memory_save 无法被识别（模型吐了也白吐）。
-  const names = hookState.toolDescriptorNames;
+  // 识别用的名单**优先取本请求的那一份** —— 它由隔离世界随增广结果回传，正是
+  // **本次实际注入提示词的那份描述符**（`auth.descriptors`）。这消除了「提示词列了 A、
+  // 识别器不认 A」的分叉（用户刚加 MCP 工具、`TOOL_DESCRIPTORS_UPDATED` 还没落地时）。
+  //
+  // ⚠️ **判据是「是不是 undefined」，不是「长度是否 > 0」** —— `undefined` 才代表**未增广**
+  // （增广失败 / 结果非法时主世界放行原始 body，拿不到本请求名单），那时才退回全局快照，
+  // 保住「老会话里已有的 XML 仍能识别执行」。而**增广成功但目录为空**（`[]`）必须按空目录
+  // 处理、**不能回落全局** —— 否则会识别出「本请求提示词里根本没列」的标签并执行。
+  const names = requestToolNames !== undefined
+    ? new Set(requestToolNames)
+    : hookState.toolDescriptorNames;
   const text = accumulator.assistantText;
   const unregistered = extractXmlTagNames(text);
   const unregisteredTags = unregistered.filter((tag) => !(names && names.has(tag)));
@@ -626,6 +645,7 @@ function extractAndNotifyToolCalls(
     diag.responses?.push({
       requestId,
       hookStateNamesSize: names ? names.size : 0,
+      requestToolNamesSize: requestToolNames ? requestToolNames.length : 0,
       unregisteredTags,
       assistantText: text.slice(0, 2000),
     });

@@ -156,8 +156,6 @@ export const RUNTIME_COMMAND_CONTRACTS = {
   DOM_TASK_STARTED: typedCommand('payload-cast', 'ack', 'background-error', 'live-only'),
   DOM_TASK_COMPLETE: typedCommand('payload-cast', 'ack', 'background-error', 'live-only'),
   DOM_TASK_FAILED: typedCommand('payload-cast', 'ack', 'background-error', 'live-only'),
-  DOM_TASK_NEEDS_ACTION: typedCommand('payload-cast', 'ack', 'background-error', 'live-only'),
-  DOM_TASK_PROGRESS: typedCommand('payload-cast', 'ack', 'background-error', 'live-only'),
 } as const satisfies Record<string, RuntimeCommandContract>;
 
 export const TYPED_RUNTIME_COMMAND_TYPES = commandTypesOwnedBy('typed-handler');

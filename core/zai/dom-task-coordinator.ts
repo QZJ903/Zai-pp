@@ -7,7 +7,7 @@
  *
  *   1. resolveTab：找/开 chat.z.ai 标签页（优先复用空闲后台 tab，busy 一 tab 一任务）；
  *   2. startTask：握手（RUN_DOM_TASK，退避重试）→ 登记 pending → 等终态事件；
- *   3. on*Event：消费 content 回传的 DOM_TASK_STARTED/COMPLETE/FAILED/NEEDS_ACTION/PROGRESS。
+ *   3. on*Event：消费 content 回传的 DOM_TASK_STARTED/COMPLETE/FAILED。
  *
  * 取消只有一条路：`startTask` 收到的 `signal` 被 abort 时发 `CANCEL_DOM_TASK`，
  * 以及 `deadlineAt` 到点时同样发一条。**没有独立的 cancelTask 入口** ——
@@ -46,17 +46,6 @@ export interface DomTaskFailedEvent {
    * 不带回来，自动化就会永远停在会话「未创建」。
    */
   chatSessionId?: string | null;
-}
-
-export interface DomTaskNeedsActionEvent {
-  taskId: string;
-  kind: 'captcha' | 'peak';
-}
-
-export interface DomTaskProgressEvent {
-  taskId: string;
-  text: string;
-  phase: string;
 }
 
 export type DomTaskOutcome =
@@ -136,8 +125,6 @@ export interface DomTaskCoordinator {
   onStarted(event: DomTaskStartedEvent): void;
   onComplete(event: DomTaskCompleteEvent): void;
   onFailed(event: DomTaskFailedEvent): void;
-  onNeedsAction(event: DomTaskNeedsActionEvent): void;
-  onProgress(event: DomTaskProgressEvent): void;
 }
 
 const DEFAULT_HOME_URL = 'https://chat.z.ai/';
@@ -444,28 +431,11 @@ export function createDomTaskCoordinator(
     });
   }
 
-  function onNeedsAction(event: DomTaskNeedsActionEvent): void {
-    const entry = pending.get(event.taskId);
-    if (!entry) return;
-    void updateTab(entry.tabId, { active: true })
-      .catch((error) => reportError('dom_task_needs_action_tab_focus_failed', error));
-    reportError(
-      'dom_task_needs_action',
-      new Error(`${event.kind} requires user action (task ${event.taskId}).`),
-    );
-  }
-
-  function onProgress(_event: DomTaskProgressEvent): void {
-    // 一期单块终答，无动作。
-  }
-
   return Object.freeze({
     startTask,
     onStarted,
     onComplete,
     onFailed,
-    onNeedsAction,
-    onProgress,
   });
 }
 

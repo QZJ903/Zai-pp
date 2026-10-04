@@ -164,9 +164,7 @@ const automation: Automation = {
   },
   glm: {
     chatSessionId: null,
-    parentMessageId: null,
     sessionUrl: null,
-    lastHistorySyncedAt: null,
   },
   createdAt: 1_000,
   updatedAt: 1_000,

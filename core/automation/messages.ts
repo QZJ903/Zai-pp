@@ -6,7 +6,7 @@ import type {
 } from './types';
 
 export function createAutomationRunnerFailure(
-  request: Pick<AutomationRunnerRequest, 'chatSessionId' | 'parentMessageId'>,
+  request: Pick<AutomationRunnerRequest, 'chatSessionId'>,
   code: string,
   message: string,
   phase: AutomationFailurePhase,
@@ -25,7 +25,6 @@ export function createAutomationRunnerFailure(
     chatSessionId: sessionIdOverride !== undefined
       ? sessionIdOverride
       : request.chatSessionId,
-    parentMessageId: request.parentMessageId,
     completedAt: at,
     error: createAutomationError(code, message, phase, retryable, at, details),
   };

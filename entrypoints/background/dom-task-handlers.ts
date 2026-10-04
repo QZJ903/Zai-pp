@@ -10,8 +10,6 @@ import type {
   DomTaskCompleteEvent,
   DomTaskCoordinator,
   DomTaskFailedEvent,
-  DomTaskNeedsActionEvent,
-  DomTaskProgressEvent,
   DomTaskStartedEvent,
 } from '../../core/zai/dom-task-coordinator';
 import type { ToolExecutionRecord } from '../../core/types';
@@ -75,14 +73,5 @@ export function createDomTaskRuntimeHandlers(
       // 这一刻带得回来 —— 缺了它，自动化会一直显示会话「未创建」。
       chatSessionId: readNullableString(message, 'chatSessionId'),
     }), (coordinator, payload) => coordinator.onFailed(payload)),
-    event<DomTaskNeedsActionEvent>('DOM_TASK_NEEDS_ACTION', (message) => ({
-      taskId: readString(message, 'taskId'),
-      kind: message.kind === 'captcha' || message.kind === 'peak' ? message.kind : 'captcha',
-    }), (coordinator, payload) => coordinator.onNeedsAction(payload)),
-    event<DomTaskProgressEvent>('DOM_TASK_PROGRESS', (message) => ({
-      taskId: readString(message, 'taskId'),
-      text: readString(message, 'text'),
-      phase: readString(message, 'phase'),
-    }), (coordinator, payload) => coordinator.onProgress(payload)),
   ]);
 }

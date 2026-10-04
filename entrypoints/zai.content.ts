@@ -159,6 +159,15 @@ const isAgentTurnByRequestId = new Map<string, boolean>();
 const nativeSearchOnByRequestId = new Map<string, boolean>();
 /** requestId → 本轮已完成的工具执行记录（TOOL_CALL 通道执行后写入，response 里读取续跑判定）。 */
 const executionsByRequest = new Map<string, ToolExecutionRecord[]>();
+/**
+ * requestId → 本轮**实际注入提示词**的那份工具描述符（= 授权返回的 `descriptors`）。
+ *
+ * ⚠️ **兜底 `parseToolXml` 必须用这份、而不是全局 `currentToolDescriptors`** ——
+ * 后者是「内容脚本最后一次同步」，用户刚加 MCP 工具、`TOOL_DESCRIPTORS_UPDATED` 广播
+ * 未落地时会与提示词分叉（提示词列了 A、识别器不认 A → 静默不执行）。这份与提示词严格同源。
+ * 释放见 `releaseRequestState`。
+ */
+const requestToolDescriptorsByRequestId = new Map<string, ToolDescriptor[]>();
 
 /**
  * 释放某个请求的全部请求级状态。**在 `REQUEST_TERMINAL` 分支末尾调用一次**。
@@ -177,7 +186,10 @@ const executionsByRequest = new Map<string, ToolExecutionRecord[]>();
  *
  * ⚠️ **没有 `REQUEST_TERMINAL` 的两条路径会留下残余**：HTML 挑战页与响应直接 reject
  * （fetch hook 在这两条路上只发各自的回调）。但这两条路都没有流、也就没有工具执行，
- * 所以真正占内存的两个容器根本不会被写；残留的只有三个小条目。**这是有意接受的**：
+ * 所以 `executedToolCallSignatures` / `executionsByRequest` 两个大容器根本不会被写；
+ * 残留的是 `chatSessionIdByRequestId` / `isAgentTurnByRequestId` / `nativeSearchOnByRequestId`
+ * 三个 UUID 级小条目，**外加 `requestToolDescriptorsByRequestId`**（增广已成功、已写入，
+ * 但它不是小条目 —— 是整份 `descriptors` 数组）。**这是有意接受的**：
  * 让 terminal 在这两条路上也发出会连带触发 `armManualStopDetection`，可能给高峰挑战
  * 误报一次 `DOM_TASK_FAILED` —— 那是行为改动，不该混在内存清理里。
  */
@@ -187,6 +199,7 @@ function releaseRequestState(requestId: string): void {
   chatSessionIdByRequestId.delete(requestId);
   isAgentTurnByRequestId.delete(requestId);
   nativeSearchOnByRequestId.delete(requestId);
+  requestToolDescriptorsByRequestId.delete(requestId);
 }
 /** 主世界消息串行队列：保证 TOOL_CALL → RESPONSE_COMPLETE → REQUEST_TERMINAL 按顺序执行。 */
 let mainWorldMessageQueue: Promise<void> = Promise.resolve();
@@ -1082,6 +1095,14 @@ async function handleAugmentRequestBody(
         toolIntent: firstText.slice(0, 16_000),
       });
       activeToolAuthorizations.set(requestId, authorization);
+      // ⚠️ **刻意不写 `requestToolDescriptorsByRequestId`** —— chatNew 请求**没有终态事件**
+      // （`fetch-hook` 只在 completion 路由发 `onRequestTerminal`），而它与随后的 completion
+      // 是**两次独立 fetch、两个不同 requestId** ⇒ 写了也**无人释放**。且它也没有解析路径
+      // （chatNew 无响应流、不跑工具识别，Map 的四个读点读的都是 completion 的 requestId）
+      // ⇒ 写了**也无人读**。首条的工具标签识别靠 completion 轮那份。
+      // ⚠️ **上面那行 `activeToolAuthorizations.set` 是同类孤儿**（grant 也只在
+      // `REQUEST_TERMINAL` 经 `closeToolAuthorization` 关，而 chatNew 收不到它）——
+      // **既有问题、非本次引入**，按「顺带发现不动」记进残余，不在这里顺手删。
       // 项目上下文（首条）：此刻**地址栏还没有 `/c/<id>`**，查不了会话归属，
       // 唯一已知的是**待绑项目**（「下一条新会话使用此项目」与面板的「在项目下开启
       // 新会话」都会先置 pending）。漏了这一步的后果是**静默的**：首条没有项目指令，
@@ -1140,7 +1161,10 @@ async function handleAugmentRequestBody(
         result: {
           body: JSON.stringify(nextBody),
           requestId,
-          toolDescriptorNames: currentCatalogNames,
+          // ⚠️ **回传本请求实际注入提示词的那份描述符名**（`authorization.descriptors`），
+          // 不是全局 `currentCatalogNames` —— 主世界识别 XML 标签时用这份，才能与提示词
+          // 严格同源（否则用户刚加 MCP 工具、广播未落地时会「提示词列了 A、识别器不认 A」）。
+          toolDescriptorNames: catalogNamesFor(authorization.descriptors),
         },
       });
       return;
@@ -1190,6 +1214,8 @@ async function handleAugmentRequestBody(
         descriptorIds: currentToolDescriptors.map((d) => d.id),
       });
       activeToolAuthorizations.set(requestId, auth);
+      // 记下本请求实际注入的那份描述符（续跑轮用授权返回的、与提示词同源）。
+      requestToolDescriptorsByRequestId.set(requestId, auth.descriptors);
       // 续跑轮也保持「原生联网关闭」：归属任务开启搜索时（matchedTask 或续跑循环所属任务），
       // 给透传 body 补上 features.auto_web_search=false + features.web_search=false，
       // 确保整条会话始终走扩展自带的 web_search / web_fetch。
@@ -1224,7 +1250,8 @@ async function handleAugmentRequestBody(
         result: {
           body: nextBodyStr,
           requestId,
-          toolDescriptorNames: currentCatalogNames,
+          // 回传本请求的授权描述符名（与提示词同源），理由同 chatNew 分支。
+          toolDescriptorNames: catalogNamesFor(auth.descriptors),
         },
       });
       return;
@@ -1237,6 +1264,8 @@ async function handleAugmentRequestBody(
       toolIntent: originalPrompt.slice(0, 16_000),
     });
     activeToolAuthorizations.set(requestId, auth);
+    // 记下本请求实际注入的那份描述符（completion 轮：与提示词同源）。
+    requestToolDescriptorsByRequestId.set(requestId, auth.descriptors);
     const parentId = readZaiCurrentUserMessageParentId(body);
     const isFirstMessage = parentId === null || parentId === undefined;
     // completion 路由的 agent 判定：features.flags 里含 general_agent。
@@ -1308,7 +1337,8 @@ async function handleAugmentRequestBody(
       result: {
         body: JSON.stringify(nextBody),
         requestId,
-        toolDescriptorNames: currentCatalogNames,
+        // 回传本请求的授权描述符名（与提示词同源），理由见 chatNew 分支的说明。
+        toolDescriptorNames: catalogNamesFor(auth.descriptors),
       },
     });
   } catch (error) {
@@ -1488,7 +1518,11 @@ async function executeDetectedFromDetected(
   // 第二个工具（如 memory_save 之后的 shell_status）会被误判「已执行」而跳过，
   // 导致「记住+看桌面」这类多工具回复只执行第一个工具。
   // 真正的重复由 executeDetected 内部的 executedToolCallSignatures（requestId+name+callId）兜底。
-  const calls = parseToolXml(detected.raw, currentToolDescriptors);
+  // ⚠️ 用**本请求实际注入的那份描述符**（`requestToolDescriptorsByRequestId`），不是全局
+  // `currentToolDescriptors` —— 后者是「上次同步」，与提示词可能分叉（见该 Map 的说明）。
+  // 未增广的请求（拿不到本请求名单）退回全局，保住「老会话里的 XML 仍能执行」。
+  const descriptors = requestToolDescriptorsByRequestId.get(detected.requestId) ?? currentToolDescriptors;
+  const calls = parseToolXml(detected.raw, descriptors);
   if (calls.length === 0) {
     diag.errors?.push({
       kind: 'detected_tool_not_parsed',
@@ -1571,6 +1605,8 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
     try {
       authorization = await requestToolAuthorization(requestId, chatSessionId);
       activeToolAuthorizations.set(requestId, authorization);
+      // 懒建路径也记一份（走的是 `currentToolDescriptors`，那是此刻唯一可得的目录）。
+      requestToolDescriptorsByRequestId.set(requestId, authorization.descriptors);
     } catch (error) {
       const code = error instanceof ToolAuthorizationRequestError
         ? error.code
@@ -1837,8 +1873,11 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     let executedThisTurn: ToolExecutionRecord[] = [...alreadyExecutedThisTurn];
 
     if (alreadyExecutedThisTurn.length === 0) {
-      // TOOL_CALL 通道没先到：兜底在这里解析并执行。
-      const calls = parseToolXml(complete.assistantText, currentToolDescriptors);
+      // TOOL_CALL 通道没先到：兜底在这里解析并执行。用本请求注入的那份描述符（与提示词同源）。
+      const calls = parseToolXml(
+        complete.assistantText,
+        requestToolDescriptorsByRequestId.get(complete.requestId) ?? currentToolDescriptors,
+      );
       for (const call of calls) {
         const execution = await executeDetected(call, complete.requestId);
         if (execution) {
@@ -1857,7 +1896,10 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
 
     console.log('[GLM++] continuation turn', {
       step: continuationLoop.stepCount,
-      parsedTools: parseToolXml(complete.assistantText, currentToolDescriptors).map((c) => c.name),
+      parsedTools: parseToolXml(
+        complete.assistantText,
+        requestToolDescriptorsByRequestId.get(complete.requestId) ?? currentToolDescriptors,
+      ).map((c) => c.name),
       executedTools: executedThisTurn.map((e) => e.name),
       continuable: executedThisTurn.filter(isContinuableExecution).map((e) => e.name),
       reusedFromToolCall: alreadyExecutedThisTurn.length > 0,
@@ -1867,7 +1909,10 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     diag.turnLog?.push({
       step: continuationLoop.stepCount,
       requestId: complete.requestId,
-      parsedTools: parseToolXml(complete.assistantText, currentToolDescriptors).map((c) => c.name),
+      parsedTools: parseToolXml(
+        complete.assistantText,
+        requestToolDescriptorsByRequestId.get(complete.requestId) ?? currentToolDescriptors,
+      ).map((c) => c.name),
       executedTools: executedThisTurn.map((e) => e.name),
       continuable: executedThisTurn.filter(isContinuableExecution).map((e) => e.name),
       reusedFromToolCall: alreadyExecutedThisTurn.length > 0,
@@ -1956,7 +2001,10 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
   // 原生轮：工具若已在 TOOL_CALL 通道执行过（executionsByRequest 有记录），
   // 这里不重复执行，只读回执行结果判定是否要续跑。
   const alreadyExecuted = executionsByRequest.get(complete.requestId) ?? [];
-  const calls = parseToolXml(complete.assistantText, currentToolDescriptors);
+  const calls = parseToolXml(
+    complete.assistantText,
+    requestToolDescriptorsByRequestId.get(complete.requestId) ?? currentToolDescriptors,
+  );
   const executions: ToolExecutionRecord[] = [...alreadyExecuted];
   if (alreadyExecuted.length === 0) {
     // 工具没在 TOOL_CALL 通道跑过（可能是 fetch-hook 只发 RESPONSE_COMPLETE 没发 TOOL_CALL），

@@ -182,7 +182,7 @@ describe('runtime sender and envelope boundary', () => {
   it('authorizes only the frozen content command surface before routing', () => {
     const extensionContext = createRuntimeMessageContext(EXTENSION_SENDER, POLICY);
     const contentContext = createRuntimeMessageContext(GLM_SENDER, POLICY);
-    expect(GLM_CONTENT_RUNTIME_COMMANDS.size).toBe(25);
+    expect(GLM_CONTENT_RUNTIME_COMMANDS.size).toBe(23);
     expect(() => authorizeRuntimeMessage({ type: 'GET_MEMORIES' }, contentContext)).not.toThrow();
     expect(() => authorizeRuntimeMessage({ type: 'GET_SYNC_CONFIG' }, contentContext))
       .toThrow('not authorized for GLM content');
@@ -194,20 +194,8 @@ describe('runtime sender and envelope boundary', () => {
       'entrypoints/zai.content.ts',
     ];
     const produced = new Set(producerFiles.flatMap(extractContentRuntimeCommands));
-    // DOM_TASK_NEEDS_ACTION / DOM_TASK_PROGRESS are part of the authorized content
-    // surface (registered in the contracts and handled in
-    // entrypoints/background/dom-task-handlers.ts) but no content producer emits them
-    // yet. Keep them listed explicitly so the exact-match invariant below stays honest.
-    const reservedDomTaskEvents = new Set(['DOM_TASK_NEEDS_ACTION', 'DOM_TASK_PROGRESS']);
 
-    expect([...produced].sort()).toEqual(
-      [...GLM_CONTENT_RUNTIME_COMMANDS]
-        .filter((type) => !reservedDomTaskEvents.has(type))
-        .sort(),
-    );
-    for (const type of reservedDomTaskEvents) {
-      expect(GLM_CONTENT_RUNTIME_COMMANDS.has(type)).toBe(true);
-    }
+    expect([...produced].sort()).toEqual([...GLM_CONTENT_RUNTIME_COMMANDS].sort());
   });
 
   it('returns a non-retryable ToolResult-shaped boundary rejection for execution commands', () => {

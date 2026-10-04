@@ -118,7 +118,7 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
 
   return {
     get assistantText() {
-      return text;
+      return stripZaiThinkingBlocks(text);
     },
     push(chunk: string): ZaiSseParseResult {
       const events: ZaiSseEvent[] = [];
@@ -150,6 +150,48 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
   };
 }
 
+/**
+ * 剥掉 z.ai 的思考块，只取最终答案正文。
+ *
+ * z.ai 的思考内联在 `answer` 相位的 `delta_content` 里、包在 `<details>…</details>`
+ * 中，**不是**独立的 `phase:"thinking"` 帧 —— 所以按 phase 过滤无效，只能按标签剥。
+ * 真机抓样确认思考块恒在 `assistantText` 最前（推理先于答案）。
+ *
+ * ⚠️ **只在 `assistantText` 出口调用，绝不能改内部累积的 `text`** ——
+ * `edit_content` 的 `edit_index` 是相对**原始文本**的 UTF-16 偏移，
+ * 内部剥掉 details 会让之后所有偏移错位、正文碎裂。
+ *
+ * 只剥**开头**的块（不剥全文所有块）：模型在答案中段讨论 / 用代码围栏举例
+ * `<details>` 时，开头不是它 ⇒ 不被误剥。唯一不可约的假阳性是「回答恰好以裸的
+ * 未围栏 `<details>…</details>` 开头且后续仍有正文」，极罕见。
+ *
+ * ⚠️ **另一个已知残余：嵌套 `<details>`** —— 正则非贪婪，`<details>思考<details>内层</details>更多</details>正文`
+ * 会剥成 `更多</details>正文`（留半截思考 + 一个孤立闭标签）。真机思考块内嵌 `<details>` 概率极低，
+ * 未处理；孤立的 `</details>` 会进 `extractXmlTagNames` 的诊断（只影响诊断噪声，不影响执行）。
+ */
+export function stripZaiThinkingBlocks(text: string): string {
+  if (!text || !text.toLowerCase().includes('<details')) return text;
+  let out = text;
+  // 剥开头的思考块（连续多个也一并剥）。
+  for (;;) {
+    const match = ZAI_LEADING_DETAILS_RE.exec(out);
+    if (!match) break;
+    const rest = out.slice(match[0].length);
+    // 剥完必须还有正文，否则不认它是思考块 —— 防「回答本身就是个 details 元素」被误剥。
+    // ⚠️ **返回 `out` 而不是 `text`** —— 此时前面几轮已剥掉的思考块不该被「吐回来」。
+    if (!rest.trim()) return out;
+    out = rest;
+  }
+  // 剥完后若仍以未闭合的 `<details` 开头 ⇒ 流被截断，砍到结尾。
+  if (ZAI_LEADING_DETAILS_OPEN_RE.test(out)) {
+    out = out.slice(0, out.search(ZAI_LEADING_DETAILS_OPEN_RE));
+  }
+  return out.replace(/^\s+/, '');
+}
+
+const ZAI_LEADING_DETAILS_RE = /^\s*<details\b[^>]*>[\s\S]*?<\/details>/i;
+const ZAI_LEADING_DETAILS_OPEN_RE = /^\s*<details\b/i;
+
 /** 在 SSE 累积文本里提取工具 XML（供 fetch hook 增广侧判断是否需要续跑）。 */
 export function extractZaiToolCalls(
   text: string,
@@ -180,9 +222,11 @@ export function extractZaiErrorDetail(from: unknown): string {
 }
 
 function utf16SafeSlice(value: string, start: number, end: number): string {
-  // JS string.slice 本身就是 UTF-16 code-unit 语义，直接 slice 即可。
+  // JS string.slice 本身就是 UTF-16 code-unit 语义。⚠️ 必须**两个端点都夹**：
+  // 只夹 `start`、切到 `start`（原写法）会让 `edit_content` 被当成整体替换。
   const clampedStart = Math.max(0, Math.min(start, value.length));
-  return value.slice(0, clampedStart);
+  const clampedEnd = Math.max(clampedStart, Math.min(end, value.length));
+  return value.slice(clampedStart, clampedEnd);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -185,7 +185,6 @@ export async function runAutomation(options: RunAutomationOptions): Promise<Auto
         prompt: automation.prompt,
         trigger: options.trigger,
         chatSessionId: automation.glm.chatSessionId,
-        parentMessageId: automation.glm.parentMessageId,
         promptOptions: automation.promptOptions,
         requestedAt: now,
       }),
@@ -330,7 +329,6 @@ async function executeWithRetry(
       result = {
         ok: false,
         chatSessionId: request.chatSessionId,
-        parentMessageId: request.parentMessageId,
         completedAt: now,
         error: toAutomationError(
           'automation_executor_failed',
@@ -377,7 +375,6 @@ function createRunTimeoutFailure(
   return {
     ok: false,
     chatSessionId: request.chatSessionId,
-    parentMessageId: request.parentMessageId,
     completedAt: now,
     error: toAutomationError(
       'automation_run_timeout',
@@ -406,7 +403,6 @@ function createStoppedRunFailure(
   return {
     ok: false,
     chatSessionId: request.chatSessionId,
-    parentMessageId: request.parentMessageId,
     completedAt: now,
     error: toAutomationError(
       cancelled ? 'automation_run_cancelled' : 'automation_run_lease_lost',
@@ -543,9 +539,7 @@ function createAutomationRuntimePatch(
       glm: {
         ...automation.glm,
         chatSessionId: result.chatSessionId,
-        parentMessageId: result.parentMessageId,
         sessionUrl: result.sessionUrl,
-        lastHistorySyncedAt: result.history?.verifiedAt ?? automation.glm.lastHistorySyncedAt,
       },
       lastRunAt: completedAt,
       nextRunAt,

@@ -370,10 +370,7 @@ function successResult(
     ok: true,
     chatSessionId: 'chat-1',
     sessionUrl: 'https://chat.z.ai/a/chat/s/chat-1',
-    parentMessageId: 1,
-    assistantMessageId: 1,
     assistantText: 'done',
-    history: null,
     completedAt,
   };
 }
@@ -387,7 +384,6 @@ function failureResult(
   return {
     ok: false,
     chatSessionId: request.chatSessionId,
-    parentMessageId: request.parentMessageId,
     completedAt: Date.now(),
     error: {
       code,

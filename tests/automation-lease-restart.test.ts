@@ -160,9 +160,7 @@ describe('automation durable lease and restart recovery', () => {
       runtimePatch: () => ({
         glm: {
           chatSessionId: lateSuccess.chatSessionId,
-          parentMessageId: lateSuccess.parentMessageId,
           sessionUrl: lateSuccess.sessionUrl,
-          lastHistorySyncedAt: null,
         },
       }),
     });
@@ -186,9 +184,7 @@ describe('automation durable lease and restart recovery', () => {
       lastError: null,
       glm: {
         chatSessionId: 'newer-chat',
-        parentMessageId: 88,
         sessionUrl: 'https://chat.z.ai/a/chat/s/newer-chat',
-        lastHistorySyncedAt: newerCompletedAt,
       },
     });
     const oldResult = successResult(oldCompletedAt);
@@ -211,7 +207,6 @@ describe('automation durable lease and restart recovery', () => {
       lastError: null,
       glm: {
         chatSessionId: 'newer-chat',
-        parentMessageId: 88,
       },
     });
     expect((await getAutomationById(automation.id))?.nextRunAt).toBeGreaterThan(now);
@@ -309,7 +304,6 @@ function claimInput(
       prompt: current.prompt,
       trigger,
       chatSessionId: current.glm.chatSessionId,
-      parentMessageId: current.glm.parentMessageId,
       promptOptions: current.promptOptions,
       requestedAt: startedAt,
     }),
@@ -353,10 +347,7 @@ function successResult(completedAt: number): Extract<AutomationRunnerResult, { o
     ok: true,
     chatSessionId: 'late-chat',
     sessionUrl: 'https://chat.z.ai/a/chat/s/late-chat',
-    parentMessageId: 9,
-    assistantMessageId: 9,
     assistantText: 'late',
-    history: null,
     completedAt,
   };
 }
@@ -367,7 +358,6 @@ function failureResult(
   return {
     ok: false,
     chatSessionId: request?.chatSessionId ?? null,
-    parentMessageId: request?.parentMessageId ?? null,
     completedAt: 4_000_100,
     error: {
       code: 'automation_run_timeout',

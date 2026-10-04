@@ -49,14 +49,6 @@ export interface TypedRuntimeCommandContracts
     request: { type: 'DOM_TASK_FAILED' };
     response: { ok: true };
   };
-  DOM_TASK_NEEDS_ACTION: {
-    request: { type: 'DOM_TASK_NEEDS_ACTION' };
-    response: { ok: true };
-  };
-  DOM_TASK_PROGRESS: {
-    request: { type: 'DOM_TASK_PROGRESS' };
-    response: { ok: true };
-  };
 }
 
 export type TypedRuntimeCommandType = keyof TypedRuntimeCommandContracts;

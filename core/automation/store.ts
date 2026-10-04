@@ -76,9 +76,7 @@ export async function createAutomation(input: AutomationCreateInput): Promise<Au
       status: 'active',
       glm: {
         chatSessionId: null,
-        parentMessageId: null,
         sessionUrl: null,
-        lastHistorySyncedAt: null,
       },
       createdAt: now,
       updatedAt: now,
@@ -332,7 +330,6 @@ export async function reconcileStaleRunsDetailed(
         result: {
           ok: false,
           chatSessionId: run.request?.chatSessionId ?? null,
-          parentMessageId: run.request?.parentMessageId ?? null,
           completedAt,
           error,
         },

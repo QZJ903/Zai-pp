@@ -9,7 +9,6 @@ import type {
   AutomationGLMSession,
   AutomationErrorState,
   AutomationFailurePhase,
-  AutomationHistorySnapshot,
   AutomationPromptContext,
   AutomationPromptOptions,
   AutomationRun,
@@ -218,23 +217,19 @@ function decodePromptOptions(raw: unknown, path: string): AutomationPromptOption
 function createEmptyGLMSession(): AutomationGLMSession {
   return {
     chatSessionId: null,
-    parentMessageId: null,
     sessionUrl: null,
-    lastHistorySyncedAt: null,
   };
 }
 
 function decodeGLMSession(raw: unknown, path: string): AutomationGLMSession {
   const value = recordValue(raw, path);
+  // 已删字段（parentMessageId / lastHistorySyncedAt）刻意**不再解出** —— 它们是上游
+  // HTTP 直连架构的续写链锚点与落库校验时间戳，本项目 DOM 注入架构下恒为空。
+  // 旧记录里可能还带着它们（`...value` 会原样保留、写入时也带着），这里不报错、不读取。
   return {
     ...value,
     chatSessionId: nullableString(value.chatSessionId, `${path}.chatSessionId`),
-    parentMessageId: storedMessageId(value.parentMessageId, `${path}.parentMessageId`),
     sessionUrl: nullableString(value.sessionUrl, `${path}.sessionUrl`),
-    lastHistorySyncedAt: nullableFiniteNumber(
-      value.lastHistorySyncedAt,
-      `${path}.lastHistorySyncedAt`,
-    ),
   } as AutomationGLMSession;
 }
 
@@ -264,7 +259,6 @@ function decodeRunnerRequest(
     prompt: nonEmptyString(value.prompt, `${path}.prompt`),
     trigger: enumValue(value.trigger, AUTOMATION_TRIGGERS, `${path}.trigger`),
     chatSessionId: nullableString(value.chatSessionId, `${path}.chatSessionId`),
-    parentMessageId: storedMessageId(value.parentMessageId, `${path}.parentMessageId`),
     promptOptions: decodePromptOptions(value.promptOptions, `${path}.promptOptions`),
     ...(value.locale === undefined
       ? {}
@@ -330,13 +324,8 @@ function decodeRunnerSuccess(
     ok: true,
     chatSessionId: stringValue(value.chatSessionId, `${path}.chatSessionId`),
     sessionUrl: nullableString(value.sessionUrl, `${path}.sessionUrl`),
-    parentMessageId: requiredStoredMessageId(value.parentMessageId, `${path}.parentMessageId`),
-    assistantMessageId: storedMessageId(value.assistantMessageId, `${path}.assistantMessageId`),
     assistantText: stringValue(value.assistantText, `${path}.assistantText`),
     ...(toolExecutions === undefined ? {} : { toolExecutions }),
-    history: value.history === null
-      ? null
-      : decodeHistorySnapshot(value.history, `${path}.history`),
     completedAt: finiteNumber(value.completedAt, `${path}.completedAt`),
   } as AutomationRunnerSuccess;
 }
@@ -349,22 +338,9 @@ function decodeRunnerFailure(
     ...value,
     ok: false,
     chatSessionId: nullableString(value.chatSessionId, `${path}.chatSessionId`),
-    parentMessageId: storedMessageId(value.parentMessageId, `${path}.parentMessageId`),
     error: decodeError(value.error, `${path}.error`),
     completedAt: finiteNumber(value.completedAt, `${path}.completedAt`),
   } as AutomationRunnerFailure;
-}
-
-function decodeHistorySnapshot(raw: unknown, path: string): AutomationHistorySnapshot {
-  const value = recordValue(raw, path);
-  return {
-    ...value,
-    chatSessionId: stringValue(value.chatSessionId, `${path}.chatSessionId`),
-    parentMessageId: storedMessageId(value.parentMessageId, `${path}.parentMessageId`),
-    assistantMessageId: storedMessageId(value.assistantMessageId, `${path}.assistantMessageId`),
-    messageCount: nonNegativeInteger(value.messageCount, `${path}.messageCount`),
-    verifiedAt: finiteNumber(value.verifiedAt, `${path}.verifiedAt`),
-  } as AutomationHistorySnapshot;
 }
 
 function decodeError(raw: unknown, path: string): AutomationErrorState {
@@ -480,35 +456,6 @@ function positiveInteger(value: unknown, path: string): number {
     corrupt(path, 'Expected a positive safe integer.');
   }
   return value as number;
-}
-
-function nonNegativeInteger(value: unknown, path: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
-    corrupt(path, 'Expected a non-negative safe integer.');
-  }
-  return value as number;
-}
-
-function storedMessageId(value: unknown, path: string): number | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 0xFFFFFFFF) {
-    return value;
-  }
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    if (/^\d+$/.test(trimmed)) {
-      const parsed = Number(trimmed);
-      if (Number.isInteger(parsed) && parsed >= 0 && parsed <= 0xFFFFFFFF) return parsed;
-    }
-  }
-  corrupt(path, 'Expected a released message id or null.');
-}
-
-function requiredStoredMessageId(value: unknown, path: string): number {
-  const result = storedMessageId(value, path);
-  // The released reader represented an absent successful parent id as zero.
-  return result ?? 0;
 }
 
 function enumValue<T extends string>(value: unknown, allowed: ReadonlySet<string>, path: string): T {

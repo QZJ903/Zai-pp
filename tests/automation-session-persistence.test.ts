@@ -145,9 +145,7 @@ describe('automation failure persists the live session', () => {
     await updateAutomationRuntime(automation.id, {
       glm: {
         chatSessionId: 'persisted-mid-run',
-        parentMessageId: null,
         sessionUrl: 'https://chat.z.ai/c/persisted-mid-run',
-        lastHistorySyncedAt: null,
       },
     });
 
@@ -183,9 +181,7 @@ describe('automation failure persists the live session', () => {
     await updateAutomationRuntime(automation.id, {
       glm: {
         chatSessionId: 'new-session',
-        parentMessageId: null,
         sessionUrl: 'https://chat.z.ai/c/old-session',
-        lastHistorySyncedAt: null,
       },
     });
 

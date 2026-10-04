@@ -945,11 +945,8 @@ async function executeAutomationWithContext(
     ok: true,
     chatSessionId: finalChatSessionId ?? '',
     sessionUrl: finalChatSessionId ? buildZaiSessionUrl(finalChatSessionId) : null,
-    parentMessageId: request.parentMessageId ?? 0,
-    assistantMessageId: null,
     assistantText: outcome.assistantText,
     toolExecutions: outcome.toolExecutions,
-    history: null,
     completedAt,
   };
 }

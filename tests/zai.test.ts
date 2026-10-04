@@ -23,6 +23,7 @@ import {
   extractZaiErrorDetail,
   extractZaiToolCalls,
   parseZaiSseData,
+  stripZaiThinkingBlocks,
 } from '../core/zai/stream-codec';
 import { filterZaiModelFacingToolDescriptors } from '../core/zai/model-facing';
 import type { ToolDescriptor } from '../core/tool/types';
@@ -309,6 +310,35 @@ describe('zai stream codec', () => {
     expect(acc.assistantText).toBe('World');
   });
 
+  it('applies edit_content as a substring replace (prefix kept, tail cut)', () => {
+    // 三语义之一：text = text.substring(0, edit_index) + edit_content。
+    // 与 GLM-Free-API zai.go / zai-openai-proxy 的参照实现一致。
+    const acc = createZaiStreamAccumulator();
+    acc.push('data: {"type":"chat:completion","data":{"phase":"answer","delta_content":"abc"}}\n');
+    acc.push('data: {"type":"chat:completion","data":{"phase":"answer","edit_content":"d","edit_index":3}}\n');
+    expect(acc.assistantText).toBe('abcd');
+  });
+
+  it('replaces the tail after edit_index when it is inside the text', () => {
+    const acc = createZaiStreamAccumulator();
+    acc.push('data: {"type":"chat:completion","data":{"phase":"answer","delta_content":"hello world"}}\n');
+    // edit_index 落在 "hello " 之后：丢掉 "world"，接上 "there"。
+    acc.push('data: {"type":"chat:completion","data":{"phase":"answer","edit_content":"there","edit_index":6}}\n');
+    expect(acc.assistantText).toBe('hello there');
+  });
+
+  it('supports per-character edit_content appends (reasoning body pattern)', () => {
+    // GLM-Free-API 回归用例形态：正文逐字符用 edit_content 追加，
+    // edit_index 每次指向当前文本末尾。原实现（切到 start）会只剩最后一个字符。
+    const acc = createZaiStreamAccumulator();
+    let len = 0;
+    for (const ch of ['a', 'b', 'c']) {
+      acc.push(`data: {"type":"chat:completion","data":{"phase":"answer","edit_content":${JSON.stringify(ch)},"edit_index":${len}}}\n`);
+      len += ch.length;
+    }
+    expect(acc.assistantText).toBe('abc');
+  });
+
   it('flushes a trailing data line that arrives without a newline', () => {
     const acc = createZaiStreamAccumulator();
     acc.push('data: {"type":"chat:completion","data":{"phase":"answer","delta_content":"Hel"}}\n');
@@ -345,6 +375,79 @@ describe('zai stream codec', () => {
       '{"type":"chat:completion","data":{"phase":"answer","delta_content":"x"}}',
     );
     expect(event?.phase).toBe('answer');
+  });
+
+  it('strips the leading thinking block from accumulated text', () => {
+    // 真机抓样：思考内联在 answer 流里、包在 <details> 中，恒在最前。
+    const raw = '<details>用户只是打了个招呼"hi"，我应该友好地回应。</details>你好！👋 我是你的私人 AI 助手。';
+    expect(stripZaiThinkingBlocks(raw)).toBe('你好！👋 我是你的私人 AI 助手。');
+  });
+
+  it('leaves text without a details block untouched', () => {
+    const raw = '这是一段普通回答，没有任何思考块。';
+    expect(stripZaiThinkingBlocks(raw)).toBe(raw);
+  });
+
+  it('does not strip a details block that appears mid-answer', () => {
+    // 模型在答案中段讨论 HTML：开头不是 <details> ⇒ 不误剥。
+    const raw = '关于 HTML：<details> 元素用于可折叠内容。</details>以上就是说明。';
+    expect(stripZaiThinkingBlocks(raw)).toBe(raw);
+  });
+
+  it('does not strip when the whole answer is a bare details element', () => {
+    // 回答本身就是个 details 元素（无后续正文）⇒ 不误剥。
+    const raw = '<details>只有这一段。</details>';
+    expect(stripZaiThinkingBlocks(raw)).toBe(raw);
+  });
+
+  it('strips a leading details opener that never closes (truncated stream)', () => {
+    // 流被截断：开标签闭合、内容未闭合 ⇒ 砍到结尾。
+    const raw = '<details>思考到一半就断了，没有闭合标签';
+    expect(stripZaiThinkingBlocks(raw)).toBe('');
+  });
+
+  it('keeps answer text before a truncated trailing details opener', () => {
+    const raw = '正文开始。<details>思考被截断';
+    // 开标签不在开头（前面有正文）⇒ 不剥。
+    expect(stripZaiThinkingBlocks(raw)).toBe(raw);
+  });
+
+  it('does not misfire on a same-prefix tag such as <detailsx>', () => {
+    const raw = '<detailsx>这不是 details 标签</detailsx>正文。';
+    expect(stripZaiThinkingBlocks(raw)).toBe(raw);
+  });
+
+  it('tolerates attributes on the opening tag', () => {
+    const raw = '<details open class="think">思考内容</details>正文。';
+    expect(stripZaiThinkingBlocks(raw)).toBe('正文。');
+  });
+
+  it('strips an uppercase DETAILS block too (guard must not be case-sensitive)', () => {
+    // ⚠️ 快速路径守卫若写成大小写敏感（`includes('<details')`），`<DETAILS>` 会在守卫处
+    // 直接返回、绕过剥离，而两个正则都带 /i —— 两处判据不一致。
+    const raw = '<DETAILS>思考</DETAILS>正文。';
+    expect(stripZaiThinkingBlocks(raw)).toBe('正文。');
+  });
+
+  it('keeps an earlier stripped block stripped when a later block is the whole answer', () => {
+    // ⚠️ 连续两个开头 details、且最后一个即正文时，「剥完无正文」那条守卫**必须返回 `out`
+    // 而不是原始 `text`** —— 否则第一个（已剥掉的）思考块会被吐回来。
+    const raw = '<details>思考</details><details>答案</details>';
+    expect(stripZaiThinkingBlocks(raw)).toBe('<details>答案</details>');
+  });
+
+  it('does not mutate the accumulator when reading assistantText', () => {
+    // 剥离只在读取出口发生（getter 是纯函数），内部累积保持原始 ——
+    // 否则 edit_content 的 edit_index（相对原始文本的 UTF-16 偏移）会错位。
+    const acc = createZaiStreamAccumulator();
+    acc.push('data: {"type":"chat:completion","data":{"phase":"answer","delta_content":"<details>思考"}}\n');
+    acc.push('data: {"type":"chat:completion","data":{"phase":"answer","delta_content":"中</details>答"}}\n');
+    expect(acc.assistantText).toBe('答');
+    // 再读一次仍是同样结果：读取不改变内部状态。
+    expect(acc.assistantText).toBe('答');
+    // 继续追加仍按原始文本延续（若读取时改写了内部 text，这里会错）。
+    acc.push('data: {"type":"chat:completion","data":{"phase":"answer","delta_content":"案"}}\n');
+    expect(acc.assistantText).toBe('答案');
   });
 });
 
