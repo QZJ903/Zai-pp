@@ -20,7 +20,6 @@ import {
   ZAI_CONTENT_TO_MAIN,
   ZAI_MAIN_TO_CONTENT,
   decodeZaiSyncHookStateMessage,
-  decodeZaiTitleLookupMessage,
   isZaiBridgeMessage,
 } from '../core/zai/messages';
 
@@ -133,48 +132,6 @@ window.addEventListener('message', (event) => {
     const state = decodeZaiSyncHookStateMessage(data);
     if (!state) return;
     updateZaiHookState({ toolDescriptorNames: new Set(state.toolDescriptorNames) });
-    return;
-  }
-  if (data.type === 'TITLE_LOOKUP') {
-    // 会话标题解析的**逐条上报**（不是整数组同步）—— 那条链路的触发很密，
-    // 走 DIAG_SYNC 的「整数组 + 追加合并」语义会平方级重复。
-    //
-    // 载荷过 decoder（只要求是对象 + `at` 是有限数字）—— 这条只进诊断数组、
-    // 没有执行语义，所以校验强度按「挡掉形状垃圾」定，不复刻联合类型。
-    const entry = decodeZaiTitleLookupMessage(data.entry);
-    if (!entry) return;
-    const target = (window as unknown as Record<string, unknown>);
-    // 主世界的诊断对象由 fetch-hook 建立，但它可能还没跑到 —— 这里兜一下，
-    // 否则「页面刚打开就发生的标题解析」会被静默丢掉。
-    const existing = (target['__GLMPP_DIAG__'] ??= {}) as Record<string, unknown>;
-    const current = Array.isArray(existing.titleLookups) ? (existing.titleLookups as unknown[]) : [];
-    // 只留最近 50 条：每次发消息都会问一次标题。
-    existing.titleLookups = [...current, entry].slice(-50);
-    return;
-  }
-  if (data.type === 'DIAG_SYNC') {
-    // isolation world 的诊断对象和页面 window 是隔离的，直接读不到。
-    // 这里把 isolation 侧 push 的诊断合并进页面共享的 __GLMPP_DIAG__（MAIN world 侧写入）。
-    const target = (window as unknown as Record<string, unknown>);
-    const existing = target['__GLMPP_DIAG__'] as Record<string, unknown> | undefined;
-    if (existing) {
-      const mergeArray = (key: string) => {
-        const incoming = Array.isArray(data[key]) ? (data[key] as unknown[]) : [];
-        const current = Array.isArray(existing[key]) ? (existing[key] as unknown[]) : [];
-        if (incoming.length > 0) existing[key] = [...current, ...incoming];
-      };
-      mergeArray('sendProbe');
-      mergeArray('failures');
-      mergeArray('errors');
-      mergeArray('toolCalls');
-      mergeArray('responses');
-      mergeArray('turnLog');
-      mergeArray('injectLog');
-      mergeArray('ssaFatal');
-      mergeArray('composerSnap');
-      mergeArray('augRequests');
-      mergeArray('chatNewLog');
-    }
     return;
   }
 });

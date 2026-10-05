@@ -430,16 +430,17 @@ describe('runtime state sync failure keeps the flow and the catalog', () => {
   it('reports the failure so it is not silent', () => {
     const body = findSyncBody(readContentProgram());
     let reported = 0;
-    const countPush = (node: t.Node) => {
-      // ⚠️ `diag.failures?.push(...)` 在 Babel 里是 `OptionalCallExpression`
-      // （callee 是 `OptionalMemberExpression`），只认 `CallExpression` 会漏掉它。
-      if (!t.isCallExpression(node) && !t.isOptionalCallExpression(node)) return;
+    const countReport = (node: t.Node) => {
+      // catch 里的上报必须是 `console.error(...)` —— 不抛、不 commit 之后，
+      // 那是这次失败**唯一**的可见面。删掉它，这条路径就彻底静默了。
+      if (!t.isCallExpression(node)) return;
       const callee = node.callee;
-      if (!t.isMemberExpression(callee) && !t.isOptionalMemberExpression(callee)) return;
-      if (t.isIdentifier(callee.property) && callee.property.name === 'push') reported += 1;
+      if (!t.isMemberExpression(callee)) return;
+      if (!t.isIdentifier(callee.object) || callee.object.name !== 'console') return;
+      if (t.isIdentifier(callee.property) && callee.property.name === 'error') reported += 1;
     };
-    for (const clause of catchClausesOf(body)) walkSourceAst(clause, countPush);
-    expect(reported, 'catch 里要记一条诊断 —— 不抛就只剩它可见').toBeGreaterThan(0);
+    for (const clause of catchClausesOf(body)) walkSourceAst(clause, countReport);
+    expect(reported, 'catch 里要 console.error 报一次 —— 不抛就只剩它可见').toBeGreaterThan(0);
   });
 });
 
@@ -612,6 +613,102 @@ describe('tool tag recognition uses the descriptors injected into this request',
       }
     });
     expect(released, 'requestToolDescriptorsByRequestId 必须在 releaseRequestState 里释放（否则按 requestId 增长）').toBe(true);
+  });
+});
+
+/**
+ * **chatNew 分支不得往任何「只在 `REQUEST_TERMINAL` 释放」的容器里写东西。**
+ *
+ * chatNew 请求收不到 `REQUEST_TERMINAL`（`fetch-hook` 只在 completion 路由发
+ * `onRequestTerminal`），而它与随后的 completion 是**两次独立 fetch、两个不同 requestId**
+ * ⇒ 写进去就是**永不释放的孤儿**，且没有任何现有测试会因此变红。
+ *
+ * 它的 grant 仍然**必须建**（增广要用 `authorization.descriptors`），所以收口方式不是「别建」，
+ * 而是「建完**显式关掉**」—— 走 `closeToolAuthorizationGrant`（只关后台、不碰 Map）。
+ * 后台的 grant 名额是 `MAX_ACTIVE_GRANTS = 32`，满了会让**之后所有**建授权抛
+ * `tool_authorization_grant_limit`（静默降级：工具全部不可用）。
+ */
+describe('chatNew does not write request-scoped state it can never release', () => {
+  /** `handleAugmentRequestBody` 里 `route === 'chatNew'` 那个 if 节点。 */
+  function findChatNewBranch(): t.IfStatement {
+    const program = readContentProgram();
+    let body: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'handleAugmentRequestBody') body = node.body;
+    });
+    expect(body, '应当存在 handleAugmentRequestBody').toBeDefined();
+
+    const branches: t.IfStatement[] = [];
+    walkSourceAst(body!, (node) => {
+      if (!t.isIfStatement(node)) return;
+      const test = node.test;
+      if (!t.isBinaryExpression(test) || test.operator !== '===') return;
+      if (!t.isIdentifier(test.left) || test.left.name !== 'route') return;
+      if (!t.isStringLiteral(test.right) || test.right.value !== 'chatNew') return;
+      branches.push(node);
+    });
+    expect(branches.length, '应当恰好有一个 `route === \'chatNew\'` 分支').toBe(1);
+    return branches[0];
+  }
+
+  /** 取该分支节点的**源码切片**（按 AST 的 `start`/`end`，不靠注释字符串定位）。 */
+  function branchSource(node: t.IfStatement): string {
+    expect(node.start, '分支节点应当带位置信息').not.toBeNull();
+    expect(node.end, '分支节点应当带位置信息').not.toBeNull();
+    return readFileSync(CONTENT_SOURCE, 'utf8').slice(node.start!, node.end!);
+  }
+
+  /** 收集该分支里对指定 Map 的 `.set(...)` 调用。 */
+  function setCallsOn(branch: t.IfStatement, container: string): number {
+    let count = 0;
+    walkSourceAst(branch, (node) => {
+      if (!t.isCallExpression(node) || !t.isMemberExpression(node.callee)) return;
+      if (!t.isIdentifier(node.callee.object) || node.callee.object.name !== container) return;
+      if (!t.isIdentifier(node.callee.property) || node.callee.property.name !== 'set') return;
+      count += 1;
+    });
+    return count;
+  }
+
+  it('does not register the chatNew request in the chat-session map', () => {
+    // ⚠️ 这条钉的是**写入点的位置**，不是「源码里出现过这个 Map」—— 后者在
+    // completion 段里天然为真，用 `includes` 就能过。
+    expect(
+      setCallsOn(findChatNewBranch(), 'chatSessionIdByRequestId'),
+      'chatNew 分支不得写 chatSessionIdByRequestId（收不到 REQUEST_TERMINAL，写进去永不释放）',
+    ).toBe(0);
+  });
+
+  it('does not register the chatNew grant in the active-authorizations map', () => {
+    expect(
+      setCallsOn(findChatNewBranch(), 'activeToolAuthorizations'),
+      'chatNew 分支不得写 activeToolAuthorizations（同上；grant 走 closeToolAuthorizationGrant 显式关）',
+    ).toBe(0);
+  });
+
+  it('still writes the chat-session map on the completion route', () => {
+    // 反面守卫：把写入点挪走时不能顺手删掉 —— 那条路径的读点（executeDetected）依赖它。
+    const source = readFileSync(CONTENT_SOURCE, 'utf8');
+    const setCalls = source.match(/chatSessionIdByRequestId\.set\(/g) ?? [];
+    expect(setCalls.length, 'chatSessionIdByRequestId 必须恰好有一个写入点（completion 段）').toBe(1);
+  });
+
+  it('closes the chatNew grant through the map-free path', () => {
+    // ⚠️ 必须走 `closeToolAuthorizationGrant`（只关后台）而不是 `closeToolAuthorization`
+    // （按 requestId 从 Map 里取）—— chatNew 没进过 Map，后者会**静默 return、grant 永不关**。
+    //
+    // ⚠️ **切片用 AST 节点的 `start`/`end`，不用注释字符串定位** —— 靠
+    // `indexOf('// completion 路由')` 那种写法依赖一句**纯注释**存在，注释一旦被删，
+    // 切片会静默扩到下一个同前缀注释、两个断言**仍然为真**，保护力度无声下降。
+    const source = branchSource(findChatNewBranch());
+    expect(
+      /closeToolAuthorizationGrant\(authorization\.id\)/.test(source),
+      'chatNew 分支必须在回传结果后关掉它的 grant（否则占满后台 32 个名额）',
+    ).toBe(true);
+    expect(
+      /closeToolAuthorization\(requestId\)/.test(source),
+      'chatNew 不得用按 requestId 取 Map 的那个关闭函数（它没进 Map，会静默 return）',
+    ).toBe(false);
   });
 });
 

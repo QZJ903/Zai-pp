@@ -122,12 +122,12 @@ describe('conversation title resolver with a stalled auth read', () => {
 
     getImpl = () => new Promise<Record<string, unknown>>(() => {});
 
-    const first = resolver.resolve('c1', 'panel-backfill');
+    const first = resolver.resolve('c1');
     await advancePastTimeout();
     await expect(first).resolves.toBeNull();
 
     // 槽位已释放 ⇒ 第二次触发能真的走到网络，而不是被 in-flight 合流吃掉。
-    await expect(resolver.resolve('c1', 'panel-backfill')).resolves.toBe('真实会话名');
+    await expect(resolver.resolve('c1')).resolves.toBe('真实会话名');
   });
 });
 

@@ -436,6 +436,56 @@ describe('zai stream codec', () => {
     expect(stripZaiThinkingBlocks(raw)).toBe('<details>答案</details>');
   });
 
+  it('strips a nested details block up to its matching close tag', () => {
+    // ⚠️⚠️ **非贪婪正则会停在内层的 `</details>` 上** ⇒ 外层剩下的半截思考被当成正文留下，
+    // 而 `assistantText` 是工具识别的输入 ⇒ 思考里的工具 XML 会漏出去并真的被执行。
+    // 单层时那种 XML 随整块一起被剥掉，嵌套时这个保护就没了。必须按配平深度剥。
+    const raw = '<details>思考<details>内层</details>更多</details>正文。';
+    expect(stripZaiThinkingBlocks(raw)).toBe('正文。');
+  });
+
+  it('strips deeply nested details blocks', () => {
+    const raw = '<details>一<details>二<details>三</details>二</details>一</details>正文。';
+    expect(stripZaiThinkingBlocks(raw)).toBe('正文。');
+  });
+
+  it('strips a nested block whose inner tag carries attributes', () => {
+    const raw = '<details>思考<details open class="x">内层</details>更多</details>正文。';
+    expect(stripZaiThinkingBlocks(raw)).toBe('正文。');
+  });
+
+  it('strips an uppercase nested details block too', () => {
+    // ⚠️ **配平扫描用的标签正则必须带 `/i`** —— 它与快速路径守卫
+    // （`text.toLowerCase().includes('<details')`）以及非贪婪正则同口径。
+    // 少了 `/i` 时大写嵌套块扫不出配平、静默退回非贪婪 ⇒ 又变成剥成半截思考。
+    const raw = '<DETAILS>思考<DETAILS>内层</DETAILS>更多</DETAILS>正文。';
+    expect(stripZaiThinkingBlocks(raw)).toBe('正文。');
+  });
+
+  it('does not leak tool XML written inside a nested thinking block', () => {
+    // 这条是本修复的**目的**：思考里提过一句工具，不能因为嵌套就把它当成模型意图执行。
+    const raw = '<details>我想<details>细节</details>我打算调用 <shell_exec>{"command":"ls"}</shell_exec> 清理</details>好的。';
+    const stripped = stripZaiThinkingBlocks(raw);
+    expect(stripped).toBe('好的。');
+    expect(stripped).not.toContain('shell_exec');
+  });
+
+  it('falls back to the non-greedy behaviour when a nested block is the entire reply', () => {
+    // ⚠️ **歧义档：整个回复就是「一个配平的嵌套块」，没有后续正文** ——
+    // 分不清「思考被截断」与「答案本身就是个 details 元素」。
+    // 这一档**刻意退回非贪婪行为**：配平版会把它整块剥掉、再被「剥完无正文」守卫退回，
+    // 而退回的是**完整原文** ⇒ 思考里的工具 XML 会一起交出去（比旧行为更糟）。
+    // 所以这里钉的是「宁可留着，也不要把思考整段吐给识别器」。
+    const raw = '<details>我要调用 <shell_exec>{"command":"ls"}</shell_exec><details>内层</details>更多</details>';
+    expect(stripZaiThinkingBlocks(raw)).toBe('更多</details>');
+  });
+
+  it('treats an unbalanced nested block as truncated, same as before', () => {
+    // 内层未闭合 ⇒ 配平路径拿不到配平块，退回非贪婪 + 截断语义（与改动前一致）。
+    const raw = '<details>思考<details>内层没闭合</details>正文';
+    expect(stripZaiThinkingBlocks(raw)).toBe('正文');
+  });
+
   it('does not mutate the accumulator when reading assistantText', () => {
     // 剥离只在读取出口发生（getter 是纯函数），内部累积保持原始 ——
     // 否则 edit_content 的 edit_index（相对原始文本的 UTF-16 偏移）会错位。

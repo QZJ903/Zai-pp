@@ -85,41 +85,6 @@ export interface ProjectPanelLabels {
   age: (timestamp: number) => string;
 }
 
-/**
- * 补名决策的诊断事件。
- *
- * 补名有四个前置条件（面板在跑 / 有当前会话 / 会话已归入项目 / 存储里是占位标题），
- * 任一不满足就静默跳过 —— 没有这份记录就分不清「没触发」与「触发了但拿不到」。
- */
-export type ProjectPanelBackfillDiagnostic =
-  | {
-    kind: 'skipped';
-    reason: 'stopped' | 'state-not-loaded' | 'no-current-conversation' | 'not-in-project'
-      | 'already-real-title' | 'already-attempted';
-    conversationId?: string;
-  }
-  /** 服务端与侧边栏都没给出真名 —— 解除登记，等下次触发。 */
-  | {
-    kind: 'unresolved';
-    conversationId: string;
-    serverTitle: string | null;
-    sidebarTitle: string | null;
-  }
-  | { kind: 'resolved'; conversationId: string; title: string; from: 'server' | 'sidebar' }
-  | { kind: 'sent'; conversationId: string; title: string }
-  | { kind: 'failed'; conversationId: string };
-
-/**
- * 一条诊断的**状态签名**：字段完全相同就是「没有新信息」，不必重复上报。
- *
- * ⚠️ **任何字段变化都要让它不同** —— 签名一旦漏掉某个字段，那个字段的变化
- * 就会被去重吞掉（比如 `unresolved` 的 `sidebarTitle` 从 null 变成真名）。
- * 所以这里用 JSON 序列化整条事件，而不是手挑几个字段拼串。
- */
-function describeBackfillEvent(event: ProjectPanelBackfillDiagnostic): string {
-  return JSON.stringify(event);
-}
-
 export interface ProjectPanelDependencies {
   /** 读项目状态；失败返回 null（面板保留上一次的展示）。 */
   loadState: () => Promise<ProjectContextState | null>;
@@ -163,13 +128,6 @@ export interface ProjectPanelDependencies {
   startNewConversation: (projectId: string) => void;
   getLabels: () => ProjectPanelLabels;
   onError?: (error: unknown) => void;
-  /**
-   * 补名决策的诊断上报（见 `ProjectPanelBackfillDiagnostic`）。
-   *
-   * ⚠️ **不是调试残留** —— 补名的四个前置条件都是静默 return，这条链路出问题时
-   * 「补不上名」与「压根没尝试」在外部表现完全相同。
-   */
-  onBackfillDiagnostic?: (event: ProjectPanelBackfillDiagnostic) => void;
 }
 
 export interface ProjectPanelController {
@@ -250,35 +208,6 @@ export function startProjectPanel(
   };
 
   /**
-   * 补名决策的诊断上报。
-   *
-   * ⚠️ **必须有**：补名有四个前置条件，任一不满足就**静默 return** ——
-   * 从外面看只是「没补上名」，分不清是「没触发」还是「触发了但拿不到」。
-   * 每次尝试都把结果与**跳过原因**记下来，一轮就能定位。
-   *
-   * ⚠️⚠️ **只在「状态真的变了」时上报** —— `applyState` 每次 refresh 都会调补名，
-   * 而 refresh 的触发源很密（visibilitychange、`PROJECT_CONTEXT_UPDATED`、切会话、
-   * 每轮回答结束）。每次都报的话，同一个结论会把诊断缓冲（50 槽）填满，把真正
-   * 有用的「解析到了什么」挤出去 —— 与「一眼定位」的意图相抵。
-   *
-   * ⚠️ **不能只对 `skipped` 去重** —— `unresolved` 同样会洪泛：拿不到 token 时
-   * `resolve` 立即返回 null（不发请求、也没缓存可命中），于是每次 refresh 都报一条
-   * `unresolved` + 一条解析器的 `no-token`。所以要按**整条结论**去重，而不是只按
-   * 跳过原因。
-   *
-   * 去重的判据是「这次结论与上次**完全相同**」：任何一个字段变了就放行
-   * （比如 `sidebarTitle` 从 null 变成真名、跳过原因从 `not-in-project` 变成
-   * `already-real-title`）。诊断缓冲表达的是**状态**，不是流水账。
-   */
-  const lastReportedSignature = new Map<string, string>();
-  const reportBackfill = (event: ProjectPanelBackfillDiagnostic): void => {
-    const signature = describeBackfillEvent(event);
-    if (lastReportedSignature.get(event.conversationId ?? '') === signature) return;
-    lastReportedSignature.set(event.conversationId ?? '', signature);
-    dependencies.onBackfillDiagnostic?.(event);
-  };
-
-  /**
    * 给**占位标题**的会话补上真名。
    *
    * 为什么需要：**待绑新会话**的绑定发生在首条消息那一刻（`bindPendingProject`），
@@ -293,50 +222,18 @@ export function startProjectPanel(
    * 它是服务端列表的投影，而页面收到 `chat:title` 后那一次重拉不保证成立。
    */
   const backfillPlaceholderTitles = (): void => {
-    if (stopped) {
-      reportBackfill({ kind: 'skipped', reason: 'stopped' });
-      return;
-    }
-    if (!state) {
-      // ⚠️ **与「面板停了」分开报** —— 状态还没加载完在启动期很常见，而两者
-      // 被去重固化成一条之后，用错的标签会一直留在诊断里。
-      reportBackfill({ kind: 'skipped', reason: 'state-not-loaded' });
-      return;
-    }
+    if (stopped) return;
+    if (!state) return;
     const current = dependencies.getCurrentConversation();
-    if (!current) {
-      reportBackfill({ kind: 'skipped', reason: 'no-current-conversation' });
-      return;
-    }
+    if (!current) return;
     const membership = state.conversations.find(
       (item) => item.conversationId === current.conversationId,
     );
-    if (!membership) {
-      // 会话不在任何项目里 —— 补名对它无意义（没有可写的归属）。
-      reportBackfill({
-        kind: 'skipped',
-        reason: 'not-in-project',
-        conversationId: current.conversationId,
-      });
-      return;
-    }
-    if (!isPlaceholderProjectConversationTitle(membership.title)) {
-      // 存储里已经是真名 —— 不用补，也**绝不能**补（会覆盖用户改过的名字）。
-      reportBackfill({
-        kind: 'skipped',
-        reason: 'already-real-title',
-        conversationId: current.conversationId,
-      });
-      return;
-    }
-    if (backfillAttemptedIds.has(current.conversationId)) {
-      reportBackfill({
-        kind: 'skipped',
-        reason: 'already-attempted',
-        conversationId: current.conversationId,
-      });
-      return;
-    }
+    // 会话不在任何项目里 —— 补名对它无意义（没有可写的归属）。
+    if (!membership) return;
+    // 存储里已经是真名 —— 不用补，也**绝不能**补（会覆盖用户改过的名字）。
+    if (!isPlaceholderProjectConversationTitle(membership.title)) return;
+    if (backfillAttemptedIds.has(current.conversationId)) return;
     void resolveTitleThenBackfill(membership.projectId, current.conversationId);
   };
 
@@ -365,21 +262,10 @@ export function startProjectPanel(
     if (stopped) return;
     const resolved = title ?? readSidebarTitle(conversationId);
     if (!resolved) {
-      reportBackfill({
-        kind: 'unresolved',
-        conversationId,
-        serverTitle: title,
-        sidebarTitle: readSidebarTitle(conversationId),
-      });
+      // 两个源都没给出真名 —— 解除登记，等下次触发再试。
       backfillAttemptedIds.delete(conversationId);
       return;
     }
-    reportBackfill({
-      kind: 'resolved',
-      conversationId,
-      title: resolved,
-      from: title ? 'server' : 'sidebar',
-    });
     await sendTitleBackfill(projectId, conversationId, resolved);
   };
 
@@ -407,18 +293,15 @@ export function startProjectPanel(
     title: string,
   ): Promise<void> => {
     if (!stillInProject(projectId, conversationId)) {
-      reportBackfill({ kind: 'skipped', reason: 'not-in-project', conversationId });
       backfillAttemptedIds.delete(conversationId);
       return;
     }
     try {
       await dependencies.backfillConversationTitle({ projectId, conversationId, title });
-      reportBackfill({ kind: 'sent', conversationId, title });
       if (stopped) return;
       refresh();
     } catch {
       // 补名失败静默：它不改变任何用户可见的状态（标题仍是占位串，与补名之前一样）。
-      reportBackfill({ kind: 'failed', conversationId });
       backfillAttemptedIds.delete(conversationId);
     }
   };
@@ -444,13 +327,10 @@ export function startProjectPanel(
     clearBackfillTimers();
     const current = dependencies.getCurrentConversation();
     // 重新给这条会话一次机会：上次可能因为服务端还没生成好标题而被跳过（未登记）。
-    // ⚠️ **但正在解析时不能清** —— 清掉会让本次触发再发一个解析，与在飞那次并发跑、
-    // 各报一次结果（表现为诊断里两条时间戳完全相同的条目，请求虽被在飞去重挡住，
-    // 但 IPC 与诊断都是双份）。
+    // ⚠️ **但正在解析时不能清** —— 清掉会让本次触发再发一个解析，与在飞那次并发跑
+    // （请求虽被在飞去重挡住，但两次触发各推进一次状态，行为上是双份）。
     if (current && !backfillInFlightIds.has(current.conversationId)) {
       backfillAttemptedIds.delete(current.conversationId);
-      // 重新给了机会 → 允许下次「已尝试过」再报一次（见 reportBackfill 的去重说明）。
-      lastReportedSignature.delete(current.conversationId);
     }
     for (const delay of BACKFILL_RETRY_DELAYS_MS) {
       if (delay === 0) {

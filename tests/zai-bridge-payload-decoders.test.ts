@@ -4,7 +4,6 @@ import {
   decodeZaiRequestTerminalMessage,
   decodeZaiResponseCompleteMessage,
   decodeZaiSyncHookStateMessage,
-  decodeZaiTitleLookupMessage,
   decodeZaiToolCallMessage,
 } from '../core/zai/messages';
 
@@ -139,30 +138,5 @@ describe('decodeZaiSyncHookStateMessage', () => {
     // 非字符串抛 TypeError → `controller.error` → **打断回给页面的响应流**。
     // `new Set()` 不做类型收敛（`[...new Set(['a', 123])]` 仍是 `['a', 123]`），别指望它兜。
     expect(decodeZaiSyncHookStateMessage({ toolDescriptorNames: names })).toBeNull();
-  });
-});
-
-describe('decodeZaiTitleLookupMessage', () => {
-  it('passes a legal entry through by reference', () => {
-    const entry = { conversationId: 'c-1', source: 'prewarm', outcome: 'resolved', at: 1 };
-    expect(decodeZaiTitleLookupMessage(entry)).toBe(entry);
-  });
-
-  it('accepts an entry carrying only the required `at`', () => {
-    // 这条只进诊断数组，没有执行语义 —— 校验强度按「挡掉形状垃圾」定，
-    // 不复刻 ZaiConversationTitleDiagnostic 的联合类型。
-    const entry = { at: 1 };
-    expect(decodeZaiTitleLookupMessage(entry)).toBe(entry);
-  });
-
-  it.each([
-    ['null', null],
-    ['array', []],
-    ['missing at', { conversationId: 'c-1' }],
-    ['non-number at', { at: 'now' }],
-    ['NaN at', { at: Number.NaN }],
-    ['Infinity at', { at: Number.POSITIVE_INFINITY }],
-  ])('rejects malformed entry: %s', (_label, value) => {
-    expect(decodeZaiTitleLookupMessage(value)).toBeNull();
   });
 });

@@ -63,13 +63,6 @@ export type ZaiSsePhase = (typeof ZAI_SSE_PHASES)[number] | (string & {});
 /** main-world ↔ isolated postMessage 协议的消息源标识。 */
 export const ZAI_MSG_SOURCE = 'zai-pp';
 
-/** 扩展在 DOM/数据属性上暴露的诊断锚点（续跑状态机 + 面板）。 */
-export const ZAI_DIAG_LOOP_ATTR = 'data-glmpp-agent-loop';
-export const ZAI_DIAG_STEP_ATTR = 'data-glmpp-agent-step';
-export const ZAI_DIAG_LOOP_CHECK_ATTR = 'data-glmpp-loop-check';
-export const ZAI_DIAG_TOOL_RESULT_ATTR = 'data-glmpp-tool-result';
-export const ZAI_DIAG_GLOBAL = '__GLMPP_DIAG__';
-
 /**
  * 侧边栏「项目」面板的标记属性（面板根节点与项目 section 都带）。
  *

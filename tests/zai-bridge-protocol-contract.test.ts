@@ -19,7 +19,7 @@ import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-sourc
  * 曾经漂移过两处（都已修）：
  * - `EXECUTE_TOOL_CALL` 被列进「隔离世界 → 主世界」，实际它走 `chrome.runtime`
  *   发给后台，**根本不过桥**；
- * - `TITLE_LOOKUP` 走桥，但两个清单里都没有它。
+ * - `TITLE_LOOKUP` 走桥，但两个清单里都没有它（该类型已随诊断链整体删除）。
  *
  * ⚠️ **断言用 AST 取调用点，不扫源码字符串** —— 类型名在导入语句、注释、
  * 清单定义里都会出现，`includes` 型断言删掉调用点照样为真。

@@ -14,7 +14,6 @@
 
 import {
   ZAI_BYPASS_HOOK_HEADER,
-  ZAI_DIAG_GLOBAL,
   ZAI_WEB_ORIGIN,
 } from './contracts';
 import {
@@ -81,21 +80,6 @@ interface ZaiRequestContext {
 
 const FETCH_HOOK_MARKER = Symbol.for('zai-pp.fetch-hook-installed');
 const XHR_HOOK_MARKER = Symbol.for('zai-pp.xhr-hook-installed');
-
-const diag = createGlobalDiagnostics();
-
-function createGlobalDiagnostics() {
-  const target = (typeof window !== 'undefined' ? window : globalThis) as unknown as Record<string, unknown>;
-  const existing = target[ZAI_DIAG_GLOBAL] as
-    | { responses?: unknown[]; toolCalls?: unknown[]; failures?: unknown[]; errors?: unknown[]; chatNewLog?: unknown[] }
-    | undefined;
-  const state = existing ?? { responses: [], toolCalls: [], failures: [], errors: [], chatNewLog: [] };
-  if (!state.errors) state.errors = [];
-  if (!state.failures) state.failures = [];
-  if (!state.chatNewLog) state.chatNewLog = [];
-  target[ZAI_DIAG_GLOBAL] = state;
-  return state;
-}
 
 let hookState: ZaiHookState = createEmptyHookState();
 
@@ -363,50 +347,6 @@ function hookFetch(): () => void {
 
     const prepared = await prepareRequest(init.body, route);
 
-    // chatNew body 诊断：记录原始 vs 增强后的 body，便于定位 400。
-    // 只抓结构 + 关键字段 + 原始原文（orig body 很小 ~1KB，augmented 截断头部），
-    // 供手动(200) vs 自动化(400) 逐字段 diff。
-    if (route === 'chatNew') {
-      const orig = parseZaiBody(init.body);
-      const next = parseZaiBody(prepared.requestBody);
-      const summarize = (b: Record<string, unknown> | null) => {
-        if (!b) return null;
-        const chat = (b.chat ?? null) as Record<string, unknown> | null;
-        const history = (chat?.history ?? null) as Record<string, unknown> | null;
-        const messages = (history?.messages ?? null) as Record<string, unknown> | null;
-        const firstMsg = messages ? (Object.values(messages)[0] as Record<string, unknown> | null | undefined) : null;
-        return {
-          topKeys: Object.keys(b).slice(0, 20),
-          chatKeys: chat ? Object.keys(chat).slice(0, 30) : null,
-          chatType: chat?.type ?? null,
-          chatFlags: Array.isArray(chat?.flags) ? chat.flags : null,
-          chatId: chat?.id ?? null,
-          chatTitle: chat?.title ?? null,
-          chatModels: chat?.models ?? null,
-          chatTimestamp: chat?.timestamp ?? null,
-          chatMessageVersion: chat?.message_version ?? null,
-          chatParams: chat?.params ?? null,
-          chatExtra: chat?.extra ?? null,
-          hasSignaturePrompt: typeof b.signature_prompt === 'string',
-          hasFeatures: typeof b.features === 'object' && b.features !== null,
-          firstMsgId: typeof firstMsg?.id === 'string' ? firstMsg.id : null,
-          firstMsgParentId: firstMsg?.parentId ?? null,
-          firstMsgRole: firstMsg?.role ?? null,
-          firstMsgTimestamp: firstMsg?.timestamp ?? null,
-          firstMsgContentLen: typeof firstMsg?.content === 'string' ? firstMsg.content.length : null,
-          firstMsgContentHead: typeof firstMsg?.content === 'string' ? firstMsg.content.slice(0, 80) : null,
-        };
-      };
-      diag.chatNewLog?.push({
-        at: Date.now(),
-        kind: 'body-snapshot',
-        url: url.slice(0, 200),
-        orig: summarize(orig),
-        augmented: summarize(next),
-        origRaw: init.body.slice(0, 2500),
-      });
-    }
-
     let requestInit: RequestInit = { ...init, body: prepared.requestBody };
     if (isCompletion) {
       const signed = applyCompletionSignature(url, prepared.requestBody);
@@ -422,35 +362,8 @@ function hookFetch(): () => void {
       );
     }
 
-    // chatNew 首条建会话：这里记录请求现场 + 响应状态，供自动化判断「为什么没跳 /c/<id>」。
-    // 若 /chats/new 非 2xx（签名错/captcha/高峰/服务端拒绝），页面 SPA 拿不到会话 id，
-    // 就不跳转 —— 这是「发送成功但仍卡首页」的最后一个未排除环节。
-    const sendStartedAt = Date.now();
-    const eventual = originalFetch.call(this, url, requestInit);
-    void (async () => {
-      try {
-        const resp = await eventual;
-        const status = resp.status;
-        let bodyText = '';
-        let errored = false;
-        try {
-          const clone = resp.clone();
-          bodyText = (await clone.text()).slice(0, 400);
-        } catch {
-          errored = true;
-        }
-        diag.chatNewLog?.push({
-          at: sendStartedAt,
-          status,
-          ok: status >= 200 && status < 300,
-          bodyHead: bodyText,
-          errored,
-        });
-      } catch (err) {
-        diag.chatNewLog?.push({ at: sendStartedAt, threw: true, error: err instanceof Error ? err.message : String(err) });
-      }
-    })();
-    return eventual;
+    // chatNew 首条建会话：请求原样转发，响应由页面自己处理（SPA 拿不到会话 id 就不会跳转）。
+    return originalFetch.call(this, url, requestInit);
   };
 
   Object.defineProperty(hookedFetch, FETCH_HOOK_MARKER, { value: true, configurable: true });
@@ -519,8 +432,7 @@ async function interceptCompletionResponse(
     // 页面按 JSON 解析会打 `Unexpected token '<'`（z.ai 前端自己打的，消不掉）。
     // 这里不重发：请求由页面发出，本 hook 只读流与透传，没有可原样重放的 body。
     // 改为发信号让内容脚本把在飞的那一轮推进下去，避免整条续跑循环干等。
-    // ⚠️ 该信号只在续跑轮有落点（内容脚本按 `activeRequestId` 认领）；原生轮只留诊断。
-    diag.failures?.push({ requestId: context.requestId, kind: 'html_challenge' });
+    // ⚠️ 该信号只在续跑轮有落点（内容脚本按 `activeRequestId` 认领）；原生轮收不到。
     hookState.onHtmlChallenge({ requestId: context.requestId });
     return response;
   }
@@ -567,11 +479,6 @@ async function interceptCompletionResponse(
             agentTaskPrompt: context.agentTaskPrompt,
             assistantText: text,
           });
-          diag.responses?.push({
-            requestId: context.requestId,
-            textLength: text.length,
-            assistantText: text,
-          });
           controller.close();
           notifyTerminal();
           return;
@@ -613,12 +520,6 @@ async function interceptCompletionResponse(
 }
 
 function registerToolCall(call: ZaiDetectedToolCall): void {
-  diag.toolCalls?.push({
-    kind: 'detected',
-    name: call.name,
-    requestId: call.requestId,
-    raw: call.raw,
-  });
   hookState.onToolCall(call);
 }
 
@@ -639,17 +540,6 @@ function extractAndNotifyToolCalls(
     ? new Set(requestToolNames)
     : hookState.toolDescriptorNames;
   const text = accumulator.assistantText;
-  const unregistered = extractXmlTagNames(text);
-  const unregisteredTags = unregistered.filter((tag) => !(names && names.has(tag)));
-  if (unregisteredTags.length > 0) {
-    diag.responses?.push({
-      requestId,
-      hookStateNamesSize: names ? names.size : 0,
-      requestToolNamesSize: requestToolNames ? requestToolNames.length : 0,
-      unregisteredTags,
-      assistantText: text.slice(0, 2000),
-    });
-  }
   if (!names || names.size === 0) return;
   // 同一次扫描内按 `raw + requestId` 去重。工具名来自 descriptor 集合、各自独立匹配，
   // 正常情况下不会命中；留着是防御 —— 名字互为前缀时（`shell` 与 `shell.exec`）正则可能重叠。
@@ -665,15 +555,6 @@ function extractAndNotifyToolCalls(
       registerToolCall({ name, raw, requestId });
     }
   }
-}
-
-function extractXmlTagNames(text: string): string[] {
-  const found: string[] = [];
-  for (const match of text.matchAll(/<\/?([A-Za-z_][A-Za-z0-9_.:-]*)\b[^>]*>/g)) {
-    const name = match[1];
-    if (!found.includes(name)) found.push(name);
-  }
-  return found;
 }
 
 function escapeRegExp(value: string): string {

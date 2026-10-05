@@ -2,7 +2,7 @@
  * 主世界 ↔ 隔离世界的 postMessage 协议。
  *
  * MAIN world 的 fetch hook 需要两样东西来回：
- * - isolated → main：运行时状态（工具标签名）+ 增广结果 + 诊断回传
+ * - isolated → main：运行时状态（工具标签名）+ 增广结果
  * - main → isolated：请求体增强请求 + 工具调用通知 + 响应完成通知
  *
  * 协议名沿用 ds++ 的 bridge 思路（BRIDGE_REQUEST/AUGMENT_REQUEST_BODY），
@@ -57,8 +57,6 @@ export const ZAI_MAIN_TO_CONTENT_TYPES = [
 export const ZAI_CONTENT_TO_MAIN_TYPES = [
   'SYNC_HOOK_STATE',           // 同步工具标签名 → update hook state
   'AUGMENT_REQUEST_BODY_RESULT', // 增强结果回传
-  'TITLE_LOOKUP',              // 会话标题解析的逐条上报（主世界侧合并进 __GLMPP_DIAG__）
-  'DIAG_SYNC',                 // 把隔离世界的诊断（sendProbe/failures/errors/toolCalls）同步到页面 window
 ] as const;
 
 export type ZaiMainToContentType = (typeof ZAI_MAIN_TO_CONTENT_TYPES)[number];
@@ -151,24 +149,6 @@ export function decodeZaiHtmlChallengeMessage(
 }
 
 /**
- * 隔离世界 → 主世界：标题解析的逐条上报。
- *
- * ⚠️ **这条只写进 `__GLMPP_DIAG__.titleLookups`（诊断面），没有执行语义** ——
- * 伪造它的后果是诊断被污染，不是执行链被驱动。校验强度按这个事实定：
- * 只要求「是一个对象、`at` 是有限数字」，**不逐字段复刻
- * `ZaiConversationTitleDiagnostic` 的联合类型**（那是类型层的约束，
- * 在这里复刻一份等于把 `ZaiConversationTitleOutcome` 的 9 个字面量抄第二遍）。
- */
-export function decodeZaiTitleLookupMessage(
-  value: unknown,
-): Record<string, unknown> | null {
-  if (!isPlainRecord(value)) return null;
-  const at = value.at;
-  if (typeof at !== 'number' || !Number.isFinite(at)) return null;
-  return value;
-}
-
-/**
  * 隔离世界 → 主世界：工具标签名同步。
  *
  * ⚠️⚠️ **这条必须校验元素类型，不能只判 `Array.isArray`** ——
@@ -222,9 +202,6 @@ export const ZAI_BRIDGE_PAYLOAD_DECODER_EXEMPTIONS = {
     reason: '形状由主世界的请求上下文决定，校验与消费都在同一个文件里',
     decoder: { name: 'decodeAugmentResult', file: 'entrypoints/zai-main-world.content.ts' },
   },
-  DIAG_SYNC: {
-    reason: '语义是「整数组追加合并」，逐个元素校验会改变现有行为（现在 Array.isArray 就合），收益也小',
-  },
 } as const satisfies Partial<Record<ZaiMainToContentType | ZaiContentToMainType, ZaiBridgePayloadDecoderExemption>>;
 
 /** 载荷 decoder 表 —— 与两个类型清单互补，`tests/zai-bridge-protocol-contract.test.ts` 守着覆盖率。 */
@@ -234,7 +211,6 @@ export const ZAI_BRIDGE_PAYLOAD_DECODERS = {
   RESPONSE_COMPLETE: decodeZaiResponseCompleteMessage,
   REQUEST_TERMINAL: decodeZaiRequestTerminalMessage,
   HTML_CHALLENGE: decodeZaiHtmlChallengeMessage,
-  TITLE_LOOKUP: decodeZaiTitleLookupMessage,
 } as const satisfies Partial<Record<ZaiMainToContentType | ZaiContentToMainType, (value: unknown) => unknown>>;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

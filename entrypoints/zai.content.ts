@@ -7,7 +7,6 @@
  *    续跑请求透传不重灌。
  * 3. 工具执行中继：MAIN world 识别出的 XML 工具 → 后台 EXECUTE_TOOL_CALL。
  * 4. 续跑循环状态机：原生轮执行了可续跑工具 → 用 DOM 注入让页面自己发下一轮。
- * 5. agent 状态面板 + 诊断锚点（data-glmpp-* / __GLMPP_DIAG__）。
  */
 
 import type {
@@ -58,7 +57,6 @@ import {
   parseZaiChatNewBody,
   readZaiCurrentUserMessageParentId,
   readZaiLastUserMessageText,
-  readZaiModelForRoute,
   rewriteZaiChatNewUserMessages,
   rewriteZaiLastUserMessage,
 } from '../core/zai/request-codec';
@@ -103,11 +101,6 @@ import { isRuntimeFailure, RuntimeCommandError } from '../core/messaging/runtime
 import {
   ZAI_AGENT_FLAG,
   ZAI_CHAT_INPUT_SELECTOR as CHAT_INPUT_SELECTOR,
-  ZAI_DIAG_GLOBAL,
-  ZAI_DIAG_LOOP_ATTR,
-  ZAI_DIAG_LOOP_CHECK_ATTR,
-  ZAI_DIAG_STEP_ATTR,
-  ZAI_DIAG_TOOL_RESULT_ATTR,
   ZAI_DOM_TASK_CANCELLED_CODE,
 } from '../core/zai/contracts';
 import { createToolInvocationCatalog } from '../core/tool/invocation';
@@ -140,6 +133,24 @@ let currentContentLocale: SupportedLocale = DEFAULT_LOCALE;
  */
 let currentWebToolsEnabled = false;
 let currentRequestMessageCount = 0;
+/**
+ * 收到的 `AUGMENT_REQUEST_BODY` 消息数（页面每发一次 completion / chats-new 请求 +1）。
+ *
+ * ⚠️ **这是自动化发送链的判据，不是诊断** —— `submitAutomationPromptViaPage` 靠它判断
+ * 「请求到底发出去了没有」（发送前后各读一次、变大即为已发出），进而决定返回 true/false，
+ * 而 `submitDomTaskPrompt` 会据此在失败时回 `DOM_TASK_FAILED`。**删它会打断自动化发送链。**
+ * ⚠️ **在 `handleAugmentRequestBody` 的提前 return 之前自增** —— 语义是「消息到了」，
+ * 与那一次增广成功与否无关。
+ */
+let observedAugRequestCount = 0;
+/**
+ * 自动化发送链最后一次致命错误的 kind（`no_textarea` / `form_not_connected` / `agent_not_idle`）。
+ *
+ * ⚠️ **这是失败码的来源，不是诊断** —— `submitDomTaskPrompt` 读它决定回给后台的 `error`，
+ * 而 `RETRYABLE_PRE_SEND_ERRORS` 里那三个码决定后台**要不要自动重跑**。删了会让这些
+ * pre-send 失败全部退化成 `composer_inject_failed`（不再重试），且**静默**。
+ */
+let lastAutomationSendErrorKind: string | null = null;
 let extensionContextValid = true;
 /** 侧边栏「项目」面板控制器（见 installProjectPanel）。 */
 let projectPanelController: ProjectPanelController | null = null;
@@ -273,55 +284,6 @@ let continuationLoop: ContinuationLoop | null = null;
 let continuationMarkerCount = 0;
 const activeToolAuthorizations = new Map<string, ToolAuthorizationGrantSummary>();
 
-const diag = getGlobalDiagnostics();
-
-function getGlobalDiagnostics() {
-  // 关键：isolation world 的 globalThis 是隔离对象，页面 console 读不到。
-  // 必须写到共享的页面 window 上，用户才能用 window.__GLMPP_DIAG__ 读到。
-  const target = (typeof window !== 'undefined' ? window : globalThis) as unknown as Record<string, unknown>;
-  const existing = target[ZAI_DIAG_GLOBAL] as
-    | {
-        responses?: unknown[];
-        toolCalls?: unknown[];
-        failures?: unknown[];
-        errors?: unknown[];
-        stateless?: unknown[];
-        sendProbe?: unknown[];
-        turnLog?: unknown[];
-        injectLog?: unknown[];
-        ssaFatal?: unknown[];
-        composerSnap?: unknown[];
-        augRequests?: unknown[];
-      }
-    | undefined;
-  const state = existing ?? { responses: [], toolCalls: [], failures: [], errors: [], stateless: [], sendProbe: [], turnLog: [], injectLog: [], ssaFatal: [], composerSnap: [], augRequests: [] };
-  if (!state.responses) state.responses = [];
-  if (!state.toolCalls) state.toolCalls = [];
-  if (!state.failures) state.failures = [];
-  if (!state.errors) state.errors = [];
-  if (!state.stateless) state.stateless = [];
-  if (!state.sendProbe) state.sendProbe = [];
-  if (!state.turnLog) state.turnLog = [];
-  if (!state.injectLog) state.injectLog = [];
-  if (!state.ssaFatal) state.ssaFatal = [];
-  if (!state.composerSnap) state.composerSnap = [];
-  if (!state.augRequests) state.augRequests = [];
-  target[ZAI_DIAG_GLOBAL] = state;
-  return state;
-}
-
-function stampLoopDiagnostic(): void {
-  if (!document.documentElement) return;
-  document.documentElement.setAttribute(
-    ZAI_DIAG_LOOP_ATTR,
-    continuationLoop?.status === 'running' ? 'running' : 'complete',
-  );
-  document.documentElement.setAttribute(
-    ZAI_DIAG_STEP_ATTR,
-    String(continuationLoop?.stepCount ?? 0),
-  );
-}
-
 // ---------------------------------------------------------------------------
 // 会话/请求辅助
 // ---------------------------------------------------------------------------
@@ -450,29 +412,17 @@ function postToMainWorld(message: Record<string, unknown>): void {
   }
 }
 
-/** 把隔离世界的诊断对象同步到页面共享 window（页面 console 读不到 isolation world 的 window）。 */
-function syncDiagnosticsToMainWorld(): void {
-  postToMainWorld({
-    type: 'DIAG_SYNC',
-    sendProbe: diag.sendProbe ?? [],
-    failures: diag.failures ?? [],
-    errors: diag.errors ?? [],
-    toolCalls: diag.toolCalls ?? [],
-    responses: diag.responses ?? [],
-    turnLog: diag.turnLog ?? [],
-    injectLog: diag.injectLog ?? [],
-    ssaFatal: diag.ssaFatal ?? [],
-    composerSnap: diag.composerSnap ?? [],
-    augRequests: diag.augRequests ?? [],
-  });
-}
-
-/** 记录自动化发送致命错误 + 立即同步一次诊断到页面（万一任务悬挂，console 直接能看到根因）。 */
-function recordSsaFatal(kind: string, error: string): void {
-  diag.ssaFatal ??= [];
-  diag.ssaFatal.push({ kind, error, at: Date.now() });
-  console.warn(`[GLM++] automation send fatal: ${kind}`, error);
-  syncDiagnosticsToMainWorld();
+/**
+ * 记录自动化发送链的致命错误 kind。
+ *
+ * ⚠️ **这不是诊断** —— `submitDomTaskPrompt` 读它决定回给后台的 `error` 码，
+ * 而 `RETRYABLE_PRE_SEND_ERRORS` 里那三个码决定后台要不要自动重跑。
+ */
+function recordAutomationSendError(kind: string): void {
+  lastAutomationSendErrorKind = kind;
+  // 本机可见性：这三个码决定后台要不要自动重跑，而失败本身只在后台侧可见
+  // （`submitDomTaskPrompt` 回 `DOM_TASK_FAILED`）。这一行是页面 console 里唯一的根因。
+  console.warn('[GLM++] automation send fatal', { kind });
 }
 
 function catalogNamesFor(descriptors: readonly ToolDescriptor[]): string[] {
@@ -586,10 +536,7 @@ async function loadAndSyncRuntimeState(): Promise<LoadedRuntimeState> {
     // fetch hook 识别工具标签，而 `extractAndNotifyToolCalls` 在名字集合为空时
     // **直接 return、一个工具都不识别**。清空等于把「识别」整条关掉。
     // 沿用旧值的口径与 `currentWebToolsEnabled` 一致（「读取失败时沿用上一次的值」）。
-    diag.failures?.push({
-      kind: 'runtime_state_sync_failed',
-      message: error instanceof Error ? error.message : String(error),
-    });
+    console.error('[GLM++] runtime state sync failed', error);
     return {
       descriptors: currentToolDescriptors,
       webToolsEnabled: currentWebToolsEnabled,
@@ -646,7 +593,7 @@ async function resolveProjectContextForRequest(
     const cachedTitle = conversationTitleResolver.peek(chatSessionId);
     if (!cachedTitle) {
       // 空跑预热：不 await —— 这条路径不为标题阻塞。
-      void conversationTitleResolver.resolve(chatSessionId, 'prewarm');
+      void conversationTitleResolver.resolve(chatSessionId);
     }
     const result = await sendRuntimeMessageStrict<ResolvedProjectAugmentationContext | null>({
       type: 'GET_PROJECT_CONTEXT_FOR_CONVERSATION',
@@ -708,17 +655,27 @@ async function createToolAuthorization(input: {
   throw new ToolAuthorizationRequestError(code);
 }
 
-async function closeToolAuthorization(requestId: string): Promise<void> {
-  const authorization = activeToolAuthorizations.get(requestId);
-  if (!authorization) return;
+/**
+ * 只关后台那份 grant，**不碰内容脚本的 Map**。给「grant 从来没进过 Map」的路径用
+ * （chatNew 就是：它收不到 `REQUEST_TERMINAL`，进 Map 就是永不释放的孤儿）。
+ */
+async function closeToolAuthorizationGrant(authorizationId: string): Promise<void> {
   try {
     await sendRuntimeMessage({
       type: 'CLOSE_TOOL_AUTHORIZATION',
-      payload: { authorizationId: authorization.id },
+      payload: { authorizationId },
     });
   } catch (error) {
     if (!isExtensionInvalidatedError(error)) throw error;
     invalidateExtensionContext();
+  }
+}
+
+async function closeToolAuthorization(requestId: string): Promise<void> {
+  const authorization = activeToolAuthorizations.get(requestId);
+  if (!authorization) return;
+  try {
+    await closeToolAuthorizationGrant(authorization.id);
   } finally {
     activeToolAuthorizations.delete(requestId);
   }
@@ -743,8 +700,7 @@ async function executeToolCall(
   if (result && typeof result === 'object' && typeof result.ok === 'boolean') {
     return result;
   }
-  diag.errors?.push({
-    kind: 'execute_tool_call_invalid_result',
+  console.error('[GLM++] execute_tool_call returned an invalid result', {
     call: call.invocationName ?? call.name,
     requestId: call.source?.requestId ?? null,
     authorizationId: authorizationId ?? null,
@@ -1011,27 +967,9 @@ async function handleAugmentRequestBody(
   const route = message.route === 'chatNew' ? 'chatNew' : 'completion';
   const bodyStr = typeof message.body === 'string' ? message.body : '';
 
-  // 归属诊断：AUGMENT_REQUEST_BODY 一进来就登记 route + 原 prompt 头（不含隐私），
-  // 即使下面 parse/归属失败，也能从 augRequests 看到页面到底发了什么请求、prompt 是什么样。
-  //
-  // ⚠️ **这里必须记 `isAgent`** —— 它决定「沙盒与宿主机」那段注不注入。
-  // 没有这一项时，「chat 模式里看到了沙箱段」无法区分「判定错了」与「看的是别的轮次」，
-  // 只能靠读代码推（而那正是本项目踩过的坑）。
-  // ⚠️ 此处早于下面的 `const body = parseZaiBody(bodyStr)`，所以**自己解析一次**
-  // （纯函数、无副作用），不能引用后面那个 `body`。
-  const diagnosticBody = parseZaiBody(bodyStr);
-  diag.augRequests?.push({
-    at: Date.now(),
-    route,
-    hasBody: !!bodyStr,
-    promptHead: readPromptHead(bodyStr, route),
-    userMessageCount: readUserMessageCount(bodyStr),
-    isAgent: diagnosticBody
-      ? (route === 'chatNew'
-        ? (parseZaiChatNewBody(diagnosticBody)?.isAgent ?? null)
-        : readZaiAgentFlag(diagnosticBody))
-      : null,
-  });
+  // 请求计数：自动化发送链靠它判断「请求到底发出去了没有」（发送前后各读一次、变大即为已发出）。
+  // ⚠️ **必须放在下面所有提前 return 之前** —— 语义是「消息到了」，与这次增广成功与否无关。
+  observedAugRequestCount += 1;
 
   if (!id) return;
   if (!bodyStr) {
@@ -1047,8 +985,10 @@ async function handleAugmentRequestBody(
 
   const requestId = mainRequestId || crypto.randomUUID();
   const chatSessionId = readZaiChatSessionId();
-  // 记下 requestId → chatSessionId，执行工具时补全 source.chatSessionId。
-  chatSessionIdByRequestId.set(requestId, chatSessionId);
+  // ⚠️ **`chatSessionIdByRequestId` 不在这里写** —— chatNew 请求收不到 `REQUEST_TERMINAL`
+  // （`fetch-hook` 只在 completion 路由发 `onRequestTerminal`），写进去就是**永不释放的孤儿**；
+  // 而它的唯一读点在 `executeDetected`，那条路只可能由 completion 轮的 requestId 走到。
+  // 写入点放在下面的 completion 段（见「记下 requestId → chatSessionId」）。
 
   try {
     if (route === 'chatNew') {
@@ -1078,7 +1018,6 @@ async function handleAugmentRequestBody(
             taskId: firstTaskId,
             chatSessionId,
           });
-          syncDiagnosticsToMainWorld();
         }
       }
 
@@ -1094,15 +1033,16 @@ async function handleAugmentRequestBody(
         chatSessionId,
         toolIntent: firstText.slice(0, 16_000),
       });
-      activeToolAuthorizations.set(requestId, authorization);
-      // ⚠️ **刻意不写 `requestToolDescriptorsByRequestId`** —— chatNew 请求**没有终态事件**
+      // ⚠️ **这份 grant 既不进 `activeToolAuthorizations`、也不写
+      // `requestToolDescriptorsByRequestId`** —— chatNew 请求**没有终态事件**
       // （`fetch-hook` 只在 completion 路由发 `onRequestTerminal`），而它与随后的 completion
-      // 是**两次独立 fetch、两个不同 requestId** ⇒ 写了也**无人释放**。且它也没有解析路径
-      // （chatNew 无响应流、不跑工具识别，Map 的四个读点读的都是 completion 的 requestId）
-      // ⇒ 写了**也无人读**。首条的工具标签识别靠 completion 轮那份。
-      // ⚠️ **上面那行 `activeToolAuthorizations.set` 是同类孤儿**（grant 也只在
-      // `REQUEST_TERMINAL` 经 `closeToolAuthorization` 关，而 chatNew 收不到它）——
-      // **既有问题、非本次引入**，按「顺带发现不动」记进残余，不在这里顺手删。
+      // 是**两次独立 fetch、两个不同 requestId** ⇒ 写进任何一个 Map 都**无人释放**（孤儿增长）。
+      // 两个 Map 的读点读的也都是 completion 的 requestId ⇒ 写了**还无人读**：首条的工具标签
+      // 识别靠 completion 轮那份，`executeDetected` 也只可能被 completion 轮的 requestId 调到。
+      // ⚠️ 但 grant 本身**必须还**：它已经用来取 `authorization.descriptors` 做增广，
+      // 而且它占着后台的 grant 名额（`MAX_ACTIVE_GRANTS = 32`，满了会让**之后所有**建授权
+      // 抛 `tool_authorization_grant_limit`）。所以增广结果回传之后**显式关掉**它 ——
+      // 走 `closeToolAuthorizationGrant`（只关后台、不碰 Map）。
       // 项目上下文（首条）：此刻**地址栏还没有 `/c/<id>`**，查不了会话归属，
       // 唯一已知的是**待绑项目**（「下一条新会话使用此项目」与面板的「在项目下开启
       // 新会话」都会先置 pending）。漏了这一步的后果是**静默的**：首条没有项目指令，
@@ -1134,26 +1074,14 @@ async function handleAugmentRequestBody(
           (chat as Record<string, unknown>).auto_web_search = false;
         }
       }
-      // 诊断：确认 chatNew 顶层 auto_web_search 写进去了、task 是否命中。
       const searchTask = firstTaskId ? activeDomTasks.get(firstTaskId) : undefined;
       // 模型覆写（chatNew 阶段）：会话模型在**建会话那一刻**定下 —— 落点是
       // `chat.models`（与首条 user 消息的 `models` 同值），由路由决定，见
       // `applyZaiModelOverrideForRoute`。这一步不能省：只在 completion 阶段写
       // 改不动已有会话。agent 模式不碰（服务端按 general_agent 装配自己的模型）。
-      const chatNewModelBefore = readZaiModelForRoute(nextBody, 'chatNew');
-      const modelOverridden = !isAgentTurn
-        ? applyZaiModelOverrideForRoute(nextBody, 'chatNew', searchTask?.model ?? null)
-        : false;
-      diag.augRequests?.push({
-        at: Date.now(),
-        route: 'chatNew-search',
-        searchEnabled: searchTask?.searchEnabled ?? null,
-        nativeSearchOn,
-        autoWebSearchWrote: ((nextBody as { chat?: { auto_web_search?: unknown } }).chat?.auto_web_search) ?? null,
-        modelOverridden,
-        modelBefore: chatNewModelBefore,
-        modelAfter: readZaiModelForRoute(nextBody, 'chatNew'),
-      });
+      if (!isAgentTurn) {
+        applyZaiModelOverrideForRoute(nextBody, 'chatNew', searchTask?.model ?? null);
+      }
       postToMainWorld({
         type: 'AUGMENT_REQUEST_BODY_RESULT',
         id,
@@ -1167,6 +1095,11 @@ async function handleAugmentRequestBody(
           toolDescriptorNames: catalogNamesFor(authorization.descriptors),
         },
       });
+      // 增广结果已经回传（主世界的 pending 请求在那一刻就 resolve 了），所以这里**不 await** ——
+      // 关 grant 是一次后台往返，没必要压在请求热路径上。
+      void closeToolAuthorizationGrant(authorization.id).catch((error: unknown) => {
+        console.error('[GLM++] closing the chatNew tool authorization failed', error);
+      });
       return;
     }
 
@@ -1176,6 +1109,11 @@ async function handleAugmentRequestBody(
       postToMainWorld({ type: 'AUGMENT_REQUEST_BODY_RESULT', id, ok: true, result: null });
       return;
     }
+
+    // 记下 requestId → chatSessionId，执行工具时补全 source.chatSessionId。
+    // ⚠️ **只写 completion 路由**（含续跑轮）：这两条都会收到 `REQUEST_TERMINAL`，
+    // 由 `releaseRequestState` 释放；chatNew 收不到，写进去就是孤儿（见上面的说明）。
+    chatSessionIdByRequestId.set(requestId, chatSessionId);
 
     // 任务归属（方案 §4.1）：DOM 任务的首条注入不是续跑模板、isContinuationRequest 不命中，
     // 必须在这里按 prompt 原文显式登记 requestId → taskId，并发出 DOM_TASK_STARTED。
@@ -1311,21 +1249,9 @@ async function handleAugmentRequestBody(
     }
     // 模型覆写：请求归属到自动化任务时，在 chat 模式下覆写 body 的 model。
     // agent 轮不碰 —— 那由服务端按 general_agent 装配。
-    const modelOverridden = isAgentTurn
-      ? false
-      : applyZaiModelOverrideForRoute(nextBody, 'completion', matchedTask?.model ?? null);
-
-    // 诊断：记录 completion 首条/续跑的归属 + features 最终值，便于定位联网开关问题。
-    diag.augRequests?.push({
-      at: Date.now(),
-      route: 'completion-features',
-      promptHead: originalPrompt.slice(0, 40),
-      matched: matchedTaskId ?? null,
-      searchEnabled: matchedTask?.searchEnabled ?? null,
-      featuresAfter: (nextBody as { features?: unknown }).features ?? null,
-      modelOverridden,
-      modelAfter: readZaiModelForRoute(nextBody, 'completion'),
-    });
+    if (!isAgentTurn) {
+      applyZaiModelOverrideForRoute(nextBody, 'completion', matchedTask?.model ?? null);
+    }
 
     // 记忆命中 → 后台 touch。
     await sendRuntimeMessage({ type: 'TOUCH_MEMORIES', payload: { ids: [] } }).catch(() => undefined);
@@ -1396,7 +1322,6 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
             deviceId: captured['x-device-id'] ?? captured.deviceId,
           });
         }
-        diag.responses?.push({ kind: 'headers-captured' });
         return;
       }
       case 'TOOL_CALL': {
@@ -1404,7 +1329,7 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         // 而那里查不到 grant 会现场建一个）。非法载荷一律丢弃，不新造拒绝分支。
         const call = decodeZaiToolCallMessage(data.data);
         if (!call) {
-          diag.errors?.push({ kind: 'tool_call_payload_rejected' });
+          console.error('[GLM++] rejected a malformed TOOL_CALL payload');
           return;
         }
         await handleDetectedToolCall(call);
@@ -1415,7 +1340,7 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         // executionsByRequest 为空时拿 assistantText 跑 parseToolXml 兜底执行工具。
         const complete = decodeZaiResponseCompleteMessage(data.payload);
         if (!complete) {
-          diag.errors?.push({ kind: 'response_complete_payload_rejected' });
+          console.error('[GLM++] rejected a malformed RESPONSE_COMPLETE payload');
           return;
         }
         await handleResponseComplete(complete);
@@ -1428,7 +1353,7 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
       case 'REQUEST_TERMINAL': {
         const terminal = decodeZaiRequestTerminalMessage(data.payload);
         if (!terminal) {
-          diag.errors?.push({ kind: 'request_terminal_payload_rejected' });
+          console.error('[GLM++] rejected a malformed REQUEST_TERMINAL payload');
           return;
         }
         const requestId = terminal.requestId;
@@ -1457,7 +1382,7 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         // completion 返回 HTML：推进续跑而不是干等。
         const challenge = decodeZaiHtmlChallengeMessage(data.payload);
         if (!challenge) {
-          diag.errors?.push({ kind: 'html_challenge_payload_rejected' });
+          console.error('[GLM++] rejected a malformed HTML_CHALLENGE payload');
           return;
         }
         const requestId = challenge.requestId;
@@ -1490,22 +1415,13 @@ async function handleDetectedToolCall(
   // 载荷已过 `decodeZaiToolCallMessage`（name / raw / requestId 都是字符串、name 非空），
   // 这里的判空只作为防御性兜底保留。
   if (!detected?.name) return;
-  // 诊断：记录识别命中的工具（含 requestId 与 raw，方便定位 XML 归属）。
-  diag.toolCalls?.push({
-    kind: 'detected',
-    name: detected.name,
-    requestId: detected.requestId,
-    raw: detected.raw,
-  });
   try {
     await executeDetectedFromDetected(detected);
   } catch (error) {
-    diag.errors?.push({
-      kind: 'detected_tool_parse_error',
+    console.error('[GLM++] executing a detected tool call failed', {
       name: detected.name,
       requestId: detected.requestId,
-      raw: detected.raw,
-      message: error instanceof Error ? error.message : String(error),
+      error: error instanceof Error ? error.message : String(error),
     });
   }
 }
@@ -1524,11 +1440,9 @@ async function executeDetectedFromDetected(
   const descriptors = requestToolDescriptorsByRequestId.get(detected.requestId) ?? currentToolDescriptors;
   const calls = parseToolXml(detected.raw, descriptors);
   if (calls.length === 0) {
-    diag.errors?.push({
-      kind: 'detected_tool_not_parsed',
+    console.error('[GLM++] a detected tool call could not be parsed', {
       name: detected.name,
       requestId: detected.requestId,
-      raw: detected.raw,
       catalogNames: currentCatalogNames,
     });
     return;
@@ -1611,27 +1525,10 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
       const code = error instanceof ToolAuthorizationRequestError
         ? error.code
         : (error instanceof Error ? error.message : String(error));
-      diag.toolCalls?.push({
-        kind: 'executed',
-        name: call.name,
-        requestId,
-        authorizationId: null,
-        ok: false,
-        summary: '工具授权创建失败',
-        detail: code,
-        error: { code: 'tool_authorization_create_failed', message: code, retryable: false },
-      });
-      console.warn('[GLM++] executeDetected: create auth failed', { name: call.name, requestId, code });
+      console.error('[GLM++] creating a tool authorization failed', { name: call.name, requestId, code });
       return null;
     }
   }
-
-  console.log('[GLM++] executeDetected', {
-    name: call.name,
-    requestId,
-    hasAuth: !!authorization?.id,
-    lazyCreated: !authId,
-  });
 
   // 补全 source.chatSessionId：优先授权记的会话，其次 requestId 映射。
   const boundSessionId = authorization?.chatSessionId ?? null;
@@ -1662,7 +1559,6 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
   const signature = `${requestId}:${callWithSource.raw ?? callWithSource.invocationName}:${callWithSource.id}`;
   const signaturesForRequest = executedToolCallSignatures.get(requestId) ?? new Set<string>();
   if (signaturesForRequest.has(signature)) {
-    diag.toolCalls?.push({ kind: 'skipped_duplicate_call', name: call.name, requestId, signature });
     return null;
   }
   signaturesForRequest.add(signature);
@@ -1670,27 +1566,13 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
 
   const effectiveAuthId = authorization?.id;
   if (!effectiveAuthId) {
-    diag.toolCalls?.push({
-      kind: 'executed',
+    console.error('[GLM++] no grant for this request; skipping the tool call', {
       name: call.name,
       requestId,
-      authorizationId: null,
-      ok: false,
-      summary: '工具授权缺失（authId 为空）',
-      detail: 'activeToolAuthorizations 里没有该 requestId 对应的 grant',
-      error: { code: 'tool_authorization_missing', message: 'no grant for requestId', retryable: false },
     });
     return null;
   }
   const result = await executeToolCall(callWithSource, effectiveAuthId);
-  console.log('[GLM++] tool call executed', {
-    ok: result.ok,
-    name: result.name,
-    requestId,
-    summary: result.summary,
-    detail: result.detail,
-    error: result.error,
-  });
   const execution: ToolExecutionRecord = {
     callId: callWithSource.id,
     // 关键：用短名（call.name，来自 descriptor.name）而非后台返回的 result.name。
@@ -1700,26 +1582,10 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
     provider: result.provider ?? call.provider,
     descriptorId: result.descriptorId ?? call.descriptorId,
   };
-  // 记下本轮执行（供 response 的续跑判定读取），并登记 pending 待办。
+  // 记下本轮执行（供 response 的续跑判定读取）。
   const list = executionsByRequest.get(requestId) ?? [];
   list.push(execution);
   executionsByRequest.set(requestId, list);
-  diag.toolCalls?.push({
-    kind: 'executed',
-    name: result.name ?? call.name,
-    requestId,
-    authorizationId: effectiveAuthId ?? null,
-    ok: result.ok,
-    summary: result.summary,
-    detail: result.detail,
-    error: result.error ?? null,
-  });
-  if (document.documentElement) {
-    document.documentElement.setAttribute(
-      ZAI_DIAG_TOOL_RESULT_ATTR,
-      `${call.name}:${result.ok ? 'ok' : 'error'}`,
-    );
-  }
   return execution;
 }
 
@@ -1809,15 +1675,6 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     clearTimeout(pendingStop);
     manualStopTimers.delete(complete.requestId);
   }
-  diag.responses?.push({
-    requestId: complete.requestId,
-    textLength: complete.assistantText.length,
-    assistantText: complete.assistantText,
-  });
-  console.log('[GLM++] response complete', {
-    requestId: complete.requestId,
-    textLength: complete.assistantText.length,
-  });
 
   // 首条请求发出后，页面 SPA 可能已经从首页跳到 /c/<id>（新建会话场景）。
   // 把任务的最新会话 id 同步下来，这样回传 backend 的才是真实 id，而非首条注入时的 null。
@@ -1849,8 +1706,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       const orphanTaskId = taskIdByRequestId.get(complete.requestId);
       if (orphanTaskId) {
         clearActiveDomTask(orphanTaskId);
-        diag.failures?.push({
-          kind: 'continuation_loop_missing',
+        console.error('[GLM++] continuation turn without a running loop; failing the task', {
           taskId: orphanTaskId,
           requestId: complete.requestId,
         });
@@ -1894,33 +1750,6 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       }
     }
 
-    console.log('[GLM++] continuation turn', {
-      step: continuationLoop.stepCount,
-      parsedTools: parseToolXml(
-        complete.assistantText,
-        requestToolDescriptorsByRequestId.get(complete.requestId) ?? currentToolDescriptors,
-      ).map((c) => c.name),
-      executedTools: executedThisTurn.map((e) => e.name),
-      continuable: executedThisTurn.filter(isContinuableExecution).map((e) => e.name),
-      reusedFromToolCall: alreadyExecutedThisTurn.length > 0,
-    });
-
-    // 铺密诊断：每轮续跑的现场完整记录，方便压测「概率不续跑」时一断就知道卡在哪个判定。
-    diag.turnLog?.push({
-      step: continuationLoop.stepCount,
-      requestId: complete.requestId,
-      parsedTools: parseToolXml(
-        complete.assistantText,
-        requestToolDescriptorsByRequestId.get(complete.requestId) ?? currentToolDescriptors,
-      ).map((c) => c.name),
-      executedTools: executedThisTurn.map((e) => e.name),
-      continuable: executedThisTurn.filter(isContinuableExecution).map((e) => e.name),
-      reusedFromToolCall: alreadyExecutedThisTurn.length > 0,
-      assistantTextHead: complete.assistantText.slice(0, 500),
-      decided: 'pending',
-    });
-    const turnLogIndex = (diag.turnLog?.length ?? 1) - 1;
-
     // 更新上一轮可见正文，供 nudge 回看。
     continuationLoop.lastVisibleText = complete.assistantText;
     // 续跑轮每轮更新最终回传正文（方案 §4.1）。
@@ -1938,8 +1767,6 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     const continuable = executedThisTurn.filter(isContinuableExecution);
     if (continuable.length > 0) {
       // 还有工具可跑 → 注入下一轮续跑。
-      const log = diag.turnLog?.[turnLogIndex];
-      if (log && typeof log === 'object') (log as Record<string, unknown>).decided = 'continue';
       await advanceContinuationLoop();
       return;
     }
@@ -1954,11 +1781,6 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
         continuationLoop.toolExecutions,
         complete.assistantText,
       );
-    const log = diag.turnLog?.[turnLogIndex];
-    if (log && typeof log === 'object') {
-      (log as Record<string, unknown>).decided = shouldNudgeNow ? 'nudge' : 'finish';
-      (log as Record<string, unknown>).shouldNudge = shouldNudgeNow;
-    }
     if (shouldNudgeNow) {
       continuationLoop.nudgeCount += 1;
       // 实时拉取最新工具目录，nudge 轮注入的「可用工具清单」同样实时。
@@ -1981,13 +1803,11 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
         // 沙箱措辞分模式 —— agent 模式下服务端沙箱是原生通路，不能喊「别用沙箱工具」。
         { isAgent: continuationLoop.isAgentTurn },
       );
-      console.log('[GLM++] nudge continuation', {
-        step: continuationLoop.stepCount,
-        nudgeCount: continuationLoop.nudgeCount,
-      });
       const submitted = await submitContinuationViaPage(nudgePrompt);
       if (!submitted) {
-        diag.failures?.push({ kind: 'continuation_nudge_submit_not_observed', step: continuationLoop.stepCount });
+        console.error('[GLM++] nudge continuation was not observed', {
+          step: continuationLoop.stepCount,
+        });
         finishContinuationLoop(continuationLoop);
       }
       return;
@@ -2026,11 +1846,6 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
   const continuable = executions.filter(isContinuableExecution);
   if (continuable.length === 0) {
     // 无续跑工具，结束。有 XML 但没续跑（如 memory_save）也算完成。
-    console.log('[GLM++] native turn: no continuable tool', {
-      requestId: complete.requestId,
-      executionNames: executions.map((e) => e.name),
-      assistantText: complete.assistantText.slice(0, 300),
-    });
     // 后台 DOM 任务：单轮无工具就要回传，不能悬挂（方案 §3 风险 #4）。
     const nativeTaskId = taskIdByRequestId.get(complete.requestId);
     if (nativeTaskId) {
@@ -2056,20 +1871,15 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
 
   const chatSessionId = readZaiChatSessionId();
   if (!chatSessionId) {
-    console.log('[GLM++] native turn: no chat session id', {
-      requestId: complete.requestId,
-      pathname: location.pathname,
-      executionNames: executions.map((e) => e.name),
-    });
     // 读不到 /c/<id> 就没法建续跑循环。若这个 requestId 归属着后台任务，
     // 必须回 FAILED 收尾，否则任务一直挂在「运行中」直到 180s 租约超时。
     const orphanTaskId = taskIdByRequestId.get(complete.requestId);
     if (orphanTaskId) {
       clearActiveDomTask(orphanTaskId);
-      diag.failures?.push({
-        kind: 'continuation_session_id_missing',
+      console.error('[GLM++] no chat session id; failing the task instead of starting a loop', {
         taskId: orphanTaskId,
         requestId: complete.requestId,
+        pathname: location.pathname,
       });
       void sendRuntimeMessage({
         type: 'DOM_TASK_FAILED',
@@ -2088,8 +1898,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       const staleTaskId = staleLoop.taskId;
       staleLoop.taskId = null;
       clearActiveDomTask(staleTaskId);
-      diag.failures?.push({
-        kind: 'continuation_loop_superseded',
+      console.error('[GLM++] superseding a running continuation loop; failing its task', {
         taskId: staleTaskId,
         requestId: complete.requestId,
       });
@@ -2101,12 +1910,6 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     }
     finishContinuationLoop(staleLoop);
   }
-
-  console.log('[GLM++] starting continuation loop', {
-    requestId: complete.requestId,
-    chatSessionId,
-    executionNames: executions.map((e) => e.name),
-  });
 
   continuationLoop = {
     loopId: crypto.randomUUID(),
@@ -2128,7 +1931,6 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
   // 这里不再单独清 `isAgentTurnByRequestId` / `nativeSearchOnByRequestId` ——
   // 释放统一由 `releaseRequestState` 在 `REQUEST_TERMINAL` 做。原先只在这个分支里清，
   // 而原生轮的三条提前 return 都漏掉了（那才是真正的残留来源）。
-  stampLoopDiagnostic();
   await advanceContinuationLoop();
 }
 
@@ -2170,7 +1972,6 @@ async function advanceContinuationLoop(): Promise<void> {
   );
   loop.pendingPrompt = prompt;
   loop.stepCount += 1;
-  stampLoopDiagnostic();
 
   // 续跑注入策略（不丢弃用户输入）：
   // 1. 注入前复制用户已有的输入文字；2. 注入时覆盖为续跑 prompt；3. 注入后恢复用户文字。
@@ -2183,14 +1984,6 @@ async function advanceContinuationLoop(): Promise<void> {
   // 主路：复用页面原生 form submit（send 函数路线）；兜底：DOM 点按钮。
   const submitted = await submitContinuationViaPage(prompt);
 
-  // 铺密诊断：记录每一次注入的成败。
-  diag.injectLog?.push({
-    step: loop.stepCount,
-    submitted,
-    path: 'submitContinuationViaPage',
-    hasPendingUserInput: pendingUserComposerRestore !== null,
-  });
-
   // 注入完成后，恢复用户之前输入的草稿（如果有）。恢复时不要触发输入事件，避免误发。
   if (pendingUserComposerRestore !== null) {
     const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
@@ -2201,7 +1994,7 @@ async function advanceContinuationLoop(): Promise<void> {
   }
 
   if (!submitted) {
-    diag.failures?.push({ kind: 'continuation_submit_not_observed', step: loop.stepCount });
+    console.error('[GLM++] continuation submit was not observed', { step: loop.stepCount });
     finishContinuationLoop(loop);
   }
 }
@@ -2245,7 +2038,7 @@ async function submitDomTaskPrompt(taskId: string, prompt: string): Promise<bool
     const task = activeDomTasks.get(taskId);
     if (task) {
       clearActiveDomTask(taskId);
-      const lastError = (diag.ssaFatal?.[diag.ssaFatal.length - 1] as { kind?: string } | undefined)?.kind;
+      const lastError = lastAutomationSendErrorKind;
       const code = lastError && RETRYABLE_PRE_SEND_ERRORS.has(lastError)
         ? lastError
         : 'composer_inject_failed';
@@ -2294,13 +2087,13 @@ async function submitAutomationPromptViaPage(
       // 兜底长等待：网卡/SPA 慢加载最多再等 60s（只兜底慢加载，不改变「textarea 出现后」的发送节奏）
       const ready = await waitForAutomationComposer(60_000);
       if (!ready) {
-        recordSsaFatal('no_textarea', 'automation send: chat-input textarea missing after 60s');
+        recordAutomationSendError('no_textarea');
         return false;
       }
       textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
     }
     if (!textarea) {
-      recordSsaFatal('no_textarea', 'automation send: chat-input textarea missing');
+      recordAutomationSendError('no_textarea');
       return false;
     }
 
@@ -2310,21 +2103,13 @@ async function submitAutomationPromptViaPage(
     // 自动化注入太快，必须显式等这个窗口过去。
     const formReady = await waitForFormConnected(textarea);
     if (!formReady) {
-      recordSsaFatal('form_not_connected', 'automation send: form never became connected');
+      recordAutomationSendError('form_not_connected');
       return false;
-    }
-
-    // 只读一次性快照：输入框/按钮/框架的 top-level DOM 形状（不逐按钮列，避免噪音）。
-    // 用于定位「楼层里为什么没二楼」。属性-snapshot 最大 6 层、每节点最多 4 个 prop。
-    try {
-      diag.composerSnap?.push(snapshotReplyComposer());
-    } catch {
-      /* 诊断失败不影响主流程 */
     }
 
     // 提交前等上一轮生成结束（只读判定 Stop 按钮，不推进/不读写 continuationLoop）。
     if (!(await waitForAgentIdle())) {
-      recordSsaFatal('agent_not_idle', 'automation send: previous generation never went idle');
+      recordAutomationSendError('agent_not_idle');
       return false;
     }
 
@@ -2332,33 +2117,19 @@ async function submitAutomationPromptViaPage(
     // ["advanced-search"]、让服务端硬注入 search/open/click/find，与扩展自带的
     // web_search / web_fetch 抢通道。联网一律交给扩展工具，由 handleAugmentRequestBody
     // 把 features.auto_web_search / features.web_search 强制写成 false 关掉原生通道。
-    const taskRecord = activeDomTasks.get(taskId);
-    if (taskRecord?.searchEnabled === true) {
-      diag.sendProbe?.push({ kind: 'automation-send', nativeSearchForcedOff: true });
-    }
 
     // 原生 setter + input 事件（真机验证过的写法）。不 disable 输入框。
     setTextareaValue(textarea, '');
     setTextareaValue(textarea, prompt);
 
-    // 写值自检：确认 value + 事件真的把内容写进去了。
-    const writeOk = typeof textarea.value === 'string' && textarea.value.trim() === prompt.trim();
-    diag.composerSnap?.push({
-      beforeValue: textarea.value,
-      afterValue: textarea.value,
-      writeOk,
-      promptHead: prompt.slice(0, 40),
-      valueHead: textarea.value.slice(0, 40),
-    });
-
     // 短稳定期：给 Svelte 时间把 bound-value 刷到 send 按钮态 / 反应式状态。
     await sleep(AUTOMATION_SUBMIT_SETTLE_MS);
 
     const sendButton = document.querySelector<HTMLButtonElement>(SEND_BUTTON_SELECTOR);
-    const observedBefore = diag.augRequests?.length ?? 0;
-    // 关键判据：「有没有请求真的发出」用 augRequests（AUGMENT_REQUEST_BODY，chatNew 和
-    // completion 都计入）。不能用 diag.responses（只计 completion 的 RESPONSE_COMPLETE）。
-    const hasNewRequest = () => (diag.augRequests?.length ?? 0) > observedBefore;
+    const observedBefore = observedAugRequestCount;
+    // 关键判据：「有没有请求真的发出」用 `observedAugRequestCount`（页面每发一次
+    // completion / chats-new 请求 +1，chatNew 和 completion 都计入）。
+    const hasNewRequest = () => observedAugRequestCount > observedBefore;
 
     // 主路：form.requestSubmit()（真机验证过的「让 z.ai 自己发」路径，
     // 触发面最小、原子，Z.ai 自己的 JS 处理后续 chatNew → 跳 /c/<id> → completion）。
@@ -2367,10 +2138,7 @@ async function submitAutomationPromptViaPage(
     // 提交前重新取 textarea 与 form：写值后 Svelte 可能已重建这一小块 DOM，
     // 早先抓到的引用会变成脱连节点（对它提交只报「form is not connected」且不发请求）。
     const liveTextarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR) ?? textarea;
-    const submitOutcome = submitFormViaRequestSubmit(liveTextarea);
-    if (submitOutcome !== 'ok') {
-      diag.sendProbe?.push({ kind: 'automation-send', submitOutcome });
-    }
+    submitFormViaRequestSubmit(liveTextarea);
     // requestSubmit 触发了，等 AUGMENT_REQUEST_BODY 真正被串行队列加工并记录（不一味 sleep）。
     const submitted = await waitForNewAugRequest(observedBefore);
 
@@ -2390,50 +2158,29 @@ async function submitAutomationPromptViaPage(
     }
 
     const requestFired = hasNewRequest();
-    const chatNewCount = (diag.augRequests ?? []).filter(
-      (r) => (r as { route?: string }).route === 'chatNew',
-    ).length;
-    diag.sendProbe?.push({
-      kind: 'automation-send',
-      writeOk,
-      submitPath,
-      sendBtnExists: !!sendButton,
-      sendBtnDisabled: sendButton?.disabled ?? null,
-      observedBefore,
-      observedAfter: diag.augRequests?.length ?? 0,
-      chatNewCount,
-      requestFired,
-      userNodes: document.querySelectorAll(USER_MESSAGE_SELECTOR).length,
-      anyPendingDialog: !!document.querySelector('[role="dialog"][data-dialog-content]'),
-      pendingDialogText: (document.querySelector('[role="dialog"][data-dialog-content]')?.textContent ?? '').trim().slice(0, 60),
-    });
 
     // 请求已发出 → 直接按「归属确认」等最终结果（不用管输入框/按钮的 UI 态了）。
     if (requestFired) {
       const recognized = await waitForDomTaskRecognized(taskId);
-      if (recognized) {
-        syncDiagnosticsToMainWorld();
-        return true;
-      }
-      const jumped = readZaiChatSessionId() !== null;
-      diag.sendProbe?.push({
-        kind: 'automation-send',
-        firedButNotRecognized: true,
-        jumped,
+      if (recognized) return true;
+      console.error('[GLM++] automation send fired a request but it was never recognized', {
+        taskId,
+        submitPath,
+        jumped: readZaiChatSessionId() !== null,
         hasStop: isAgentCurrentlyRunning(),
       });
-      syncDiagnosticsToMainWorld();
       return false;
     }
 
     // 三类发送动作都触发不了任何请求：这条链路在页面侧被完全拦截。
-    diag.sendProbe?.push({
-      kind: 'automation-send',
-      error: 'no_request_fired',
+    console.error('[GLM++] automation send fired no request at all', {
+      taskId,
+      submitPath,
+      sendBtnExists: !!sendButton,
+      sendBtnDisabled: sendButton?.disabled ?? null,
       jumped: readZaiChatSessionId() !== null,
       hasStop: isAgentCurrentlyRunning(),
     });
-    syncDiagnosticsToMainWorld();
     return false;
   } finally {
     domSendInFlight = false;
@@ -2471,11 +2218,11 @@ async function waitForDomTaskRecognized(taskId: string, timeoutMs = AUTOMATION_R
   return false;
 }
 
-/** 等 augRequests 出现新记录（首条 chatNew 从发送到 main-world hook 上报串行队列有延迟）。 */
+/** 等 `observedAugRequestCount` 变大（首条 chatNew 从发送到 main-world hook 上报串行队列有延迟）。 */
 async function waitForNewAugRequest(beforeCount: number, timeoutMs = 1_200): Promise<boolean> {
   const endAt = Date.now() + timeoutMs;
   while (Date.now() < endAt) {
-    if ((diag.augRequests?.length ?? 0) > beforeCount) return true;
+    if (observedAugRequestCount > beforeCount) return true;
     await sleep(80);
   }
   return false;
@@ -2533,49 +2280,10 @@ function submitFormViaRequestSubmit(
   return 'ok';
 }
 
-/** 从请求 body 字符串里读 user 消息的 prompt 头（chatNew 读 chat.history，completion 读 messages）。 */
-function readPromptHead(bodyStr: string, route: 'chatNew' | 'completion'): string {
-  try {
-    const parsed = JSON.parse(bodyStr) as Record<string, unknown>;
-    if (route === 'chatNew') {
-      const firstText = parseZaiChatNewBody(parsed)?.userMessageTexts[0] ?? '';
-      if (firstText) return `chatNew:${firstText.slice(0, 60)}`;
-      // 兜底：直接抓 body.chat.history 任一 content，看真实形状。
-      const chat = parsed.chat as Record<string, unknown> | undefined;
-      const history = chat?.history as Record<string, unknown> | undefined;
-      const msgs = history?.messages as Record<string, unknown> | undefined;
-      const anyContent = Object.values(msgs ?? {})
-        .map((m) => (m && typeof m === 'object' ? (m as Record<string, unknown>).content : undefined))
-        .find((c) => typeof c === 'string');
-      return anyContent ? `chatNew~raw:${String(anyContent).slice(0, 60)}` : '[chatNew: no user text found]';
-    }
-    const prompt = readZaiLastUserMessageText(parsed);
-    return prompt ? `completion:${prompt.slice(0, 60)}` : '[completion: no user message]';
-  } catch {
-    return '[unparseable body]';
-  }
-}
-
-/** 读请求 body 里 user 消息数量（首条/续跑诊断用）。 */
-function readUserMessageCount(bodyStr: string): number {
-  try {
-    const parsed = JSON.parse(bodyStr) as Record<string, unknown>;
-    const messages = parsed.messages;
-    if (!Array.isArray(messages)) return 0;
-    return messages.filter(
-      (m) => m && typeof m === 'object' && (m as Record<string, unknown>).role === 'user',
-    ).length;
-  } catch {
-    return -1;
-  }
-}
-
 const AUTOMATION_SEND_MAX_ATTEMPTS = 3;
 const AUTOMATION_SUBMIT_SETTLE_MS = 120;
-const AUTOMATION_KEY_SEND_SETTLE_MS = 600;
 const AUTOMATION_RECOGNIZE_TIMEOUT_MS = 5_000;
 const AUTOMATION_SEND_RETRY_DELAY_MS = 800;
-const USER_MESSAGE_SELECTOR = '.user-message';
 
 /**
  * 派发一次真人风格的 Enter 按键（只发 keydown，不三连发）。
@@ -2667,7 +2375,6 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
 
     // 等上一轮生成结束，避免首页双提交（首条消息卡在首页的根因）。
     if (!(await waitForAgentIdle())) {
-      diag.sendProbe?.push({ kind: 'form', error: 'agent_not_idle' });
       return false;
     }
 
@@ -2684,7 +2391,6 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
     const sendButton = await waitForSendButtonEnabled();
     if (!sendButton) {
       textarea.disabled = wasDisabled;
-      diag.sendProbe?.push({ kind: 'form', error: 'no_send_button' });
       return false;
     }
 
@@ -2692,14 +2398,12 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
     const outcome = submitFormViaRequestSubmit(textarea);
     if (outcome !== 'ok') {
       textarea.disabled = wasDisabled;
-      diag.sendProbe?.push({ kind: 'form', error: outcome });
       return false;
     }
 
     // 成功判定：Svelte 提交后 input 会被清空。
     const sentOk = await waitForComposerCleared();
     textarea.disabled = wasDisabled;
-    diag.sendProbe?.push({ kind: 'form', sentOk });
     if (sentOk) return true;
     // input 没清空，但请求计数涨了也算发出去了（跟 DOM 路同一兜底判定）。
     return waitForRequestObserved(Date.now());
@@ -2863,22 +2567,7 @@ const conversationTitleResolver = createZaiConversationTitleResolver({
     return typeof localStorage === 'undefined' ? null : localStorage.getItem('token');
   },
   fetchImpl: (input, init) => fetch(input, init),
-  onDiagnostic: (event) => {
-    reportTitleLookup(event);
-  },
 });
-
-/**
- * 标题链路的诊断上报（解析结果 + 补名决策）。
- *
- * ⚠️ **不能走 `syncDiagnosticsToMainWorld()`** —— 那个通道的合并是**追加**语义
- * （`[...current, ...incoming]`）而隔离侧发的是整个数组，每次调用都会把已有条目
- * 再追加一遍。这条链路触发很密（每次发消息都会问一次标题），走那条路会平方级重复。
- * 所以单独开一条消息**逐条上报**。
- */
-function reportTitleLookup(entry: unknown): void {
-  postToMainWorld({ type: 'TITLE_LOOKUP', entry });
-}
 
 /**
  * 注入 UI 的主题跟随：把 z.ai 页面的 `html.light` / `html.dark` 投影成
@@ -3015,10 +2704,7 @@ function installProjectPanel(): void {
       });
     },
     async resolveConversationTitle(conversationId) {
-      return conversationTitleResolver.resolve(conversationId, 'panel-backfill');
-    },
-    onBackfillDiagnostic(event) {
-      reportTitleLookup({ ...event, at: Date.now() });
+      return conversationTitleResolver.resolve(conversationId);
     },
     async setPending(projectId) {
       await sendRuntimeMessageStrict({
@@ -3106,12 +2792,6 @@ function finishContinuationLoop(loop: ContinuationLoop): void {
   loop.activeRequestId = null;
   loop.pendingPrompt = null;
   continuationLoop = null;
-  stampLoopDiagnostic();
-  console.log('[GLM++] continuation loop complete', {
-    steps: loop.stepCount,
-    executions: loop.toolExecutions.length,
-    taskId: loop.taskId,
-  });
   // 后台 DOM 任务：续跑收尾 → 回传终态成功并清理归属（方案 §4.1 / §2.6）。
   if (loop.taskId) {
     const task = activeDomTasks.get(loop.taskId);
@@ -3130,8 +2810,6 @@ function finishContinuationLoop(loop: ContinuationLoop): void {
       steps: loop.stepCount,
     });
   }
-  // 循环收尾时，把隔离世界的诊断同步到页面 window（sendProbe/failures/errors 等）。
-  syncDiagnosticsToMainWorld();
 }
 
 // ---------------------------------------------------------------------------
@@ -3245,7 +2923,6 @@ async function terminateDomTaskAsStopped(taskId: string, requestId: string): Pro
     finishContinuationLoop(continuationLoop);
   }
   clearActiveDomTask(taskId);
-  diag.failures?.push({ kind: 'manual_stop_detected', taskId, requestId });
   void sendRuntimeMessage({
     type: 'DOM_TASK_FAILED',
     taskId,
@@ -3302,7 +2979,6 @@ async function sendPromptPrimitive(prompt: string): Promise<boolean> {
 
     // 等上一轮生成结束，避免注入被当作用户抢答丢弃（首页首条尤其重要）。
     if (!(await waitForAgentIdle())) {
-      diag.sendProbe?.push({ kind: 'shared-send', error: 'agent_not_idle' });
       return false;
     }
 
@@ -3315,7 +2991,6 @@ async function sendPromptPrimitive(prompt: string): Promise<boolean> {
     const sendButton = await waitForSendButtonEnabled();
     if (!sendButton) {
       textarea.disabled = wasDisabled;
-      diag.sendProbe?.push({ kind: 'shared-send', error: 'no_send_button' });
       return false;
     }
 
@@ -3325,7 +3000,6 @@ async function sendPromptPrimitive(prompt: string): Promise<boolean> {
     const sentOk = await waitForComposerCleared();
     textarea.disabled = wasDisabled;
     if (sentOk) {
-      diag.sendProbe?.push({ kind: 'shared-send', sentOk: true });
       return true;
     }
     // 兜底：请求计数涨了也算发出去了（续跑模板请求会被 peek 计数）。
@@ -3456,87 +3130,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ---------------------------------------------------------------------------
-// composer 结构快照（自动化诊断用）：把输入框所在「楼层」的 top-level 形状
-// 抓下来，判断页面到底是哪套 UI、send 按钮在哪、以及输入框外层有没有拦截层。
-// 属性去敏感，只留结构；最多 6 层、每节点最多 4 个 prop。
-// ---------------------------------------------------------------------------
-
-const COMPOSER_BUILDINGS = [
-  '#chat-input',
-  'textarea',
-  'form',
-  '[data-editor]',
-  '[contenteditable="true"]',
-  '.chat-input',
-  '[class*="chat-input" i]',
-  '[class*="composer" i]',
-  '[id*="send" i]',
-  '[aria-label*="send" i]',
-  '[aria-label*="Send" i]',
-].map((selector) => ({ kind: 'sel', selector }));
-
-function snapshotReplyComposer(): unknown {
-  return {
-    url: location.href,
-    time: Date.now(),
-    buildings: COMPOSER_BUILDINGS.map((q) => {
-      let el: Element | null = null;
-      try {
-        el = document.querySelector(q.selector);
-      } catch {
-        el = null;
-      }
-      if (!el) return { q: q.selector, found: false };
-      return {
-        q: q.selector,
-        found: true,
-        id: el.id || null,
-        disabled: (el as HTMLTextAreaElement).disabled ?? (el as HTMLButtonElement).disabled ?? null,
-        wrapAttr: el.getAttribute('data-editor') ?? el.getAttribute('contenteditable') ?? null,
-        path: buildAncestorPath(el),
-      };
-    }),
-  };
-}
-
-function buildAncestorPath(el: Element): string {
-  const parts: string[] = [];
-  let node: Element | null = el;
-  for (let depth = 0; node && depth < 6; depth += 1) {
-    parts.push(buildNodeLabel(node, depth));
-    node = node.parentElement;
-  }
-  return parts.join(' < ');
-}
-
-function buildNodeLabel(node: Element, depth: number): string {
-  const tag = node.tagName.toLowerCase();
-  const id = node.id ? `#${node.id}` : '';
-  const cls = typeof node.className === 'string'
-    ? `.${node.className.trim().split(/\s+/).slice(0, 2).join('.')}`
-    : '';
-  const aria = node.getAttribute('aria-label')
-    ? `[aria*="${node.getAttribute('aria-label')!.slice(0, 14)}"]`
-    : '';
-  const type = depth === 0 ? buildNodeExtra(node) : '';
-  return `${tag}${id}${cls}${aria}${type}`;
-}
-
-function buildNodeExtra(node: Element): string {
-  const props: string[] = [];
-  const el = node as HTMLElement;
-  if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
-    props.push(`value=${JSON.stringify(el.value.slice(0, 30))}`);
-    props.push(`disabled=${el.disabled}`);
-  } else if (el instanceof HTMLButtonElement) {
-    props.push(`disabled=${el.disabled}`);
-    props.push(`type=${el.type || el.getAttribute('type') || '(none)'}`);
-    props.push(`text=${JSON.stringify((el.innerText || el.textContent || '').trim().slice(0, 12))}`);
-  }
-  return props.length > 0 ? ` ${props.slice(0, 4).join(' ')}` : '';
-}
-
 async function waitForRequestObserved(sinceTs: number): Promise<boolean> {
   // 判定「注入的续跑 prompt 真的发出去」：看 AUGMENT_REQUEST_BODY 是否观察到一条续跑请求。
   // 不能用 continuationLoop.status 判定（会自锁：RESPONSE_COMPLETE 在串行队列里被本函数阻塞，
@@ -3653,7 +3246,7 @@ export default defineContentScript({
         // 标题优先问服务端（侧边栏那行是二手源，见 conversationTitleResolver 的说明）；
         // 拿不到再退回侧边栏，仍拿不到就是占位串 —— 后台的闸门会拒绝它，不会被落库。
         void (async () => {
-          const resolved = await conversationTitleResolver.resolve(conversationId, 'sidebar-read');
+          const resolved = await conversationTitleResolver.resolve(conversationId);
           sendResponse({
             ok: true,
             conversation: {
@@ -3732,8 +3325,6 @@ export default defineContentScript({
     installProjectPanel();
 
     await loadAndSyncRuntimeState();
-    stampLoopDiagnostic();
-    console.log('[GLM++] isolated content ready');
   },
 });
 

@@ -165,20 +165,33 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
  * `<details>` 时，开头不是它 ⇒ 不被误剥。唯一不可约的假阳性是「回答恰好以裸的
  * 未围栏 `<details>…</details>` 开头且后续仍有正文」，极罕见。
  *
- * ⚠️ **另一个已知残余：嵌套 `<details>`** —— 正则非贪婪，`<details>思考<details>内层</details>更多</details>正文`
- * 会剥成 `更多</details>正文`（留半截思考 + 一个孤立闭标签）。真机思考块内嵌 `<details>` 概率极低，
- * 未处理；孤立的 `</details>` 会进 `extractXmlTagNames` 的诊断（只影响诊断噪声，不影响执行）。
+ * ⚠️⚠️ **必须按「配平的闭合标签」剥，不能用非贪婪正则** —— 非贪婪会在**内层**的
+ * `</details>` 处收手，`<details>思考<details>内层</details>更多</details>正文`
+ * 会剥成 `更多</details>正文`：外层剩下的半截思考被当成正文留下。
+ * 而 `assistantText` 是工具识别的输入（`extractAndNotifyToolCalls` 与兜底
+ * `parseToolXml`），**模型写在思考里的工具 XML 会因此漏出去并真的被执行** ——
+ * 单层时那种 XML 会随整块一起被剥掉，嵌套时这个保护就没了。
  */
 export function stripZaiThinkingBlocks(text: string): string {
   if (!text || !text.toLowerCase().includes('<details')) return text;
   let out = text;
   // 剥开头的思考块（连续多个也一并剥）。
   for (;;) {
+    // 先按配平的闭合标签整块剥（见上方说明）。
+    const balancedEnd = findBalancedLeadingDetailsEnd(out);
+    if (balancedEnd !== null) {
+      const rest = out.slice(balancedEnd);
+      // 剥完必须还有正文，否则不认它是思考块 —— 防「回答本身就是个 details 元素」被误剥。
+      // ⚠️ 这一档**退回下面的非贪婪路径**，不能直接 `return out`：`out` 可能是一整个
+      // 嵌套块，整段吐回去会把思考里的工具 XML 一并交出去。
+      if (rest.trim()) {
+        out = rest;
+        continue;
+      }
+    }
     const match = ZAI_LEADING_DETAILS_RE.exec(out);
     if (!match) break;
     const rest = out.slice(match[0].length);
-    // 剥完必须还有正文，否则不认它是思考块 —— 防「回答本身就是个 details 元素」被误剥。
-    // ⚠️ **返回 `out` 而不是 `text`** —— 此时前面几轮已剥掉的思考块不该被「吐回来」。
     if (!rest.trim()) return out;
     out = rest;
   }
@@ -189,8 +202,31 @@ export function stripZaiThinkingBlocks(text: string): string {
   return out.replace(/^\s+/, '');
 }
 
+/**
+ * 取「开头那个配平的 `<details>` 块」的结束偏移。不配平（从未闭合 / 内层未闭合）返回 null，
+ * 交给非贪婪路径按截断语义处理。
+ *
+ * 判据是**深度归零**，不是「遇到第一个 `</details>`」—— 后者正是嵌套形态剥错的成因。
+ */
+function findBalancedLeadingDetailsEnd(text: string): number | null {
+  if (!ZAI_LEADING_DETAILS_OPEN_RE.test(text)) return null;
+  let depth = 0;
+  ZAI_DETAILS_TAG_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = ZAI_DETAILS_TAG_RE.exec(text))) {
+    if (match[0][1] === '/') {
+      depth -= 1;
+      if (depth === 0) return match.index + match[0].length;
+    } else {
+      depth += 1;
+    }
+  }
+  return null;
+}
+
 const ZAI_LEADING_DETAILS_RE = /^\s*<details\b[^>]*>[\s\S]*?<\/details>/i;
 const ZAI_LEADING_DETAILS_OPEN_RE = /^\s*<details\b/i;
+const ZAI_DETAILS_TAG_RE = /<details\b[^>]*>|<\/details\s*>/gi;
 
 /** 在 SSE 累积文本里提取工具 XML（供 fetch hook 增广侧判断是否需要续跑）。 */
 export function extractZaiToolCalls(
