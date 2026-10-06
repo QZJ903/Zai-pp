@@ -176,6 +176,16 @@ const chatSessionIdByRequestId = new Map<string, string | null>();
 const isAgentTurnByRequestId = new Map<string, boolean>();
 /** requestId → 本轮是否开着原生联网：与上面同理，供 handleResponseComplete 建续跑循环时取用。 */
 const nativeSearchOnByRequestId = new Map<string, boolean>();
+/**
+ * requestId → 本轮激活的本地 Skill 目录（只在真有激活时写入）。
+ *
+ * ⚠️ **建授权时已经用了它，这里再记一份是给续跑循环用的** —— 续跑轮会**重新建授权**
+ * （防上一轮 grant 被关掉），而续跑 prompt 是模板、不是用户输入，重新跑一遍 Skill 激活
+ * 只会得到 null。所以要把「启动该循环的那一轮」的目录带到循环上（与 `isAgentTurn` /
+ * `nativeSearchOn` / `model` 同一类状态）。少了它，续跑轮里 `shell_exec` 的初始 cwd
+ * 就不再被归一到 Skill 目录，而**提示词里那句软约束照样在** ⇒ 静默退化。
+ */
+const localSkillDirByRequestId = new Map<string, string>();
 /** requestId → 本轮已完成的工具执行记录（TOOL_CALL 通道执行后写入，response 里读取续跑判定）。 */
 const executionsByRequest = new Map<string, ToolExecutionRecord[]>();
 /**
@@ -206,9 +216,9 @@ const requestToolDescriptorsByRequestId = new Map<string, ToolDescriptor[]>();
  * ⚠️ **没有 `REQUEST_TERMINAL` 的两条路径会留下残余**：HTML 挑战页与响应直接 reject
  * （fetch hook 在这两条路上只发各自的回调）。但这两条路都没有流、也就没有工具执行，
  * 所以 `executedToolCallSignatures` / `executionsByRequest` 两个大容器根本不会被写；
- * 残留的是 `chatSessionIdByRequestId` / `isAgentTurnByRequestId` / `nativeSearchOnByRequestId`
- * 三个 UUID 级小条目，**外加 `requestToolDescriptorsByRequestId`**（增广已成功、已写入，
- * 但它不是小条目 —— 是整份 `descriptors` 数组）。**这是有意接受的**：
+ * 残留的是 `chatSessionIdByRequestId` / `isAgentTurnByRequestId` / `nativeSearchOnByRequestId` /
+ * `localSkillDirByRequestId` 四个 UUID / 短串级小条目，**外加 `requestToolDescriptorsByRequestId`**
+ * （增广已成功、已写入，但它不是小条目 —— 是整份 `descriptors` 数组）。**这是有意接受的**：
  * 让 terminal 在这两条路上也发出会连带触发 `armManualStopDetection`，可能给高峰挑战
  * 误报一次 `DOM_TASK_FAILED` —— 那是行为改动，不该混在内存清理里。
  */
@@ -218,6 +228,7 @@ function releaseRequestState(requestId: string): void {
   chatSessionIdByRequestId.delete(requestId);
   isAgentTurnByRequestId.delete(requestId);
   nativeSearchOnByRequestId.delete(requestId);
+  localSkillDirByRequestId.delete(requestId);
   requestToolDescriptorsByRequestId.delete(requestId);
 }
 /** 主世界消息串行队列：保证 TOOL_CALL → RESPONSE_COMPLETE → REQUEST_TERMINAL 按顺序执行。 */
@@ -286,6 +297,15 @@ interface ContinuationLoop {
   nativeSearchOn: boolean;
   /** 归属任务选定的模型 id：续跑轮也要把同一模型写回请求体。 */
   model: string | null;
+  /**
+   * 启动该循环的那一轮激活的本地 Skill 目录（没激活则为 null）。
+   *
+   * ⚠️ **续跑轮必须复用它** —— 续跑 prompt 是模板、不是用户输入，重新跑一遍 Skill 激活
+   * 只会得到 null（`parseSkillCommand` 匹配不到 `/名字`、隐式打分也对不上模板文本）。
+   * 少了它，续跑轮建的 grant 就没有 `localSkillDir`，`shell_exec` 的初始 cwd 不再被归一
+   * 到 Skill 目录 —— 而**提示词里那句软约束照旧在**，所以是静默退化。
+   */
+  localSkillDir: string | null;
 }
 
 let continuationLoop: ContinuationLoop | null = null;
@@ -697,6 +717,13 @@ async function createToolAuthorization(input: {
   chatSessionId: string | null;
   descriptorIds?: string[];
   toolIntent?: string;
+  /**
+   * 本轮激活的本地 Skill 目录（由 `resolveActiveLocalSkill` 算出）。
+   * 后台**不会直接采信**它 —— 先过 `validateLocalSkillDirectory` 确认是某个已导入
+   * 本地 Skill 的目录，不是就丢弃。带上它的唯一作用：让执行期把
+   * `shell_exec` / `shell_session_begin` 的初始 cwd 归一到 Skill 目录。
+   */
+  localSkillDir?: string;
 }): Promise<ToolAuthorizationGrantSummary> {
   const response = await sendRuntimeMessageStrict<unknown>({
     type: 'CREATE_TOOL_AUTHORIZATION',
@@ -870,9 +897,61 @@ function djb2Hash(value: string): string {
   return (hash >>> 0).toString(36);
 }
 
+interface ActiveLocalSkill {
+  resolved: ReturnType<typeof resolveSkills>;
+  /** 激活的本地索引 Skill 的盘上目录；没激活则为 `undefined`。 */
+  activeLocalSkillDir: string | undefined;
+}
+
+/**
+ * 解析本轮激活的本地索引 Skill：显式 `/技能名` 触发优先；无触发词时按描述打分隐式激活
+ * （受 `skillAutoActivation` 门控）。
+ *
+ * ⚠️ **必须在建授权之前调用** —— 它算出的 `activeLocalSkillDir` 要随
+ * `CREATE_TOOL_AUTHORIZATION` 上报给后台，后台才可能在执行期把
+ * `shell_exec` / `shell_session_begin` 的初始 cwd 归一到 Skill 目录
+ * （`core/tool/local-skill-cwd.ts` 的 `enforceLocalSkillCwd`）。少了它，提示词里那句
+ * 「Run commands with the initial cwd set to the Skill directory path」只是**软约束**。
+ *
+ * ⚠️ **值来自扩展自己算出的激活结果**，不是页面/模型声明的字段；后台仍会再校验一次它
+ * 是不是某个已导入本地 Skill 的目录（`validateLocalSkillDirectory`），不是就丢弃。
+ *
+ * ⚠️ **抽成独立函数是因为建授权与提示词增广都要它，而两者顺序不能互换**（增广要授权返回的
+ * descriptors，授权要这里的 dir）⇒ 只能先算好、再分别喂给两边。**同一件事算两遍必然分叉。**
+ */
+function resolveActiveLocalSkill(
+  originalPrompt: string,
+  isFirstMessage: boolean,
+): ActiveLocalSkill {
+  const locale = currentContentLocale ?? DEFAULT_LOCALE;
+  const invocation = parseSkillCommand(originalPrompt);
+  let resolved: ReturnType<typeof resolveSkills> = null;
+  let activeLocalSkillDir: string | undefined;
+  const skills: AugmentationSkill[] = currentSkills.filter((skill) => skill.enabled !== false);
+
+  if (invocation) {
+    const primarySkill = skills.find((skill) => skill.name === invocation.skillName);
+    if (primarySkill && isLocalIndexSkill(primarySkill)) {
+      activeLocalSkillDir = primarySkill.remote?.localDirectory || undefined;
+    }
+    resolved = resolveSkills(skills, invocation.skillName, invocation.args, locale);
+  } else {
+    const auto = currentSkillAutoActivation ?? DEFAULT_SKILL_AUTO_ACTIVATION_SETTINGS;
+    const implicitAllowed = auto.everyMessage || (auto.firstMessage && isFirstMessage);
+    if (implicitAllowed) {
+      const picked = selectImplicitLocalSkill(skills, originalPrompt);
+      if (picked) {
+        activeLocalSkillDir = picked.remote?.localDirectory || undefined;
+        resolved = { combinedPrompt: composeLocalSkillPrompt(picked), memoryEnabled: picked.memoryEnabled, skillName: picked.name };
+      }
+    }
+  }
+  return { resolved, activeLocalSkillDir };
+}
+
 function augmentPrompt(
   originalPrompt: string,
-  options?: {
+  options: {
     toolDescriptors?: readonly ToolDescriptor[];
     isFirstMessage?: boolean;
     projectContext?: string | null;
@@ -880,6 +959,8 @@ function augmentPrompt(
     isAgent?: boolean;
     /** 本轮是否开着页面原生联网（等同「用户想搜」）。 */
     nativeSearchOn?: boolean;
+    /** 本轮的 Skill 激活结果，由调用方经 `resolveActiveLocalSkill` 算出（见其说明）。 */
+    skillActivation: ActiveLocalSkill;
   },
 ): string {
   const isFirstMessage = options?.isFirstMessage ?? true;
@@ -917,30 +998,8 @@ function augmentPrompt(
   const memoryEnabled = promptSettings.memoryEnabled;
   const systemPromptEnabled = promptSettings.systemPromptEnabled;
 
-  // Skill 激活：对齐 ds++ 的 request-augmentation 逻辑。显式 `/技能名` 触发优先；
-  // 无触发词时，local indexed skill 按描述打分隐式激活（受 skillAutoActivation 门控）。
-  const invocation = parseSkillCommand(originalPrompt);
-  let resolved: ReturnType<typeof resolveSkills> = null;
-  let activeLocalSkillDir: string | undefined;
-  const skills: AugmentationSkill[] = currentSkills.filter((skill) => skill.enabled !== false);
-
-  if (invocation) {
-    const primarySkill = skills.find((skill) => skill.name === invocation.skillName);
-    if (primarySkill && isLocalIndexSkill(primarySkill)) {
-      activeLocalSkillDir = primarySkill.remote?.localDirectory || undefined;
-    }
-    resolved = resolveSkills(skills, invocation.skillName, invocation.args, locale);
-  } else {
-    const auto = currentSkillAutoActivation ?? DEFAULT_SKILL_AUTO_ACTIVATION_SETTINGS;
-    const implicitAllowed = auto.everyMessage || (auto.firstMessage && isFirstMessage);
-    if (implicitAllowed) {
-      const picked = selectImplicitLocalSkill(skills, originalPrompt);
-      if (picked) {
-        activeLocalSkillDir = picked.remote?.localDirectory || undefined;
-        resolved = { combinedPrompt: composeLocalSkillPrompt(picked), memoryEnabled: picked.memoryEnabled, skillName: picked.name };
-      }
-    }
-  }
+  // Skill 激活：由调用方在建授权之前算好传进来（它同时要拿去建授权，见函数说明）。
+  const { resolved, activeLocalSkillDir } = options.skillActivation;
 
   // local index skill → 激活指令 + index 注入 system context（强制先读 SKILL.md）。
   // custom/builtin skill → 指令作为「可见用户输入」注入（原用户输入压进 metadata），
@@ -1094,10 +1153,17 @@ async function handleAugmentRequestBody(
         ? (activeDomTasks.get(firstTaskId)?.searchEnabled === true || readChatNewNativeSearchEnabled(body))
         : readChatNewNativeSearchEnabled(body);
 
+      // ⚠️ **Skill 激活必须早于建授权** —— 它算出的 `activeLocalSkillDir` 要随授权一起
+      // 上报给后台，后台才可能在执行期把 `shell_exec` 的初始 cwd 归一到 Skill 目录。
+      // 顺序反过来（先建授权再激活）就只能拿到一份没有 dir 的 grant，而**表现是静默的**：
+      // 提示词里照样写着「initial cwd set to the Skill directory path」，只是没人强制它。
+      const skillActivation = resolveActiveLocalSkill(firstText, true);
+
       const authorization = await createToolAuthorization({
         requestId,
         chatSessionId,
         toolIntent: firstText.slice(0, 16_000),
+        localSkillDir: skillActivation.activeLocalSkillDir,
       });
       // ⚠️ **这份 grant 既不进 `activeToolAuthorizations`、也不写
       // `requestToolDescriptorsByRequestId`** —— chatNew 请求**没有终态事件**
@@ -1125,6 +1191,7 @@ async function handleAugmentRequestBody(
           nativeSearchOn,
           projectContext: pendingProject?.context ?? null,
           projectId: pendingProject?.projectId ?? null,
+          skillActivation,
         }),
       );
       const nextBody = rewriteZaiChatNewUserMessages(body, augmented);
@@ -1216,6 +1283,11 @@ async function handleAugmentRequestBody(
         requestId,
         chatSessionId,
         descriptorIds: currentToolDescriptors.map((d) => d.id),
+        // 续跑轮不重跑 Skill 激活（prompt 是模板，重跑必然拿不到），沿用启动该循环那轮记下的。
+        // ⚠️ **循环已不在时（`continuationLoop` 为 null）这一轮退化为「只保留提示词软约束」**，
+        // 与改动前一致 —— 此刻无法凭空造出 dir，可选动作只有「放行」或「让这一轮显式失败」，
+        // 而后者会把「用户手打一段形似续跑模板的文本」从正常回答变成工具全不可用，属行为改动。
+        localSkillDir: continuationLoop?.localSkillDir ?? undefined,
       });
       activeToolAuthorizations.set(requestId, auth);
       // 记下本请求实际注入的那份描述符（续跑轮用授权返回的、与提示词同源）。
@@ -1261,19 +1333,33 @@ async function handleAugmentRequestBody(
       return;
     }
 
+    // 首条判定与 agent 判定都只读 body（纯函数、无 await），提前到这里 ——
+    // 因为 **Skill 激活要用 `isFirstMessage`**（隐式激活的 `firstMessage` 门控依赖它），
+    // 而 Skill 激活必须早于建授权（见下）。
+    const parentId = readZaiCurrentUserMessageParentId(body);
+    const isFirstMessage = parentId === null || parentId === undefined;
+    // completion 路由的 agent 判定：features.flags 里含 general_agent。
+    const isAgentTurn = readZaiAgentFlag(body);
+
+    // ⚠️ **Skill 激活必须早于建授权** —— `activeLocalSkillDir` 要随授权上报给后台，
+    // 后台才可能把 `shell_exec` / `shell_session_begin` 的初始 cwd 归一到 Skill 目录。
+    // 顺序反了只会得到一份没有 dir 的 grant，而表现是静默的（提示词里的软约束照旧在）。
+    const skillActivation = resolveActiveLocalSkill(originalPrompt, isFirstMessage);
+
     // 先建授权（toolIntent → MCP capability 投影），再用授权返回的 descriptors 增广。
     const auth = await createToolAuthorization({
       requestId,
       chatSessionId,
       toolIntent: originalPrompt.slice(0, 16_000),
+      localSkillDir: skillActivation.activeLocalSkillDir,
     });
     activeToolAuthorizations.set(requestId, auth);
     // 记下本请求实际注入的那份描述符（completion 轮：与提示词同源）。
     requestToolDescriptorsByRequestId.set(requestId, auth.descriptors);
-    const parentId = readZaiCurrentUserMessageParentId(body);
-    const isFirstMessage = parentId === null || parentId === undefined;
-    // completion 路由的 agent 判定：features.flags 里含 general_agent。
-    const isAgentTurn = readZaiAgentFlag(body);
+    // 记下本轮的 Skill 目录：续跑循环要用（续跑 prompt 是模板，重跑激活只会得到 null）。
+    if (skillActivation.activeLocalSkillDir !== undefined) {
+      localSkillDirByRequestId.set(requestId, skillActivation.activeLocalSkillDir);
+    }
     // 记下 requestId → agent 标记：续跑/nudge 轮要用同一套模型侧裁剪口径。
     isAgentTurnByRequestId.set(requestId, isAgentTurn);
     // 联网判定：自动化任务自身的 searchEnabled，或 body 已带原生联网标记
@@ -1300,6 +1386,7 @@ async function handleAugmentRequestBody(
       projectId: project?.projectId ?? null,
       isAgent: isAgentTurn,
       nativeSearchOn,
+      skillActivation,
     });
     currentRequestMessageCount = isFirstMessage ? 1 : currentRequestMessageCount + 1;
     const nextBody = rewriteZaiLastUserMessage(body, augmented);
@@ -1993,6 +2080,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     isAgentTurn: isAgentTurnByRequestId.get(complete.requestId) ?? false,
     nativeSearchOn: nativeSearchOnByRequestId.get(complete.requestId) ?? false,
     model: resolveLoopModel(complete.requestId),
+    localSkillDir: localSkillDirByRequestId.get(complete.requestId) ?? null,
   };
   // 这里不再单独清 `isAgentTurnByRequestId` / `nativeSearchOnByRequestId` ——
   // 释放统一由 `releaseRequestState` 在 `REQUEST_TERMINAL` 做。原先只在这个分支里清，
@@ -3113,6 +3201,16 @@ async function waitForComposerCleared(): Promise<boolean> {
   return false;
 }
 
+/**
+ * 写输入框并派发 `input` 事件（自动化发送链的共享原语）。
+ *
+ * ⚠️ **本写法已在 z.ai 真机验证有效**（原生 value setter + 冒泡的 `input` 事件，
+ * 页面据此更新 Svelte bound-value）。不 disable 输入框。
+ *
+ * ⚠️ **`inputType` / `data` 在本站点无人读**（真机验证：写完后 `value` 完整保留、
+ * 全程没有 `beforeinput` 监听）⇒ 这里写 `insertText` + 占位 `data` 与上游的
+ * `insertFromPaste` + 真实文本**等价**，不必为了「对齐上游」去改。
+ */
 function setTextareaValue(textarea: HTMLTextAreaElement, text: string): void {
   const setter = Object.getOwnPropertyDescriptor(
     window.HTMLTextAreaElement.prototype,
@@ -3124,9 +3222,13 @@ function setTextareaValue(textarea: HTMLTextAreaElement, text: string): void {
 }
 
 /**
- * 插入文本到聊天输入框（对齐 ds++ 的 insertTextIntoPromptTextarea 语义）。
+ * 插入文本到聊天输入框。
  * 走原生 value setter + input/change 事件，让 Svelte bound-value 同步，返回
  * { ok, insertedLength } 或 { ok:false, error }。供保存项「插入到对话」复用。
+ *
+ * ⚠️ **InputEvent 的 `data` / `inputType` 在本站点无人读**（真机验证过）——
+ * 所以这里写 `insertText` + 占位 `data` 与上游的 `insertFromPaste` + 真实文本等价，
+ * 不必为了「对齐上游」去改。见 `setTextareaValue`。
  */
 function insertPromptText(text: string): { ok: true; insertedLength: number } | { ok: false; error: string } {
   if (text.length === 0) return { ok: false, error: 'empty_prompt_text' };

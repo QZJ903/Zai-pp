@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createSkillCreatorToolDescriptors } from '../core/skill/creator-tool';
 import { createMemoryImportToolDescriptors } from '../core/memory/import-tool';
+import { createMcpCapabilityToolDescriptors } from '../core/mcp/capability-tools';
 import { tool as zhTool } from '../core/i18n/resources/zh-CN/tool';
 import { tool as enTool } from '../core/i18n/resources/en/tool';
 
@@ -11,6 +12,13 @@ import { tool as enTool } from '../core/i18n/resources/en/tool';
  * 与用户界面无关，而英文 schema 对模型更稳。既有先例是 web / memory / browser
  * 三组工具的描述符（见 `core/i18n/resources/zh-CN/tool.ts` 的 `web` 块 ——
  * `searchTitle` / `searchDescription` 等在 zh 资源里也是英文）。
+ *
+ * ⚠️ **「schema」的范围要卡准**：只指 `renderToolSchema`（`core/prompt/augmentation.ts`）
+ * 渲染的那几样 —— `descriptor.title` / `descriptor.description` / `descriptor.inputSchema`。
+ * 对应资源就是 `title` / `description` / `*Title` / `*Description` 这些键。
+ * ⚠️ **`providerName` 不在这个面里** —— 它不进 `### Tool` 段，进的是「工具结果」
+ * （续跑 prompt 的 `<tool_results>`、`mcp_discover` 的返回值）⇒ **`mcpCapability` 与
+ * `browser` 的 `providerName` 保持中文是有意的，别顺手改**。
  *
  * ⚠️ **为什么要有这条测试**：i18n 的两个校验都不管这件事 ——
  * `verify:i18n` 的 locale-check 只比键的存在性、coverage-audit 只管有没有裸中文，
@@ -35,6 +43,29 @@ function schemaText(descriptor: {
   return [descriptor.title, descriptor.description, JSON.stringify(descriptor.inputSchema)].join('\n');
 }
 
+/**
+ * 只取描述符里**属于 `### Tool` 段**的那三样，用于跨语言比对。
+ *
+ * ⚠️ **不能直接比整个描述符** —— `provider` 里带 `displayName`，而它在 zh 下
+ * **刻意是中文**（见文件头）。整比会让「zh 的 providerName 保持中文」这条正确行为
+ * 反过来把测试弄红。
+ */
+function schemaPortion(descriptor: {
+  name: string;
+  invocationName: string;
+  title: string;
+  description: string;
+  inputSchema: unknown;
+}): unknown {
+  return {
+    name: descriptor.name,
+    invocationName: descriptor.invocationName,
+    title: descriptor.title,
+    description: descriptor.description,
+    inputSchema: descriptor.inputSchema,
+  };
+}
+
 describe('tool schema copy stays English under zh-CN', () => {
   it('keeps the Skill draft tool schema free of Chinese', () => {
     const [descriptor] = createSkillCreatorToolDescriptors('zh-CN');
@@ -51,15 +82,37 @@ describe('tool schema copy stays English under zh-CN', () => {
     expect(descriptor).toEqual(createMemoryImportToolDescriptors('en')[0]);
   });
 
+  it('keeps every MCP capability tool schema free of Chinese', () => {
+    const zhDescriptors = createMcpCapabilityToolDescriptors('zh-CN');
+    const enDescriptors = createMcpCapabilityToolDescriptors('en');
+    // 三个描述符：mcp_discover / mcp_describe / mcp_invoke
+    expect(zhDescriptors.length).toBeGreaterThan(0);
+    expect(zhDescriptors.map((descriptor) => descriptor.name)).toEqual(
+      enDescriptors.map((descriptor) => descriptor.name),
+    );
+
+    for (const [index, descriptor] of zhDescriptors.entries()) {
+      expect(schemaText(descriptor), descriptor.name).not.toMatch(CJK);
+      // ⚠️ **只比 schema 三样，不比整个描述符** —— `provider.displayName` 在 zh 下
+      // **刻意保持中文**（它进的是工具结果、不是 `### Tool` 段，见文件头说明）。
+      expect(schemaPortion(descriptor), descriptor.name).toEqual(schemaPortion(enDescriptors[index]!));
+    }
+  });
+
   it('still localizes the user-facing copy of those same tools', () => {
     // 反向守一条：**只把 schema 那部分统一成英文**，不能顺手把用户可见文案也英文化。
     // 判据是「同一个块里，schema 键两语言同值、UI 键两语言不同值且 zh 是中文」。
-    for (const block of ['skillCreator', 'memoryImport'] as const) {
+    //
+    // ⚠️ **块清单要挑「非 schema 键在 zh 下确实是中文」的** —— 判据是 `flattenStrings`
+    // 把非 schema 键**全部**要求含 CJK，所以 `memory` / `web` 进不来：它们的
+    // `providerName` 本身就是英文（`Zai++ Memory` / `Zai++ Web Search`）。
+    // `mcpCapability` 的 `providerName` 是中文（刻意保留，见文件头）⇒ 可以进。
+    for (const block of ['skillCreator', 'memoryImport', 'mcpCapability'] as const) {
       const zhBlock = zhTool[block] as unknown as Record<string, unknown>;
       const enBlock = enTool[block] as unknown as Record<string, unknown>;
 
       const schemaKeys = Object.keys(zhBlock).filter((key) => SCHEMA_KEY.test(key));
-      expect(schemaKeys.length).toBeGreaterThan(0);
+      expect(schemaKeys.length, `${block} 应当有 schema 键`).toBeGreaterThan(0);
       for (const key of schemaKeys) {
         expect(zhBlock[key], `${block}.${key} 应与 en 同值`).toBe(enBlock[key]);
       }

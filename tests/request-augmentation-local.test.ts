@@ -29,9 +29,11 @@ import { isLocalIndexInstructions, LOCAL_INDEX_MARKER } from '../core/skill/loca
  *    其余来源**原样透传**；
  *  ④ 边界段**不重复追加**（技能正文里已经写了就不再加）。
  *
- * ⚠️ 上游有、本项目**没有**的一条：`activeLocalSkillDir`。那个字段在上游由
- * `augmentRequestBody` 返回；本项目改由 `zai.content.ts` 就地算出来（见
- * `paragraph` 里的 `let activeLocalSkillDir`），不进公开面 ⇒ 这里不测。
+ * ⚠️ 上游有、本项目**当初没有**的一条：`activeLocalSkillDir`。上游由 `augmentRequestBody`
+ * 一次性返回它；本项目由 `zai.content.ts` 的 `resolveActiveLocalSkill` 就地算出、再分别
+ * 喂给建授权（`CREATE_TOOL_AUTHORIZATION` 的 `localSkillDir`）与 `augmentPrompt`。
+ * **两条链的接线由 `zai-content-local-skill-dir-contract.test.ts` 守着**（本文件只测公开的
+ * 纯函数 helper，测不了那个私有入口）。
  */
 
 const MARKER = LOCAL_INDEX_MARKER; // 'Index form: true'

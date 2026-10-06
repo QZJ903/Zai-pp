@@ -337,6 +337,7 @@ describe('request-scoped state is released once per request', () => {
       'executedToolCallSignatures',
       'executionsByRequest',
       'isAgentTurnByRequestId',
+      'localSkillDirByRequestId',
       'nativeSearchOnByRequestId',
       'requestToolDescriptorsByRequestId',
     ]);
@@ -684,6 +685,41 @@ describe('chatNew does not write request-scoped state it can never release', () 
       setCallsOn(findChatNewBranch(), 'activeToolAuthorizations'),
       'chatNew 分支不得写 activeToolAuthorizations（同上；grant 走 closeToolAuthorizationGrant 显式关）',
     ).toBe(0);
+  });
+
+  it('does not write any request-scoped map that releaseRequestState owns', () => {
+    // ⚠️ **这条是通则，不是「再补一个容器名」** —— 上面两条守的是同一件事的两个具体实例，
+    // 而新增请求级容器时很容易只记得加 `releaseRequestState` 的 delete、忘了这里。
+    // 所以**从 `releaseRequestState` 反向枚举容器名**，逐个断言 chatNew 分支不写它们。
+    //
+    // ⚠️ 判据是「`releaseRequestState` 里 delete 了哪些容器」而不是手抄清单 ——
+    // 手抄的第二份清单必然分叉（B9），而这里的分叉形态是静默的：新容器没人守，
+    // chatNew 一旦写了它就成了永不释放的孤儿，且不会有任何测试变红。
+    const program = readContentProgram();
+    let releaseBody: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'releaseRequestState') {
+        releaseBody = node.body;
+      }
+    });
+    expect(releaseBody, '应当存在 releaseRequestState').toBeDefined();
+
+    const owned = new Set<string>();
+    walkSourceAst(releaseBody!, (node) => {
+      if (!t.isCallExpression(node) || !t.isMemberExpression(node.callee)) return;
+      if (!t.isIdentifier(node.callee.object) || !t.isIdentifier(node.callee.property)) return;
+      if (node.callee.property.name !== 'delete') return;
+      owned.add(node.callee.object.name);
+    });
+    // 先确认枚举不是空的 —— 全被改名/搬走时，「没有违规」会假通过。
+    expect(owned.size, 'releaseRequestState 应当释放若干容器').toBeGreaterThanOrEqual(5);
+
+    const branch = findChatNewBranch();
+    const offenders = [...owned].filter((container) => setCallsOn(branch, container) > 0);
+    expect(
+      offenders,
+      `chatNew 分支不得写这些容器（收不到 REQUEST_TERMINAL，写进去永不释放）：${offenders.join(', ')}`,
+    ).toEqual([]);
   });
 
   it('still writes the chat-session map on the completion route', () => {
