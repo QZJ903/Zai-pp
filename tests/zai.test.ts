@@ -25,6 +25,10 @@ import {
   parseZaiSseData,
   stripZaiThinkingBlocks,
 } from '../core/zai/stream-codec';
+import {
+  ZAI_WEB_ROUTES,
+  type ZaiWebRouteName,
+} from '../core/zai/contracts';
 import { filterZaiModelFacingToolDescriptors } from '../core/zai/model-facing';
 import type { ToolDescriptor } from '../core/tool/types';
 
@@ -122,6 +126,89 @@ describe('zai request codec', () => {
         method: 'GET',
       }),
     ).toBe(false);
+  });
+
+  // ⚠️⚠️ **这一条是上面那张用例表的解药。** 用例表从 `ZAI_WEB_ROUTES` 派生，
+  // 所以**常量值本身写错时两边会同步改错** —— 矩阵照样全绿（实测过：把
+  // `completions` 改成 `completion` 后 38 条用例仍全过）。这里把**线上真实路径**
+  // 独立钉成字面量：真机抓包 + 第三方 HAR（`zhipu-ai-proxy-master/har/intl/`）确认过。
+  it('pins the released route paths to their literal values', () => {
+    expect(ZAI_WEB_ROUTES).toEqual({
+      completion: '/api/v2/chat/completions',
+      chatNew: '/api/v1/chats/new',
+    });
+  });
+
+  // 路由匹配是「哪些请求会被我们改写并注入提示词」的判据 —— 它是一道边界，
+  // 所以**拒绝面必须逐条钉住**：异源 / 加后缀 / 藏在 query 里 / 方法不符
+  // 这几类正是「本该拒绝却被接受」的形态。
+  // ⚠️ 判据是 origin 与 pathname **精确相等** —— 换成 includes / startsWith 这类
+  // 近似匹配会让上面几类全部漏过，而漏过的表现是「把提示词注进了不该注的请求」。
+  interface RouteCase {
+    name: string;
+    route: ZaiWebRouteName;
+    url: string;
+    method: string;
+    baseUrl?: string;
+    matched: boolean;
+  }
+
+  const routeNames = Object.keys(ZAI_WEB_ROUTES) as ZaiWebRouteName[];
+  const pathOf = (route: ZaiWebRouteName) => ZAI_WEB_ROUTES[route];
+  const encodedPath = (path: string) => `https://chat.z.ai/${path.split('/').slice(1).join('%2F')}`;
+
+  const acceptedRouteCases: RouteCase[] = routeNames.flatMap((route) => {
+    const path = pathOf(route);
+    return [
+      { name: `${route}: absolute URL`, route, url: `https://chat.z.ai${path}`, method: 'POST', matched: true },
+      // 相对路径必须按站点 origin 兜底解析 —— fetch hook 里拿到的就是相对路径。
+      { name: `${route}: relative path resolves against the site origin`, route, url: path, method: 'POST', matched: true },
+      { name: `${route}: host is case-insensitive`, route, url: `https://CHAT.Z.AI${path}`, method: 'POST', matched: true },
+      { name: `${route}: explicit default port`, route, url: `https://chat.z.ai:443${path}`, method: 'POST', matched: true },
+      { name: `${route}: query string is ignored`, route, url: `https://chat.z.ai${path}?timestamp=1&requestId=abc`, method: 'POST', matched: true },
+      { name: `${route}: fragment is ignored`, route, url: `https://chat.z.ai${path}#anchor`, method: 'POST', matched: true },
+      { name: `${route}: method is case-insensitive`, route, url: `https://chat.z.ai${path}`, method: 'post', matched: true },
+    ];
+  });
+
+  const rejectedRouteCases: RouteCase[] = routeNames.flatMap((route) => {
+    const path = pathOf(route);
+    return [
+      { name: `${route}: different origin`, route, url: `https://evil.test${path}`, method: 'POST', matched: false },
+      { name: `${route}: subdomain of the site`, route, url: `https://sub.chat.z.ai${path}`, method: 'POST', matched: false },
+      { name: `${route}: insecure scheme`, route, url: `http://chat.z.ai${path}`, method: 'POST', matched: false },
+      { name: `${route}: path embedded in a query parameter`, route, url: `https://evil.test/?next=${path}`, method: 'POST', matched: false },
+      { name: `${route}: path with a suffix`, route, url: `https://chat.z.ai${path}/suffix`, method: 'POST', matched: false },
+      { name: `${route}: trailing slash`, route, url: `https://chat.z.ai${path}/`, method: 'POST', matched: false },
+      { name: `${route}: percent-encoded slashes`, route, url: encodedPath(path), method: 'POST', matched: false },
+      { name: `${route}: userinfo looks like the site host`, route, url: `https://chat.z.ai@evil.test${path}`, method: 'POST', matched: false },
+      { name: `${route}: wrong method`, route, url: `https://chat.z.ai${path}`, method: 'GET', matched: false },
+      { name: `${route}: empty method`, route, url: `https://chat.z.ai${path}`, method: '', matched: false },
+      { name: `${route}: relative path with a foreign base`, route, url: path, method: 'POST', baseUrl: 'https://evil.test/page', matched: false },
+    ];
+  });
+
+  it.each([...acceptedRouteCases, ...rejectedRouteCases])(
+    '$name',
+    ({ route, url, method, baseUrl, matched }: RouteCase) => {
+      const input = baseUrl === undefined ? { url, method } : { url, method, baseUrl };
+      const result = route === 'completion'
+        ? matchZaiCompletionRoute(input)
+        : matchZaiChatNewRoute(input);
+      expect(result).toBe(matched);
+    },
+  );
+
+  // 两个匹配函数体逐字相同、只差一个路径常量 —— 漏改一处的表现是「两条路由互相认领对方的请求」。
+  it('keeps each matcher on its own path', () => {
+    expect(matchZaiChatNewRoute({
+      url: `https://chat.z.ai${pathOf('completion')}`,
+      method: 'POST',
+    })).toBe(false);
+    expect(matchZaiCompletionRoute({
+      url: `https://chat.z.ai${pathOf('chatNew')}`,
+      method: 'POST',
+    })).toBe(false);
   });
 
   it('reads the last user message from completion body', () => {

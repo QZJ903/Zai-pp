@@ -95,9 +95,17 @@ import { decodeProjectContextState } from '../core/project/codec';
 import { selectPendingProjectPrompt } from '../core/project/prompt-context';
 import { PROJECT_UNTITLED_CONVERSATION } from '../core/project/title';
 import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
+import { findZaiToolXmlBlocks } from '../core/zai/tool-xml';
 import { createZaiConversationTitleResolver } from '../core/zai/conversation-title';
 import { readZaiSidebarAgentMode, zaiNewConversationPath } from '../core/zai/mode';
 import { isRuntimeFailure, RuntimeCommandError } from '../core/messaging/runtime-response';
+import {
+  BACKGROUND_RUNTIME_PATHNAMES,
+  createExtensionRuntimeMessageContext,
+  decodeRuntimeMessageEnvelope,
+  RuntimeBoundaryError,
+  type RuntimeMessageSenderLike,
+} from '../core/messaging/runtime-boundary';
 import {
   ZAI_AGENT_FLAG,
   ZAI_CHAT_INPUT_SELECTOR as CHAT_INPUT_SELECTOR,
@@ -398,6 +406,56 @@ async function sendRuntimeMessageStrict<T>(
     throw new RuntimeCommandError(code);
   }
   return response as T;
+}
+
+/**
+ * 入站 runtime 消息的**来源闸门**：只放行后台发来的那几条。
+ *
+ * **它拦什么**：内容脚本的 `onMessage` 只要不过闸门，任何能到达它的消息都会走完整条
+ * 分支链 —— 其中包括 `RUN_DOM_TASK`（真的去驱动页面发消息）与 `INSERT_PROMPT_TEXT`
+ * （真的往输入框写文本）。闸门把这些收窄成「只认后台发的」。
+ *
+ * ⚠️ **上游在同一位置做了这件事**（`entrypoints/content.ts` 的
+ * `handleContentRuntimeMessage`），它的注释是：
+ * *「runtime.sendMessage reaches every extension context. A content receiver must not
+ * answer a content-to-background RPC before the background does.」*
+ *
+ * ⚠️⚠️ **但上游那条理由与 Chrome 官方文档对不上，我如实记录**：
+ * 文档明确写 *「extensions cannot send messages to content scripts using this method
+ * [runtime.sendMessage]. To send messages to content scripts, use tabs.sendMessage.」*
+ * ⇒ 按文档，内容脚本**只会**收到 `tabs.sendMessage` 来的消息（即后台发的），
+ * 「抢答」场景不成立。**两种说法我没有实测过哪一种对**（上游已发布运行、文档是规范，
+ * 而这类投递面差异历史上有过浏览器实现分歧）。**这里按「闸门本身有正当性」来做**：
+ * 收窄入站来源是防御纵深，与「抢答」这条理由成立与否无关。
+ *
+ * ⚠️ 判据与后台侧**同源**：`createExtensionRuntimeMessageContext` +
+ * `BACKGROUND_RUNTIME_PATHNAMES`，不另写一份 —— 两处各写一遍必然分叉。
+ *
+ * ⚠️⚠️ **拒绝时静默 `return`、不回响应**（与后台侧的 `createRuntimeBoundaryErrorResponse` 相反）：
+ * 回一条错误响应**同样算「应答」**，会让本内容脚本在应答竞速里赢过后台。
+ *
+ * ⚠️⚠️ **它依赖一条我没有实测的假设**：后台发消息时 `sender.url` 落在
+ * `BACKGROUND_RUNTIME_PATHNAMES` 那两条里（`/background.js`）。**若假设不成立，闸门会拒掉
+ * 所有广播**（表现：侧边栏改了记忆/技能/背景，页面不更新、要刷新才生效）。
+ * 上游用同一套校验且已发布运行 ⇒ 假设应成立；**真机出现上述症状时，第一个查这里。**
+ */
+function isAuthorizedInboundRuntimeMessage(
+  message: unknown,
+  sender: RuntimeMessageSenderLike,
+): boolean {
+  try {
+    decodeRuntimeMessageEnvelope(message);
+    createExtensionRuntimeMessageContext(sender, {
+      runtimeId: chrome.runtime.id,
+      extensionOrigin: chrome.runtime.getURL('/'),
+      allowedPathnames: BACKGROUND_RUNTIME_PATHNAMES,
+    });
+    return true;
+  } catch (error) {
+    // 只吞「边界拒绝」这一类；真出别的错要让它冒出来，别把 bug 静默掉。
+    if (error instanceof RuntimeBoundaryError) return false;
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -715,28 +773,30 @@ async function executeToolCall(
 
 /**
  * 从响应文本里解析 XML 工具调用，用注入的工具目录识别。
- * 返回 {call, payload} 供执行。这里复用 streaming-tool-call-parser 的成品语义：
- * 找 `<tool>JSON</tool>` 块，body 为 JSON。
+ * 返回 `{ call, payload }` 供执行：找 `<tool>JSON</tool>` 块，body 为 JSON。
+ *
+ * ⚠️⚠️ **块扫描必须走线性扫描器（`findZaiToolXmlBlocks`），绝不能用 `[\s\S]*?` 正则。**
+ * 那族正则在「开标签后跟**连续空白**、且全文没有配对闭合标签」时**灾难性回溯** ——
+ * 实测 4,000 空白 6.5s / 8,000 空白 **49s**。而本函数的输入是 `assistantText`
+ * （`handleResponseComplete` 兜底路径）与 `detected.raw`，**两者都来自桥消息、都没有长度上限**
+ * ⇒ 模型输出一段「`<shell_exec>` + 大段缩进/空行」就能让内容脚本卡死数十秒。
+ * 触发条件与修法见 `core/zai/tool-xml.ts` 的说明。
  */
 function parseToolXml(
   text: string,
   descriptors: readonly ToolDescriptor[],
 ): ToolCall[] {
   const catalog = createToolInvocationCatalog(descriptors);
-  const regex = new RegExp(
-    `<\\s*(${catalog.invocationNames.map(escapeRegExp).join('|')})\\s*>\\s*([\\s\\S]*?)\\s*<\\/\\s*\\1\\s*>`,
-    'g',
-  );
   const calls: ToolCall[] = [];
-  for (const match of text.matchAll(regex)) {
-    const matchedTag = match[1];
-    const raw = match[0];
-    const body = match[2] ?? '';
+  const blocks = findZaiToolXmlBlocks(text, catalog.invocationNames);
+
+  for (const block of blocks) {
+    const matchedTag = block.name;
     const descriptor =
       catalog.descriptorByInvocationName.get(matchedTag) ??
       catalog.descriptorByName.get(matchedTag);
     // 关键：call.invocationName 必须是 descriptor 的权威 invocationName（长名），
-    // 不能是正则匹配到的短名/别名。授权快照里存的是 descriptor.invocationName，
+    // 不能是扫描到的短名/别名。授权快照里存的是 descriptor.invocationName，
     // 短名会触发 tool_descriptor_mismatch（claims do not match authorized descriptor）。
     const invocationName = descriptor?.invocationName ?? matchedTag;
     // id 用「正文里出现的序号」而非全局 index，保证同一条消息里多个 memory_save 的
@@ -744,9 +804,9 @@ function parseToolXml(
     const id = `xml:${calls.length}`;
     let payload: Record<string, unknown> = {};
     let parseError;
-    if (body.trim()) {
+    if (block.body) {
       try {
-        const parsed = JSON.parse(body);
+        const parsed = JSON.parse(block.body);
         payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
       } catch (error) {
         parseError = {
@@ -761,7 +821,7 @@ function parseToolXml(
       name: descriptor?.name ?? invocationName,
       invocationName,
       payload,
-      raw,
+      raw: block.raw,
       descriptorId: descriptor?.id,
       provider: descriptor?.provider,
       ...(parseError ? { parseError } : {}),
@@ -795,8 +855,14 @@ function isContinuableExecution(execution: ToolExecutionRecord): boolean {
 // 请求增广
 // ---------------------------------------------------------------------------
 
-/** 简单字符串哈希（djb2），用于给同一条消息里多个同类型工具生成稳定且唯一的 callId。 */
-function hashString(value: string): string {
+/**
+ * 简单字符串哈希（djb2），用于给同一条消息里多个同类型工具生成稳定且唯一的 callId。
+ *
+ * ⚠️ 名字带算法：`core/tool/restore-block.ts` 另有一个同用途但**算法不同**的哈希
+ * （`hash * 31`）。两者都只在本文件内使用、输出不落库，因此不需要统一 ——
+ * 但名字必须能区分，否则读代码的人会以为改一处等于改另一处。
+ */
+function djb2Hash(value: string): string {
   let hash = 5381;
   for (let i = 0; i < value.length; i += 1) {
     hash = ((hash << 5) + hash + value.charCodeAt(i)) | 0;
@@ -1542,7 +1608,7 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
   // callId，background 授权层 grant 里 callId 去重（tool_call_replayed）就把后面两条拦截。
   // 用 raw 的哈希作 id：同一条 raw 在 TOOL_CALL 通道和 response 通道拿到的 id 一致（可复用），
   // 不同 raw 拿到的 id 不同（不误判 replay）。
-  const stableCallId = `xml:${hashString(call.raw || call.invocationName || crypto.randomUUID())}`;
+  const stableCallId = `xml:${djb2Hash(call.raw || call.invocationName || crypto.randomUUID())}`;
   const callWithSource: ToolCall = {
     ...call,
     id: stableCallId,
@@ -2750,8 +2816,10 @@ function installProjectPanel(): void {
   });
 
   // 面板状态变了（侧边栏增删改）→ 重拉重绘。
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type === 'PROJECT_CONTEXT_UPDATED') projectPanelController?.refresh();
+  // ⚠️ 与入口那处监听**同一个闸门**（此处此前连 `sender` 参数都没声明）。
+  chrome.runtime.onMessage.addListener((message, sender) => {
+    if (!isAuthorizedInboundRuntimeMessage(message, sender)) return undefined;
+    if (message.type === 'PROJECT_CONTEXT_UPDATED') projectPanelController?.refresh();
     return undefined;
   });
 
@@ -3206,8 +3274,10 @@ export default defineContentScript({
       void dispatchMainWorldMessage(event.data);
     });
 
-    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (!message || typeof message !== 'object') return undefined;
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      // ⚠️ 闸门必须在**任何分支之前**：见 isAuthorizedInboundRuntimeMessage 的说明。
+      // 不通过就静默 return（不回响应 —— 回错误响应同样算应答、会赢下竞速）。
+      if (!isAuthorizedInboundRuntimeMessage(message, sender)) return undefined;
       if (message.type === 'STATE_UPDATED' || message.type === 'TOOL_DESCRIPTORS_UPDATED') {
         // ⚠️ `void` 的 rejection 没人接 —— 这条广播监听是 fire-and-forget，
         // 不该指望被调函数永不抛（后台的 `refreshBackgroundLocale` 也是自带 `.catch`）。
@@ -3324,13 +3394,17 @@ export default defineContentScript({
     installInjectedThemeWatch();
     installProjectPanel();
 
+    // 启动时把页面 localStorage 里的登录态 token 主动推进 chrome.storage。
+    // ⚠️ 后台的 service worker 读不到页面 localStorage/performance，token 只能由内容脚本给；
+    // 而 fetch hook 那条捕获链要**用户发出第一条消息**才会触发 —— 在此之前后台读 token
+    // 只会拿到 null（表现：自动化页的模型下拉退化成内置兜底清单）。
+    // 这里是那条兜底链的**发送方**（`REFRESH_ZAI_AUTH` 那条 runtime 消息已无人使用，
+    // 见 core/zai/auth.ts 的说明）—— 推送取代了「后台来问」。
+    void refreshZaiAuth();
+
     await loadAndSyncRuntimeState();
   },
 });
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 /** 后台 auth refresh：从页面 localStorage 读 token 兜底写进 chrome.storage（best-effort）。 */
 async function refreshZaiAuth(): Promise<boolean> {

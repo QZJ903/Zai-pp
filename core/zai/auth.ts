@@ -6,7 +6,8 @@
  *
  *   1. content script 从主世界 fetch hook 捕获的现场（query 里的 token/user_id、
  *      header 里的 Authorization / X-FE-Version / x-device-id）写进 chrome.storage.local；
- *   2. 页面 localStorage 里的 `token`（REFRESH_ZAI_AUTH 时由隔离世界兜底读取）。
+ *   2. 页面 localStorage 里的 `token` —— 由内容脚本在**启动时**主动读一次并推进 storage
+ *      （`refreshZaiAuth`），不等用户发出第一条消息。
  *
  * 注意：auth 只读写入扩展自己的 chrome.storage.local，绝不改写页面 storage。
  */
@@ -97,7 +98,8 @@ export async function clearZaiAuthFromStorage(): Promise<void> {
 
 /**
  * 把 content script 捕获到的零散字段合并进 storage 里的 auth（不覆盖新捕获 token 之外的旧字段）。
- * 只在捕获到 token 时才写；写不进则留给 REFRESH_ZAI_AUTH 的 localStorage 兜底。
+ * 只在捕获到 token 时才写 —— 写不进不影响功能：fetch hook 那条捕获链会在下一次请求时再写，
+ * 内容脚本启动时也会主动推一次页面 localStorage 的 token。
  */
 export async function mergeZaiAuthFromCapture(capture: ZaiAuthCaptureInput): Promise<boolean> {
   const token = firstNonEmpty(capture.token);

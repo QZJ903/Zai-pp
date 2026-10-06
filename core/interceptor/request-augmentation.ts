@@ -1,4 +1,4 @@
-import { DEFAULT_LOCALE, translate, type SupportedLocale } from '../i18n';
+import { DEFAULT_LOCALE, translate, type SupportedLocale } from '../i18n/background';
 import { parseSkillCommand } from '../skill/parser';
 import { isLocalIndexInstructions, buildLocalExecutionBoundary } from '../skill/local-importer';
 import { selectImplicitSkill, type LocalSkillIndex } from '../skill/local-skill-scorer';

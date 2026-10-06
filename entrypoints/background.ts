@@ -202,7 +202,16 @@ import type { AutomationExecutionContext } from '../core/automation/execution';
 
 const ZAI_HOME_URL = 'https://chat.z.ai/';
 const ZAI_TAB_URL_PATTERN = '*://chat.z.ai/*';
-/** 向 chat.z.ai 标签页请求 auth 刷新（content 从页面 localStorage 兜底读 token）。 */
+/**
+ * ⚠️ **当前无人发送** —— 上游用它在 token 缓存失效时向 z.ai 标签页要一次 auth 刷新
+ * （`loadOrRefreshClientHeaders` → 自动化 runner 与侧边栏登录态），本项目这两处都没有：
+ * 自动化走 DOM 注入、侧边栏不显示登录态。所以本项目改用**内容脚本启动时主动推送**
+ * （`zai.content.ts` 的 `refreshZaiAuth`，见 `core/zai/auth.ts` 的说明），
+ * 内容脚本那个接收分支因此也收不到消息。
+ * ⚠️ **保留它是为了 `tests/runtime-command-contract.test.ts` 的正则锚点**
+ * （它读这一行来校验 tab RPC 名单）；真要删，得连那个测试与
+ * `tests/fixtures/runtime-contract/runtime.ts` 的 `RUNTIME_TAB_RPC_TYPES` 一起改。
+ */
 const REFRESH_AUTH_MESSAGE = { type: 'REFRESH_ZAI_AUTH' } as const;
 const domTaskCoordinator = createDomTaskCoordinator({
   homeUrl: ZAI_HOME_URL,

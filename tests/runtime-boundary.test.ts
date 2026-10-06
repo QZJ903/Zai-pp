@@ -229,7 +229,117 @@ describe('runtime sender and envelope boundary', () => {
     ]);
   });
 
+  // ⚠️ 内容脚本侧**每一处**入站监听都要过闸门 —— 只守一处等于没守：
+  // 上游同一位置的注释写明「runtime.sendMessage reaches every extension context.
+  // A content receiver must not answer a content-to-background RPC before the background
+  // does」，即不过闸门的接收端会**抢在后台前面应答**（答的还可能是别的标签页的状态）。
+  it('accepts the background sender path and rejects every other extension page', () => {
+    // ⚠️⚠️ **这条是「闸门判据本身」的运行期覆盖，补的是上一版只有 AST 断言的洞**：
+    // 闸门挂在 `zai.content.ts` 里、不能直接 import（加载即执行 `defineContentScript`），
+    // 所以这里用**同一套判据**（`createExtensionRuntimeMessageContext` +
+    // `BACKGROUND_RUNTIME_PATHNAMES`）跑三档真实 sender —— 闸门内部调的就是它。
+    //
+    // ⚠️ 它守的是闸门**误拒后台广播**这个最危险的失效形态：若后台发消息时 `sender.url`
+    // 不是 `/background.js`，闸门会把 STATE_UPDATED / BACKGROUND_UPDATED /
+    // TOOL_DESCRIPTORS_UPDATED / PROJECT_CONTEXT_UPDATED 全部静默拒掉
+    // （表现：侧边栏改了记忆/技能/背景，页面不更新、要刷新才生效）。
+    // ⚠️ **这条测的是「判据对这类 sender 的判定」**，不是「真机投递时 url 确实是这个值」——
+    // 后者只有真机能验（见交接文档的待验证项）。
+    const backgroundSender = {
+      id: POLICY.runtimeId,
+      url: 'chrome-extension://runtime-contract/background.js',
+      origin: 'chrome-extension://runtime-contract',
+      documentLifecycle: 'active',
+    };
+    expect(createExtensionRuntimeMessageContext(backgroundSender, {
+      runtimeId: POLICY.runtimeId,
+      extensionOrigin: POLICY.extensionOrigin,
+      allowedPathnames: BACKGROUND_RUNTIME_PATHNAMES,
+    }).surface).toBe('extension_context');
+
+    // 扩展自己的**其它**页面（侧边栏）不是后台 ⇒ 必须拒。
+    expect(() => createExtensionRuntimeMessageContext({
+      ...backgroundSender,
+      url: 'chrome-extension://runtime-contract/sidepanel.html',
+    }, {
+      runtimeId: POLICY.runtimeId,
+      extensionOrigin: POLICY.extensionOrigin,
+      allowedPathnames: BACKGROUND_RUNTIME_PATHNAMES,
+    })).toThrow('path is not authorized');
+
+    // 内容脚本自己（网页来源）也不是后台 ⇒ 必须拒。
+    expect(() => createExtensionRuntimeMessageContext(GLM_SENDER, {
+      runtimeId: POLICY.runtimeId,
+      extensionOrigin: POLICY.extensionOrigin,
+      allowedPathnames: BACKGROUND_RUNTIME_PATHNAMES,
+    })).toThrow('not an extension context');
+  });
+
+  it('gates every content runtime receiver before its privileged branches', () => {
+    const content = readFileSync('entrypoints/zai.content.ts', 'utf8');
+    const program = parseTypeScriptSource('entrypoints/zai.content.ts', content);
+
+    // ① 找出全部 chrome.runtime.onMessage.addListener(...) 调用
+    const listeners: t.CallExpression[] = [];
+    walkSourceAst(program, (node) => {
+      if (!t.isCallExpression(node)) return;
+      const callee = node.callee;
+      if (
+        t.isMemberExpression(callee)
+        && t.isIdentifier(callee.property, { name: 'addListener' })
+        && t.isMemberExpression(callee.object)
+        && t.isIdentifier(callee.object.property, { name: 'onMessage' })
+      ) {
+        listeners.push(node);
+      }
+    });
+
+    // 数量断言：多一处或少一处都说明有人新加了未守的接收端（或删掉了已守的）。
+    expect(listeners).toHaveLength(2);
+
+    // ② 每一处的回调体里都必须出现闸门调用
+    for (const listener of listeners) {
+      const [callback] = listener.arguments;
+      expect(t.isArrowFunctionExpression(callback) || t.isFunctionExpression(callback)).toBe(true);
+      const body = (callback as t.ArrowFunctionExpression | t.FunctionExpression).body;
+      let gated = false;
+      walkSourceAst(body, (node) => {
+        if (t.isCallExpression(node) && t.isIdentifier(node.callee, { name: 'isAuthorizedInboundRuntimeMessage' })) {
+          gated = true;
+        }
+      });
+      const line = content.slice(0, listener.start ?? 0).split('\n').length;
+      expect(gated, `listener at line ${line} does not pass the inbound runtime gate`).toBe(true);
+    }
+
+    // ③ 闸门本体：与后台侧同源，且**静默拒绝**
+    const gate = findFunctionDeclaration(program, 'isAuthorizedInboundRuntimeMessage');
+    expect(gate, 'missing isAuthorizedInboundRuntimeMessage').toBeDefined();
+    const gateSource = content.slice(gate!.start ?? 0, gate!.end ?? 0);
+    expect(gateSource).toContain('decodeRuntimeMessageEnvelope(message)');
+    expect(gateSource).toContain('createExtensionRuntimeMessageContext(sender');
+    expect(gateSource).toContain('allowedPathnames: BACKGROUND_RUNTIME_PATHNAMES');
+    expect(gateSource).toContain('error instanceof RuntimeBoundaryError');
+    // ⚠️ 反向断言：拒绝时**不能**回响应 —— 回一条错误响应同样算「应答」、照样赢下竞速。
+    // ⚠️⚠️ **判据必须用函数体里才可能出现的写法**：`createRuntimeBoundaryErrorResponse`
+    // 恰好只出现在这段 JSDoc 里，而 babel 的 `node.start` **不含前置注释** ⇒ 那条断言
+    // 把正确性押在「解析器的注释归属」上（注释一挪进函数体它就假红）。
+    // `sendResponse(` 是**只可能在函数体里**的调用形态，锚它才是稳的。
+    expect(gateSource).not.toContain('sendResponse(');
+  });
+
 });
+
+function findFunctionDeclaration(
+  program: t.Program,
+  name: string,
+): t.FunctionDeclaration | undefined {
+  let found: t.FunctionDeclaration | undefined;
+  walkSourceAst(program, (node) => {
+    if (t.isFunctionDeclaration(node) && node.id?.name === name) found = node;
+  });
+  return found;
+}
 
 function expectInOrder(source: string, fragments: Array<string | RegExp>): void {
   let previous = -1;

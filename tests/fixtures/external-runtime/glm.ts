@@ -1,146 +1,32 @@
-export const GLM_ROUTE_CONTRACT = {
-  origin: 'https://chat.z.ai',
-  bypassHeader: 'X-DPP-Bypass-Hook',
-  routes: {
-    completion: '/api/v0/chat/completion',
-    editMessage: '/api/v0/chat/edit_message',
-    regenerate: '/api/v0/chat/regenerate',
-    history: '/api/v0/chat/history_messages',
-    createSession: '/api/v0/chat_session/create',
-    fetchSessions: '/api/v0/chat_session/fetch_page',
-    uploadFile: '/api/v0/file/upload_file',
-    fetchFiles: '/api/v0/file/fetch_files',
-  },
-} as const;
+/**
+ * z.ai SSE 的**已知缺口**清单（`tests/live-gap-ownership.test.ts` 消费）。
+ *
+ * ⚠️ **本文件曾经还装着 9 个从上游照抄的 fixture**（`GLM_ROUTE_CONTRACT` /
+ * `LEGAL_GLM_ROUTE_FIXTURES` / `GLM_ACTIVE_ROUTE_METHOD_FIXTURES` /
+ * `REJECTED_GLM_ROUTE_FIXTURES` / `GLM_REQUEST_BODY_FIXTURE` /
+ * `GLM_ACTIVE_COMPLETION_BODY_FIXTURE` / `LEGAL_GLM_SSE_FIXTURES` /
+ * `CRLF_GLM_SSE_FIXTURE` / `UNKNOWN_GLM_SSE_EVENT`），**2026-10-06 已删除**。
+ * 它们全仓零消费者、且内容是 **deepseek 协议**（9 条路由写的是 `/api/v0/chat/...`、
+ * `bypassHeader` 是 `X-DPP-Bypass-Hook`），与本项目真实使用的
+ * `/api/v1/chats/new` + `/api/v2/chat/completions` 对不上。
+ *
+ * ⚠️ **删除的依据**：它们本来要喂的契约面，本项目已用自己的形状覆盖 ——
+ * 路由接受/拒绝面在 `tests/zai.test.ts`（38 条，用真实路由）、
+ * 工具 XML 块扫描在 `tests/zai-tool-xml-scanner.test.ts`、
+ * 流式解码在 `tests/zai.test.ts` + `tests/zai-usage-snapshot.test.ts`。
+ * 上游那三份测试（`deepseek-protocol-contract` / `deepseek-active-protocol` /
+ * `xml-tool-stream-filter`，共 682 行）**从未评估过**这件事，记在
+ * `GLM++开发日志.md` 与记忆 `zai-build` 的 §4.33 第四节，**不再由本文件承载**。
+ */
 
-export const LEGAL_GLM_ROUTE_FIXTURES = [
-  { route: 'completion', method: 'POST', url: 'https://chat.z.ai/api/v0/chat/completion' },
-  { route: 'editMessage', method: 'POST', url: 'https://chat.z.ai/api/v0/chat/edit_message' },
-  { route: 'regenerate', method: 'POST', url: 'https://chat.z.ai/api/v0/chat/regenerate' },
-  { route: 'history', method: 'GET', url: 'https://chat.z.ai/api/v0/chat/history_messages?chat_session_id=one' },
-  {
-    route: 'completion',
-    method: 'POST',
-    url: '/api/v0/chat/completion',
-    baseUrl: 'https://chat.z.ai/a/chat/s/session-contract',
-  },
-] as const;
-
-export const GLM_ACTIVE_ROUTE_METHOD_FIXTURES = [
-  { name: 'completion', path: '/api/v0/chat/completion', method: 'POST' },
-  { name: 'editMessage', path: '/api/v0/chat/edit_message', method: 'POST' },
-  { name: 'regenerate', path: '/api/v0/chat/regenerate', method: 'POST' },
-  { name: 'history', path: '/api/v0/chat/history_messages', method: 'GET' },
-  { name: 'createSession', path: '/api/v0/chat_session/create', method: 'POST' },
-  { name: 'fetchSessions', path: '/api/v0/chat_session/fetch_page', method: 'GET' },
-  { name: 'uploadFile', path: '/api/v0/file/upload_file', method: 'POST' },
-  { name: 'fetchFiles', path: '/api/v0/file/fetch_files', method: 'GET' },
-] as const;
-
-export const REJECTED_GLM_ROUTE_FIXTURES = [
-  {
-    name: 'different origin with a released path',
-    url: 'https://example.test/proxy/api/v0/chat/completion',
-    method: 'POST',
-  },
-  {
-    name: 'released path embedded in a query parameter',
-    url: 'https://example.test/?next=/api/v0/chat/regenerate',
-    method: 'POST',
-  },
-  {
-    name: 'released path with a suffix',
-    url: 'https://chat.z.ai/api/v0/chat/history_messages/suffix',
-    method: 'GET',
-  },
-  {
-    name: 'completion with the wrong method',
-    url: 'https://chat.z.ai/api/v0/chat/completion',
-    method: 'GET',
-  },
-  {
-    name: 'history with the wrong method',
-    url: 'https://chat.z.ai/api/v0/chat/history_messages',
-    method: 'POST',
-  },
-  {
-    name: 'relative route on a non-GLM page',
-    url: '/api/v0/chat/completion',
-    method: 'POST',
-    baseUrl: 'https://example.test/page',
-  },
-] as const;
-
-export const GLM_REQUEST_BODY_FIXTURE = {
-  chat_session_id: 'session-contract',
-  parent_message_id: 19,
-  model_class: 'glm_chat',
-  prompt: 'Preserve the released request body.',
-  ref_file_ids: ['file-contract'],
-  thinking_enabled: true,
-  search_enabled: false,
-  action: 'continue',
-  preempt: false,
-  future_sibling: { preserve: true },
-} as const;
-
-export const GLM_ACTIVE_COMPLETION_BODY_FIXTURE = {
-  chat_session_id: 'session-contract',
-  parent_message_id: 19,
-  model_type: 'expert',
-  prompt: 'Preserve the active request body.',
-  ref_file_ids: ['file-contract'],
-  thinking_enabled: true,
-  search_enabled: false,
-  action: null,
-  preempt: false,
-} as const;
-
-export const LEGAL_GLM_SSE_FIXTURES = [
-  {
-    name: 'bare text append',
-    wire: 'data: {"v":"bare"}\n\n',
-    parsed: { v: 'bare' },
-    text: 'bare',
-    finished: false,
-  },
-  {
-    name: 'response content append',
-    wire: 'data: {"p":"response/content","o":"APPEND","v":"patch"}\n\n',
-    parsed: { p: 'response/content', o: 'APPEND', v: 'patch' },
-    text: 'patch',
-    finished: false,
-  },
-  {
-    name: 'response fragment append',
-    wire: 'data: {"p":"response/fragments","o":"APPEND","v":[{"content":"fragment"}]}\n\n',
-    parsed: { p: 'response/fragments', o: 'APPEND', v: [{ content: 'fragment' }] },
-    text: 'fragment',
-    finished: false,
-  },
-  {
-    name: 'direct finished patch',
-    wire: 'data: {"p":"response/status","v":"FINISHED"}\n\n',
-    parsed: { p: 'response/status', v: 'FINISHED' },
-    text: null,
-    finished: true,
-  },
-  {
-    name: 'batch text and quasi finished patch',
-    wire: 'data: {"p":"response","o":"BATCH","v":[{"p":"response/content","o":"APPEND","v":"batch"},{"p":"quasi_status","v":"FINISHED"}]}\n\n',
-    parsed: {
-      p: 'response',
-      o: 'BATCH',
-      v: [
-        { p: 'response/content', o: 'APPEND', v: 'batch' },
-        { p: 'quasi_status', v: 'FINISHED' },
-      ],
-    },
-    text: 'batch',
-    finished: true,
-  },
-] as const;
-
+/**
+ * 当前已知、**刻意不修**的协议缺口。每条都要有明确的 `owner` 与 `target`，
+ * 由 `tests/live-gap-ownership.test.ts` 断言「不是历史遗留、有主、且目标不是内部代号」。
+ *
+ * ⚠️ 这一条**对 z.ai 成立**（与上游那份 deepseek fixture 不同）：`parseZaiSseData`
+ * 在 `JSON.parse` 失败时**静默返回 null**、不留任何痕迹
+ * （`core/zai/stream-codec.ts` 的 `catch { return null; }`）。
+ */
 export const GLM_SSE_CURRENT_GAPS = [
   {
     name: 'malformed event JSON is silently represented as null',
@@ -151,14 +37,3 @@ export const GLM_SSE_CURRENT_GAPS = [
     target: 'observable-protocol-error',
   },
 ] as const;
-
-export const CRLF_GLM_SSE_FIXTURE = {
-  wire: 'event: ready\r\ndata: {"model_type":"vision"}\r\n\r\ndata: {"v":"text"}\r\n\r\n',
-  events: [
-    { type: 'ready', parsed: { model_type: 'vision' } },
-    { type: 'message', parsed: { v: 'text' } },
-  ],
-} as const;
-
-export const UNKNOWN_GLM_SSE_EVENT =
-  'event: future\ndata: {"p":"future/patch","o":"APPEND","v":{"preserve":true}}\n\n';
