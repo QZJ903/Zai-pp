@@ -114,9 +114,17 @@ export function clearExternalizedToolPayloadNamespace(namespace: string): void {
   }
 }
 
+/**
+ * Rehydrate an externalized payload body.
+ *
+ * `invocationName` is the payload's own recorded tag (used for the chunk
+ * entry-key match); `toolName` is the stable tool identity used for the cwd
+ * gate — they are different identities, see `local-skill-cwd.ts`.
+ */
 export function parseExternalizedToolPayload(
   body: string,
   invocationName: string,
+  toolName: string,
   skillDir?: string,
 ): { payload: ToolPayload | null; parseError?: ToolError } {
   try {
@@ -130,7 +138,7 @@ export function parseExternalizedToolPayload(
         ),
       };
     }
-    return { payload: enforceLocalSkillCwd(parsed as ToolPayload, invocationName, skillDir) };
+    return { payload: enforceLocalSkillCwd(parsed as ToolPayload, toolName, skillDir) };
   } catch (error) {
     return {
       payload: null,

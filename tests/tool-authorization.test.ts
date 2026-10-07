@@ -4,6 +4,7 @@ import {
   TOOL_AUTHORIZATION_STORAGE_KEY,
   authorizeToolExecution,
   closeToolAuthorization,
+  completeToolExecutionAuthorization,
   createToolAuthorization,
   haveEquivalentToolDescriptorSecurity,
 } from '../core/tool/authorization';
@@ -575,6 +576,27 @@ describe('tool authorization context', () => {
       '[GLM++] tool authorization completion persistence failed',
       expect.any(Error),
     );
+  });
+
+  it('atomically rejects sequential and concurrent replay', async () => {
+    const descriptor = makeDescriptor();
+    const grant = await createGrant([descriptor]);
+    const context = { kind: 'grant' as const, grantId: grant.id, subject: SUBJECT };
+    const first = await authorizeToolExecution(makeCall(), context, [descriptor]);
+    await completeToolExecutionAuthorization(first.reservation, { ok: true, summary: 'done' });
+
+    await expect(authorizeToolExecution(makeCall(), context, [descriptor]))
+      .rejects.toMatchObject({ code: 'tool_call_replayed' });
+
+    const secondGrant = await createGrant([descriptor]);
+    const secondContext = { kind: 'grant' as const, grantId: secondGrant.id, subject: SUBJECT };
+    const attempts = await Promise.allSettled([
+      authorizeToolExecution(makeCall(), secondContext, [descriptor]),
+      authorizeToolExecution(makeCall(), secondContext, [descriptor]),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === 'fulfilled')).toHaveLength(1);
+    const rejected = attempts.find((attempt) => attempt.status === 'rejected') as PromiseRejectedResult;
+    expect(rejected.reason).toMatchObject({ code: 'tool_call_replayed' });
   });
 });
 

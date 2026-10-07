@@ -351,9 +351,12 @@ export async function resolveToolCallPayload(
   if (!isExternalizedToolPayload(call.payload)) {
     // Normal XML / legacy DSML path (the most common execution route): inject
     // the initial cwd hint. Do not re-trust any call-supplied field.
+    // ⚠️ The cwd gate keys on `call.name` (the stable tool identity), NOT on
+    // `call.invocationName` — the latter is `mcp_<server uuid>_<tool>` for every
+    // Shell Local tool, so gating on it never fired (see local-skill-cwd.ts).
     return {
       ...call,
-      payload: enforceLocalSkillCwd(call.payload, call.invocationName ?? '', grantLocalSkillDir),
+      payload: enforceLocalSkillCwd(call.payload, call.name, grantLocalSkillDir),
     };
   }
 
@@ -375,7 +378,12 @@ export async function resolveToolCallPayload(
     };
   }
 
-  const resolved = parseExternalizedToolPayload(body, call.payload.invocationName, grantLocalSkillDir);
+  const resolved = parseExternalizedToolPayload(
+    body,
+    call.payload.invocationName,
+    call.name,
+    grantLocalSkillDir,
+  );
   if (resolved.parseError) {
     return {
       ...call,

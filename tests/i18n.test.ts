@@ -58,9 +58,15 @@ describe('i18n translation', () => {
   });
 
   it('translates content/background injected surfaces', () => {
-    expect(translate('en', 'content.permission.webFetch', {
-      origin: 'https://example.com',
-    })).toBe('Zai++ needs permission to access https://example.com so it can fetch that page');
+    // ⚠️ 样本必须取**生产在用的键** —— 原先这条用的是 `content.permission.webFetch`，
+    // 而那个键只在测试里被引用（生产零引用），已随零引用清理删除。
+    // 换成同段、同样带参数的 `content.projectPanel.conversationCount`（zai.content.ts 在用）。
+    expect(translate('en', 'content.projectPanel.conversationCount', {
+      count: 3,
+    })).toBe('3 chats');
+    expect(translate('zh-CN', 'content.projectPanel.conversationCount', {
+      count: 3,
+    })).toBe('3 个对话');
   });
 
   it('interpolates message parameters without swallowing missing placeholders', () => {

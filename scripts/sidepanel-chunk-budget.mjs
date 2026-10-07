@@ -36,7 +36,22 @@ const BASELINE = Object.freeze({
   // 是本文件历史上单次涨幅最大的一次（比 2.15.12 的提示词那次还大）。
   // **判据**：`core/i18n/resources/*/sidepanel.ts` 是**整份**进初始 shell 的，
   // 所以**往任何一段加键都会全文计入** —— 加文案前先想一下值不值。
-  initialShell: { raw: 346_096, gzip: 107_600 },
+  // ⚠️⚠️ **2026-10-07 四测（零引用 i18n 键清理）**：删掉 **45 个零引用键**
+  // （`tool.artifact.*` 14 + `tool.sandbox.*` 12 + `sidepanel.toolsPage.*` 权限面板 10
+  // + `sidepanel` 其余 7 + `common.retry` + `content.permission.webFetch`，中英各一份），
+  // 实测 raw 338044 / gzip 105470 —— **raw −8052 / gzip −2130**。
+  // ⚠️ **这是本文件历史上单次降幅最大的一次**，与 2.15.21 那次加 24 键的涨幅同源：
+  // 两个 section 都是**整份**进初始 shell。
+  // **教训**：基线长期偏大时门禁是「靠实测比基线小」蒙过去的（2.15.16→2.15.19 差了 378 字节），
+  // 所以**降了也要回写**，不能只满足于「门禁还绿」。
+  initialShell: { raw: 338_044, gzip: 105_470 },
+  // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
+  // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
+  // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，
+  // 别看着输出里 `baseline.routeChunks` 与 `current.routeChunks` 并排就以为它们在比。
+  // 这里保留的是**早先实测过的参考值**（条目比 `BUDGET` 少、且早已不是当前值）；
+  // 要不要改成与 initialShell 一致的「基线 + 小余量」，是另一个议题 ——
+  // 那会把路由块的门禁从「20 倍余量」收紧到「涨几百字节就红」，属设计决策。
   routeChunks: {
     CapabilitiesPage: { raw: 1_568, gzip: 669 },
     SettingsPage: { raw: 2_118, gzip: 855 },

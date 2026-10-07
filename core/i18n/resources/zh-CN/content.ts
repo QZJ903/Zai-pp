@@ -4,9 +4,6 @@ export const content = {
       backgroundFailed: '后台工具执行失败',
     },
   },
-  permission: {
-    webFetch: 'Zai++ 需要访问 {origin} 的权限以获取该页面内容',
-  },
   projectPanel: {
     title: '项目',
     empty: '暂无项目',

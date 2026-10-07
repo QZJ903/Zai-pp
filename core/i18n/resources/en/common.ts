@@ -15,7 +15,6 @@ export const common = {
   preview: 'Preview',
   refresh: 'Refresh',
   remove: 'Remove',
-  retry: 'Retry',
   save: 'Save',
   saveChanges: 'Save changes',
   test: 'Test',

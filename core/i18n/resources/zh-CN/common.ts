@@ -15,7 +15,6 @@ export const common = {
   preview: '预览',
   refresh: '刷新',
   remove: '移除',
-  retry: '重试',
   save: '保存',
   saveChanges: '保存更改',
   test: '测试',

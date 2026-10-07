@@ -1,15 +1,22 @@
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import * as t from '@babel/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withSyncLocalStateLock } from '../core/persistence/local-state-lock';
+import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-source';
 import {
+  createProjectContext,
   stageDeleteProjectContextAndMemoriesAlreadyLocked,
   updateProjectContext,
   type ProjectContextState,
 } from '../core/project';
 import {
   PROJECT_CONTEXT_STORAGE_KEY,
+  getProjectContextState,
   saveProjectContextStateForSyncApply,
 } from '../core/project/store';
 import {
+  getSavedItemsState,
   saveSavedItem,
   type SavedItemsState,
 } from '../core/saved-items';
@@ -193,6 +200,155 @@ describe('versioned browser repositories', () => {
     // 下次回传时对方就拿到了「数据被吞」的假象。
     expect(storage[SAVED_ITEMS_STORAGE_KEY]).toEqual(remoteState);
   });
+
+  it('keeps chrome.storage routing single-owned by the versioned repository', () => {
+    // 路由（`chrome.storage.local` 的读写）只有 versioned-repository 一处实现；
+    // 走它的 store 一旦自己直接读写，就绕开了「先解码再覆盖」那层保护。
+    const repositoryPath = 'core/persistence/versioned-repository.ts';
+    const repositorySource = readFileSync(repositoryPath, 'utf8');
+    expect(repositorySource).toContain('chrome.storage.local.get');
+    expect(repositorySource).toContain('chrome.storage.local.set');
+
+    // 消费方清单**派生**自「谁真的 import 了 createVersionedRepository」，不手抄 ——
+    // 手抄的清单在新增 store 时会静默漏掉那一个（正是这条要防的事）。
+    const consumers = listTypeScriptFiles('core')
+      .filter((path) => importsRepositoryFactory(readFileSync(path, 'utf8'), path))
+      .map(toPosixPath);
+
+    // 非空 + 含已知成员：否则「导入改名 / 文件挪走」会让上面那条循环空跑而恒绿。
+    expect(consumers).toEqual(expect.arrayContaining([
+      'core/project/store.ts',
+      'core/saved-items/store.ts',
+    ]));
+
+    for (const path of consumers) {
+      // 走 AST 找真实的成员访问，不查字符串 —— 后者写一句提到它的注释就会假红。
+      expect(findChromeStorageAccesses(readFileSync(path, 'utf8'), path), path).toEqual([]);
+    }
+  });
+
+  it('keeps sync apply delegating domain validation to the owning store', () => {
+    const syncFiles = listTypeScriptFiles('core/sync').map(toPosixPath);
+    const applyPath = 'core/sync/local-state-browser.ts';
+
+    // 委托：sync 的 apply 步骤必须调 store 的 *ForSyncApply（它们内部才做
+    // 「先解码现有原始值、再写入」—— 那条保护就是上面 `guards sync replacements…` 测的东西）。
+    const calls = calledNames(readFileSync(applyPath, 'utf8'), applyPath);
+    expect([...calls]).toEqual(expect.arrayContaining([
+      'saveProjectContextStateForSyncApply',
+      'replaceSavedItemsStateForSyncApply',
+    ]));
+
+    // 不重复实现：sync 层不得自己再解码一份领域状态（两份实现必然分叉）。
+    for (const path of syncFiles) {
+      const syncCalls = calledNames(readFileSync(path, 'utf8'), path);
+      expect(syncCalls.has('decodeProjectContextState'), path).toBe(false);
+      expect(syncCalls.has('decodeSavedItemsState'), path).toBe(false);
+    }
+  });
+
+  it('treats a missing key as empty state without writing storage', async () => {
+    await expect(getProjectContextState()).resolves.toEqual({
+      schemaVersion: 2,
+      projects: [],
+      conversations: [],
+      pendingProjectId: null,
+    });
+    await expect(getSavedItemsState()).resolves.toEqual({ schemaVersion: 1, items: [] });
+    // 「缺键」是正常初态，读它不该产生副作用。
+    expect(storageSet).not.toHaveBeenCalled();
+  });
+
+  it('rejects a present null value instead of treating it as missing', async () => {
+    // 显式 `null` 与「缺键」是两件事：前者是**已落盘的非法值**，必须显式失败并原样保留。
+    // 判据在 `createChromeStorageSlot`：`hasOwnProperty` + `!== undefined` 两条都要有。
+    storage[PROJECT_CONTEXT_STORAGE_KEY] = null;
+    storage[SAVED_ITEMS_STORAGE_KEY] = null;
+
+    await expect(getProjectContextState()).rejects.toThrow('projectContext must be an object');
+    await expect(getSavedItemsState()).rejects.toThrow('savedItems must be an object');
+    expect(storage[PROJECT_CONTEXT_STORAGE_KEY]).toBeNull();
+    expect(storage[SAVED_ITEMS_STORAGE_KEY]).toBeNull();
+    expect(storageSet).not.toHaveBeenCalled();
+  });
+
+  it('serializes concurrent Project and Saved Items mutations without lost updates', async () => {
+    // 两个并发变更各自「读 → 改 → 写」；没有 FIFO 就会双双读到同一份旧状态、
+    // 后写的那次把先写的整条记录覆盖掉（丢更新）。
+    randomUUID
+      .mockReturnValueOnce('project-a')
+      .mockReturnValueOnce('project-b')
+      .mockReturnValueOnce('saved-a')
+      .mockReturnValueOnce('sync-a')
+      .mockReturnValueOnce('saved-b')
+      .mockReturnValueOnce('sync-b');
+
+    await Promise.all([
+      createProjectContext({ name: 'Project A' }),
+      createProjectContext({ name: 'Project B' }),
+    ]);
+    expect(storage[PROJECT_CONTEXT_STORAGE_KEY]).toMatchObject({
+      projects: [{ id: 'project-a' }, { id: 'project-b' }],
+    });
+
+    await Promise.all([
+      saveSavedItem({ kind: 'snippet', title: 'A', content: 'A', tags: [] }),
+      saveSavedItem({ kind: 'bookmark', title: 'B', content: 'B', tags: [] }),
+    ]);
+    const savedItems = storage[SAVED_ITEMS_STORAGE_KEY] as { items: Array<{ id: string }> };
+    expect(savedItems.items.map((item) => item.id).sort()).toEqual(['saved-a', 'saved-b']);
+  });
+
+  it('fails mutations before clocks, identifiers, or writes can touch future/corrupt state', async () => {
+    // 拒绝态（更高版本的未来态 / 结构损坏）必须在**任何副作用之前**失败：
+    // 解码先于构造新记录 ⇒ 时钟不被读、ID 不被生成、存储一个字节都不写。
+    // 反过来（先造记录再解码）的表现是「用户数据没变，但 ID 与时间戳已经被消耗掉」，
+    // 且下一次重试会拿到一组新的 ID —— 这类痕迹不可见，只能靠这三条断言钉住。
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+
+    for (const raw of Object.values(PROJECT_REJECTED_STATES)) {
+      storage[PROJECT_CONTEXT_STORAGE_KEY] = raw;
+      await expect(createProjectContext({ name: 'Blocked' })).rejects.toThrow();
+      // 原样保留：失败不得就地重写（重写会把未来态降级成本版本能读的形状）。
+      expect(storage[PROJECT_CONTEXT_STORAGE_KEY]).toBe(raw);
+    }
+    expect(randomUUID).not.toHaveBeenCalled();
+    expect(now).not.toHaveBeenCalled();
+
+    for (const raw of Object.values(SAVED_ITEMS_REJECTED_STATES)) {
+      storage[SAVED_ITEMS_STORAGE_KEY] = raw;
+      await expect(saveSavedItem({
+        kind: 'snippet',
+        title: 'Blocked',
+        content: 'Blocked',
+        tags: [],
+      })).rejects.toThrow();
+      expect(storage[SAVED_ITEMS_STORAGE_KEY]).toBe(raw);
+    }
+    expect(randomUUID).not.toHaveBeenCalled();
+    expect(now).not.toHaveBeenCalled();
+    expect(storageSet).not.toHaveBeenCalled();
+  });
+
+  it('touches clocks, identifiers, and storage on the legal path', async () => {
+    // 上一条的对照面：证明那些 `not.toHaveBeenCalled()` 不是恒真 ——
+    // 合法状态下同一批副作用**必须**发生，否则上一条在任何实现下都会绿。
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+
+    // 两条 store 分开断言（中间清一次）—— 合在一起时，只要**任意一条**碰了时钟与 ID
+    // 两条断言就都满足，另一条整段被删也照样绿（实测过：把 createProjectContext 的
+    // `Date.now()` / `crypto.randomUUID()` 换成常量，合并写法仍然全绿）。
+    await createProjectContext({ name: 'Allowed' });
+    expect(now).toHaveBeenCalled();
+    expect(randomUUID).toHaveBeenCalled();
+
+    now.mockClear();
+    randomUUID.mockClear();
+    await saveSavedItem({ kind: 'snippet', title: 'Allowed', content: 'Allowed', tags: [] });
+    expect(now).toHaveBeenCalled();
+    expect(randomUUID).toHaveBeenCalled();
+    expect(storageSet).toHaveBeenCalled();
+  });
 });
 
 // ---- 契约夹具：与上游 ds++ 的同名夹具逐字段对齐（仅换命名空间前缀）----
@@ -318,3 +474,70 @@ const SAVED_ITEMS_REJECTED_STATES = {
   future: { schemaVersion: 2, items: [SAVED_ITEM], futureField: 'preserve-me' },
   corrupt: { schemaVersion: 1, items: null },
 } as const;
+
+
+// ---- 源码级检查用的辅助函数（走 AST，不查字符串）----
+
+function listTypeScriptFiles(root: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(root)) {
+    const path = join(root, entry);
+    if (statSync(path).isDirectory()) {
+      out.push(...listTypeScriptFiles(path));
+      continue;
+    }
+    if (path.endsWith('.ts')) out.push(path);
+  }
+  return out;
+}
+
+function toPosixPath(path: string): string {
+  return path.replace(/\\/g, '/');
+}
+
+function importsRepositoryFactory(source: string, path: string): boolean {
+  const program = parseTypeScriptSource(path, source);
+  let found = false;
+  walkSourceAst(program, (node) => {
+    if (!t.isImportDeclaration(node)) return;
+    if (!String(node.source.value).endsWith('persistence/versioned-repository')) return;
+    for (const specifier of node.specifiers) {
+      if (t.isImportSpecifier(specifier)
+        && t.isIdentifier(specifier.imported)
+        && specifier.imported.name === 'createVersionedRepository') {
+        found = true;
+      }
+    }
+  });
+  return found;
+}
+
+/** 源码里**真实出现**的 `chrome.storage.*` 成员访问（注释与字符串不参与）。 */
+function findChromeStorageAccesses(source: string, path: string): string[] {
+  const program = parseTypeScriptSource(path, source);
+  const found: string[] = [];
+  walkSourceAst(program, (node) => {
+    if (!t.isMemberExpression(node) || node.computed) return;
+    const text = memberPath(node);
+    if (text && text.startsWith('chrome.storage.')) found.push(text);
+  });
+  return found;
+}
+
+function memberPath(node: t.Node): string | null {
+  if (t.isIdentifier(node)) return node.name;
+  if (t.isMemberExpression(node) && !node.computed && t.isIdentifier(node.property)) {
+    const object = memberPath(node.object);
+    return object ? `${object}.${node.property.name}` : null;
+  }
+  return null;
+}
+
+function calledNames(source: string, path: string): Set<string> {
+  const program = parseTypeScriptSource(path, source);
+  const names = new Set<string>();
+  walkSourceAst(program, (node) => {
+    if (t.isCallExpression(node) && t.isIdentifier(node.callee)) names.add(node.callee.name);
+  });
+  return names;
+}

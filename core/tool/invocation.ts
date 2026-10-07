@@ -82,12 +82,22 @@ export function createToolInvocationCatalog(
   return catalog;
 }
 
+/**
+ * ⚠️ **捕获组两侧不能加 `\s*`** —— `\s*([\s\S]*?)\s*` 里两个量词都能吃空白、
+ * 彼此重叠，在「开标签后跟连续空白、且无配对闭合标签」时**灾难性回溯**
+ * （实测 4,000 空白 6.4s / 8,000 空白 >20s）。标签名两侧的 `\s*` 保留 ——
+ * 那是刻意支持 `< name >` 这类带空格标签的写法，且不参与重叠。
+ *
+ * 去掉后是近线性（4000 空白 0ms）。⚠️ **代价是捕获组会带上尾部空白**
+ * （原先由 `\s*` 吃掉）—— 调用方需自行 `trim()`。本函数当前无生产消费者，
+ * 唯一的用法在 `scripts/web-search-smoke.mjs`，那里本来就 `.trim()`。
+ */
 export function createXmlToolCallRegex(catalog: ToolInvocationCatalog): RegExp {
   if (catalog.invocationNames.length === 0) return /$a/g;
   let source = xmlRegexSourceCache.get(catalog);
   if (!source) {
     const names = catalog.invocationNames.map(escapeRegExp).join('|');
-    source = `<\\s*(${names})\\s*>\\s*([\\s\\S]*?)\\s*<\\/\\s*\\1\\s*>`;
+    source = `<\\s*(${names})\\s*>([\\s\\S]*?)<\\/\\s*\\1\\s*>`;
     xmlRegexSourceCache.set(catalog, source);
   }
   return new RegExp(source, 'g');

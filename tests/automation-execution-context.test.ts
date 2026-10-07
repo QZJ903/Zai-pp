@@ -146,15 +146,14 @@ describe('automation execution context', () => {
   });
 
   it('rethrows any Error reason, and only synthesises cancelled for a non-Error reason', () => {
-    // ⚠️⚠️ **无参 `abort()` 这一档在 jsdom 与真机上是两种行为，断言必须写成环境无关的形态。**
-    // 实测（同一天、同一份代码）：
-    // - **Node / 真机浏览器**：`DOMException instanceof Error === true`
-    //   （WebIDL 规范把 `DOMException.prototype.[[Prototype]]` 设成 `%Error.prototype%`）
-    //   ⇒ 走「原样抛出」分支，抛的是那个 DOMException 本身。
-    // - **jsdom**（本项目的 vitest 环境）：`DOMException instanceof Error === false`
-    //   （jsdom 没做那条原型链）⇒ 走「合成 `cancelled`」分支。
-    // ⇒ 所以这里**不能断言抛的是哪一个类**，只能断言**两者都归成 `cancelled`**
-    //   —— 而「归成 cancelled」正是调用方唯一关心的语义（见 `readAutomationStopKind` 那条）。
+    // ⚠️⚠️ **无参 `abort()` 这一档：不能断言抛的是哪一个类，只能断言语义（归成 `cancelled`）。**
+    // 原因是**跨 realm 的类身份**，不是「两条分支」：
+    // 测试环境（`--environment jsdom`）里 `AbortController` 仍是运行时自带的那个，
+    // 它 `abort()` 产出的 `DOMException` 与断言里引用的 `DOMException` **不是同一个类**
+    // ⇒ `expect(...).toThrow(DOMException)` 恒 false（实测：`constructor.name === 'DOMException'`、
+    // `name === 'AbortError'`，但 `instanceof DOMException === false`）。
+    // ⚠️ **生产代码走的仍是「原样抛出」那条分支**（`reason instanceof Error` 为真）——
+    // 与真机一致，两种环境在**行为**上并没有分叉，分叉只在「测试里那个类名属于哪个 realm」。
     const bare = new AbortController();
     bare.abort();
     expect(() => throwIfAutomationAborted(bare.signal)).toThrow();

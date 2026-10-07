@@ -201,7 +201,14 @@ function clamp(value: string | undefined, maxLength: number): string | undefined
  */
 const ZAI_PENDING_ACTION_RE = /(?:我(?:将|会|想|要|先|让|再|直接|现在|继续|尝试|开始|需要|还需要|仍需|打算|计划|马上|随后|稍后|先去|先来|接下来).{0,48}(?:调用|创建|编辑|检查|验证|生成|保存|尝试|搜索|获取|打开|执行|查看|访问|读取|抓取|下载|上传|修改|更新|删除|写入|分析|比对|比较|监控|查询|发送|提交|安装|启动|停止|清理|转换|解析|提取|汇总|整理|核对|核实|扫描|截屏|渲染)|(?:接下来|下一步|然后|让我|先让我).{0,48}(?:调用|创建|编辑|检查|验证|生成|保存|尝试|搜索|获取|打开|执行|查看|访问|读取|抓取|下载|上传|修改|更新|删除|写入|分析|比对|比较|监控|查询|发送|提交|安装|启动|停止|清理|转换|解析|提取|汇总|整理|核对|核实|扫描|截屏|渲染)|(?:(?:现在|这就|马上|随后|稍后|立即|立刻|先|直接))?(?:为|帮)(?:你|您)(?:创建|生成|制作|输出|编写|绘制|渲染)(?!了|好|完|成|过|的)|(?:i(?:'ll| will|'m| am|'d| would| want to| should| have to| (?:still\s+)?need to|'m going to| am going to|'m about to| am about to|'ve got to| have got to)|let me|let's|next,? (?:i|we)|we(?:'ll| will| need to| can)|(?:my|the) next step is to).{0,64}(?:call|create|edit|inspect|validate|generate|save|try|search|fetch|open|run|browse|read|check|look|use|verify|test|download|write|update|review|analyze|extract|query|send|post|investigate|monitor|compare|install|start|stop|convert|parse|list|collect|request|retry|scroll|click|type|navigate))/gi;
 
-const ZAI_TASK_COMPLETE_RE = /<task_complete>\s*([\s\S]*?)\s*<\/task_complete>/;
+// ⚠️ **捕获组两侧不能加 `\s*`** —— `<task_complete>\s*([\s\S]*?)\s*<\/task_complete>`
+// 会在「开标签后跟连续空白、且无配对闭合标签」时灾难性回溯（`\s*` 与 `[\s\S]*?\s*`
+// 量词重叠；实测 4,000 空白 6.4s / 8,000 空白 >20s）。输入是 `complete.assistantText`
+// 全文，来自桥消息、没有长度上限。去掉这两个 `\s*` 后是近线性（100 万空白 0.1ms）。
+// 对 `.test()` 的布尔结果**完全等价**（穷举 8.7 万条 + 随机 30 万条零差异），
+// 因为这里只用 `.test()`、不取捕获组，且无 `g` flag。守卫见
+// `tests/zai-nudge-task-complete-redos.test.ts`。
+const ZAI_TASK_COMPLETE_RE = /<task_complete>([\s\S]*?)<\/task_complete>/;
 const ZAI_NUDGE_DECISION_TAIL_MAX_CHARS = 600;
 const ZAI_PENDING_ACTION_AFTER_MAX_CHARS = 80;
 

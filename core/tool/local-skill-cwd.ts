@@ -19,13 +19,24 @@
 // Applies only to command-type tools that accept cwd. Tools that take rootPath /
 // paths as input (local_file_read / local_file_write / local_file_stat /
 // local_skill_preview) are out of scope (no cwd semantics, forcing is meaningless).
+//
+// ⚠️ The gate below keys on the **tool name** (`descriptor.name`, carried on the
+// call as `call.name`), never on the invocation name (`call.invocationName`).
+// The shell tools are published by the Shell Local MCP server, so their
+// invocation name is `mcp_<sanitized server id>_<tool name>` — derived from a
+// per-install server UUID (core/mcp/descriptor-identity.ts). A gate that matched
+// on the invocation name therefore never fired for any real shell call: cwd
+// silently fell back to homedir() and a caller-supplied cwd was never
+// overwritten, while the prompt still promised the Skill directory. The tool
+// name is the transport-independent identity (`shell_exec` stays `shell_exec`
+// whether the tool arrives over MCP or from an in-process provider).
 
 import type { ToolPayload } from './types';
 
-const CWD_ENFORCED_INVOCATIONS = new Set(['shell_exec', 'shell_session_begin']);
+const CWD_ENFORCED_TOOLS = new Set(['shell_exec', 'shell_session_begin']);
 
-export function isCwdEnforcedInvocation(invocationName: string): boolean {
-  return CWD_ENFORCED_INVOCATIONS.has(invocationName);
+export function isCwdEnforcedTool(toolName: string): boolean {
+  return CWD_ENFORCED_TOOLS.has(toolName);
 }
 
 /**
@@ -38,16 +49,20 @@ export function isCwdEnforcedInvocation(invocationName: string): boolean {
  *   outside the Skill directory. This honors the "error cwd normalized to Skill
  *   directory" promise, so a caller-supplied cwd can never silently
  *   override the grant's skillDir.
+ *
+ * `toolName` is the stable tool identity (call.name), not the invocation name —
+ * see the file header for why that distinction is load-bearing.
+ *
  * Note: cwd normalization applies only to the initial command-type calls (shell_exec / shell_session_begin) (initial cwd hint, not persistently bound to the session).
  * A call whose cwd is already skillDir is idempotent; shell_session_exec reuses the session's existing cwd and is intentionally out of scope here (contracts.ts:80-84).
  */
 export function enforceLocalSkillCwd(
   payload: ToolPayload,
-  invocationName: string,
+  toolName: string,
   skillDir: string | undefined,
 ): ToolPayload {
   if (!skillDir || !skillDir.trim()) return payload;
-  if (!isCwdEnforcedInvocation(invocationName)) return payload;
+  if (!isCwdEnforcedTool(toolName)) return payload;
   if (payload.cwd === skillDir) return payload;
   return { ...payload, cwd: skillDir };
 }

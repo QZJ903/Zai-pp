@@ -81,10 +81,14 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// ⚠️ 捕获组两侧不加 `\s*`：`\s*([\s\S]*?)\s*` 两个量词都能吃空白、彼此重叠，
+// 在「开标签后跟连续空白、且无配对闭合标签」时灾难性回溯（4,000 空白 6.3s）。
+// 去掉后近线性；匹配**跨度**不变（惰性组本来就会吃掉内部空白），只是
+// `match[2]` 会带上尾部空白 —— 下面已 `.trim()`。
 function createXmlToolCallRegex(catalog) {
   if (catalog.invocationNames.length === 0) return /$a/g;
   const names = catalog.invocationNames.map(escapeRegExp).join('|');
-  return new RegExp(`<(${names})>\\s*([\\s\\S]*?)\\s*<\\/\\1>`, 'g');
+  return new RegExp(`<(${names})>([\\s\\S]*?)<\\/\\1>`, 'g');
 }
 
 function extractToolCalls(text, descriptors) {

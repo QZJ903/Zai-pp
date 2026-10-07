@@ -4,9 +4,6 @@ export const content = {
       backgroundFailed: 'Background tool execution failed',
     },
   },
-  permission: {
-    webFetch: 'Zai++ needs permission to access {origin} so it can fetch that page',
-  },
   projectPanel: {
     title: 'Projects',
     empty: 'No projects yet',
