@@ -39,14 +39,39 @@ export const ZAI_MODEL_LIST_TTL_MS = 5 * 60_000;
  * 兜底清单：从未抓到过服务端清单（未登录 / 网络不可达 / 接口变更）时用。
  *
  * ⚠️ **id 必须是 `/api/models` 里真实存在的值** —— GLM-5.3-Flash 的 id 是
- * `x-preview-l`（与 `ZAI_MODEL_CHAT` 同源），**不是** `glm-5.3-flash`；写错会让
- * 自动化请求带着一个不存在的模型名发出去。
+ * `x-preview-l`，**不是** `glm-5.3-flash`；写错会让自动化请求带着一个不存在的
+ * 模型名发出去。
  */
 export const ZAI_FALLBACK_MODEL_OPTIONS: readonly ZaiModelOption[] = Object.freeze([
   { id: 'x-preview-l', label: 'GLM-5.3-Flash' },
   { id: 'glm-5.3', label: 'GLM-5.3' },
   { id: 'glm-5.2', label: 'GLM-5.2' },
 ]);
+
+/**
+ * 由清单派生「模型 id → 显示名」的查找函数。
+ *
+ * **用途**：把落库的模型 id 翻成用户看得懂的名字（用量面板按 id 归类，直接渲染会
+ * 把 `x-preview-l` 这种内部 id 显示给用户）。
+ *
+ * ⚠️ **必须按小写建键与查键** —— 用量侧归类的键是 `modelType.toLowerCase()`
+ * （`core/usage/stats.ts` 的 `getUsageModelKey`），而服务端清单里的 id 大小写不统一
+ * （实测存在 `GLM-5-Turbo`、`GLM-4.1V-Thinking-FlashX` 这类）。两边都不做归一的话，
+ * 带大写的模型会静默查不到、退回显示原始 id。
+ *
+ * ⚠️ **清单是过滤过的**（只留 `reasoning_effort === true` 的对话模型）⇒ 查不到是
+ * **正常返回 null**，调用方必须保留原有显示名作兜底，不能当成错误。
+ */
+export function createZaiModelLabelLookup(
+  models: readonly ZaiModelOption[],
+): (id: string | null | undefined) => string | null {
+  const byId = new Map(models.map((model) => [model.id.toLowerCase(), model.label]));
+  return (id) => {
+    if (typeof id !== 'string') return null;
+    const key = id.trim().toLowerCase();
+    return key ? byId.get(key) ?? null : null;
+  };
+}
 
 /** 解析后的中间形状：带上「网页菜单是否列它」的判定结果。 */
 interface ParsedZaiModel extends ZaiModelOption {

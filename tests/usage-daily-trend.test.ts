@@ -17,7 +17,7 @@ function makeDaily(index: number, total: number): UsageDailySummary {
     messageCount: 1,
     sessionCount: 1,
     turnCount: 1,
-    models: [{ modelKey: 'vision', modelLabel: 'GLM Vision', tokens: total }],
+    models: [{ modelKey: 'x-preview-l', modelLabel: 'GLM-5.3-Flash', tokens: total }],
   };
 }
 
@@ -34,8 +34,8 @@ function makeUsageSummary(rangeDays: 7 | 30): UsageSummary {
     currentStreak: rangeDays,
     serverTokenRecordCount: rangeDays,
     mostUsedModel: {
-      modelKey: 'vision',
-      modelLabel: 'GLM Vision',
+      modelKey: 'x-preview-l',
+      modelLabel: 'GLM-5.3-Flash',
       totalTokens: days.reduce((sum, day) => sum + day.tokens, 0),
       turnCount: rangeDays,
       messageCount: rangeDays * 2,
@@ -45,8 +45,8 @@ function makeUsageSummary(rangeDays: 7 | 30): UsageSummary {
     days,
     heatmap: days.map((day) => ({ day: day.day, timestamp: day.timestamp, tokens: day.tokens, level: 1 as const })),
     modelUsage: [{
-      modelKey: 'vision',
-      modelLabel: 'GLM Vision',
+      modelKey: 'x-preview-l',
+      modelLabel: 'GLM-5.3-Flash',
       totalTokens: days.reduce((sum, day) => sum + day.tokens, 0),
       turnCount: rangeDays,
       messageCount: rangeDays * 2,

@@ -125,13 +125,23 @@ export function getUsageModelKey(modelType: string | null | undefined): string {
   return normalized ? normalized.toLowerCase() : 'glm-default';
 }
 
+/**
+ * 用量记录里模型字段的显示名。
+ *
+ * ⚠️ **本项目只用到「读不到模型」这一档** —— 返回 `GLM Chat`；其余情况**原样返回
+ * 落库的模型 id**，友好名由调用方补（侧边栏用量面板用 `createZaiModelLabelLookup`
+ * 查 `GET_ZAI_MODELS` 清单，见 `core/zai/models.ts`）。
+ *
+ * ⚠️⚠️ **与上游不同（有意）**：上游同位置还认 `default` / `expert` / `vision` 三个取值 ——
+ * 那是 DeepSeek 的 `body.model_type` 协议，上游 `normalizeDeepSeekModelType` 会把
+ * 空值 / `chat` / 未知值**归一到 `'default'` 再写进请求体**，所以那三档在上游是活路径。
+ * 本项目读的是 `body.model` 的**真 id**（`core/zai/fetch-hook.ts` 的 `readRequestModelType`），
+ * 全史 grep `model_type` **零命中**、HAR 里也没有该字段 ⇒ 那三个值在本项目**不可能产生**，
+ * 三档已删。**别按「与上游对齐」把它们加回来。**
+ */
 export function getUsageModelLabel(modelType: string | null | undefined): string {
   const normalized = typeof modelType === 'string' ? modelType.trim() : '';
-  const lower = normalized.toLowerCase();
-  if (!lower || lower === 'default') return 'GLM Chat';
-  if (lower === 'expert') return 'GLM Expert';
-  if (lower === 'vision') return 'GLM Vision';
-  return normalized;
+  return normalized || 'GLM Chat';
 }
 
 function getRecentDayKeys(rangeDays: UsageRangeDays, now: number): string[] {

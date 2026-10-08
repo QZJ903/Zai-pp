@@ -25,15 +25,6 @@ export interface ZaiSignatureComponents {
   userId: string;
 }
 
-export interface ZaiSignedRequest {
-  /** 追加到 query 的签名相关参数（含 signature_timestamp）。 */
-  queryParams: Record<string, string>;
-  /** `X-Signature` header 值。 */
-  signature: string;
-  /** 本次签名绑定的权威 prompt（也是 body.signature_prompt 应收到的值）。 */
-  prompt: string;
-}
-
 // ---------------------------------------------------------------------------
 // 纯 TypeScript SHA-256 / HMAC-SHA256（浏览器可用，无 Node crypto 依赖）。
 // ---------------------------------------------------------------------------
@@ -138,10 +129,6 @@ function hmacSha256Hex(keyBytes: Uint8Array, dataBytes: Uint8Array): string {
   return toHex(outer);
 }
 
-function sha256Hex(text: string): string {
-  return toHex(sha256(encoder.encode(text)));
-}
-
 // ---------------------------------------------------------------------------
 // Base64（浏览器 btoa 的语义，处理 UTF-8）。
 // ---------------------------------------------------------------------------
@@ -195,31 +182,6 @@ export function createZaiSignature(
 
   // 第二层：signature = hex(HMAC-SHA256(wKeyHexAsUtf8, dataToSign))
   return hmacSha256Hex(encoder.encode(wKey), encoder.encode(dataToSign));
-}
-
-/**
- * 从裸组件（requestId/timestamp/user_id）直接产出一份完整签名结果，
- * 内含 query 参数对象（signature_timestamp 与 timestamp 同源）与 X-Signature。
- */
-export function buildZaiSignedRequest(
-  components: ZaiSignatureComponents,
-  prompt: string,
-): ZaiSignedRequest {
-  const sortedPayload = buildZaiSortedPayload(components);
-  const signature = createZaiSignature(sortedPayload, prompt, components.timestamp);
-  return {
-    queryParams: {
-      timestamp: components.timestamp,
-      requestId: components.requestId,
-      user_id: components.userId,
-      version: '0.0.1',
-      platform: 'web',
-      token: '',
-      signature_timestamp: components.timestamp,
-    },
-    signature,
-    prompt,
-  };
 }
 
 /**

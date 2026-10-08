@@ -88,6 +88,25 @@ export function isWebSearchToolName(name: string): name is WebSearchToolName {
 }
 
 /**
+ * 是不是**扩展自带的** web 工具（`web_search` / `web_fetch`）。
+ *
+ * ⚠️⚠️ **判据是「名字 **且** provider 契约」，不能只看名字。** 围绕 web 工具的每一条策略
+ * （agent 模式恒裁、联网开关关着就不进模型目录、要不要注入联网引导）**都只对扩展自带的
+ * 联网成立**；第三方 MCP 服务完全可以把工具命名为 `web_search`，那与我们的联网策略无关 ——
+ * 只按名字判会让**用户的工具凭空消失**（失败方向静默），或让扩展专属的引导被误注入。
+ *
+ * ⚠️ 这是**判据的唯一实现**：判断「某个 descriptor 属不属于扩展自带联网」的地方**都调它**，
+ * 别各自写一遍（两份判据分叉时没有任何报错）。
+ * ⚠️ 判「属于哪一类」时 `name` 不保证唯一，要连 provider 一起看；要**按 id 定位**时用
+ * `descriptorId`。判据的完整理由见 `core/zai/model-facing.ts`。
+ */
+export function isExtensionWebToolDescriptor(descriptor: ToolDescriptor): boolean {
+  if (!isWebSearchToolName(descriptor.name)) return false;
+  return descriptor.provider?.kind === WEB_SEARCH_TOOL_PROVIDER.kind
+    && descriptor.provider?.id === WEB_SEARCH_TOOL_PROVIDER.id;
+}
+
+/**
  * 扩展 web 工具单次响应体的**字节上限**（内存保护）。
  *
  * `web_search` 与 `web_fetch` 共用这一个值：两者都是「取回一份文档再解析」，

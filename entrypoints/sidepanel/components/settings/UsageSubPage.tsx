@@ -7,11 +7,12 @@ import {
   type CSSProperties,
 } from 'react';
 import type { UsageModelSummary, UsageRangeDays, UsageSummary } from '../../../../core/types';
+import { createZaiModelLabelLookup, decodeZaiModelListResponse } from '../../../../core/zai/models';
 import { createRequestGenerationFence } from '../../async-state';
 import { usageController } from '../../controllers/usage-controller';
 import { useI18n } from '../../i18n';
 import { getRuntimeErrorMessage } from '../../runtime-response';
-import { SidepanelRuntimeError } from '../../runtime-client';
+import { SidepanelRuntimeError, sidepanelRuntimeClient } from '../../runtime-client';
 import {
   EmptyState,
   SegmentedControl,
@@ -43,6 +44,11 @@ export default function UsageSubPage() {
   rangeKeyRef.current = rangeKey;
   const { confirm, node: confirmNode } = useConfirm();
   const banner = useBanner();
+  // 模型 id → 显示名。用量记录里存的是接口 id（如 `x-preview-l`），
+  // 直接渲染会把内部 id 显示给用户。清单由后台带 5 分钟缓存与内置兜底。
+  const [modelLabel, setModelLabel] = useState<(id: string | null | undefined) => string | null>(
+    () => () => null,
+  );
 
   const summary = summaries[rangeKey] ?? null;
   const rangeOptions = useMemo(() => [
@@ -75,6 +81,29 @@ export default function UsageSubPage() {
     void load(rangeKey);
     return () => requestGeneration.current.invalidate();
   }, [load, rangeKey]);
+
+  // 模型显示名：挂载时拉一次清单（后台带 5 分钟缓存）。
+  // ⚠️ **失败一律静默** —— 这只是显示层的锦上添花，拿不到清单就退回记录里原有的
+  // `modelLabel`（即原始 id），不该因此给用量面板挂一条错误横幅。
+  useEffect(() => {
+    let cancelled = false;
+    void sidepanelRuntimeClient
+      .request(
+        { type: 'GET_ZAI_MODELS' },
+        { decode: (value) => decodeZaiModelListResponse(value, 'GET_ZAI_MODELS response') },
+      )
+      .then((list) => {
+        if (cancelled) return;
+        const lookup = createZaiModelLabelLookup(list.models);
+        setModelLabel(() => lookup);
+      })
+      .catch(() => {
+        /* 拿不到清单就用原始 id，见上 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const clearStats = async () => {
     const ok = await confirm({
@@ -136,17 +165,38 @@ export default function UsageSubPage() {
         />
       ) : (
         <>
-          <UsageMetricGrid summary={summary} locale={locale} />
+          <UsageMetricGrid summary={summary} locale={locale} modelLabel={modelLabel} />
           <UsageHeatmap summary={summary} locale={locale} />
           <UsageDailyTrend summary={summary} locale={locale} />
-          <UsageModelSplit summary={summary} locale={locale} />
+          <UsageModelSplit summary={summary} locale={locale} modelLabel={modelLabel} />
         </>
       )}
     </div>
   );
 }
 
-function UsageMetricGrid({ summary, locale }: { summary: UsageSummary; locale: string }) {
+type ModelLabelLookup = (id: string | null | undefined) => string | null;
+
+/**
+ * 优先用清单里的显示名；清单里没有（已下架 / 非对话模型）就退回记录里原有的值。
+ *
+ * ⚠️ 查的是 `modelKey` 而不是原始 `modelType` —— 用量汇总里只带 `modelKey`
+ * （= `modelType` 的小写形态，`core/usage/stats.ts` 的 `getUsageModelKey`）。
+ * 清单侧的查找键同样做了小写归一，所以两边对得上。
+ */
+function resolveModelLabel(model: UsageModelSummary, lookup: ModelLabelLookup): string {
+  return lookup(model.modelKey) ?? model.modelLabel;
+}
+
+function UsageMetricGrid({
+  summary,
+  locale,
+  modelLabel,
+}: {
+  summary: UsageSummary;
+  locale: string;
+  modelLabel: ModelLabelLookup;
+}) {
   const { t } = useI18n();
   const mostUsedModel = summary.mostUsedModel;
   return (
@@ -176,7 +226,9 @@ function UsageMetricGrid({ summary, locale }: { summary: UsageSummary; locale: s
       />
       <MetricCell
         label={t('sidepanel.settings.usage.mostUsedModel')}
-        value={mostUsedModel?.modelLabel ?? t('sidepanel.settings.usage.noModel')}
+        value={mostUsedModel
+          ? resolveModelLabel(mostUsedModel, modelLabel)
+          : t('sidepanel.settings.usage.noModel')}
         detail={mostUsedModel
           ? t('sidepanel.settings.usage.share', { percent: formatPercent(mostUsedModel.share, locale) })
           : t('sidepanel.settings.usage.noModel')}
@@ -286,7 +338,15 @@ function UsageDailyTrend({ summary, locale }: { summary: UsageSummary; locale: s
   );
 }
 
-function UsageModelSplit({ summary, locale }: { summary: UsageSummary; locale: string }) {
+function UsageModelSplit({
+  summary,
+  locale,
+  modelLabel,
+}: {
+  summary: UsageSummary;
+  locale: string;
+  modelLabel: ModelLabelLookup;
+}) {
   const { t } = useI18n();
   const donutStyle = {
     background: buildDonutGradient(summary.modelUsage),
@@ -312,7 +372,7 @@ function UsageModelSplit({ summary, locale }: { summary: UsageSummary; locale: s
                 style={{ background: getModelColor(model.modelKey, summary.modelUsage) }}
               />
               <div className="min-w-0 flex-1">
-                <div className="usage-model-name">{model.modelLabel}</div>
+                <div className="usage-model-name">{resolveModelLabel(model, modelLabel)}</div>
                 <div className="usage-model-tokens">{formatCompactTokens(model.totalTokens, locale)} tokens</div>
               </div>
               <div className="usage-model-share">{formatPercent(model.share, locale)}</div>

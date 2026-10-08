@@ -68,15 +68,9 @@ export {
   createWebSearchToolDescriptors,
   createWebSearchToolProviderIdentity,
   executeWebSearchToolCall,
+  isExtensionWebToolDescriptor,
   isWebSearchToolName,
 } from './web-search';
-
-export {
-  isExtensionOwnedBrowserControlDescriptor,
-  isExtensionOwnedWebFetchDescriptor,
-  isExtensionOwnedWebSearchDescriptor,
-  projectToolDescriptorsForNativeSearch,
-} from './native-search-projection';
 
 export {
   WEB_FETCH_DESCRIPTOR_ID,

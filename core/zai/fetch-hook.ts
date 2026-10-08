@@ -15,10 +15,10 @@
 import {
   ZAI_BYPASS_HOOK_HEADER,
   ZAI_WEB_ORIGIN,
+  type ZaiWebRouteName,
 } from './contracts';
 import {
-  matchZaiChatNewRoute,
-  matchZaiCompletionRoute,
+  matchZaiWebRoute,
   parseZaiBody,
   readZaiLastUserMessageText,
   readZaiModelForRoute,
@@ -40,7 +40,7 @@ export interface ZaiHookState {
   onRequestBody: (
     body: string,
     requestId: string,
-    route: 'completion' | 'chatNew',
+    route: ZaiWebRouteName,
   ) => Promise<ZaiRequestBodyModification | null>;
   onHeadersCaptured: (headers: Record<string, string> | null) => void;
   onToolCall: (call: ZaiDetectedToolCall) => void;
@@ -222,6 +222,14 @@ function readUserIdFromToken(token: string): string {
   }
 }
 
+/**
+ * 页面 prod-fe 版本号的形态（真机抓包：completion 请求头 `x-fe-version: prod-fe-1.0.194`）。
+ *
+ * ⚠️ **不能带 `g` flag** —— `readFeVersion` 在循环里反复调它，带 `g` 的正则会跨调用
+ * 保留 `lastIndex`，表现为「隔一条 resource 才命中一次」，静默漏。
+ */
+export const ZAI_FE_VERSION_RE = /prod-fe-[\d.]+/;
+
 /** 捕获 completion 请求的完整现场：token / user_id / fe 版本，供 stateless 续跑复用。 */
 /** 动态读页面当前 prod-fe 版本（关键坑：硬编码会报「请刷新页面」）。 */
 export function readFeVersion(): string {
@@ -229,8 +237,7 @@ export function readFeVersion(): string {
   try {
     if (typeof performance !== 'undefined' && typeof performance.getEntriesByType === 'function') {
       for (const entry of performance.getEntriesByType('resource')) {
-        const name = entry.name;
-        const match = /prod-fe-[\d.]+/.exec(name);
+        const match = ZAI_FE_VERSION_RE.exec(entry.name);
         if (match) candidates.push(match[0]);
       }
     }
@@ -238,8 +245,7 @@ export function readFeVersion(): string {
     /* ignore */
   }
   if (candidates.length > 0) {
-    const latest = candidates.sort().reverse()[0];
-    return latest.replace(/^prod-fe-/, 'prod-fe-');
+    return candidates.sort().reverse()[0];
   }
   return '';
 }
@@ -279,7 +285,7 @@ interface ZaiIntercepted {
 
 async function prepareRequest(
   body: string,
-  route: 'completion' | 'chatNew',
+  route: ZaiWebRouteName,
 ): Promise<ZaiIntercepted> {
   const originalContext = createRequestContext(body);
   let modified: ZaiRequestBodyModification | null = null;
@@ -333,22 +339,20 @@ function hookFetch(): () => void {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input instanceof Request ? input.url : '';
     const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
 
-    const isCompletion = url && method ? matchZaiCompletionRoute({ url, method, baseUrl: ZAI_WEB_ORIGIN }) : false;
-    const isChatNew = url && method ? matchZaiChatNewRoute({ url, method, baseUrl: ZAI_WEB_ORIGIN }) : false;
-    if ((!isCompletion && !isChatNew) || typeof init?.body !== 'string') {
+    const route = url && method ? matchZaiWebRoute({ url, method, baseUrl: ZAI_WEB_ORIGIN }) : null;
+    if (!route || typeof init?.body !== 'string') {
       return originalFetch.call(this, input, init);
     }
     if (hasBypassHeader(init.headers)) {
       return originalFetch.call(this, input, { ...init, headers: stripBypassHeader(init.headers) });
     }
 
-    const route = isCompletion ? 'completion' : 'chatNew';
     hookState.onHeadersCaptured(captureClientHeaders(init.headers, url));
 
     const prepared = await prepareRequest(init.body, route);
 
     let requestInit: RequestInit = { ...init, body: prepared.requestBody };
-    if (isCompletion) {
+    if (route === 'completion') {
       const signed = applyCompletionSignature(url, prepared.requestBody);
       if (signed.headers['X-Signature']) {
         const headers = new Headers(requestInit.headers ?? {});
@@ -376,24 +380,22 @@ function hookFetch(): () => void {
 function hookXHR(): () => void {
   const prototype = XMLHttpRequest.prototype as XMLHttpRequest & { [XHR_HOOK_MARKER]?: true };
   if (prototype[XHR_HOOK_MARKER]) return () => undefined;
-  const routes = new WeakMap<XMLHttpRequest, 'completion' | 'chatNew' | null>();
+  const routes = new WeakMap<XMLHttpRequest, ZaiWebRouteName | null>();
   const origOpen = XMLHttpRequest.prototype.open;
   const origSend = XMLHttpRequest.prototype.send;
 
   XMLHttpRequest.prototype.open = function (method: string, url: string | URL, ...rest: unknown[]) {
     const routeUrl = typeof url === 'string' ? url : url instanceof URL ? url.href : '';
-    let route: 'completion' | 'chatNew' | null = null;
-    if (routeUrl && typeof method === 'string') {
-      if (matchZaiCompletionRoute({ url: routeUrl, method, baseUrl: ZAI_WEB_ORIGIN })) route = 'completion';
-      else if (matchZaiChatNewRoute({ url: routeUrl, method, baseUrl: ZAI_WEB_ORIGIN })) route = 'chatNew';
-    }
+    const route = routeUrl && typeof method === 'string'
+      ? matchZaiWebRoute({ url: routeUrl, method, baseUrl: ZAI_WEB_ORIGIN })
+      : null;
     routes.set(this, route);
     return origOpen.apply(this, [method, url, ...rest] as Parameters<typeof origOpen>);
   };
 
   XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
     const route = routes.get(this);
-    if ((route === 'completion' || route === 'chatNew') && typeof body === 'string') {
+    if (route && typeof body === 'string') {
       const xhr = this;
       void prepareRequest(body, route).then((prepared) => {
         return origSend.call(xhr, prepared.requestBody);
@@ -560,5 +562,3 @@ function extractAndNotifyToolCalls(
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
-
-export const ZAI_FE_VERSION_RE = /prod-fe-[\d.]+/;

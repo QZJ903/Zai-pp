@@ -13,6 +13,7 @@
  *      zai.content.ts 的 disableZaiNativeWebSearch 关掉。
  */
 
+import { isExtensionWebToolDescriptor } from '../tool/web-search';
 import type { ToolDescriptor } from '../tool/types';
 
 /**
@@ -31,12 +32,6 @@ const ALWAYS_FILTERED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'local_skill_preview',
 ]);
 
-/** 按条件裁掉的 web 工具。 */
-const WEB_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'web_search',
-  'web_fetch',
-]);
-
 export interface ZaiModelFacingFilterOptions {
   /** agent 模式（服务端沙箱语境）时为 true。 */
   isAgent?: boolean;
@@ -49,10 +44,6 @@ export interface ZaiModelFacingFilterOptions {
   nativeSearchOn?: boolean;
 }
 
-function isWebTool(descriptor: ToolDescriptor): boolean {
-  return WEB_TOOL_NAMES.has(descriptor.invocationName) || WEB_TOOL_NAMES.has(descriptor.name);
-}
-
 export function isFilteredZaiModelFacingTool(
   descriptor: ToolDescriptor,
   options?: ZaiModelFacingFilterOptions,
@@ -63,7 +54,16 @@ export function isFilteredZaiModelFacingTool(
   ) {
     return true;
   }
-  if (!isWebTool(descriptor)) return false;
+  // ⚠️⚠️ **web 工具的身份判据不在本文件** —— 是 `core/tool/web-search.ts` 的
+  // `isExtensionWebToolDescriptor`（**名字 + provider 契约**，不能只看名字）。
+  // 裁剪 web 工具的理由是「agent 模式联网由服务端沙箱承担」与「用户这轮没想搜」——
+  // 那两条**只对扩展自带的联网成立**。第三方 MCP 可以把工具命名为 `web_search`，
+  // 那与我们的联网策略无关；只按名字判会让**用户的工具凭空消失**（失败方向静默）。
+  // ⚠️ 提示词侧（联网引导该不该注入）问的是**同一个问题**，用**同一份判据** ——
+  // 各自写一遍会在分叉时静默出错（一边裁了、另一边照样注入引导）。
+  // ⚠️ 与「按 `descriptor.name` 判工具身份」那条通则同族：`name` 不保证唯一，
+  // 要判「属于哪一类」时得连 provider 一起看；要按 id 定位时用 `descriptorId`。
+  if (!isExtensionWebToolDescriptor(descriptor)) return false;
   // agent 模式：联网走服务端沙箱，恒裁。
   if (options?.isAgent) return true;
   // chat 模式：开关关着、本轮也没开原生联网 → 裁掉；否则放行。

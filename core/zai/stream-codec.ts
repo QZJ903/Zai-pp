@@ -13,7 +13,6 @@
 
 import {
   ZAI_SSE_ENVELOPE_TYPE,
-  ZAI_SSE_PHASES,
   type ZaiSsePhase,
 } from './contracts';
 
@@ -228,23 +227,6 @@ const ZAI_LEADING_DETAILS_RE = /^\s*<details\b[^>]*>[\s\S]*?<\/details>/i;
 const ZAI_LEADING_DETAILS_OPEN_RE = /^\s*<details\b/i;
 const ZAI_DETAILS_TAG_RE = /<details\b[^>]*>|<\/details\s*>/gi;
 
-/** 在 SSE 累积文本里提取工具 XML（供 fetch hook 增广侧判断是否需要续跑）。 */
-export function extractZaiToolCalls(
-  text: string,
-  toolNames: ReadonlySet<string>,
-): Array<{ name: string; raw: string }> {
-  if (!text || toolNames.size === 0) return [];
-  const pattern = new RegExp(
-    `<\\s*(${Array.from(toolNames).map(escapeRegExp).join('|')})\\b[^>]*>`,
-    'gi',
-  );
-  const found: Array<{ name: string; raw: string }> = [];
-  for (const match of text.matchAll(pattern)) {
-    found.push({ name: match[1], raw: match[0] });
-  }
-  return found;
-}
-
 /** 解析 SSE 内嵌错误详情（HTTP 200 但 body 里带 error）。 */
 export function extractZaiErrorDetail(from: unknown): string {
   const record = isRecord(from) ? from : null;
@@ -276,9 +258,3 @@ function readString(value: unknown): string {
 function readFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-export const ZAI_SSE_PHASE_SET: ReadonlySet<string> = new Set(ZAI_SSE_PHASES);

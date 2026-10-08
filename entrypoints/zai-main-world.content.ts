@@ -16,6 +16,7 @@ import {
   type ZaiRequestBodyModification,
   type ZaiResponseCompletePayload,
 } from '../core/zai/fetch-hook';
+import type { ZaiWebRouteName } from '../core/zai/contracts';
 import {
   ZAI_CONTENT_TO_MAIN,
   ZAI_MAIN_TO_CONTENT,
@@ -96,7 +97,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 function requestAugmentedBody(
   body: string,
   requestId: string,
-  route: 'completion' | 'chatNew',
+  route: ZaiWebRouteName,
 ): Promise<ZaiRequestBodyModification | null> {
   const id = crypto.randomUUID();
   return new Promise((resolve) => {

@@ -8,8 +8,7 @@ import {
   applyZaiChatNewModelOverride,
   applyZaiModelOverride,
   applyZaiModelOverrideForRoute,
-  matchZaiChatNewRoute,
-  matchZaiCompletionRoute,
+  matchZaiWebRoute,
   parseZaiBody,
   parseZaiChatNewBody,
   readZaiChatNewModel,
@@ -21,7 +20,6 @@ import {
 import {
   createZaiStreamAccumulator,
   extractZaiErrorDetail,
-  extractZaiToolCalls,
   parseZaiSseData,
   stripZaiThinkingBlocks,
 } from '../core/zai/stream-codec';
@@ -30,6 +28,7 @@ import {
   type ZaiWebRouteName,
 } from '../core/zai/contracts';
 import { filterZaiModelFacingToolDescriptors } from '../core/zai/model-facing';
+import { createWebSearchToolProviderIdentity } from '../core/tool/web-search';
 import type { ToolDescriptor } from '../core/tool/types';
 
 // 签名测试向量：与 zhipu-ai-proxy/intl-sign.js、GLM-Free-API zai.go 交叉验证。
@@ -107,25 +106,31 @@ describe('zai signature', () => {
 });
 
 describe('zai request codec', () => {
-  it('matches completion and chatNew routes', () => {
+  it('resolves a request to its route name, or null when it belongs to none', () => {
     expect(
-      matchZaiCompletionRoute({
+      matchZaiWebRoute({
         url: 'https://chat.z.ai/api/v2/chat/completions',
         method: 'POST',
       }),
-    ).toBe(true);
+    ).toBe('completion');
     expect(
-      matchZaiChatNewRoute({
+      matchZaiWebRoute({
         url: 'https://chat.z.ai/api/v1/chats/new',
         method: 'POST',
       }),
-    ).toBe(true);
+    ).toBe('chatNew');
     expect(
-      matchZaiCompletionRoute({
+      matchZaiWebRoute({
         url: 'https://chat.z.ai/api/v2/chat/completions',
         method: 'GET',
       }),
-    ).toBe(false);
+    ).toBeNull();
+    expect(
+      matchZaiWebRoute({
+        url: 'https://chat.z.ai/api/v1/chats',
+        method: 'POST',
+      }),
+    ).toBeNull();
   });
 
   // ⚠️⚠️ **这一条是上面那张用例表的解药。** 用例表从 `ZAI_WEB_ROUTES` 派生，
@@ -144,6 +149,11 @@ describe('zai request codec', () => {
   // 这几类正是「本该拒绝却被接受」的形态。
   // ⚠️ 判据是 origin 与 pathname **精确相等** —— 换成 includes / startsWith 这类
   // 近似匹配会让上面几类全部漏过，而漏过的表现是「把提示词注进了不该注的请求」。
+  //
+  // ⚠️⚠️ **断言比的是「解析出来的路由名」，不是布尔值** —— 这一点是承重的：
+  // 策略表里 `route` 与路径错配（把 `chatNew` 那行的 route 写成 `'completion'`、
+  // 或两行整体对调）时，**布尔口径的断言抓不到**（两条都「匹配上了」），
+  // 而按路由名比会立刻红。
   interface RouteCase {
     name: string;
     route: ZaiWebRouteName;
@@ -192,24 +202,9 @@ describe('zai request codec', () => {
     '$name',
     ({ route, url, method, baseUrl, matched }: RouteCase) => {
       const input = baseUrl === undefined ? { url, method } : { url, method, baseUrl };
-      const result = route === 'completion'
-        ? matchZaiCompletionRoute(input)
-        : matchZaiChatNewRoute(input);
-      expect(result).toBe(matched);
+      expect(matchZaiWebRoute(input)).toBe(matched ? route : null);
     },
   );
-
-  // 两个匹配函数体逐字相同、只差一个路径常量 —— 漏改一处的表现是「两条路由互相认领对方的请求」。
-  it('keeps each matcher on its own path', () => {
-    expect(matchZaiChatNewRoute({
-      url: `https://chat.z.ai${pathOf('completion')}`,
-      method: 'POST',
-    })).toBe(false);
-    expect(matchZaiCompletionRoute({
-      url: `https://chat.z.ai${pathOf('chatNew')}`,
-      method: 'POST',
-    })).toBe(false);
-  });
 
   it('reads the last user message from completion body', () => {
     const body = {
@@ -443,13 +438,6 @@ describe('zai stream codec', () => {
     expect(acc.assistantText).toBe('Hello');
   });
 
-  it('extracts tool calls from accumulated text', () => {
-    const text = 'before <shell_exec>{"command":"ls"}</shell_exec> after';
-    const found = extractZaiToolCalls(text, new Set(['shell_exec']));
-    expect(found.length).toBe(1);
-    expect(found[0].name).toBe('shell_exec');
-  });
-
   it('extracts embedded error detail', () => {
     const payload = {
       data: { error: { detail: '人机验证失败' } },
@@ -589,19 +577,43 @@ describe('zai stream codec', () => {
 });
 
 describe('zai model-facing filter', () => {
-  const mk = (name: string, invocationName: string): ToolDescriptor =>
+  // ⚠️ **web 工具的 fixture 必须带真实 provider** —— 判据是「provider 契约 + 名字」，
+  // 不带 provider 的 fixture 会让 `web_search` 被判成**非扩展自带**（MCP 同名那种），
+  // 于是那几条用例会红，而红的原因不是代码错、是 fixture 缺字段。
+  // provider 由**生产同一个工厂**派生，不手抄。
+  const webProvider = createWebSearchToolProviderIdentity('en');
+
+  const mk = (
+    name: string,
+    invocationName: string,
+    provider?: ToolDescriptor['provider'],
+  ): ToolDescriptor =>
     ({
       name,
       invocationName,
       id: `id-${name}`,
       inputSchema: {},
+      ...(provider ? { provider } : {}),
     }) as unknown as ToolDescriptor;
+
+  /** 扩展自带的 web 工具（生产形状：`name === invocationName` 且 provider 是 `local/web`）。 */
+  const mkOwnWebTool = (name: 'web_search' | 'web_fetch'): ToolDescriptor =>
+    mk(name, name, webProvider);
+
+  /** 第三方 MCP 服务暴露的、**恰好同名**的工具（长 invocationName + mcp provider）。 */
+  const mkMcpLookalike = (name: 'web_search' | 'web_fetch'): ToolDescriptor =>
+    mk(name, `browser_tools_${name}`, {
+      kind: 'mcp',
+      id: 'browser-tools',
+      displayName: 'Browser Tools',
+      transport: 'streamable_http',
+    });
 
   it('keeps web_search and web_fetch when the web tools switch is on', () => {
     const descriptors = [
       mk('memory_save', 'memory_save'),
-      mk('web_search', 'web_search'),
-      mk('web_fetch', 'web_fetch'),
+      mkOwnWebTool('web_search'),
+      mkOwnWebTool('web_fetch'),
     ];
     const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
       isAgent: false,
@@ -613,8 +625,8 @@ describe('zai model-facing filter', () => {
   it('keeps web tools when page-native search is on even if the switch is off', () => {
     const descriptors = [
       mk('memory_save', 'memory_save'),
-      mk('web_search', 'web_search'),
-      mk('web_fetch', 'web_fetch'),
+      mkOwnWebTool('web_search'),
+      mkOwnWebTool('web_fetch'),
     ];
     const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
       isAgent: false,
@@ -627,8 +639,8 @@ describe('zai model-facing filter', () => {
   it('filters web tools when the switch is off and native search is off', () => {
     const descriptors = [
       mk('memory_save', 'memory_save'),
-      mk('web_search', 'web_search'),
-      mk('web_fetch', 'web_fetch'),
+      mkOwnWebTool('web_search'),
+      mkOwnWebTool('web_fetch'),
     ];
     const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
       isAgent: false,
@@ -641,8 +653,8 @@ describe('zai model-facing filter', () => {
   it('filters web_search and web_fetch out of the model catalog for agent turns', () => {
     const descriptors = [
       mk('memory_save', 'memory_save'),
-      mk('web_search', 'web_search'),
-      mk('web_fetch', 'web_fetch'),
+      mkOwnWebTool('web_search'),
+      mkOwnWebTool('web_fetch'),
     ];
     const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
       isAgent: true,
@@ -668,5 +680,43 @@ describe('zai model-facing filter', () => {
       'skill_draft_create',
       'memory_import_preview',
     ]);
+  });
+
+  // ⚠️⚠️ **这一条守的是「判身份要按 provider 契约，不能只按名字」。**
+  // web 工具的裁剪理由是「agent 模式联网由服务端沙箱承担」「用户没想搜」——
+  // 那两条**只对扩展自带的联网成立**。第三方 MCP 服务完全可以把工具命名为
+  // `web_search`，那与我们的联网策略无关，误裁的表现是「用户的工具凭空消失」。
+  // ⚠️ 反面对照同样必要：扩展自带的那一个**必须仍被裁**，否则这条用例会退化成
+  // 「什么都不裁」也通过。
+  it('never filters an MCP tool that merely shares the web tool names', () => {
+    const descriptors = [
+      mkOwnWebTool('web_search'),
+      mkMcpLookalike('web_search'),
+      mkOwnWebTool('web_fetch'),
+      mkMcpLookalike('web_fetch'),
+    ];
+
+    // agent 模式：扩展自带的恒裁，MCP 同名的一个都不裁。
+    expect(filterZaiModelFacingToolDescriptors(descriptors, { isAgent: true })
+      .map((d) => d.id)).toEqual([
+      'id-web_search',
+      'id-web_fetch',
+    ]);
+
+    // chat 模式 + 开关关 + 原生关：同样只裁扩展自带的。
+    expect(filterZaiModelFacingToolDescriptors(descriptors, {
+      isAgent: false,
+      webToolsEnabled: false,
+      nativeSearchOn: false,
+    }).map((d) => d.id)).toEqual([
+      'id-web_search',
+      'id-web_fetch',
+    ]);
+
+    // 反向：开关开着时扩展自带的也放行，四个都在。
+    expect(filterZaiModelFacingToolDescriptors(descriptors, {
+      isAgent: false,
+      webToolsEnabled: true,
+    })).toHaveLength(4);
   });
 });

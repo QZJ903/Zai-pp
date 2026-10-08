@@ -31,10 +31,6 @@ export const ZAI_SIGNATURE_TIME_SLOT_MS = 300_000;
 /** 扩展自己发的请求带此 header，fetch hook 见之即直通（防自钩）。 */
 export const ZAI_BYPASS_HOOK_HEADER = 'X-ZAI-PP-Bypass-Hook';
 
-/** chat 模式默认 model；agent 模式用 glm-5.2。 */
-export const ZAI_MODEL_CHAT = 'x-preview-l';
-export const ZAI_MODEL_AGENT = 'glm-5.2';
-
 /** agent 模式没有单独端点，靠 features.flags / chats/new.type 的这个标志区分。 */
 export const ZAI_AGENT_FLAG = 'general_agent';
 
@@ -45,20 +41,22 @@ export const ZAI_SSE_ENVELOPE_TYPE = 'chat:completion';
 export const ZAI_CHAT_INPUT_SELECTOR = '#chat-input';
 
 /**
- * SSE phase 全集。thinking/answer 带文本三语义；tool_call/tool_response 只在
- * agent 模式出现（服务端沙箱工具，扩展本地不劫持）；done 收尾。
+ * SSE phase 的已知取值：`thinking` / `answer` 带文本三语义；`tool_call` /
+ * `tool_response` 只在 agent 模式出现（服务端沙箱工具，扩展本地不劫持）；`done` 收尾。
+ *
+ * ⚠️ **只是个联合类型，没有运行时数组** —— 判 phase 的地方一律**按形状识别、不按取值过滤**
+ * （见 `core/zai/stream-codec.ts` 的三条判据），所以这份清单的用途是**文档与类型提示**，
+ * 不是校验表；末尾那个 `(string & {})` 表示服务端新增相位时不报错。
  */
-export const ZAI_SSE_PHASES = [
-  'thinking',
-  'answer',
-  'tool_call',
-  'tool_response',
-  'other',
-  'search',
-  'done',
-] as const;
-
-export type ZaiSsePhase = (typeof ZAI_SSE_PHASES)[number] | (string & {});
+export type ZaiSsePhase =
+  | 'thinking'
+  | 'answer'
+  | 'tool_call'
+  | 'tool_response'
+  | 'other'
+  | 'search'
+  | 'done'
+  | (string & {});
 
 /** main-world ↔ isolated postMessage 协议的消息源标识。 */
 export const ZAI_MSG_SOURCE = 'zai-pp';

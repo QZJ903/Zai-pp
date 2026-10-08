@@ -172,12 +172,12 @@ describe('tool execution call sites are awaited', () => {
       });
       expect(body, `应当存在 ${fnName}`).toBeDefined();
 
-      // 该函数体里 `filterZaiModelFacingToolDescriptors(第一个参数, …)` 的**根标识符**。
+      // 该函数体里 `modelFacingDescriptorsFor(第一个参数, …)` 的**根标识符**。
       // 两种写法都要认：`descriptors`（解构）与 `loopState.descriptors`（整体持有）。
       const receivers: string[] = [];
       walkSourceAst(body!, (node) => {
         if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
-        if (node.callee.name !== 'filterZaiModelFacingToolDescriptors') return;
+        if (node.callee.name !== 'modelFacingDescriptorsFor') return;
         const first = node.arguments[0];
         if (t.isIdentifier(first)) receivers.push(first.name);
         else if (t.isMemberExpression(first) && t.isIdentifier(first.object)) {
@@ -219,7 +219,7 @@ describe('tool execution call sites are awaited', () => {
       const webFlagSources: string[] = [];
       walkSourceAst(body!, (node) => {
         if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
-        if (node.callee.name !== 'filterZaiModelFacingToolDescriptors') return;
+        if (node.callee.name !== 'modelFacingDescriptorsFor') return;
         const options = node.arguments[1];
         if (!t.isObjectExpression(options)) return;
         for (const property of options.properties) {
@@ -518,6 +518,30 @@ describe('authorization retry only resends a freshly synced catalog', () => {
 });
 
 describe('tool tag recognition uses the descriptors injected into this request', () => {
+  /** `handleAugmentRequestBody` 的 `handleAugmentRequestBody` 函数体。 */
+  function findAugmentBody(): t.BlockStatement {
+    const program = readContentProgram();
+    let body: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'handleAugmentRequestBody') body = node.body;
+    });
+    expect(body, '应当存在 handleAugmentRequestBody').toBeDefined();
+    return body!;
+  }
+
+  /** 该函数体里 `if (isContinuationRequest(...)) { … }` 那个分支。 */
+  function findContinuationBranch(): t.IfStatement {
+    const branches: t.IfStatement[] = [];
+    walkSourceAst(findAugmentBody(), (node) => {
+      if (!t.isIfStatement(node)) return;
+      const test = node.test;
+      if (!t.isCallExpression(test) || !t.isIdentifier(test.callee)) return;
+      if (test.callee.name === 'isContinuationRequest') branches.push(node);
+    });
+    expect(branches.length, '应当恰好有一个 isContinuationRequest(...) 分支').toBe(1);
+    return branches[0]!;
+  }
+
   /**
    * 识别 XML 标签用的名单必须**与提示词同源** —— 即本请求授权返回的 `descriptors`，
    * 而不是全局 `currentCatalogNames` / `currentToolDescriptors`（那是「上次同步」）。
@@ -532,7 +556,7 @@ describe('tool tag recognition uses the descriptors injected into this request',
    * ⚠️ **只断言接线**（回传值来自 `descriptors`、兜底解析读 `requestToolDescriptorsByRequestId`），
    * 不断言具体函数名 —— 后者用 `includes` 就能过。
    */
-  it('returns this request\'s authorized descriptor names in the augment result', () => {
+  it('returns this request\'s model-facing descriptor names in the augment result', () => {
     const program = readContentProgram();
     let body: t.BlockStatement | undefined;
     walkSourceAst(program, (node) => {
@@ -540,9 +564,14 @@ describe('tool tag recognition uses the descriptors injected into this request',
     });
     expect(body, '应当存在 handleAugmentRequestBody').toBeDefined();
 
-    // 收集所有 `toolDescriptorNames:` 的值，断言它们都是 `catalogNamesFor(<某>.descriptors)`，
-    // 没有一处回落到 `currentCatalogNames`。
-    const sources: string[] = [];
+    // ⚠️⚠️ **回传的必须是「模型可见目录」，不是「授权目录」。**
+    // 这两者曾经混用：提示词用过滤后的、识别用未过滤的 ⇒ 用户在侧边栏关掉的 web 工具
+    // 仍会被识别并执行（表现是「关了搜索它还在搜」，静默）。所以这里断言：
+    // ① 每处 `toolDescriptorNames` 都是 `catalogNamesFor(<标识符>)`（**不是** `<某>.descriptors`
+    //    那种成员表达式 —— 那正是「未过滤的授权目录」的形态）；
+    // ② 那个标识符在本函数内**由 `modelFacingDescriptorsFor(...)` 绑定**；
+    // ③ 没有一处回落到全局 `currentCatalogNames`。
+    const namesArgs: string[] = [];
     let usesGlobalCatalogNames = false;
     walkSourceAst(body!, (node) => {
       if (!t.isObjectProperty(node)) return;
@@ -555,46 +584,216 @@ describe('tool tag recognition uses the descriptors injected into this request',
       if (t.isCallExpression(value) && t.isIdentifier(value.callee)
         && value.callee.name === 'catalogNamesFor') {
         const arg = value.arguments[0];
-        if (t.isMemberExpression(arg) && t.isIdentifier(arg.property)
-          && arg.property.name === 'descriptors') {
-          sources.push('descriptors');
+        if (t.isIdentifier(arg)) {
+          namesArgs.push(arg.name);
           return;
         }
+        // `<某>.descriptors` 是「授权目录」的形态 —— 明确拒绝。
+        namesArgs.push(t.isMemberExpression(arg) ? `<成员表达式 ${'…'}>` : '<非预期来源>');
+        return;
       }
-      sources.push('<非预期来源>');
+      namesArgs.push('<非预期来源>');
     });
 
-    expect(sources.length, '应当有多处回传 toolDescriptorNames（chatNew / 续跑 / completion）').toBeGreaterThanOrEqual(3);
-    expect(sources.every((s) => s === 'descriptors'), `toolDescriptorNames 必须来自本请求的 descriptors，实际：${sources.join(', ')}`).toBe(true);
+    expect(namesArgs.length, '应当有多处回传 toolDescriptorNames（chatNew / 续跑 / completion）').toBeGreaterThanOrEqual(3);
+    expect(
+      namesArgs.every((name) => /^[A-Za-z_$][\w$]*$/.test(name)),
+      `toolDescriptorNames 必须来自一个「模型可见目录」标识符，不能是授权目录的成员表达式。实际：${namesArgs.join(', ')}`,
+    ).toBe(true);
     expect(usesGlobalCatalogNames, '不得回传全局 currentCatalogNames（那是上次同步，会与提示词分叉）').toBe(false);
+
+    // ② 那些标识符必须由过滤助手绑定 —— 否则「改个变量名继续用未过滤目录」就能绕过。
+    const boundByFilter = new Set<string>();
+    walkSourceAst(body!, (node) => {
+      if (!t.isVariableDeclarator(node) || !t.isIdentifier(node.id)) return;
+      const init = node.init;
+      if (!init) return;
+      const call = t.isAwaitExpression(init) ? init.argument : init;
+      if (t.isCallExpression(call) && t.isIdentifier(call.callee)
+        && call.callee.name === 'modelFacingDescriptorsFor') {
+        boundByFilter.add(node.id.name);
+      }
+    });
+    for (const name of new Set(namesArgs)) {
+      expect(
+        boundByFilter.has(name),
+        `回传用的 \`${name}\` 必须由 modelFacingDescriptorsFor(...) 绑定（否则可能带回未过滤目录）`,
+      ).toBe(true);
+    }
   });
 
-  it('parses fallback tool XML with the per-request descriptors, not the global snapshot', () => {
+  it('parses fallback tool XML with the model-facing catalog, not the global snapshot', () => {
     const program = readContentProgram();
-    // 所有 `parseToolXml(<text>, <第二参>)` 调用点，收集第二参是不是**裸** `currentToolDescriptors`。
+    // 所有 `parseToolXml(<text>, <第二参>)` 调用点，逐个判定第二参。
     const bareGlobalArgs: number[] = [];
+    const notFilteredArgs: number[] = [];
     const callLines: number[] = [];
     walkSourceAst(program, (node) => {
       if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
       if (node.callee.name !== 'parseToolXml') return;
-      callLines.push(node.loc?.start.line ?? -1);
+      const line = node.loc?.start.line ?? -1;
+      callLines.push(line);
       const second = node.arguments[1];
       if (t.isIdentifier(second) && second.name === 'currentToolDescriptors') {
-        bareGlobalArgs.push(node.loc?.start.line ?? -1);
+        bareGlobalArgs.push(line);
+        return;
       }
+      // ⚠️⚠️ **必须是 `modelFacingForRequest(requestId)`** —— 只断言「不是裸全局目录」不够：
+      // 传 `requestToolDescriptorsByRequestId.get(id) ?? currentToolDescriptors` 也满足那条，
+      // 而那个 Map 里存的是**未过滤**的授权目录（懒建路径刻意存原样），于是「关掉的工具
+      // 仍被兜底解析认出来并执行」这个缺陷原封不动。
+      const isFilteredCall = t.isCallExpression(second)
+        && t.isIdentifier(second.callee)
+        && second.callee.name === 'modelFacingForRequest';
+      if (!isFilteredCall) notFilteredArgs.push(line);
     });
     expect(callLines.length, '应当有 parseToolXml 调用点').toBeGreaterThan(0);
     // 不得有任何一处把裸 `currentToolDescriptors` 当目录 —— 那正是要消除的分叉。
     expect(bareGlobalArgs, `这些行的 parseToolXml 用了裸 currentToolDescriptors（会与提示词分叉）：${bareGlobalArgs.join(', ')}`).toEqual([]);
+    // 且每一处都必须过模型可见过滤。
+    expect(
+      notFilteredArgs,
+      `这些行的 parseToolXml 第二参不是 modelFacingForRequest(...)（会拿到未过滤的授权目录）：${notFilteredArgs.join(', ')}`,
+    ).toEqual([]);
 
-    // 且必须真的用到了按请求的 Map（要么直接、要么经 `const descriptors = … ?? currentToolDescriptors`）。
-    const source = readFileSync(CONTENT_SOURCE, 'utf8');
     // ⚠️ **写入点恰好 3 个**（续跑 / completion / 懒建）—— **chatNew 刻意不写**：它没有终态
     // 事件（`fetch-hook` 只在 completion 路由发 `onRequestTerminal`），与随后的 completion 是
     // 两个不同 requestId ⇒ 写了既**无人释放**（孤儿泄漏）、也**无人读**（Map 的读点读的都是
     // completion 的 requestId）。这条钉住「别把 chatNew 那行加回来」。
+    const source = readFileSync(CONTENT_SOURCE, 'utf8');
     const setCalls = source.match(/requestToolDescriptorsByRequestId\.set\(/g) ?? [];
     expect(setCalls.length, '写入点必须恰好 3 个（chatNew 刻意不写，见注释）').toBe(3);
+  });
+
+  /**
+   * ⚠️⚠️ **「模型可见目录」在 `handleAugmentRequestBody` 里必须只有一个计算入口。**
+   *
+   * 缺陷形态：过滤结果只喂提示词，识别与解析各拿一份未过滤的授权目录 —— 用户关掉的
+   * web 工具仍被识别并执行（「关了搜索它还在搜」，静默）。
+   * 所以这里断言：该函数体内 `modelFacingDescriptorsFor(...)` 的调用点**都绑定到标识符**、
+   * 且**没有一处**再出现「直接读 `xxx.descriptors` 交给 catalogNamesFor」的旧形态。
+   */
+  it('binds every model-facing catalog to a single filtered computation', () => {
+    const program = readContentProgram();
+    let body: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'handleAugmentRequestBody') body = node.body;
+    });
+    expect(body, '应当存在 handleAugmentRequestBody').toBeDefined();
+
+    let filterCalls = 0;
+    walkSourceAst(body!, (node) => {
+      if (t.isCallExpression(node) && t.isIdentifier(node.callee)
+        && node.callee.name === 'modelFacingDescriptorsFor') {
+        filterCalls += 1;
+      }
+    });
+    // 三个分支（chatNew / 续跑 / completion）各一次 —— 每处都要有自己的口径。
+    expect(filterCalls, 'chatNew / 续跑 / completion 三个分支都该算出自己的模型可见目录').toBe(3);
+
+    // ⚠️⚠️ **续跑轮的口径必须取 `continuationLoop`，不能退化成别的来源。**
+    // 理由是**时序约束**不是偏好：续跑轮的提示词**在提交之前就建好了**
+    // （`advanceContinuationLoop` 用 `loop.isAgentTurn` / `loop.nativeSearchOn` 过滤出
+    // toolNames 喂给 `buildZaiContinuationPrompt`，nudge 轮同理），建提示词那一刻这个请求的
+    // body 还不存在。识别与解析必须与提示词同源，所以只能取快照。
+    // ⚠️ 循环不在时（用户手打了一段形似续跑模板的文本）退回读 body —— 那种请求就是真实的
+    // 用户请求。**不能退化成「只看归属任务」**：模板文本不在 `taskIdByPromptText` 里、
+    // `matchedTask` 取不到 ⇒ 那条路恒为 false。
+    //
+    // 断言方式：`isAgent` 是**内联**在 options 里的，`nativeSearchOn` 是**分支内先声明**再传。
+    // 两种形态都要收 —— 只认一种会在重构时假红。
+    const continuationBranch = findContinuationBranch();
+    /** `continuationLoop?.xxx ?? …` 形态？ */
+    const isLoopBacked = (value: t.Node | null | undefined): boolean => {
+      if (!value || !t.isLogicalExpression(value) || value.operator !== '??') return false;
+      const left = value.left;
+      // ⚠️ `a?.b` 在这个 Babel 版本下是 `OptionalMemberExpression`（见
+      // `zai-content-project-scope-contract.test.ts` 的同款判定）；两种都收，
+      // 免得将来 Babel 行为变了变成假红。
+      return (t.isOptionalMemberExpression(left) || t.isMemberExpression(left))
+        && t.isIdentifier(left.object, { name: 'continuationLoop' });
+    };
+
+    // ① 分支内声明的、由 loop 快照派生的标识符（如 `const nativeSearchOn = loop?.x ?? …`）。
+    const loopDerivedNames = new Set<string>();
+    walkSourceAst(continuationBranch, (node) => {
+      if (!t.isVariableDeclarator(node) || !t.isIdentifier(node.id)) return;
+      if (isLoopBacked(node.init)) loopDerivedNames.add(node.id.name);
+    });
+
+    // ② 传给 modelFacingDescriptorsFor 的两个值，各自算不算「loop 派生」。
+    const optionKeys = new Set<string>();
+    walkSourceAst(continuationBranch, (node) => {
+      if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+      if (node.callee.name !== 'modelFacingDescriptorsFor') return;
+      const options = node.arguments[1];
+      if (!t.isObjectExpression(options)) return;
+      for (const property of options.properties) {
+        if (!t.isObjectProperty(property) || !t.isIdentifier(property.key)) continue;
+        const key = property.key.name;
+        if (key !== 'isAgent' && key !== 'nativeSearchOn') continue;
+        const value = property.value;
+        // 内联形态，或引用分支内声明的 loop 派生标识符（含 shorthand `{ nativeSearchOn }`）。
+        const backed = isLoopBacked(value)
+          || (t.isIdentifier(value) && loopDerivedNames.has(value.name));
+        if (backed) optionKeys.add(key);
+      }
+    });
+    expect(
+      [...optionKeys].sort(),
+      '续跑轮的 isAgent / nativeSearchOn 都必须源自 `continuationLoop`（内联或经分支内声明）',
+    ).toEqual(['isAgent', 'nativeSearchOn']);
+
+    // ⚠️⚠️ **续跑轮的「关原生通道」必须与「放行 web 工具」用同一个值。**
+    //
+    // 真机确认过的缺陷：这两件事曾经用两个来源不同的变量算 ——
+    // `searchEnabled`（只看归属任务快照）决定要不要 `disableZaiNativeWebSearch`，
+    // `loop.nativeSearchOn` 决定模型可见目录。两者只在自动化下相等；**非自动化 + 用户点了地球**
+    // 时前者 false、后者 true ⇒ 放行了扩展 web 工具却**没关原生通道**，两套联网并存。
+    // 真机实测：地球开着时页面**每轮都重新带** `features.auto_web_search=true`，
+    // 「首条写过 false」不会延续到续跑轮。
+    //
+    // 断言方式：同一个标识符必须**同时**被 ① 传给 `modelFacingDescriptorsFor` 的
+    // `nativeSearchOn`、② 守卫 `disableZaiNativeWebSearch(...)`。
+    // 只断言其中一个都会被「用两个变量」的写法绕过。
+    const passedToFilter = new Set<string>();
+    const guardedDisable = new Set<string>();
+    walkSourceAst(continuationBranch, (node) => {
+      if (t.isCallExpression(node) && t.isIdentifier(node.callee)
+        && node.callee.name === 'modelFacingDescriptorsFor') {
+        const options = node.arguments[1];
+        if (t.isObjectExpression(options)) {
+          for (const property of options.properties) {
+            if (!t.isObjectProperty(property) || !t.isIdentifier(property.key)) continue;
+            if (property.key.name !== 'nativeSearchOn') continue;
+            if (t.isIdentifier(property.value)) passedToFilter.add(property.value.name);
+          }
+        }
+      }
+      // `if (X) disableZaiNativeWebSearch(...)` —— 取 if 的 test 里的标识符。
+      // ⚠️ **只认「直接守卫」**：consequent 直接就是那条调用（`if (X) f();`）。
+      // 不能用「consequent 子树里有没有这条调用」—— 那样外层 `if (parsedBody) { … }`
+      // 也会被算成守卫（它子树里确实有），于是断言拿到两个标识符而假红。
+      if (t.isIfStatement(node) && t.isIdentifier(node.test)
+        && t.isExpressionStatement(node.consequent)
+        && t.isCallExpression(node.consequent.expression)
+        && t.isIdentifier(node.consequent.expression.callee)
+        && node.consequent.expression.callee.name === 'disableZaiNativeWebSearch') {
+        guardedDisable.add(node.test.name);
+      }
+    });
+    expect(
+      [...passedToFilter].sort(),
+      '续跑分支里传给 modelFacingDescriptorsFor 的 nativeSearchOn 必须是一个标识符',
+    ).toHaveLength(1);
+    expect(
+      [...guardedDisable].sort(),
+      '续跑分支里 disableZaiNativeWebSearch 必须被一个标识符守卫',
+    ).toHaveLength(1);
+    expect(
+      [...guardedDisable],
+      `「放行 web 工具」与「关原生通道」必须用同一个变量（现在分别是 ${[...passedToFilter]} 与 ${[...guardedDisable]}）`,
+    ).toEqual([...passedToFilter]);
   });
 
   it('releases the per-request descriptor map alongside the other request-scoped state', () => {
@@ -614,6 +813,74 @@ describe('tool tag recognition uses the descriptors injected into this request',
       }
     });
     expect(released, 'requestToolDescriptorsByRequestId 必须在 releaseRequestState 里释放（否则按 requestId 增长）').toBe(true);
+  });
+
+  /**
+   * ⚠️⚠️ **completion 轮的联网标记必须能带上「归属任务的 searchEnabled」。**
+   *
+   * 那个值的用途是双重的：既决定本轮关不关原生通道，又经
+   * `isAgentTurnByRequestId` 旁的 `nativeSearchOnByRequestId` → `ContinuationLoop.nativeSearchOn`
+   * 决定**续跑轮列不列 web 工具**。少一路来源的后果是有条件的、且**不报错**：
+   * 「用户页面默认开着地球 + 跑一个开了搜索的自动化」时，续跑轮既不列工具、也不关原生。
+   *
+   * ⚠️ **曾经的形态是这里重查了一遍 `taskIdByPromptText.get(originalPrompt)`** ——
+   * 那个 Map 的语义是「**待认领**的 prompt → taskId」，本请求的条目**在本函数更早处
+   * 已被 delete**，所以那个三元恒不成立、任务标记从来没被并进来。**读一个已删的键
+   * 不会报错、测试也不会红**，所以把「来源里必须含 task」钉在这里。
+   *
+   * ⚠️ 断言**只认「表达式里引用了 `X.searchEnabled`」**，不锁变量名与写法 ——
+   * 内联 `matchedTask?.searchEnabled === true || …` 与先声明一个局部变量都算过。
+   */
+  it('derives the completion native-search flag from the assigned task, not from the pending-prompt map', () => {
+    const augmentBody = findAugmentBody();
+
+    // 收集 `X.searchEnabled` 形态的成员表达式所取的对象名。
+    const taskFlagReceivers = new Set<string>();
+    walkSourceAst(augmentBody, (node) => {
+      if (!t.isMemberExpression(node) && !t.isOptionalMemberExpression(node)) return;
+      if (!t.isIdentifier(node.property) || node.property.name !== 'searchEnabled') return;
+      if (t.isIdentifier(node.object)) taskFlagReceivers.add(node.object.name);
+    });
+
+    // 反面：**归属之后**不得再按 prompt 原文去查那个「待认领」映射 ——
+    // 本请求的条目此刻已被 delete，读它恒 `undefined`。
+    // ⚠️ **判据必须锚在「那次 delete 之后」**：归属本身当然要先 `get` 一次
+    // （读到才 `delete`），把整段扫一遍会把那次合法读取也算成违规。
+    const deletePositions: number[] = [];
+    walkSourceAst(augmentBody, (node) => {
+      if (!t.isCallExpression(node) || !t.isMemberExpression(node.callee)) return;
+      if (!t.isIdentifier(node.callee.property) || node.callee.property.name !== 'delete') return;
+      if (!t.isIdentifier(node.callee.object, { name: 'taskIdByPromptText' })) return;
+      if (node.start !== null && node.start !== undefined) deletePositions.push(node.start);
+    });
+    expect(
+      deletePositions.length,
+      '应当有一处 `taskIdByPromptText.delete(...)`（归属时释放「待认领」映射）',
+    ).toBeGreaterThan(0);
+    const assignmentPosition = Math.min(...deletePositions);
+
+    const lateReads: number[] = [];
+    walkSourceAst(augmentBody, (node) => {
+      if (!t.isCallExpression(node) || !t.isMemberExpression(node.callee)) return;
+      if (!t.isIdentifier(node.callee.property) || node.callee.property.name !== 'get') return;
+      if (!t.isIdentifier(node.callee.object, { name: 'taskIdByPromptText' })) return;
+      if (node.start === null || node.start === undefined) return;
+      if (node.start > assignmentPosition) lateReads.push(node.loc?.start.line ?? -1);
+    });
+
+    expect(
+      lateReads,
+      '归属之后不得再读 `taskIdByPromptText.get(...)` —— 本请求的条目已被 delete，'
+      + `读它恒为 undefined（任务标记会被静默丢掉）。这些行违规：${lateReads.join(', ')}`,
+    ).toEqual([]);
+    expect(
+      [...taskFlagReceivers].length,
+      'completion 轮的联网标记必须由「归属任务」的 searchEnabled 派生（没有任何 `X.searchEnabled` 读取）',
+    ).toBeGreaterThan(0);
+    expect(
+      [...taskFlagReceivers],
+      `归属任务的来源只能是本函数内那次归属的结果（matchedTask），实际读了：${[...taskFlagReceivers].join(', ')}`,
+    ).toContain('matchedTask');
   });
 });
 

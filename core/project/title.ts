@@ -61,9 +61,3 @@ export function isPlaceholderProjectConversationTitle(value: string): boolean {
     || isZaiSiteDefaultConversationTitle(title)
     || isZaiNewConversationPlaceholderTitle(title);
 }
-
-export function isUsableProjectConversationTitle(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  const title = value.trim();
-  return title.length > 0 && !isPlaceholderProjectConversationTitle(title);
-}

@@ -7,6 +7,7 @@ import {
   createToolInvocationCatalog,
   getPreferredToolInvocationName,
   getToolInvocationNames,
+  isExtensionWebToolDescriptor,
   type ToolInvocationCatalog,
 } from '../tool';
 import { estimateTokens, formatMemoriesBlock, getMemoryBudget, selectMemories } from '../memory/selector';
@@ -144,9 +145,10 @@ export function renderToolSchemas(
  * 联网搜索引导：chat 模式、目录里有扩展自带的 web_search 描述符就注入。
  *
  * 两个门：
- * 1. `isAgent` —— agent 模式的联网由服务端沙箱承担，不注入（其工具也已被
- *    core/zai/model-facing.ts 的 AGENT_ONLY_FILTERED_TOOL_NAMES 裁掉，
- *    所以这一门是双保险：即使将来过滤名单变了，引导也不会漏进 agent）。
+ * 1. `isAgent` —— agent 模式的联网由服务端沙箱承担，不注入。⚠️ 它与模型侧的裁剪**是两处
+ *    独立实现**（那处不是「某个名单」：web 工具的 agent 裁剪由 `core/zai/model-facing.ts`
+ *    的 `isFilteredZaiModelFacingTool` 在 `isAgent` 为真时直接返回 true 完成）——
+ *    所以这一门的作用是「即使将来那处判据变了，引导也不会漏进 agent」。
  * 2. 工具在不在 —— 用户在侧边栏关掉 web 工具时，目录里没有 web_search，
  *    引导也应随之消失。
  */
@@ -156,7 +158,11 @@ function renderWebSearchGuidance(
   locale: SupportedLocale,
 ): string {
   if (isAgent) return '';
-  const hasWebSearch = descriptors.some((descriptor) => descriptor.name === 'web_search');
+  // ⚠️ **判据必须是「扩展自带的 web 工具」，不能只看名字** —— 这段引导讲的是
+  // 「输出 web_search 工具调用、结果自动展示在页面上」，那**只对扩展自带的联网成立**；
+  // 第三方 MCP 完全可以暴露一个同名工具，按名字判会把这段扩展专属的引导误注入给它。
+  // 判据与模型侧裁剪**同源**（`core/tool/web-search.ts` 的 `isExtensionWebToolDescriptor`）。
+  const hasWebSearch = descriptors.some(isExtensionWebToolDescriptor);
   if (!hasWebSearch) return '';
   return translate(locale, 'prompt.webSearchGuidance');
 }

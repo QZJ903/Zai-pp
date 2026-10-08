@@ -3,6 +3,7 @@ import {
   ZAI_FALLBACK_MODEL_OPTIONS,
   ZAI_MODEL_LIST_TTL_MS,
   createZaiModelCatalog,
+  createZaiModelLabelLookup,
   decodeZaiModelListResponse,
   parseZaiUpstreamModels,
 } from '../core/zai/models';
@@ -219,5 +220,60 @@ describe('zai model catalog', () => {
 
     expect(result.source).toBe('stale');
     expect(result.models).toEqual([{ id: 'glm-5.3', label: 'GLM-5.3' }]);
+  });
+});
+
+describe('createZaiModelLabelLookup', () => {
+  const OPTIONS = [
+    { id: 'x-preview-l', label: 'GLM-5.3-Flash' },
+    { id: 'glm-5.3', label: 'GLM-5.3' },
+    // 大小写不统一是服务端清单的实测形态（`GLM-5-Turbo` / `GLM-4.1V-Thinking-FlashX`）。
+    { id: 'GLM-5-Turbo', label: 'GLM-5-Turbo' },
+  ];
+
+  it('maps a model id to its display label', () => {
+    const lookup = createZaiModelLabelLookup(OPTIONS);
+    expect(lookup('x-preview-l')).toBe('GLM-5.3-Flash');
+    expect(lookup('glm-5.3')).toBe('GLM-5.3');
+  });
+
+  it('normalizes case and surrounding whitespace on both sides of the lookup', () => {
+    // ⚠️ 用量侧归类的键是小写的（`getUsageModelKey` 做 `toLowerCase`），
+    // 而清单里的 id 大小写不统一 —— 两边都不归一就会静默查不到、退回显示原始 id。
+    const lookup = createZaiModelLabelLookup(OPTIONS);
+    expect(lookup('X-PREVIEW-L')).toBe('GLM-5.3-Flash');
+    expect(lookup('glm-5-turbo')).toBe('GLM-5-Turbo');
+    expect(lookup('GLM-5-TURBO')).toBe('GLM-5-Turbo');
+    expect(lookup('  glm-5.3  ')).toBe('GLM-5.3');
+  });
+
+  it('returns null for a model the list does not carry', () => {
+    // 清单只留 `reasoning_effort === true` 的对话模型 ⇒ 查不到是正常返回，
+    // 调用方必须保留原有显示名兜底（不能当成错误、也不能渲染出 null）。
+    const lookup = createZaiModelLabelLookup(OPTIONS);
+    expect(lookup('glm-4.7')).toBeNull();
+    expect(lookup('')).toBeNull();
+    expect(lookup('   ')).toBeNull();
+    expect(lookup(null)).toBeNull();
+    expect(lookup(undefined)).toBeNull();
+  });
+
+  it('falls back to the raw id only when the lookup misses', () => {
+    const lookup = createZaiModelLabelLookup(OPTIONS);
+    const resolve = (model: { modelKey: string; modelLabel: string }) => (
+      lookup(model.modelKey) ?? model.modelLabel
+    );
+    expect(resolve({ modelKey: 'x-preview-l', modelLabel: 'x-preview-l' })).toBe('GLM-5.3-Flash');
+    expect(resolve({ modelKey: 'glm-4.7', modelLabel: 'glm-4.7' })).toBe('glm-4.7');
+  });
+
+  it('does not alias two ids that differ only in case', () => {
+    // 反向断言：归一化不能宽到「把不同的 id 折成同一个」——
+    // 建键时后写的会覆盖先写的，这里钉住「后写者胜」这个确定行为。
+    const lookup = createZaiModelLabelLookup([
+      { id: 'glm-5.3', label: 'first' },
+      { id: 'GLM-5.3', label: 'second' },
+    ]);
+    expect(lookup('glm-5.3')).toBe('second');
   });
 });

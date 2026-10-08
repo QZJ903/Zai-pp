@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  getUsageModelKey,
+  getUsageModelLabel,
   summarizeUsage,
   toLocalDayKey,
 } from '../core/usage/stats';
@@ -24,8 +26,8 @@ describe('summarizeUsage', () => {
 
     const summary = summarizeUsage([
       makeRecord({ id: 'old', recordedAt: outsideRange, totalTokens: 999 }),
-      makeRecord({ id: 'vision', recordedAt: yesterday, chatSessionId: 'session-a', modelType: 'vision', totalTokens: 100 }),
-      makeRecord({ id: 'expert', recordedAt: now, chatSessionId: 'session-b', modelType: 'expert', totalTokens: 240 }),
+      makeRecord({ id: 'flash', recordedAt: yesterday, chatSessionId: 'session-a', modelType: 'x-preview-l', totalTokens: 100 }),
+      makeRecord({ id: 'flagship', recordedAt: now, chatSessionId: 'session-b', modelType: 'glm-5.3', totalTokens: 240 }),
     ], { rangeDays: 7, now });
 
     expect(summary.days).toHaveLength(7);
@@ -37,10 +39,11 @@ describe('summarizeUsage', () => {
     expect(summary.activeDays).toBe(2);
     expect(summary.currentStreak).toBe(2);
     expect(summary.serverTokenRecordCount).toBe(2);
-    expect(summary.mostUsedModel?.modelLabel).toBe('GLM Expert');
+    // 落库的是模型 id，标签由调用方查清单补（见下方 getUsageModelLabel 的用例）。
+    expect(summary.mostUsedModel?.modelLabel).toBe('glm-5.3');
     expect(summary.modelUsage.map((model) => model.modelLabel)).toEqual([
-      'GLM Expert',
-      'GLM Vision',
+      'glm-5.3',
+      'x-preview-l',
     ]);
   });
 
@@ -79,14 +82,51 @@ describe('usage store', () => {
       tps: 1061.7,
       speedSource: 'server',
       elapsedMs: 3110,
-      modelType: 'vision',
+      modelType: 'glm-5.2',
     });
 
     const summary = await getUsageSummary(30);
     expect(summary.turnCount).toBe(1);
     expect(summary.totalTokens).toBe(3302);
     expect(summary.serverTokenRecordCount).toBe(1);
-    expect(summary.mostUsedModel?.modelLabel).toBe('GLM Vision');
+    expect(summary.mostUsedModel?.modelLabel).toBe('glm-5.2');
+  });
+});
+
+describe('getUsageModelLabel', () => {
+  it('falls back to a readable name only when the record carries no model', () => {
+    expect(getUsageModelLabel(null)).toBe('GLM Chat');
+    expect(getUsageModelLabel(undefined)).toBe('GLM Chat');
+    expect(getUsageModelLabel('')).toBe('GLM Chat');
+    expect(getUsageModelLabel('   ')).toBe('GLM Chat');
+  });
+
+  it('passes a real model id through untouched', () => {
+    // ⚠️ 本项目落库的是 `body.model` 的真 id（`x-preview-l` / `glm-5.3` / `glm-4.7`），
+    // 不认上游 DeepSeek 的 `default` / `expert` / `vision` 三档 —— 那三档在本项目
+    // 不可能产生（全史 grep `model_type` 零命中）。友好名由调用方查 `GET_ZAI_MODELS`
+    // 清单补（`createZaiModelLabelLookup`），不在这里硬编码。
+    expect(getUsageModelLabel('x-preview-l')).toBe('x-preview-l');
+    expect(getUsageModelLabel('glm-5.3')).toBe('glm-5.3');
+    expect(getUsageModelLabel('glm-4.7')).toBe('glm-4.7');
+    expect(getUsageModelLabel('  glm-5.2  ')).toBe('glm-5.2');
+  });
+
+  it('does not translate the upstream-only model types', () => {
+    // 反向断言：上游那三档被删掉之后，它们**不再**被翻译成 `GLM Chat/Expert/Vision`，
+    // 而是像任何其它不认识的 id 一样原样透出。这是有意与上游不同（见函数注释）。
+    expect(getUsageModelLabel('default')).toBe('default');
+    expect(getUsageModelLabel('expert')).toBe('expert');
+    expect(getUsageModelLabel('vision')).toBe('vision');
+  });
+});
+
+describe('getUsageModelKey', () => {
+  it('lowercases a real id and buckets an absent model under a stable key', () => {
+    expect(getUsageModelKey('GLM-5-Turbo')).toBe('glm-5-turbo');
+    expect(getUsageModelKey('x-preview-l')).toBe('x-preview-l');
+    expect(getUsageModelKey(null)).toBe('glm-default');
+    expect(getUsageModelKey('  ')).toBe('glm-default');
   });
 });
 

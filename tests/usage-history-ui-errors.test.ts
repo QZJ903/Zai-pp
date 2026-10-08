@@ -227,8 +227,8 @@ function makeUsageSummary(rangeDays: 7 | 30 = 30, totalTokens = 321): UsageSumma
     currentStreak: 1,
     serverTokenRecordCount: 1,
     mostUsedModel: {
-      modelKey: 'vision',
-      modelLabel: 'GLM Vision',
+      modelKey: 'x-preview-l',
+      modelLabel: 'GLM-5.3-Flash',
       totalTokens,
       turnCount: 1,
       messageCount: 2,
@@ -242,7 +242,7 @@ function makeUsageSummary(rangeDays: 7 | 30 = 30, totalTokens = 321): UsageSumma
       messageCount: 2,
       sessionCount: 1,
       turnCount: 1,
-      models: [{ modelKey: 'vision', modelLabel: 'GLM Vision', tokens: totalTokens }],
+      models: [{ modelKey: 'x-preview-l', modelLabel: 'GLM-5.3-Flash', tokens: totalTokens }],
     }],
     heatmap: [{
       day: '2026-07-14',
@@ -251,8 +251,8 @@ function makeUsageSummary(rangeDays: 7 | 30 = 30, totalTokens = 321): UsageSumma
       level: 5,
     }],
     modelUsage: [{
-      modelKey: 'vision',
-      modelLabel: 'GLM Vision',
+      modelKey: 'x-preview-l',
+      modelLabel: 'GLM-5.3-Flash',
       totalTokens,
       turnCount: 1,
       messageCount: 2,

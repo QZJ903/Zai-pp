@@ -19,35 +19,43 @@ export interface ZaiRoutePolicy {
   readonly method: 'POST' | 'GET';
 }
 
+/**
+ * 可增强路由的**策略表** —— 路由名 → 路径 + 方法。
+ *
+ * ⚠️ **这是路由匹配的唯一真源**：`matchZaiWebRoute` 遍历它，新增一条路由只改这张表。
+ * 曾经这里被架空过 —— 表在、但匹配是两个各自内联 `ZAI_WEB_ROUTES` + 字面 `'POST'` 的
+ * 函数，两张函数体逐字相同、只差一个路径常量（漏改一处的表现是**两条路由互相认领
+ * 对方的请求**，且不报错）。
+ */
 const ZAI_ROUTE_POLICY: Record<ZaiWebRouteName, ZaiRoutePolicy> = {
   completion: { route: 'completion', method: 'POST' },
   chatNew: { route: 'chatNew', method: 'POST' },
 };
 
-export function matchZaiCompletionRoute(input: {
+/**
+ * 匹配一条请求属于哪个可增强路由；不属于任何一个则返回 `null`。
+ *
+ * ⚠️ 判据是 origin 与 pathname **精确相等**（不是 `includes` / `startsWith`）——
+ * 近似匹配会把「加后缀 / 藏在 query 里 / 异源」这几类一起放进来，表现是
+ * **把提示词注进了不该注的请求**。拒绝面由 `tests/zai.test.ts` 逐条钉住。
+ *
+ * ⚠️ **相对 URL 必须用 `new URL(url, baseUrl ?? ZAI_WEB_ORIGIN)` 兜底** ——
+ * fetch hook 里拿到的就是相对路径。
+ */
+export function matchZaiWebRoute(input: {
   url: string;
   method: string;
   baseUrl?: string;
-}): boolean {
+}): ZaiWebRouteName | null {
   const url = readUrl(input.url, input.baseUrl);
-  if (!url || url.origin !== ZAI_WEB_ORIGIN) return false;
-  return (
-    url.pathname === ZAI_WEB_ROUTES.completion &&
-    input.method.toUpperCase() === 'POST'
-  );
-}
-
-export function matchZaiChatNewRoute(input: {
-  url: string;
-  method: string;
-  baseUrl?: string;
-}): boolean {
-  const url = readUrl(input.url, input.baseUrl);
-  if (!url || url.origin !== ZAI_WEB_ORIGIN) return false;
-  return (
-    url.pathname === ZAI_WEB_ROUTES.chatNew &&
-    input.method.toUpperCase() === 'POST'
-  );
+  if (!url || url.origin !== ZAI_WEB_ORIGIN) return null;
+  const method = input.method.toUpperCase();
+  for (const policy of Object.values(ZAI_ROUTE_POLICY)) {
+    if (url.pathname === ZAI_WEB_ROUTES[policy.route] && method === policy.method) {
+      return policy.route;
+    }
+  }
+  return null;
 }
 
 /** 相对 URL 必须用 `new URL(url, ZAI_WEB_ORIGIN)` 兜底（关键坑：fetch hook 里 URL 是相对路径）。 */
@@ -306,8 +314,13 @@ export function readZaiChatNewModel(body: Record<string, unknown>): unknown {
   return chat?.models ?? null;
 }
 
-/** 模型落点由**路由**决定，与调用点在代码里的位置无关。 */
-export type ZaiModelRoute = 'chatNew' | 'completion';
+/**
+ * 模型落点由**路由**决定，与调用点在代码里的位置无关。
+ *
+ * 就是 `ZaiWebRouteName` 的别名 —— 保留这个名字是因为它表达的是「模型写入按哪个
+ * 路由分叉」，而不是「哪些路由可增强」。**别再手抄一份联合类型**。
+ */
+export type ZaiModelRoute = ZaiWebRouteName;
 
 /**
  * 按路由把任务选定的模型写进请求体 —— **唯一入口**。

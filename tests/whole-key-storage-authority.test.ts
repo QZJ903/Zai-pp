@@ -33,7 +33,7 @@ describe('Usage whole-key mutation authority', () => {
       recordedAt: now + 100,
       source: 'sidepanel-api',
       chatSessionId: 'new-chat',
-      modelType: 'vision',
+      modelType: 'glm-5.2',
       totalTokens: 900,
       tokenSource: 'server',
       tps: 90,
@@ -55,7 +55,7 @@ describe('Usage whole-key mutation authority', () => {
     expect(records.find((record) => record.id === 'shared')).toMatchObject({
       source: 'sidepanel-api',
       chatSessionId: 'new-chat',
-      modelType: 'vision',
+      modelType: 'glm-5.2',
       totalTokens: 900,
       tokenSource: 'server',
       tps: 90,

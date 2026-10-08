@@ -508,6 +508,59 @@ function catalogNamesFor(descriptors: readonly ToolDescriptor[]): string[] {
   return catalog.invocationNames;
 }
 
+/**
+ * 本请求的**模型可见工具目录** —— 提示词、标签识别、兜底解析三处**必须共用这一份**。
+ *
+ * ⚠️⚠️ **为什么要有这个函数**：`filterZaiModelFacingToolDescriptors` 曾经只在
+ * `augmentPrompt` 内部调用一次，结果只喂给了提示词；而**标签识别**（回传给主世界的
+ * `toolDescriptorNames`）与**兜底解析**（`requestToolDescriptorsByRequestId`）用的都是
+ * **授权返回的完整目录**。两份名单分叉的后果是**静默的**：
+ * 用户在侧边栏关掉 web 工具后，提示词里已经没有 schema 了，但模型照**会话历史里
+ * 首条注入的示例**照样吐 `<web_search>` 标签 —— 而识别名单里有它、执行侧无人拦，
+ * **于是真的搜了**。用户看到的是「关了搜索它还在搜」。
+ *
+ * ⚠️ **白名单就是判据里的那个 OR**（`webToolsEnabled || nativeSearchOn`）：
+ * 自动化任务的 `searchEnabled`、或页面原生联网开着时，`nativeSearchOn` 为真 ⇒
+ * **即使扩展搜索开关是关的也放行**。所以这一处判据同时决定「关掉就不识别」与
+ * 「白名单照常放行」两件事，**别再在别处写第二份**。
+ */
+function modelFacingDescriptorsFor(
+  descriptors: readonly ToolDescriptor[],
+  options: { isAgent: boolean; nativeSearchOn: boolean; webToolsEnabled?: boolean },
+): ToolDescriptor[] {
+  return filterZaiModelFacingToolDescriptors(descriptors, {
+    isAgent: options.isAgent,
+    nativeSearchOn: options.nativeSearchOn,
+    webToolsEnabled: options.webToolsEnabled ?? currentWebToolsEnabled,
+  });
+}
+
+/**
+ * 按 requestId 取本请求的模型可见目录 —— 供**执行期**的读点用（那时只有 requestId）。
+ *
+ * ⚠️ 两个 per-request 标记都从请求级 Map 取（`isAgentTurnByRequestId` /
+ * `nativeSearchOnByRequestId`），**不是**从当前 body 重算 —— 执行发生在流式回答期间，
+ * 那时已经拿不到 body 了。这两个 Map 由增广阶段写入、由 `releaseRequestState` 释放。
+ *
+ * ⚠️⚠️ **两个标记取不到时回落 `false`，但 `webToolsEnabled` 不回落** ——
+ * 它取的是模块状态 `currentWebToolsEnabled`（见 `modelFacingDescriptorsFor`）。
+ * 所以「更严」这个说法**只对 `nativeSearchOn=false` 成立**（少放行）。
+ * `isAgent=false` 那一半会把「agent 轮恒裁」这条规则**暂时关掉**：增广没跑完 +
+ * 侧边栏联网开关开着时，web 工具不会被裁。那条路（下文的懒建授权）**模型本来就没拿到
+ * 我们的工具清单** —— 它能吐出的 `<web_search>` 只可能来自会话历史里的旧示例，
+ * 而那正是「过滤而非删除」有意保留的能力（老会话的 XML 仍要能执行）。
+ * ⇒ **行为保持不变，但别把这里读成「一定会更严」。**
+ */
+function modelFacingForRequest(requestId: string): ToolDescriptor[] {
+  return modelFacingDescriptorsFor(
+    requestToolDescriptorsByRequestId.get(requestId) ?? currentToolDescriptors,
+    {
+      isAgent: isAgentTurnByRequestId.get(requestId) ?? false,
+      nativeSearchOn: nativeSearchOnByRequestId.get(requestId) ?? false,
+    },
+  );
+}
+
 function syncHookState(): void {
   const names = catalogNamesFor(currentToolDescriptors);
   currentCatalogNames = names;
@@ -863,6 +916,15 @@ function isContinuableExecution(execution: ToolExecutionRecord): boolean {
   // 也一并算（它们在 z.ai 里是 Shell Local MCP server 的工具，provider.kind 是 mcp）。
   // 终态工具（memory_save/update/delete、skill_draft_create、memory_import_preview 等）
   // 不在此列 → 自然不可续跑。
+  //
+  // ⚠️⚠️ **这里的「按名字」是刻意的，不是漏改的身份判据 —— 别顺手删。**
+  // 它问的不是「这个工具是不是扩展自带的 web 工具」（那个问题按 provider 契约判，
+  // 见 `core/tool/web_search` 的 `isExtensionWebToolDescriptor`），而是
+  // **「这一轮还值不值得继续跑」** —— 方向是**向宽**：判错成「可续跑」只是多跑一轮，
+  // 判错成「不可续跑」会让续跑循环提前收尾（自动化那边表现为卡到租约超时）。
+  // 所以保留按名字的那几条作为**缺 provider 记录的安全网**：`provider` 在
+  // `ToolExecutionRecord` 上是可选字段（工具历史编解码明确允许缺省），
+  // 只认 provider 会在那种记录上恒 false。
   return Boolean(
     !execution.pending &&
       (execution.provider?.kind === 'mcp' ||
@@ -952,27 +1014,26 @@ function resolveActiveLocalSkill(
 function augmentPrompt(
   originalPrompt: string,
   options: {
-    toolDescriptors?: readonly ToolDescriptor[];
+    /**
+     * **必须传已经过 `modelFacingDescriptorsFor` 的目录** —— 提示词里的工具清单就是
+     * 模型「看不看得见」某个工具的唯一判据，所以这里**不再自己过滤**：
+     * 过滤只发生在调用点那一处，同一份结果同时喂给提示词、标签识别与兜底解析。
+     * ⚠️ 曾经的形态是「本函数内部过滤、只喂提示词」，而识别与解析用的是未过滤目录 ⇒
+     * 两份名单分叉（见 `modelFacingDescriptorsFor` 的说明）。
+     */
+    toolDescriptors: readonly ToolDescriptor[];
     isFirstMessage?: boolean;
     projectContext?: string | null;
     projectId?: string | null;
+    /** agent 模式：只用于「要不要注入沙箱段」这一处（web 工具的裁剪已在调用点做完）。 */
     isAgent?: boolean;
-    /** 本轮是否开着页面原生联网（等同「用户想搜」）。 */
-    nativeSearchOn?: boolean;
     /** 本轮的 Skill 激活结果，由调用方经 `resolveActiveLocalSkill` 算出（见其说明）。 */
     skillActivation: ActiveLocalSkill;
   },
 ): string {
   const isFirstMessage = options?.isFirstMessage ?? true;
   const isAgent = options?.isAgent ?? false;
-  const nativeSearchOn = options?.nativeSearchOn ?? false;
-  // 模型侧裁掉由服务端或独立 UI 流程承担的工具。
-  // web 工具（web_search / web_fetch）：agent 恒裁；chat 模式下「开关开着」或
-  // 「本轮开着原生联网」任一成立就放行 —— 保证用户想搜时一定走扩展自己的搜索。
-  const modelFacing = filterZaiModelFacingToolDescriptors(
-    options?.toolDescriptors ?? currentToolDescriptors,
-    { isAgent, webToolsEnabled: currentWebToolsEnabled, nativeSearchOn },
-  );
+  const modelFacing = options.toolDescriptors;
   const locale = currentContentLocale ?? DEFAULT_LOCALE;
   // 项目上下文**只由调用方显式传入**，没有模块级兜底：两个调用点（首条建会话读待绑项目、
   // completion 读会话归属）各自拿得到正确的源。用模块状态兜底会让「调用方明确传 null」
@@ -1171,24 +1232,29 @@ async function handleAugmentRequestBody(
       // 是**两次独立 fetch、两个不同 requestId** ⇒ 写进任何一个 Map 都**无人释放**（孤儿增长）。
       // 两个 Map 的读点读的也都是 completion 的 requestId ⇒ 写了**还无人读**：首条的工具标签
       // 识别靠 completion 轮那份，`executeDetected` 也只可能被 completion 轮的 requestId 调到。
-      // ⚠️ 但 grant 本身**必须还**：它已经用来取 `authorization.descriptors` 做增广，
-      // 而且它占着后台的 grant 名额（`MAX_ACTIVE_GRANTS = 32`，满了会让**之后所有**建授权
-      // 抛 `tool_authorization_grant_limit`）。所以增广结果回传之后**显式关掉**它 ——
-      // 走 `closeToolAuthorizationGrant`（只关后台、不碰 Map）。
+      // ⚠️ 但 grant 本身**必须还**：它已经用来取 `authorization.descriptors`（再过滤成
+      // `modelFacing`）做增广，而且它占着后台的 grant 名额（`MAX_ACTIVE_GRANTS = 32`，
+      // 满了会让**之后所有**建授权抛 `tool_authorization_grant_limit`）。
+      // 所以增广结果回传之后**显式关掉**它 —— 走 `closeToolAuthorizationGrant`（只关后台、不碰 Map）。
       // 项目上下文（首条）：此刻**地址栏还没有 `/c/<id>`**，查不了会话归属，
       // 唯一已知的是**待绑项目**（「下一条新会话使用此项目」与面板的「在项目下开启
       // 新会话」都会先置 pending）。漏了这一步的后果是**静默的**：首条没有项目指令，
       // 且 projectId 为 null 会把项目记忆整批过滤掉，要等第二轮才恢复。
       const pendingProject = await resolvePendingProjectContextForFirstMessage();
+      // 本请求的模型可见目录：**提示词、标签识别、兜底解析共用这一份**（见
+      // `modelFacingDescriptorsFor`）。这里由授权返回的完整目录过滤而来。
+      const modelFacing = modelFacingDescriptorsFor(authorization.descriptors, {
+        isAgent: isAgentTurn,
+        nativeSearchOn,
+      });
       // 首条（chats/new）始终增强：把工具目录 + 记忆 + 联网引导注入，让模型在建会话
       // 那一刻就学会工具用法（web_search 搜、shell 写文件、memory 等）。首条注入不会污染
       // parent 链（首条是会话起点，无 parent），所以联网会话也照常注入。
       const augmented = parsed.userMessageTexts.map((text) =>
         augmentPrompt(text, {
-          toolDescriptors: authorization.descriptors,
+          toolDescriptors: modelFacing,
           isFirstMessage: true,
           isAgent: isAgentTurn,
-          nativeSearchOn,
           projectContext: pendingProject?.context ?? null,
           projectId: pendingProject?.projectId ?? null,
           skillActivation,
@@ -1222,10 +1288,11 @@ async function handleAugmentRequestBody(
         result: {
           body: JSON.stringify(nextBody),
           requestId,
-          // ⚠️ **回传本请求实际注入提示词的那份描述符名**（`authorization.descriptors`），
-          // 不是全局 `currentCatalogNames` —— 主世界识别 XML 标签时用这份，才能与提示词
-          // 严格同源（否则用户刚加 MCP 工具、广播未落地时会「提示词列了 A、识别器不认 A」）。
-          toolDescriptorNames: catalogNamesFor(authorization.descriptors),
+          // ⚠️ **回传本请求实际注入提示词的那份描述符名**（就是上面那份过滤后的
+          // `modelFacing`），不是全局 `currentCatalogNames`、也不是未过滤的
+          // `authorization.descriptors` —— 主世界识别 XML 标签时用这份，才能与提示词
+          // 严格同源。⚠️ 用未过滤目录会让「用户在侧边栏关掉的工具」仍被识别并执行。
+          toolDescriptorNames: catalogNamesFor(modelFacing),
         },
       });
       // 增广结果已经回传（主世界的 pending 请求在那一刻就 resolve 了），所以这里**不 await** ——
@@ -1290,15 +1357,37 @@ async function handleAugmentRequestBody(
         localSkillDir: continuationLoop?.localSkillDir ?? undefined,
       });
       activeToolAuthorizations.set(requestId, auth);
-      // 记下本请求实际注入的那份描述符（续跑轮用授权返回的、与提示词同源）。
-      requestToolDescriptorsByRequestId.set(requestId, auth.descriptors);
-      // 续跑轮也保持「原生联网关闭」：归属任务开启搜索时（matchedTask 或续跑循环所属任务），
-      // 给透传 body 补上 features.auto_web_search=false + features.web_search=false，
-      // 确保整条会话始终走扩展自带的 web_search / web_fetch。
-      const searchEnabled =
-        matchedTask?.searchEnabled === true ||
-        (continuationLoop?.taskId != null &&
-          activeDomTasks.get(continuationLoop.taskId)?.searchEnabled === true);
+      // 本请求的联网标记 —— **一个变量，两处用途**：
+      // ① 决定「模型可见目录列不列 web 工具」（与提示词同源）；
+      // ② 决定「要不要在这个 body 上写 disableZaiNativeWebSearch」。
+      //
+      // ⚠️⚠️ **这两件事必须用同一个值** —— 两个来源不同的变量会让它们分叉：
+      // `searchEnabled`（只看归属任务的快照）决定 ②，`loop.nativeSearchOn` 决定 ①。
+      // 两者只在自动化下相等；**非自动化 + 用户点了地球**时 `loop.nativeSearchOn=true`
+      // 而 `searchEnabled=false` ⇒ 放行了扩展 web 工具、却**没关原生通道**，两套并存。
+      // 真机实测：地球开着时**页面每轮都重新带 `features.auto_web_search=true`**，
+      // 所以「首条写过 false」不会延续到续跑轮 —— 那两条续跑轮的原生通道确实是开着的。
+      //
+      // ⚠️ **口径取「循环上记的那一份」**（`ContinuationLoop.nativeSearchOn`）—— 这是
+      // **时序约束**不是偏好：续跑轮的提示词**在提交之前就建好了**（`advanceContinuationLoop`
+      // 用 `loop.nativeSearchOn` 过滤出 toolNames 喂给 `buildZaiContinuationPrompt`，
+      // nudge 轮同理），建提示词那一刻这个请求的 body 还不存在。识别与解析必须与提示词
+      // 同源，所以只能取快照。
+      //
+      // ⚠️ 循环不在时（用户手打了一段形似续跑模板的文本）退回**读 body** ——
+      // 那种请求就是真实的用户请求，body 是它自己的真相。
+      // **不能退化成「只看归属任务」**：模板文本不在 `taskIdByPromptText` 里、
+      // `matchedTask` 取不到 ⇒ 那条路会恒为 false，与 body 的真实内容无关。
+      //
+      // ⚠️ **已知残留（可接受）**：快照是「启动循环那一刻」的，用户中途改地球不会反映到
+      // 后续续跑轮。失败方向安全 —— 那时原生通道可用，用户仍能搜，只是不列扩展工具。
+      const nativeSearchOn = continuationLoop?.nativeSearchOn ?? readCompletionNativeSearchEnabled(body);
+      // 本请求的模型可见目录（续跑轮）：**与提示词、识别、解析共用同一份**。
+      const modelFacing = modelFacingDescriptorsFor(auth.descriptors, {
+        isAgent: continuationLoop?.isAgentTurn ?? readZaiAgentFlag(body),
+        nativeSearchOn,
+      });
+      requestToolDescriptorsByRequestId.set(requestId, modelFacing);
       // 续跑轮同样把任务选定的模型写回请求体：页面每轮都会重新带 model，
       // 只在首条写会退回到页面默认。agent 轮不碰（与首条同口径）。
       const loopTask = continuationLoop?.taskId != null
@@ -1308,10 +1397,10 @@ async function handleAugmentRequestBody(
         matchedTask?.model ?? loopTask?.model ?? continuationLoop?.model ?? null;
       const modelOverrideEnabled = continuationLoop?.isAgentTurn !== true;
       let nextBodyStr = bodyStr;
-      if (searchEnabled || (modelOverrideEnabled && continuationModel)) {
+      if (nativeSearchOn || (modelOverrideEnabled && continuationModel)) {
         const parsedBody = parseZaiBody(bodyStr);
         if (parsedBody) {
-          if (searchEnabled) disableZaiNativeWebSearch(parsedBody);
+          if (nativeSearchOn) disableZaiNativeWebSearch(parsedBody);
           // 续跑轮走 completion 端点 → 落点是顶层 `model`，由路由决定。
           if (modelOverrideEnabled) {
             applyZaiModelOverrideForRoute(parsedBody, 'completion', continuationModel);
@@ -1326,8 +1415,9 @@ async function handleAugmentRequestBody(
         result: {
           body: nextBodyStr,
           requestId,
-          // 回传本请求的授权描述符名（与提示词同源），理由同 chatNew 分支。
-          toolDescriptorNames: catalogNamesFor(auth.descriptors),
+          // 回传本请求实际注入提示词的那份描述符名（上面过滤后的 `modelFacing`），
+          // 理由同 chatNew 分支 —— 用未过滤目录会让关掉的工具仍被识别并执行。
+          toolDescriptorNames: catalogNamesFor(modelFacing),
         },
       });
       return;
@@ -1354,8 +1444,6 @@ async function handleAugmentRequestBody(
       localSkillDir: skillActivation.activeLocalSkillDir,
     });
     activeToolAuthorizations.set(requestId, auth);
-    // 记下本请求实际注入的那份描述符（completion 轮：与提示词同源）。
-    requestToolDescriptorsByRequestId.set(requestId, auth.descriptors);
     // 记下本轮的 Skill 目录：续跑循环要用（续跑 prompt 是模板，重跑激活只会得到 null）。
     if (skillActivation.activeLocalSkillDir !== undefined) {
       localSkillDirByRequestId.set(requestId, skillActivation.activeLocalSkillDir);
@@ -1363,14 +1451,29 @@ async function handleAugmentRequestBody(
     // 记下 requestId → agent 标记：续跑/nudge 轮要用同一套模型侧裁剪口径。
     isAgentTurnByRequestId.set(requestId, isAgentTurn);
     // 联网判定：自动化任务自身的 searchEnabled，或 body 已带原生联网标记
-    // （features.auto_web_search / features.web_search）。
-    // 注意 matchedTask 变量在下方声明，这里先读 taskId 判断。
-    const firstCompletionTaskId = taskIdByPromptText.get(originalPrompt);
-    const nativeSearchOn = firstCompletionTaskId
-      ? (activeDomTasks.get(firstCompletionTaskId)?.searchEnabled === true || readCompletionNativeSearchEnabled(body))
-      : readCompletionNativeSearchEnabled(body);
+    // （features.auto_web_search / features.web_search）。检测到即为「本轮要用联网」——
+    // 一律关掉原生通道，走扩展自带的 web_search / web_fetch。
+    //
+    // ⚠️⚠️ **任务的来源必须是上面那次归属的结果（`matchedTask`），不能再去查
+    // `taskIdByPromptText`** —— 那个 Map 的语义是「**待认领**的 prompt → taskId」，
+    // 本请求的条目**已经在上面的归属里被 delete 掉了**（读取时机晚于删除）。
+    // 曾经在这里重查一次，于是这个分支**恒不成立**、任务的 `searchEnabled` 从来没被并进来；
+    // 那时它只让本轮少一个「关原生」的来源，而现在 `nativeSearchOnByRequestId` 还会经
+    // `ContinuationLoop.nativeSearchOn` 决定续跑轮**列不列 web 工具** —— 少一次就是
+    // 「开了搜索的自动化在续跑轮既不列工具、也不关原生」。
+    const nativeSearchOn = matchedTask?.searchEnabled === true
+      || readCompletionNativeSearchEnabled(body);
     // 记下 requestId → 联网标记：同上。
     nativeSearchOnByRequestId.set(requestId, nativeSearchOn);
+    // 本请求的模型可见目录：**提示词、标签识别、兜底解析共用这一份**（见
+    // `modelFacingDescriptorsFor`）。⚠️ 存进 Map 的必须是**过滤后**的这份 ——
+    // 它同时是「主世界认不认这个标签」与「兜底解析认不认这个块」的判据。
+    // 存未过滤目录会让「用户在侧边栏关掉的工具」仍被识别并执行（见该函数的说明）。
+    const modelFacing = modelFacingDescriptorsFor(auth.descriptors, {
+      isAgent: isAgentTurn,
+      nativeSearchOn,
+    });
+    requestToolDescriptorsByRequestId.set(requestId, modelFacing);
     // 项目上下文：ds++ 对首条消息才 bindPendingProject；z.ai 会话 id 从 /c/<id> 读，不需要 conversation title/url 也能拿到对话归属。
     const project = await resolveProjectContextForRequest(chatSessionId, isFirstMessage);
     // 每轮都增强（含续写轮）。
@@ -1380,12 +1483,11 @@ async function handleAugmentRequestBody(
     // 不再装配工具。现在联网一律走扩展自己的 web_search / web_fetch（原生通道由下方
     // disableZaiNativeWebSearch 关掉），那个前提不复存在，跳过的理由也随之作废。
     const augmented = augmentPrompt(originalPrompt, {
-      toolDescriptors: auth.descriptors,
+      toolDescriptors: modelFacing,
       isFirstMessage,
       projectContext: project?.context ?? null,
       projectId: project?.projectId ?? null,
       isAgent: isAgentTurn,
-      nativeSearchOn,
       skillActivation,
     });
     currentRequestMessageCount = isFirstMessage ? 1 : currentRequestMessageCount + 1;
@@ -1416,8 +1518,9 @@ async function handleAugmentRequestBody(
       result: {
         body: JSON.stringify(nextBody),
         requestId,
-        // 回传本请求的授权描述符名（与提示词同源），理由见 chatNew 分支的说明。
-        toolDescriptorNames: catalogNamesFor(auth.descriptors),
+        // 回传本请求实际注入提示词的那份描述符名（上面过滤后的 `modelFacing`），
+        // 理由见 chatNew 分支的说明。
+        toolDescriptorNames: catalogNamesFor(modelFacing),
       },
     });
   } catch (error) {
@@ -1587,11 +1690,11 @@ async function executeDetectedFromDetected(
   // 第二个工具（如 memory_save 之后的 shell_status）会被误判「已执行」而跳过，
   // 导致「记住+看桌面」这类多工具回复只执行第一个工具。
   // 真正的重复由 executeDetected 内部的 executedToolCallSignatures（requestId+name+callId）兜底。
-  // ⚠️ 用**本请求实际注入的那份描述符**（`requestToolDescriptorsByRequestId`），不是全局
-  // `currentToolDescriptors` —— 后者是「上次同步」，与提示词可能分叉（见该 Map 的说明）。
-  // 未增广的请求（拿不到本请求名单）退回全局，保住「老会话里的 XML 仍能执行」。
-  const descriptors = requestToolDescriptorsByRequestId.get(detected.requestId) ?? currentToolDescriptors;
-  const calls = parseToolXml(detected.raw, descriptors);
+  // ⚠️ 用**本请求实际注入的那份描述符**（`modelFacingForRequest`），不是全局
+  // `currentToolDescriptors` —— 后者是「上次同步」、且**未过滤**，与提示词会分叉。
+  // 未增广的请求（拿不到本请求名单）退回全局目录，但**仍然过一遍过滤** ——
+  // 保住「老会话里的 XML 仍能执行」，同时保住「关掉的工具不被识别」。
+  const calls = parseToolXml(detected.raw, modelFacingForRequest(detected.requestId));
   if (calls.length === 0) {
     console.error('[GLM++] a detected tool call could not be parsed', {
       name: detected.name,
@@ -1673,6 +1776,18 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
       authorization = await requestToolAuthorization(requestId, chatSessionId);
       activeToolAuthorizations.set(requestId, authorization);
       // 懒建路径也记一份（走的是 `currentToolDescriptors`，那是此刻唯一可得的目录）。
+      //
+      // ⚠️⚠️ **这里刻意存「未过滤」的 `authorization.descriptors`，与另外两处不同。**
+      // 理由：这条路的两个请求级标记（`isAgentTurnByRequestId` / `nativeSearchOnByRequestId`）
+      // **都没被写过** —— 增广压根没跑完（id / body 缺失、body 解析失败、或外层 catch），
+      // 所以「本轮该不该放行 web 工具」这个语义**根本不存在**。
+      // 硬要在这里过滤，只能拿模块级 `currentWebToolsEnabled` 配两个默认 `false`，
+      // 而 `isAgent=false` 会让**agent 轮不再恒裁** —— 方向是错的（该裁的没裁）。
+      // ⇒ 存原样，把过滤留给读侧：`modelFacingForRequest` 统一过一次判据。
+      // ⚠️ **注意读侧并不保证「更严」** —— `webToolsEnabled` 那里取的是模块状态，
+      // 所以「增广没跑完 + 联网开关开着 + agent 轮」这一格会**少裁一次** web 工具。
+      // 可接受：模型没有拿到我们的目录，能吐出的标签只可能来自会话历史里的旧示例，
+      // 而那正是「过滤而非删除」有意保留的能力（见 `modelFacingForRequest` 的说明）。
       requestToolDescriptorsByRequestId.set(requestId, authorization.descriptors);
     } catch (error) {
       const code = error instanceof ToolAuthorizationRequestError
@@ -1885,7 +2000,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       // TOOL_CALL 通道没先到：兜底在这里解析并执行。用本请求注入的那份描述符（与提示词同源）。
       const calls = parseToolXml(
         complete.assistantText,
-        requestToolDescriptorsByRequestId.get(complete.requestId) ?? currentToolDescriptors,
+        modelFacingForRequest(complete.requestId),
       );
       for (const call of calls) {
         const execution = await executeDetected(call, complete.requestId);
@@ -1939,7 +2054,8 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       // 实时拉取最新工具目录，nudge 轮注入的「可用工具清单」同样实时。
       // ⚠️ 用返回值而不是模块状态：模块状态按「最新一次同步生效」落地，本次可能被顶掉。
       const nudgeState = await loadAndSyncRuntimeState();
-      const nudgeToolNames = catalogNamesFor(filterZaiModelFacingToolDescriptors(
+      // ⚠️ `webToolsEnabled` 传的是**本次同步的返回值**，不是模块状态 —— 同理。
+      const nudgeToolNames = catalogNamesFor(modelFacingDescriptorsFor(
         nudgeState.descriptors,
         {
           isAgent: continuationLoop.isAgentTurn,
@@ -1976,7 +2092,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
   const alreadyExecuted = executionsByRequest.get(complete.requestId) ?? [];
   const calls = parseToolXml(
     complete.assistantText,
-    requestToolDescriptorsByRequestId.get(complete.requestId) ?? currentToolDescriptors,
+    modelFacingForRequest(complete.requestId),
   );
   const executions: ToolExecutionRecord[] = [...alreadyExecuted];
   if (alreadyExecuted.length === 0) {
@@ -2109,7 +2225,10 @@ async function advanceContinuationLoop(): Promise<void> {
   // （用户新增 skill / MCP 后，续跑轮立刻能用到，而非首条消息时的快照）。
   // ⚠️ 用返回值而不是模块状态：模块状态按「最新一次同步生效」落地，本次可能被顶掉。
   const loopState = await loadAndSyncRuntimeState();
-  const toolNames = catalogNamesFor(filterZaiModelFacingToolDescriptors(
+  // ⚠️ `webToolsEnabled` 传的是**本次同步的返回值**，不是模块状态 —— 同理。
+  // ⚠️⚠️ **这份 `toolNames` 与续跑分支的 `modelFacing` 必须同源** —— 前者写进提示词、
+  // 后者决定识别与解析；两边都取 `loop.isAgentTurn` / `loop.nativeSearchOn`，口径一致。
+  const toolNames = catalogNamesFor(modelFacingDescriptorsFor(
     loopState.descriptors,
     {
       isAgent: loop.isAgentTurn,
@@ -2973,10 +3092,6 @@ function finishContinuationLoop(loop: ContinuationLoop): void {
 // ---------------------------------------------------------------------------
 
 const SEND_BUTTON_SELECTOR = '#send-message-button';
-const SUBMIT_OBSERVE_TIMEOUT_MS = 4_000;
-
-let submitObserver: MutationObserver | null = null;
-let lastSubmitObservedUrl = '';
 
 /**
  * Stop 按钮（`[aria-label="Stop"]`）出现/消失观察器。
@@ -3163,26 +3278,6 @@ async function sendPromptPrimitive(prompt: string): Promise<boolean> {
   } finally {
     domSendInFlight = false;
   }
-}
-
-function installSubmitObserver(): void {
-  if (submitObserver) return;
-  submitObserver = new MutationObserver(() => {
-    lastSubmitObservedUrl = location.href;
-  });
-}
-
-function observeSubmit(): void {
-  if (!submitObserver) installSubmitObserver();
-  // 观察 body 变化：提交成功会新增 user 消息节点。
-  if (submitObserver && document.body) {
-    submitObserver.observe(document.body, { childList: true, subtree: false });
-  }
-}
-
-function stopObserveSubmit(): void {
-  submitObserver?.disconnect();
-  submitObserver = null;
 }
 
 async function sendPromptViaDom(prompt: string): Promise<boolean> {
