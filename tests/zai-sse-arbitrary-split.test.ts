@@ -231,11 +231,18 @@ describe('SSE accumulator keeps multi-byte text intact across byte boundaries', 
  *
  * 所以这一组走**真 hook**：装 `installZaiFetchHook()`，用桩 `window.fetch` 造一个
  * 按任意字节切点分片的 SSE 响应，断言两件事：
- * ① **回给页面的字节逐字节不变**（hook 的定位是「只读流 + 透传」）；
+ * ① **回给页面的字节逐字节不变**（见下方关于「剥离」的口径说明）；
  * ② **累积出来的正文与手写期望一致**（`onResponseComplete` 收到的那份）。
  *
  * ⚠️ 实测价值：把 `fetch-hook.ts` 里的 `{ stream: true }` 去掉后，
  * **只测字符层的那些断言全绿**（它们不经过那个 decoder），只有这一组会红。
+ *
+ * ⚠️⚠️ **「逐字节不变」这条口径的前提已经收窄**（工具 XML 剥离上线后）：
+ * hook 现在会把**模型吐的工具 XML** 从回给页面的字节里剥掉。所以准确的说法是
+ * 「**没有可剥内容时**逐字节不变」—— `WIRES` 里这几条 wire 都不含工具块，
+ * 所以断言照旧成立；含工具块的那条另见 `zai-stream-strip.test.ts`。
+ * ⚠️ **这条前提要一直成立**：`WIRES` 是「分帧续接」的测试载体，**别往里面加工具块**，
+ * 那会让这组用例从「测分帧」变成「测剥离」，两个判据混在一起。
  */
 describe('the real fetch hook survives arbitrary network byte splits', () => {
   const COMPLETION_URL = 'https://chat.z.ai/api/v2/chat/completions?requestId=r1&user_id=u1';
@@ -329,6 +336,8 @@ describe('the real fetch hook survives arbitrary network byte splits', () => {
   const TOTAL_BYTES = new TextEncoder().encode(WIRE).length;
 
   it('passes the page bytes through untouched at every byte split', async () => {
+    // ⚠️ **这条 wire 不含工具块** ⇒ 剥离层走 `unchanged` 分支、透传原始字节。
+    // 口径是「**没有可剥内容时**逐字节不变」（见文件头说明）。
     const original = new TextEncoder().encode(WIRE);
     for (let at = 0; at <= TOTAL_BYTES; at += 1) {
       const run = await runThroughHook(WIRE, [at]);

@@ -9,14 +9,60 @@
 
 import {
   ZAI_AGENT_FLAG,
+  ZAI_AUGMENTABLE_WEB_ROUTES,
+  ZAI_HISTORY_WEB_ROUTES,
   ZAI_WEB_ORIGIN,
   ZAI_WEB_ROUTES,
+  type ZaiAugmentableWebRoute,
+  type ZaiHistoryWebRoute,
   type ZaiWebRouteName,
 } from './contracts';
 
 export interface ZaiRoutePolicy {
   readonly route: ZaiWebRouteName;
   readonly method: 'POST' | 'GET';
+}
+
+/**
+ * 路径模板里 `{id}` 段**不能**匹配的已知字面量段。
+ *
+ * 真机实测存在的同前缀端点：`/api/v1/chats/all`、`/chats/all/archived`、
+ * `/chats/subagents`、`/chats/remix`、`/chats/{id}/tags`（后者由模板自身的
+ * `/messages/batch` 后缀排除）。
+ *
+ * ⚠️ **刻意不要求 id 必须是 UUID 形态** —— 那会引入一个**静默失效**：
+ * 万一服务端换了 id 形态（短 id / 带前缀），我们就不再匹配、于是**静默不剥**。
+ * 用「排除已知字面段」则失败方向相反：未知字面段端点被当成 `chatDetail` 走一次剥，
+ * 而剥函数对不认识的形状是 no-op ⇒ 无害。
+ */
+const ZAI_CHAT_ID_LITERAL_SEGMENTS: readonly string[] = [
+  'all',
+  'subagents',
+  'remix',
+  'new',
+  'archived',
+];
+
+/** 单个路径段（不含 `/`），且不是上面那几个字面量。 */
+const ZAI_CHAT_ID_SEGMENT = `(?!${ZAI_CHAT_ID_LITERAL_SEGMENTS.join('|')}(?:/|$))[^/]+`;
+
+/**
+ * 把 `ZAI_WEB_ROUTES` 里的路径模板编译成匹配 `pathname` 的正则。
+ *
+ * ⚠️ **必须是整串锚定的正则**（`^…$`），不能用 `includes` / `startsWith` ——
+ * 近似匹配会把「加后缀 / 藏在 query 里 / 异源」几类一起放进来，表现是
+ * **把提示词注进了不该注的请求**。拒绝面由 `tests/zai.test.ts` 逐条钉住。
+ */
+function compileRoutePattern(template: string): RegExp {
+  const source = template
+    .split('/')
+    .map((segment) => (segment === '{id}' ? ZAI_CHAT_ID_SEGMENT : escapeRegExp(segment)))
+    .join('/');
+  return new RegExp(`^${source}$`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -30,17 +76,28 @@ export interface ZaiRoutePolicy {
 const ZAI_ROUTE_POLICY: Record<ZaiWebRouteName, ZaiRoutePolicy> = {
   completion: { route: 'completion', method: 'POST' },
   chatNew: { route: 'chatNew', method: 'POST' },
+  // 历史路由：页面用 GET 拉会话详情、用 POST 批量取消息正文。
+  chatDetail: { route: 'chatDetail', method: 'GET' },
+  chatMessages: { route: 'chatMessages', method: 'POST' },
 };
 
+const ZAI_ROUTE_PATTERNS: ReadonlyMap<ZaiWebRouteName, RegExp> = new Map(
+  (Object.keys(ZAI_ROUTE_POLICY) as ZaiWebRouteName[])
+    .map((route) => [route, compileRoutePattern(ZAI_WEB_ROUTES[route])] as const),
+);
+
 /**
- * 匹配一条请求属于哪个可增强路由；不属于任何一个则返回 `null`。
+ * 匹配一条请求属于哪个路由；不属于任何一个则返回 `null`。
  *
- * ⚠️ 判据是 origin 与 pathname **精确相等**（不是 `includes` / `startsWith`）——
+ * ⚠️ 判据是 origin 与 pathname **整串相等**（不是 `includes` / `startsWith`）——
  * 近似匹配会把「加后缀 / 藏在 query 里 / 异源」这几类一起放进来，表现是
  * **把提示词注进了不该注的请求**。拒绝面由 `tests/zai.test.ts` 逐条钉住。
  *
  * ⚠️ **相对 URL 必须用 `new URL(url, baseUrl ?? ZAI_WEB_ORIGIN)` 兜底** ——
  * fetch hook 里拿到的就是相对路径。
+ *
+ * ⚠️⚠️ **匹配上 ≠ 该增强** —— 该不该增强看 `isZaiAugmentableRoute` /
+ * `isZaiHistoryRoute`。三条名单互相独立，理由见 `contracts.ts` 的说明。
  */
 export function matchZaiWebRoute(input: {
   url: string;
@@ -51,11 +108,34 @@ export function matchZaiWebRoute(input: {
   if (!url || url.origin !== ZAI_WEB_ORIGIN) return null;
   const method = input.method.toUpperCase();
   for (const policy of Object.values(ZAI_ROUTE_POLICY)) {
-    if (url.pathname === ZAI_WEB_ROUTES[policy.route] && method === policy.method) {
-      return policy.route;
-    }
+    if (method !== policy.method) continue;
+    if (ZAI_ROUTE_PATTERNS.get(policy.route)?.test(url.pathname)) return policy.route;
   }
   return null;
+}
+
+const ZAI_AUGMENTABLE_ROUTE_SET: ReadonlySet<string> = new Set(ZAI_AUGMENTABLE_WEB_ROUTES);
+
+/**
+ * 这条路由的**请求体**要不要注入提示词。
+ *
+ * ⚠️ 与「路由匹配上了吗」是两个问题：历史路由同样会被 `matchZaiWebRoute` 匹配到，
+ * 但它们的请求体里没有提示词（`chatMessages` 的 body 是 `{"ids":[…]}`）⇒
+ * 让它们进增广分支会把 `signature_prompt` 写进一个不该有它的请求体。
+ */
+export function isZaiAugmentableRoute(
+  route: ZaiWebRouteName | null | undefined,
+): route is ZaiAugmentableWebRoute {
+  return typeof route === 'string' && ZAI_AUGMENTABLE_ROUTE_SET.has(route);
+}
+
+const ZAI_HISTORY_ROUTE_SET: ReadonlySet<string> = new Set(ZAI_HISTORY_WEB_ROUTES);
+
+/** 这条路由的**响应体**要不要剥掉内部文本与工具 XML。 */
+export function isZaiHistoryRoute(
+  route: ZaiWebRouteName | null | undefined,
+): route is ZaiHistoryWebRoute {
+  return typeof route === 'string' && ZAI_HISTORY_ROUTE_SET.has(route);
 }
 
 /** 相对 URL 必须用 `new URL(url, ZAI_WEB_ORIGIN)` 兜底（关键坑：fetch hook 里 URL 是相对路径）。 */
@@ -317,10 +397,11 @@ export function readZaiChatNewModel(body: Record<string, unknown>): unknown {
 /**
  * 模型落点由**路由**决定，与调用点在代码里的位置无关。
  *
- * 就是 `ZaiWebRouteName` 的别名 —— 保留这个名字是因为它表达的是「模型写入按哪个
- * 路由分叉」，而不是「哪些路由可增强」。**别再手抄一份联合类型**。
+ * ⚠️ **取值域是「可增强路由」而不是全部路由** —— 模型覆写发生在增广阶段，
+ * 只有可增强路由会走到那里。用 `ZaiWebRouteName` 会让历史路由也能传进来，
+ * 而那两条路根本没有模型落点（`readZaiModelForRoute` 会把它们当 `completion` 读）。
  */
-export type ZaiModelRoute = ZaiWebRouteName;
+export type ZaiModelRoute = ZaiAugmentableWebRoute;
 
 /**
  * 按路由把任务选定的模型写进请求体 —— **唯一入口**。

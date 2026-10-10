@@ -15,15 +15,51 @@ export const ZAI_HOME_URL = 'https://chat.z.ai/';
 export const ZAI_TAB_URL_PATTERN = '*://chat.z.ai/*';
 
 /**
- * chat.z.ai 前端实际使用的两个可增强路由。
- * completion 是 agent/chat 共用的补全端点；chatNew 是首条消息前建的会话。
+ * chat.z.ai 前端实际使用的路由。
+ *
+ * 两类，**判据不同**（见 `request-codec.ts` 的两份名单）：
+ * - **可增强**（`completion` / `chatNew`）：请求体里有提示词，我们要注入。
+ * - **历史**（`chatDetail` / `chatMessages`）：响应体里有**我们注入过的文本**与
+ *   模型吐的工具 XML，我们要剥掉。它们**不可增强** —— 请求体里没有提示词。
+ *
+ * ⚠️ **`{id}` 是变量段**（会话 id）。匹配时展开成「单个路径段」，并排除若干已知
+ * 字面量段 —— 见 `request-codec.ts` 的 `ZAI_CHAT_ID_LITERAL_SEGMENTS`。
  */
 export const ZAI_WEB_ROUTES = {
   completion: '/api/v2/chat/completions',
   chatNew: '/api/v1/chats/new',
+  chatDetail: '/api/v1/chats/{id}',
+  chatMessages: '/api/v1/chats/{id}/messages/batch',
 } as const;
 
 export type ZaiWebRouteName = keyof typeof ZAI_WEB_ROUTES;
+
+/**
+ * **可增强**路由的白名单。
+ *
+ * ⚠️⚠️ **路由匹配 ≠ 该增强** —— 这两件事必须分开。历史上它们是隐含合一的
+ * （`matchZaiWebRoute` 匹配上就进增广分支），而加进历史路由后那样会**当场打碎请求**：
+ * `POST /api/v1/chats/{id}/messages/batch` 的 body 是 `{"ids":[…]}`，
+ * 内容脚本那边只认 `chatNew`、其余一律当 `completion` ⇒ `rewriteZaiLastUserMessage`
+ * 会**无条件写上 `signature_prompt`** ⇒ body 变成 `{"ids":[…],"signature_prompt":"<两万字>"}`。
+ *
+ * ⚠️ **`AUGMENT_REQUEST_BODY` 在桥的豁免表里**（逐字段取值 + 默认值），未知 route
+ * 会静默落到 `'completion'` ⇒ **这份名单是唯一那道门**。
+ */
+export const ZAI_AUGMENTABLE_WEB_ROUTES = [
+  'completion',
+  'chatNew',
+] as const;
+
+export type ZaiAugmentableWebRoute = (typeof ZAI_AUGMENTABLE_WEB_ROUTES)[number];
+
+/** **历史**路由：响应体要剥掉内部文本与工具 XML，请求不增强。 */
+export const ZAI_HISTORY_WEB_ROUTES = [
+  'chatDetail',
+  'chatMessages',
+] as const;
+
+export type ZaiHistoryWebRoute = (typeof ZAI_HISTORY_WEB_ROUTES)[number];
 
 /**
  * 签名密钥（intl-sign.js == zai.go，测试向量已交叉验证）。

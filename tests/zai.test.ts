@@ -8,6 +8,8 @@ import {
   applyZaiChatNewModelOverride,
   applyZaiModelOverride,
   applyZaiModelOverrideForRoute,
+  isZaiAugmentableRoute,
+  isZaiHistoryRoute,
   matchZaiWebRoute,
   parseZaiBody,
   parseZaiChatNewBody,
@@ -24,6 +26,8 @@ import {
   stripZaiThinkingBlocks,
 } from '../core/zai/stream-codec';
 import {
+  ZAI_AUGMENTABLE_WEB_ROUTES,
+  ZAI_HISTORY_WEB_ROUTES,
   ZAI_WEB_ROUTES,
   type ZaiWebRouteName,
 } from '../core/zai/contracts';
@@ -172,17 +176,47 @@ describe('zai request codec', () => {
   // 所以**常量值本身写错时两边会同步改错** —— 矩阵照样全绿（实测过：把
   // `completions` 改成 `completion` 后 38 条用例仍全过）。这里把**线上真实路径**
   // 独立钉成字面量：真机抓包 + 第三方 HAR（`zhipu-ai-proxy-master/har/intl/`）确认过。
+  //
+  // ⚠️ **`{id}` 是变量段模板，钉的是模板本身**（不是某个具体 id）——
+  // 模板写错（例如漏了 `/messages/batch` 后缀）会让历史侧**静默不剥**。
   it('pins the released route paths to their literal values', () => {
     expect(ZAI_WEB_ROUTES).toEqual({
       completion: '/api/v2/chat/completions',
       chatNew: '/api/v1/chats/new',
+      chatDetail: '/api/v1/chats/{id}',
+      chatMessages: '/api/v1/chats/{id}/messages/batch',
     });
+  });
+
+  // ⚠️⚠️ **「路由匹配」与「该不该增强」是两份独立的名单。** 历史路由会被
+  // `matchZaiWebRoute` 匹配到，但它们的请求体里没有提示词 —— 让它们进增广分支
+  // 会把 `signature_prompt` 写进 `{"ids":[…]}` 这种 body。
+  // ⚠️ **这条断言与「桥的豁免表」是配套的**：`AUGMENT_REQUEST_BODY` 的 route
+  // 是逐字段取值 + 默认值，未知值静默落到 `'completion'` ⇒ 这份名单是唯一那道门。
+  it('keeps the augmentable and history route sets disjoint and explicit', () => {
+    expect([...ZAI_AUGMENTABLE_WEB_ROUTES].sort()).toEqual(['chatNew', 'completion']);
+    expect([...ZAI_HISTORY_WEB_ROUTES].sort()).toEqual(['chatDetail', 'chatMessages']);
+    // 两份名单合起来必须覆盖全部路由 —— 新增路由时漏归类的表现是「它既不被增强
+    // 也不被剥」，而那是静默的。
+    expect([...ZAI_AUGMENTABLE_WEB_ROUTES, ...ZAI_HISTORY_WEB_ROUTES].sort())
+      .toEqual(Object.keys(ZAI_WEB_ROUTES).sort());
+    for (const route of ZAI_AUGMENTABLE_WEB_ROUTES) {
+      expect(isZaiAugmentableRoute(route), `${route} 应可增强`).toBe(true);
+      expect(isZaiHistoryRoute(route), `${route} 不该被当历史路由`).toBe(false);
+    }
+    for (const route of ZAI_HISTORY_WEB_ROUTES) {
+      expect(isZaiHistoryRoute(route), `${route} 应是历史路由`).toBe(true);
+      expect(isZaiAugmentableRoute(route), `${route} 不该可增强`).toBe(false);
+    }
+    // 未匹配（null）两边都是 false。
+    expect(isZaiAugmentableRoute(null)).toBe(false);
+    expect(isZaiHistoryRoute(null)).toBe(false);
   });
 
   // 路由匹配是「哪些请求会被我们改写并注入提示词」的判据 —— 它是一道边界，
   // 所以**拒绝面必须逐条钉住**：异源 / 加后缀 / 藏在 query 里 / 方法不符
   // 这几类正是「本该拒绝却被接受」的形态。
-  // ⚠️ 判据是 origin 与 pathname **精确相等** —— 换成 includes / startsWith 这类
+  // ⚠️ 判据是 origin 与 pathname **整串相等** —— 换成 includes / startsWith 这类
   // 近似匹配会让上面几类全部漏过，而漏过的表现是「把提示词注进了不该注的请求」。
   //
   // ⚠️⚠️ **断言比的是「解析出来的路由名」，不是布尔值** —— 这一点是承重的：
@@ -199,37 +233,50 @@ describe('zai request codec', () => {
   }
 
   const routeNames = Object.keys(ZAI_WEB_ROUTES) as ZaiWebRouteName[];
-  const pathOf = (route: ZaiWebRouteName) => ZAI_WEB_ROUTES[route];
+  // 每条路由的**真实方法**（历史详情是 GET、批量取消息是 POST）—— 表里写死
+  // `'POST'` 会让 chatDetail 的「方法正确」用例反而红。
+  const ROUTE_METHOD: Record<ZaiWebRouteName, string> = {
+    completion: 'POST',
+    chatNew: 'POST',
+    chatDetail: 'GET',
+    chatMessages: 'POST',
+  };
+  // 把模板里的 `{id}` 换成一个**具体的**会话 id（真机形态：UUID）。
+  const SAMPLE_CHAT_ID = '4636417d-6084-4203-9a7a-f9246d5ed027';
+  const pathOf = (route: ZaiWebRouteName) => ZAI_WEB_ROUTES[route].replace('{id}', SAMPLE_CHAT_ID);
+  const otherMethodOf = (route: ZaiWebRouteName) => (ROUTE_METHOD[route] === 'POST' ? 'GET' : 'POST');
   const encodedPath = (path: string) => `https://chat.z.ai/${path.split('/').slice(1).join('%2F')}`;
 
   const acceptedRouteCases: RouteCase[] = routeNames.flatMap((route) => {
     const path = pathOf(route);
+    const method = ROUTE_METHOD[route];
     return [
-      { name: `${route}: absolute URL`, route, url: `https://chat.z.ai${path}`, method: 'POST', matched: true },
+      { name: `${route}: absolute URL`, route, url: `https://chat.z.ai${path}`, method, matched: true },
       // 相对路径必须按站点 origin 兜底解析 —— fetch hook 里拿到的就是相对路径。
-      { name: `${route}: relative path resolves against the site origin`, route, url: path, method: 'POST', matched: true },
-      { name: `${route}: host is case-insensitive`, route, url: `https://CHAT.Z.AI${path}`, method: 'POST', matched: true },
-      { name: `${route}: explicit default port`, route, url: `https://chat.z.ai:443${path}`, method: 'POST', matched: true },
-      { name: `${route}: query string is ignored`, route, url: `https://chat.z.ai${path}?timestamp=1&requestId=abc`, method: 'POST', matched: true },
-      { name: `${route}: fragment is ignored`, route, url: `https://chat.z.ai${path}#anchor`, method: 'POST', matched: true },
-      { name: `${route}: method is case-insensitive`, route, url: `https://chat.z.ai${path}`, method: 'post', matched: true },
+      { name: `${route}: relative path resolves against the site origin`, route, url: path, method, matched: true },
+      { name: `${route}: host is case-insensitive`, route, url: `https://CHAT.Z.AI${path}`, method, matched: true },
+      { name: `${route}: explicit default port`, route, url: `https://chat.z.ai:443${path}`, method, matched: true },
+      { name: `${route}: query string is ignored`, route, url: `https://chat.z.ai${path}?timestamp=1&requestId=abc`, method, matched: true },
+      { name: `${route}: fragment is ignored`, route, url: `https://chat.z.ai${path}#anchor`, method, matched: true },
+      { name: `${route}: method is case-insensitive`, route, url: `https://chat.z.ai${path}`, method: method.toLowerCase(), matched: true },
     ];
   });
 
   const rejectedRouteCases: RouteCase[] = routeNames.flatMap((route) => {
     const path = pathOf(route);
+    const method = ROUTE_METHOD[route];
     return [
-      { name: `${route}: different origin`, route, url: `https://evil.test${path}`, method: 'POST', matched: false },
-      { name: `${route}: subdomain of the site`, route, url: `https://sub.chat.z.ai${path}`, method: 'POST', matched: false },
-      { name: `${route}: insecure scheme`, route, url: `http://chat.z.ai${path}`, method: 'POST', matched: false },
-      { name: `${route}: path embedded in a query parameter`, route, url: `https://evil.test/?next=${path}`, method: 'POST', matched: false },
-      { name: `${route}: path with a suffix`, route, url: `https://chat.z.ai${path}/suffix`, method: 'POST', matched: false },
-      { name: `${route}: trailing slash`, route, url: `https://chat.z.ai${path}/`, method: 'POST', matched: false },
-      { name: `${route}: percent-encoded slashes`, route, url: encodedPath(path), method: 'POST', matched: false },
-      { name: `${route}: userinfo looks like the site host`, route, url: `https://chat.z.ai@evil.test${path}`, method: 'POST', matched: false },
-      { name: `${route}: wrong method`, route, url: `https://chat.z.ai${path}`, method: 'GET', matched: false },
+      { name: `${route}: different origin`, route, url: `https://evil.test${path}`, method, matched: false },
+      { name: `${route}: subdomain of the site`, route, url: `https://sub.chat.z.ai${path}`, method, matched: false },
+      { name: `${route}: insecure scheme`, route, url: `http://chat.z.ai${path}`, method, matched: false },
+      { name: `${route}: path embedded in a query parameter`, route, url: `https://evil.test/?next=${path}`, method, matched: false },
+      { name: `${route}: path with a suffix`, route, url: `https://chat.z.ai${path}/suffix`, method, matched: false },
+      { name: `${route}: trailing slash`, route, url: `https://chat.z.ai${path}/`, method, matched: false },
+      { name: `${route}: percent-encoded slashes`, route, url: encodedPath(path), method, matched: false },
+      { name: `${route}: userinfo looks like the site host`, route, url: `https://chat.z.ai@evil.test${path}`, method, matched: false },
+      { name: `${route}: wrong method`, route, url: `https://chat.z.ai${path}`, method: otherMethodOf(route), matched: false },
       { name: `${route}: empty method`, route, url: `https://chat.z.ai${path}`, method: '', matched: false },
-      { name: `${route}: relative path with a foreign base`, route, url: path, method: 'POST', baseUrl: 'https://evil.test/page', matched: false },
+      { name: `${route}: relative path with a foreign base`, route, url: path, method, baseUrl: 'https://evil.test/page', matched: false },
     ];
   });
 
@@ -240,6 +287,54 @@ describe('zai request codec', () => {
       expect(matchZaiWebRoute(input)).toBe(matched ? route : null);
     },
   );
+
+  // ⚠️⚠️ **`{id}` 段必须排除已知字面量段** —— `/api/v1/chats/all`、`/chats/subagents`、
+  // `/chats/remix` 都落在「单个路径段」的形状里。不排除的话它们会被当成某条会话详情，
+  // 于是**响应被当历史剥一次**（当前无害，因为剥函数对不认识的形状是 no-op），
+  // 但更糟的是 `/chats/all` 与 `chatNew` 的路径**在字面量上互不干扰、语义却相邻**，
+  // 将来若给它加增强就会出事。这条把「排除清单生效」钉死。
+  it('does not treat known literal chat sub-paths as a chat id', () => {
+    const literalPaths = [
+      '/api/v1/chats/all',
+      '/api/v1/chats/all/archived',
+      '/api/v1/chats/subagents',
+      '/api/v1/chats/remix',
+    ];
+    for (const path of literalPaths) {
+      expect(matchZaiWebRoute({ url: `https://chat.z.ai${path}`, method: 'GET' }), `${path} 不该匹配`).toBeNull();
+      expect(matchZaiWebRoute({ url: `https://chat.z.ai${path}`, method: 'POST' }), `${path} 不该匹配`).toBeNull();
+    }
+    // 反面对照：`subagents` 带上真正属于它的 query 也仍不匹配（query 本来就被忽略）。
+    expect(
+      matchZaiWebRoute({ url: 'https://chat.z.ai/api/v1/chats/subagents?chat_id=x', method: 'GET' }),
+    ).toBeNull();
+    // `/chats/new` 是**真路由**（chatNew）—— 它既不能被 chatDetail 抢走，也不能在
+    // 方法不符时落到 chatDetail 上。这条把「排除清单」与「真路由」的边界钉死。
+    expect(matchZaiWebRoute({ url: 'https://chat.z.ai/api/v1/chats/new', method: 'POST' })).toBe('chatNew');
+    expect(matchZaiWebRoute({ url: 'https://chat.z.ai/api/v1/chats/new', method: 'GET' })).toBeNull();
+    // 而一条真会话 id 要匹配得上 —— 否则上面那些「不匹配」可能是路径整体坏掉造成的。
+    expect(
+      matchZaiWebRoute({
+        url: `https://chat.z.ai/api/v1/chats/${SAMPLE_CHAT_ID}`,
+        method: 'GET',
+      }),
+    ).toBe('chatDetail');
+  });
+
+  // ⚠️ **两个历史端点的后缀不能互相认领** —— `/chats/{id}` 与 `/chats/{id}/messages/batch`
+  // 只差一个后缀，模板写错（漏后缀 / 多后缀）的表现是**其中一条静默不剥**。
+  it('keeps the two history endpoints apart', () => {
+    const detail = `https://chat.z.ai/api/v1/chats/${SAMPLE_CHAT_ID}`;
+    const batch = `${detail}/messages/batch`;
+    expect(matchZaiWebRoute({ url: detail, method: 'GET' })).toBe('chatDetail');
+    expect(matchZaiWebRoute({ url: batch, method: 'POST' })).toBe('chatMessages');
+    // 交错的方法必须被拒（详情是 GET、批量是 POST）。
+    expect(matchZaiWebRoute({ url: detail, method: 'POST' })).toBeNull();
+    expect(matchZaiWebRoute({ url: batch, method: 'GET' })).toBeNull();
+    // 未知后缀不是任何路由（防止「只要前缀对上就认」的近似匹配）。
+    expect(matchZaiWebRoute({ url: `${detail}/tags`, method: 'GET' })).toBeNull();
+    expect(matchZaiWebRoute({ url: `${batch}/extra`, method: 'POST' })).toBeNull();
+  });
 
   it('reads the last user message from completion body', () => {
     const body = {
@@ -607,6 +702,122 @@ describe('zai stream codec', () => {
     expect(acc.assistantText).toBe('答');
     // 继续追加仍按原始文本延续（若读取时改写了内部 text，这里会错）。
     acc.push('data: {"type":"chat:completion","data":{"phase":"answer","delta_content":"案"}}\n');
+    expect(acc.assistantText).toBe('答案');
+  });
+});
+
+/**
+ * **思考按 `phase` 分流，不靠 `<details>` 标签。**
+ *
+ * ⚠️⚠️ **为什么需要这一组**：真机实测（2026-10）`phase:"thinking"` 是**独立相位**、
+ * 内容是**裸文本**（整段累积里 `<details` 出现 0 次）。而 `stripZaiThinkingBlocks`
+ * 的第一行是「不含 `<details` 就原样返回」⇒ 它在生产路径上等价于 no-op。
+ *
+ * 漏掉的后果不是「多显示一段思考」：`assistantText` 同时是
+ * `extractAndNotifyToolCalls` 与兜底 `parseToolXml` 的输入 ⇒
+ * **模型写在思考里的完整工具 XML 会被真的执行**。
+ *
+ * ⚠️ **这一组必须走真入口**（push 真实 `data:` 行），不能只喂字符串给
+ * `stripZaiThinkingBlocks` —— 下面那些 `<details>` 用例测的是**函数本身**，
+ * 而函数本身从来没错，错的是生产里喂给它的东西不再有 `<details>`。
+ */
+describe('zai stream codec: thinking phase split', () => {
+  const line = (phase: string, key: string, value: unknown): string =>
+    `data: ${JSON.stringify({ type: 'chat:completion', data: { phase, [key]: value } })}\n`;
+
+  it('drops thinking-phase text from assistantText', () => {
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '用户只是打了个招呼。'));
+    acc.push(line('thinking', 'delta_content', '不需要调用任何工具。'));
+    acc.push(line('answer', 'delta_content', '你好！有什么可以帮你？'));
+    expect(acc.assistantText).toBe('你好！有什么可以帮你？');
+  });
+
+  it('keeps thinking text out of the accumulated answer even when it mentions a tool', () => {
+    // 这条是本修复的目的：思考里写出的完整工具 XML 不能进识别器。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '我需要用 <shell_exec>{"command":"ls"}</shell_exec> 列目录。'));
+    acc.push(line('answer', 'delta_content', '好的，我看看。'));
+    const text = acc.assistantText;
+    expect(text).toBe('好的，我看看。');
+    expect(text).not.toContain('shell_exec');
+  });
+
+  it('yields an empty answer when the stream never leaves the thinking phase', () => {
+    // 思考到一半就被打断（abort / 网络断）⇒ 没有答案，绝不能把思考当答案交出去。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '正在想……'));
+    acc.finish();
+    expect(acc.assistantText).toBe('');
+  });
+
+  it('treats an unknown phase as answer text (failure direction is safe)', () => {
+    // 服务端新增相位名时不能把正文一起丢掉 —— 未知一律按答案算。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '思考。'));
+    acc.push(line('future_phase', 'delta_content', '正文。'));
+    expect(acc.assistantText).toBe('正文。');
+  });
+
+  it('does not treat "other"-phase text as thinking', () => {
+    // `other` 是 usage 的承载相位，但**不排除**它带文本 —— 按 phase 分流时
+    // 只把 `thinking` 当非答案，其余都算答案。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '思考。'));
+    acc.push(line('other', 'delta_content', '正文。'));
+    expect(acc.assistantText).toBe('正文。');
+  });
+
+  it('re-bases the answer start when a content frame replaces the whole text', () => {
+    // `content` 是整体替换：这段文本的归属由**本帧自己的相位**决定，不继承上一帧。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '思考。'));
+    acc.push(line('answer', 'content', '整段替换后的答案。'));
+    expect(acc.assistantText).toBe('整段替换后的答案。');
+  });
+
+  it('re-bases the answer start when a content frame itself carries thinking', () => {
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('answer', 'delta_content', '先前的答案。'));
+    acc.push(line('thinking', 'content', '整段替换成了思考。'));
+    expect(acc.assistantText).toBe('');
+  });
+
+  it('keeps the answer start when an edit lands inside the answer', () => {
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '思考。'));
+    acc.push(line('answer', 'delta_content', 'abcde'));
+    // 答案起点是 3（思考 3 字）；edit_index=7 落在答案之内 ⇒ 起点之前那段没被碰，起点不动。
+    acc.push('data: {"type":"chat:completion","data":{"phase":"answer","edit_content":"D","edit_index":7}}\n');
+    expect(acc.assistantText).toBe('abcdD');
+  });
+
+  it('re-bases the answer start when an edit rewrites the thinking region', () => {
+    // ⚠️ 这条是那四条同步规则里**唯一实测不可达**的一条（真机零 edit），
+    // 但代码写了就必须有用例喂它 —— 否则又是「写了但没人走」。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '思考到一半'));
+    // edit_index=0 落在答案起点之前（此时还没有答案）⇒ 起点重定到 edit 之后。
+    acc.push('data: {"type":"chat:completion","data":{"phase":"answer","edit_content":"思考完毕。答案。","edit_index":0}}\n');
+    expect(acc.assistantText).toBe('思考完毕。答案。');
+  });
+
+  it('still applies the legacy details strip on top of the phase split', () => {
+    // 旧版站点形态：思考内联在 answer 相位里、包在 <details> 中。
+    // 两条路要能叠加（phase 分流先切、details 剥离后切）。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('answer', 'delta_content', '<details>内联思考</details>答案。'));
+    expect(acc.assistantText).toBe('答案。');
+  });
+
+  it('does not mutate the accumulator across repeated reads (phase split)', () => {
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '思考。'));
+    acc.push(line('answer', 'delta_content', '答'));
+    expect(acc.assistantText).toBe('答');
+    expect(acc.assistantText).toBe('答');
+    // 继续追加仍按**完整**文本延续：内部 text 从未被切过。
+    acc.push(line('answer', 'delta_content', '案'));
     expect(acc.assistantText).toBe('答案');
   });
 });

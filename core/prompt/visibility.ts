@@ -1,9 +1,21 @@
 import { SUPPORTED_LOCALES, translate } from '../i18n/background';
 
-export const VISIBLE_USER_PROMPT_START = '<!-- glm-visible-user-prompt:start -->';
-export const VISIBLE_USER_PROMPT_END = '<!-- glm-visible-user-prompt:end -->';
-const VISIBLE_USER_PROMPT_METADATA_PREFIX = '<!-- glm-visible-user-prompt:value=';
-const VISIBLE_USER_PROMPT_METADATA_SUFFIX = ' -->';
+// 「可见用户提示词」的标记与提取在**零依赖**的 `visible-user-prompt.ts` 里 ——
+// 主世界（`core/zai/history-cleanup.ts`）也要用它，而本文件为「提醒段识别」
+// 拖了整条 i18n 资源链（约 80 KB）。这里原样转出，**既有 import 路径全部不变**。
+export {
+  VISIBLE_USER_PROMPT_END,
+  VISIBLE_USER_PROMPT_START,
+  extractVisibleUserPrompt,
+  markVisibleUserPrompt,
+  markVisibleUserPromptMetadata,
+} from './visible-user-prompt';
+
+import {
+  VISIBLE_USER_PROMPT_METADATA_PREFIX,
+  VISIBLE_USER_PROMPT_START,
+  extractVisibleUserPrompt,
+} from './visible-user-prompt';
 
 /**
  * 提醒段的识别特征，**按 locale 从资源派生**（标题行 + 必现行）。
@@ -38,51 +50,14 @@ const TOOL_REMINDER_FRAGMENT_PREFIXES = [
   'Do not put executable tool XML',
 ];
 
-export function markVisibleUserPrompt(prompt: string): string {
-  return `${VISIBLE_USER_PROMPT_START}\n${prompt}\n${VISIBLE_USER_PROMPT_END}`;
-}
-
-export function markVisibleUserPromptMetadata(prompt: string): string {
-  return `${VISIBLE_USER_PROMPT_METADATA_PREFIX}${encodeURIComponent(JSON.stringify(prompt))}${VISIBLE_USER_PROMPT_METADATA_SUFFIX}`;
-}
-
-export function extractVisibleUserPrompt(text: string): string | null {
-  const metadataPrompt = extractVisibleUserPromptMetadata(text);
-  if (metadataPrompt !== null) return metadataPrompt;
-
-  const start = text.indexOf(VISIBLE_USER_PROMPT_START);
-  if (start === -1) return null;
-
-  const contentStart = start + VISIBLE_USER_PROMPT_START.length;
-  const end = text.indexOf(VISIBLE_USER_PROMPT_END, contentStart);
-  if (end === -1) return null;
-
-  return trimSingleBoundaryNewline(text.slice(contentStart, end));
-}
-
-function extractVisibleUserPromptMetadata(text: string): string | null {
-  const visiblePromptStart = text.indexOf(VISIBLE_USER_PROMPT_START);
-  if (visiblePromptStart === -1 || text[visiblePromptStart - 1] !== '\n') return null;
-
-  const metadataLineEnd = visiblePromptStart - 1;
-  const metadataLineStart = text.lastIndexOf('\n', metadataLineEnd - 1) + 1;
-  const metadataLine = text.slice(metadataLineStart, metadataLineEnd);
-  if (!metadataLine.startsWith(VISIBLE_USER_PROMPT_METADATA_PREFIX) ||
-    !metadataLine.endsWith(VISIBLE_USER_PROMPT_METADATA_SUFFIX)) {
-    return null;
-  }
-
-  const contentStart = VISIBLE_USER_PROMPT_METADATA_PREFIX.length;
-  const contentEnd = metadataLine.length - VISIBLE_USER_PROMPT_METADATA_SUFFIX.length;
-
-  try {
-    const decoded = JSON.parse(decodeURIComponent(metadataLine.slice(contentStart, contentEnd)));
-    return typeof decoded === 'string' ? decoded : null;
-  } catch {
-    return null;
-  }
-}
-
+/**
+ * 剥掉我们注入的内部提示词文本，还原成**用户真正看到的那句话**。
+ *
+ * ⚠️ **主世界不用这个函数**（它要用 i18n 派生的提醒段识别，而主世界不该拖 i18n）——
+ * 主世界只做标记提取（`extractVisibleUserPrompt`）。两条路的判据不同、**方向一致**：
+ * 都返回用户原文，差别只在「没有标记时怎么办」：
+ * 这里会继续尝试剥提醒段，主世界那边则原样返回。
+ */
 export function sanitizeInternalPromptText(
   text: string,
   fallbackVisiblePrompt?: string,
@@ -104,17 +79,6 @@ export function containsInternalPromptMarker(text: string): boolean {
     text.includes(VISIBLE_USER_PROMPT_METADATA_PREFIX) ||
     containsToolFormatReminder(text) ||
     isToolReminderOnly(text);
-}
-
-function trimSingleBoundaryNewline(text: string): string {
-  let next = text;
-  if (next.startsWith('\r\n')) next = next.slice(2);
-  else if (next.startsWith('\n')) next = next.slice(1);
-
-  if (next.endsWith('\r\n')) next = next.slice(0, -2);
-  else if (next.endsWith('\n')) next = next.slice(0, -1);
-
-  return next;
 }
 
 function containsToolFormatReminder(text: string): boolean {

@@ -7,8 +7,10 @@
  *   - content                  → 整体替换（reset 后写入）
  *   - edit_content+edit_index  → substring 替换（edit_index 为 UTF-16 code-unit 偏移）
  *
- * 用途：在 fetch hook 里把 SSE 字节里的工具 XML 识别出来、并作字节级透传
- * （扩展只「读」流、不改页面渲染的字节），同时累积 assistant 文本用于工具解析。
+ * 用途：在 fetch hook 里解析 SSE，累积 assistant 文本用于工具识别与兜底解析。
+ *
+ * ⚠️ **本文件不碰回给页面的字节** —— 它只「读」流。改字节的是 `stream-strip.ts`
+ * （工具 XML 剥离），两者的输入都是**原始** wire，互不依赖。
  */
 
 import {
@@ -29,7 +31,7 @@ export interface ZaiSseParseResult {
 
 /**
  * 一个可累积 assistant 文本的解析器。`consumeZaiSseData` 推进状态，
- * `assistantText` 是当前累积的正文（三语义合并）。
+ * `assistantText` 是当前累积的**答案正文**（三语义合并 + 按相位切掉思考）。
  */
 export interface ZaiStreamAccumulator {
   assistantText: string;
@@ -83,16 +85,41 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
   let text = '';
   // SSE 的 `data:` 行可能跨 TextDecoder 分片被截断，必须把未完结的行缓存到下一次 push。
   let pending = '';
+  /**
+   * 答案正文在 `text` 里的起点（UTF-16 偏移）；`null` = 到目前为止全是思考。
+   *
+   * ⚠️⚠️ **思考必须靠 phase 分，不能靠 `<details>` 标签** —— 真机实测（2026-10）
+   * `phase:"thinking"` 帧的 `delta_content` 是**裸文本**，整段累积里 `<details` 出现 0 次。
+   * 而旧版站点（2025-12）把思考内联在 `answer` 相位里、包在 `<details>` 中 ⇒
+   * `stripZaiThinkingBlocks` 当时够用。**那个前提已经消失**，所以出口那个函数
+   * 现在只是「内联 details」那一路的兜底，真正分流在这里。
+   * 漏掉这一步的后果不是「多显示一段思考」：`assistantText` 同时是
+   * `extractAndNotifyToolCalls` 与兜底 `parseToolXml` 的输入 ⇒
+   * **模型写在思考里的完整工具 XML 会被真的执行**。
+   *
+   * ⚠️ **不能改成「内部累积时就丢掉思考」** —— `edit_content` 的 `edit_index` 是
+   * 相对**完整文本**的绝对偏移，内部丢字符会让之后所有偏移错位、正文碎裂。
+   * 所以分流只发生在出口（见 `assistantText` getter）。
+   */
+  let answerStart: number | null = null;
+
+  /** `thinking` 是唯一的「非答案」相位；未知相位一律按答案算（失败方向安全）。 */
+  const isThinkingPhase = (phase: ZaiSsePhase): boolean => phase === 'thinking';
 
   const applyPhase = (event: ZaiSseEvent): string => {
     const d = event.parsed;
+    const thinking = isThinkingPhase(event.phase);
     const dc = readString(d.delta_content);
     if (dc) {
+      // 首个「非思考相位且带文本」的帧定下答案起点 —— 记的是**追加前**的长度。
+      if (answerStart === null && !thinking) answerStart = text.length;
       text += dc;
       return dc;
     }
     const content = readString(d.content);
     if (content) {
+      // 整体替换：这段文本的归属由**本帧自己的相位**决定，不继承上一帧。
+      answerStart = thinking ? null : 0;
       text = content;
       return content;
     }
@@ -101,6 +128,12 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
       // edit_index 是 UTF-16 code-unit 偏移（浏览器字符串索引语义）。
       const editIndex = readFiniteNumber(d.edit_index) ?? 0;
       const prefix = utf16SafeSlice(text, 0, editIndex);
+      // ⚠️ 落点若在答案起点**之前**（含「答案还没开始」），这次改写就覆盖了分流点 ⇒
+      // 重定到 edit 之后。落点在答案之内则起点不动（前缀没被碰）。
+      // 这是**近似**：认为「edit 之后的内容都算答案」。
+      if (editIndex <= (answerStart ?? Number.POSITIVE_INFINITY)) {
+        answerStart = thinking ? null : editIndex;
+      }
       text = prefix + ec;
       return ec;
     }
@@ -117,7 +150,11 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
 
   return {
     get assistantText() {
-      return stripZaiThinkingBlocks(text);
+      // 先按相位切掉思考（真机：思考是独立的 `thinking` 相位、裸文本），
+      // 再过一遍 details 剥离（旧版站点把思考内联在 `answer` 里的那一档兜底）。
+      // 两步都只在出口做，内部 `text` 始终是完整的服务端原文。
+      const answer = answerStart === null ? '' : utf16SafeSlice(text, answerStart, text.length);
+      return stripZaiThinkingBlocks(answer);
     },
     push(chunk: string): ZaiSseParseResult {
       const events: ZaiSseEvent[] = [];
@@ -150,11 +187,17 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
 }
 
 /**
- * 剥掉 z.ai 的思考块，只取最终答案正文。
+ * 剥掉内联在正文里的思考块，只取最终答案正文。
  *
- * z.ai 的思考内联在 `answer` 相位的 `delta_content` 里、包在 `<details>…</details>`
- * 中，**不是**独立的 `phase:"thinking"` 帧 —— 所以按 phase 过滤无效，只能按标签剥。
- * 真机抓样确认思考块恒在 `assistantText` 最前（推理先于答案）。
+ * ⚠️⚠️ **这不是思考分流的主路径** —— 主路径是 `assistantText` getter 里的
+ * `answerStart` 按 **phase** 切分。本函数处理的是**另一种站点形态**：思考内联在
+ * `answer` 相位的 `delta_content` 里、包在 `<details>…</details>` 中。
+ *
+ * ⚠️ **成立前提已变（2026-10 真机实测）**：`phase:"thinking"` 现在是**独立相位**、
+ * 内容是**裸文本**，整段累积里 `<details` 出现 **0 次** ⇒ 本函数在生产路径上
+ * 直接走第一行的快速返回、等价于 no-op。旧版站点（2025-12）确实是内联 + details，
+ * 当时它是唯一的分流手段。**留着是因为那个形态可能因灰度或回滚再现** ——
+ * 但**别再把它当成「思考已经被挡住了」的依据**。
  *
  * ⚠️ **只在 `assistantText` 出口调用，绝不能改内部累积的 `text`** ——
  * `edit_content` 的 `edit_index` 是相对**原始文本**的 UTF-16 偏移，

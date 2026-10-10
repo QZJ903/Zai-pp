@@ -17,7 +17,11 @@ import {
   ZAI_WEB_ORIGIN,
   type ZaiWebRouteName,
 } from './contracts';
+import { stripZaiHistoryResponse } from './history-cleanup';
+import { resolveHistoryToolNames } from './history-tool-names';
 import {
+  isZaiAugmentableRoute,
+  isZaiHistoryRoute,
   matchZaiWebRoute,
   parseZaiBody,
   readZaiLastUserMessageText,
@@ -34,6 +38,10 @@ import {
   type ZaiUsageSnapshot,
 } from './stream-metrics';
 import { resignZaiCompletionRequest } from './sign';
+import {
+  createZaiCompletionStreamRewriter,
+  encodeZaiStreamText,
+} from './stream-strip';
 
 export interface ZaiHookState {
   toolDescriptorNames: ReadonlySet<string>;
@@ -340,7 +348,18 @@ function hookFetch(): () => void {
     const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
 
     const route = url && method ? matchZaiWebRoute({ url, method, baseUrl: ZAI_WEB_ORIGIN }) : null;
-    if (!route || typeof init?.body !== 'string') {
+
+    // ⚠️⚠️ **历史路由先于增广分支** —— 它们的响应体里有我们注入过的文本与工具 XML，
+    // 要剥；而它们的**请求体里没有提示词**，绝不能进增广（见 `isZaiAugmentableRoute`）。
+    // ⚠️ 这一判**不能写成 `route === 'chatDetail'`**：历史路由是**两条**，
+    // 漏一条的表现是「其中一个端点静默不剥」。
+    if (route && isZaiHistoryRoute(route)) {
+      return interceptHistoryResponse(originalFetch.call(this, input, init));
+    }
+
+    // ⚠️ **匹配上路由 ≠ 该增强** —— 未匹配（`null`）与「匹配上但不在增强白名单」
+    // 走同一条原样转发。这是加历史路由之后**必须**分开的一件事。
+    if (!isZaiAugmentableRoute(route) || typeof init?.body !== 'string') {
       return originalFetch.call(this, input, init);
     }
     if (hasBypassHeader(init.headers)) {
@@ -395,7 +414,11 @@ function hookXHR(): () => void {
 
   XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
     const route = routes.get(this);
-    if (route && typeof body === 'string') {
+    // ⚠️ **只有可增强路由才走增广** —— 历史路由（`chatMessages` 是 POST、有 body）
+    // 进了这条分支就会被写进 `signature_prompt`，把请求打碎。
+    // ⚠️ **历史路由的响应侧这里仍然不处理**（本 hook 的响应侧整条缺失）——
+    // 真机实测 z.ai 的 API 请求全走 fetch，XHR 侧无流量；这条是休眠通道的既有状态。
+    if (isZaiAugmentableRoute(route) && typeof body === 'string') {
       const xhr = this;
       void prepareRequest(body, route).then((prepared) => {
         return origSend.call(xhr, prepared.requestBody);
@@ -444,6 +467,10 @@ async function interceptCompletionResponse(
   const decoder = new TextDecoder();
   const accumulator = createZaiStreamAccumulator();
   const usageTracker = createZaiUsageTracker(context.requestId, context.modelType);
+  // 工具 XML 剥离（当场那一份）。名单 = 内置基线 ∪ 本请求名单 ∪ 全局快照。
+  const rewriter = createZaiCompletionStreamRewriter(resolveHistoryToolNames(
+    requestToolNames ?? hookState.toolDescriptorNames,
+  ));
 
   const observeUsageFrames = (parsed: ZaiSseParseResult) => {
     for (const event of parsed.events) usageTracker.observeEvent(event);
@@ -482,14 +509,20 @@ async function interceptCompletionResponse(
             agentTaskPrompt: context.agentTaskPrompt,
             assistantText: text,
           });
+          // 流结束：把扣住的尾巴（未闭合的块也一并删掉）放行给页面。
+          const flushed = rewriter.finish();
+          if (flushed.text) controller.enqueue(encodeZaiStreamText(flushed.text));
           controller.close();
           notifyTerminal();
           return;
         }
         const chunk = decoder.decode(value, { stream: true });
-        // 字节透传（原样回给页面）。
-        controller.enqueue(value);
-        // 增量解析 SSE 做工具识别（不改变页面收到的字节）。
+        // ⚠️ **工具 XML 从回给页面的字节里剥掉** —— 模型吐的 `<shell_exec>{…}`
+        // 否则会一直留在正文里（用户可见）；刷新后服务端存的那份由历史侧另管。
+        // ⚠️ `unchanged` 为真时**透传原始字节**，保住「没改动就逐字节不变」。
+        const rewritten = rewriter.push(chunk);
+        controller.enqueue(rewritten.unchanged ? value : encodeZaiStreamText(rewritten.text));
+        // 增量解析 SSE 做工具识别（输入是**原始** wire，与剥离无关）。
         observeUsageFrames(accumulator.push(chunk));
       } catch (error) {
         controller.error(error);
@@ -522,10 +555,86 @@ async function interceptCompletionResponse(
   return rebuilt;
 }
 
+/**
+ * 历史响应清洗：`GET /api/v1/chats/{id}` 与 `POST /api/v1/chats/{id}/messages/batch`。
+ *
+ * 两个端点形状不同、正文位置也不同（见 `history-cleanup.ts` 顶部的表），
+ * 但**清洗逻辑是一份** —— 它按路径逐层取，取不到就是 no-op。
+ *
+ * ⚠️⚠️ **这里改的是响应体，不是字节** —— 先 `await response.text()` 再 `JSON.parse`
+ * （**不是** `response.json()`），这样解析失败时还能用**原文**重建响应放行。
+ * 页面拿到的是 `JSON.stringify` 后的等价对象，字段顺序可能变，但**值一个不动**
+ * （除了要剥的那几个 content）。
+ *
+ * ⚠️ **重建时必须删 `content-length` / `content-encoding`** —— 长度已经变了，
+ * 而 `content-encoding` 指向的压缩已经由浏览器解掉。`content-length` 对不上时
+ * Chrome 会截断或挂住响应。与 `interceptCompletionResponse` 同一处理。
+ *
+ * ⚠️ **不加字节上限** —— 这是页面**必需**的响应，读一半就废掉整个会话。
+ * 实测量级：`messages/batch` 80 KB、`chats/{id}` 34 KB。与「六处刻意不加限」
+ * 同一取舍（那些是 GitHub / Bing / chatNew 诊断这类非必需响应）。
+ */
+async function interceptHistoryResponse(
+  responsePromise: Promise<Response>,
+): Promise<Response> {
+  // ⚠️ 网络层失败要让 rejection 原样传给页面（页面自己有错误处理），不能吞掉换成空响应。
+  const response = await responsePromise;
+  const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
+  if (!contentType.includes('json') || !response.body) return response;
+
+  // ⚠️⚠️ **`await response.text()` 之后这个 Response 就已经读干了** —— 所以**每一条**
+  // 后续路径都必须走 `rebuildHistoryResponse` 重建，绝不能 `return response`。
+  // 返回已读干的响应给页面，表现是**整个会话加载不出来**（页面读 body 拿到空串）。
+  let raw: string;
+  try {
+    raw = await response.text();
+  } catch {
+    return response;
+  }
+
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    // 不是 JSON（HTML 挑战页 / 空 body）：用原文重建。
+    return rebuildHistoryResponse(raw, response);
+  }
+
+  const stats = stripZaiHistoryResponse(json, {
+    toolNames: resolveHistoryToolNames(hookState.toolDescriptorNames),
+  });
+  // 一处都没改时也**必须重建**（理由见上），只是不做序列化、直接把原文放回去。
+  if (stats.restoredUserMessages === 0 && stats.strippedToolBlocks === 0) {
+    return rebuildHistoryResponse(raw, response);
+  }
+
+  return rebuildHistoryResponse(JSON.stringify(json), response);
+}
+
+/** 用一段文本重建响应，保留状态码 / 状态文本 / 除长度与编码外的全部 header。 */
+function rebuildHistoryResponse(text: string, source: Response): Response {
+  const headers = new Headers(source.headers);
+  headers.delete('content-length');
+  headers.delete('content-encoding');
+  const rebuilt = new Response(text, {
+    headers,
+    status: source.status,
+    statusText: source.statusText,
+  });
+  // Response 构造函数没有 url 选项；重建后补回最终 URL（与流式那条同处理）。
+  if (source.url) {
+    Object.defineProperty(rebuilt, 'url', {
+      value: source.url,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return rebuilt;
+}
+
 function registerToolCall(call: ZaiDetectedToolCall): void {
   hookState.onToolCall(call);
 }
-
 function extractAndNotifyToolCalls(
   accumulator: ZaiStreamAccumulator,
   requestId: string,
