@@ -94,7 +94,7 @@ import {
 import { decodeProjectContextState } from '../core/project/codec';
 import { selectPendingProjectPrompt } from '../core/project/prompt-context';
 import { PROJECT_UNTITLED_CONVERSATION } from '../core/project/title';
-import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
+import { buildZaiChatSessionUrl, readZaiChatSessionId } from '../core/zai/chat-session';
 import { findZaiToolXmlBlocks } from '../core/zai/tool-xml';
 import { createZaiConversationTitleResolver } from '../core/zai/conversation-title';
 import { readZaiSidebarAgentMode, zaiNewConversationPath } from '../core/zai/mode';
@@ -111,6 +111,7 @@ import {
   ZAI_CHAT_INPUT_SELECTOR as CHAT_INPUT_SELECTOR,
   ZAI_DOM_TASK_CANCELLED_CODE,
 } from '../core/zai/contracts';
+import { sleep } from '../core/zai/async';
 import { createToolInvocationCatalog } from '../core/tool/invocation';
 import { createLatestSyncGate } from '../core/tool/latest-sync';
 import { MCP_CAPABILITY_TOOL_PROVIDER_ID } from '../core/mcp/capability-contract';
@@ -316,21 +317,9 @@ const activeToolAuthorizations = new Map<string, ToolAuthorizationGrantSummary>(
 // 会话/请求辅助
 // ---------------------------------------------------------------------------
 
-/** 从 location 读 z.ai 会话 id：`/c/<id>`。 */
-function readZaiChatSessionId(value?: string): string | null {
-  const pathname = value ?? location.pathname;
-  const match = /^\/c\/([^/?#]+)/.exec(pathname);
-  if (!match?.[1]) return null;
-  try {
-    const id = decodeURIComponent(match[1]);
-    return id.trim() ? id.trim() : null;
-  } catch {
-    return null;
-  }
-}
-
+/** 当前会话 id：从地址栏 `/c/<id>` 读（`core/zai/chat-session` 是唯一核心实现）。 */
 function getCurrentChatSessionId(): string | null {
-  return readZaiChatSessionId();
+  return readZaiChatSessionId(location.pathname);
 }
 
 /**
@@ -1170,7 +1159,7 @@ async function handleAugmentRequestBody(
   }
 
   const requestId = mainRequestId || crypto.randomUUID();
-  const chatSessionId = readZaiChatSessionId();
+  const chatSessionId = getCurrentChatSessionId();
   // ⚠️ **`chatSessionIdByRequestId` 不在这里写** —— chatNew 请求收不到 `REQUEST_TERMINAL`
   // （`fetch-hook` 只在 completion 路由发 `onRequestTerminal`），写进去就是**永不释放的孤儿**；
   // 而它的唯一读点在 `executeDetected`，那条路只可能由 completion 轮的 requestId 走到。
@@ -1771,7 +1760,7 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
   const authId = authorization?.id;
   if (!authId) {
     const chatSessionId =
-      chatSessionIdByRequestId.get(requestId) ?? readZaiChatSessionId();
+      chatSessionIdByRequestId.get(requestId) ?? getCurrentChatSessionId();
     try {
       authorization = await requestToolAuthorization(requestId, chatSessionId);
       activeToolAuthorizations.set(requestId, authorization);
@@ -1803,7 +1792,7 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
   const chatSessionId =
     (boundSessionId !== null && boundSessionId !== undefined ? boundSessionId : undefined) ??
     chatSessionIdByRequestId.get(requestId) ??
-    readZaiChatSessionId();
+    getCurrentChatSessionId();
 
   // 关键：callId 必须是「本条 raw 内容的稳定且唯一」的 id。
   // parseToolXml 对「单条 raw」解析时 id 恒为 xml:0，三条 memory_save 会撞同一个
@@ -1878,7 +1867,7 @@ async function handleUsageSnapshot(raw: unknown): Promise<void> {
         recordedAt: Date.now(),
         source: 'glm-web',
         // 会话 id 唯一真源是地址栏 `/c/<id>`（请求体里的 chat_id 与 URL 是否同值未经验证）。
-        chatSessionId: readZaiChatSessionId(),
+        chatSessionId: getCurrentChatSessionId(),
         // z.ai 的流里没有消息 id 概念，恒 null。
         assistantMessageId: null,
         modelType: snapshot.modelType,
@@ -1947,7 +1936,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
   // 首条请求发出后，页面 SPA 可能已经从首页跳到 /c/<id>（新建会话场景）。
   // 把任务的最新会话 id 同步下来，这样回传 backend 的才是真实 id，而非首条注入时的 null。
   const liveTaskId = taskIdByRequestId.get(complete.requestId);
-  const liveChatSessionId = readZaiChatSessionId();
+  const liveChatSessionId = getCurrentChatSessionId();
   if (liveTaskId && liveChatSessionId) {
     const liveTask = activeDomTasks.get(liveTaskId);
     if (liveTask) {
@@ -2124,7 +2113,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
         task.status = 'done';
         activeDomTasks.delete(nativeTaskId);
         // 固定会话：回传前 re-read 真实 /c/<id>（新建会话下 task.chatSessionId 可能还是 null）。
-        const liveSessionId = readZaiChatSessionId();
+        const liveSessionId = getCurrentChatSessionId();
         void sendRuntimeMessage({
           type: 'DOM_TASK_COMPLETE',
           taskId: nativeTaskId,
@@ -2138,7 +2127,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     return;
   }
 
-  const chatSessionId = readZaiChatSessionId();
+  const chatSessionId = getCurrentChatSessionId();
   if (!chatSessionId) {
     // 读不到 /c/<id> 就没法建续跑循环。若这个 requestId 归属着后台任务，
     // 必须回 FAILED 收尾，否则任务一直挂在「运行中」直到 180s 租约超时。
@@ -2439,7 +2428,7 @@ async function submitAutomationPromptViaPage(
       console.error('[GLM++] automation send fired a request but it was never recognized', {
         taskId,
         submitPath,
-        jumped: readZaiChatSessionId() !== null,
+        jumped: getCurrentChatSessionId() !== null,
         hasStop: isAgentCurrentlyRunning(),
       });
       return false;
@@ -2451,7 +2440,7 @@ async function submitAutomationPromptViaPage(
       submitPath,
       sendBtnExists: !!sendButton,
       sendBtnDisabled: sendButton?.disabled ?? null,
-      jumped: readZaiChatSessionId() !== null,
+      jumped: getCurrentChatSessionId() !== null,
       hasStop: isAgentCurrentlyRunning(),
     });
     return false;
@@ -2609,7 +2598,7 @@ async function runDomTask(input: {
     return { ok: false, error: 'busy' };
   }
   // 会话一致性：后台指定要续用的会话必须等于当前页面会话（新会话时 chatSessionId 为 null）。
-  const currentSessionId = readZaiChatSessionId();
+  const currentSessionId = getCurrentChatSessionId();
   if (input.chatSessionId && input.chatSessionId !== currentSessionId) {
     return { ok: false, error: 'wrong_conversation' };
   }
@@ -2712,7 +2701,7 @@ const sessionChangeListeners = new Set<() => void>();
 function reportLiveSessionToActiveTasks(): void {
   // 没有在跑的后台任务时直接返回。
   if (activeDomTasks.size === 0) return;
-  const sessionId = readZaiChatSessionId();
+  const sessionId = getCurrentChatSessionId();
   if (!sessionId) return;
   for (const task of activeDomTasks.values()) {
     if (task.status !== 'pending' && task.status !== 'injected' && task.status !== 'running') continue;
@@ -2767,7 +2756,7 @@ function onZaiSessionChange(listener: () => void): () => void {
 function notifySessionChange(): void {
   // 1s 轮询会每秒调到这里，所以先比对会话 id —— 没真变就不打扰订阅者，
   // 否则项目面板会被每秒重绘一次。
-  const sessionId = readZaiChatSessionId();
+  const sessionId = getCurrentChatSessionId();
   if (sessionId === lastNotifiedSessionId) return;
   lastNotifiedSessionId = sessionId;
   for (const listener of sessionChangeListeners) {
@@ -3073,7 +3062,7 @@ function finishContinuationLoop(loop: ContinuationLoop): void {
     // 固定会话：回传前强制 re-read location 的真实 /c/<id>。新建会话场景
     // 下，loop.chatSessionId 可能是早期读到的 null；此刻页面早已跳到 /c/<id>，重新
     // 读才能把「真实会话 id」落库，后续运行才能沿用同一个对话。
-    const liveSessionId = readZaiChatSessionId();
+    const liveSessionId = getCurrentChatSessionId();
     const finalSessionId = liveSessionId ?? task?.chatSessionId ?? loop.chatSessionId;
     clearActiveDomTask(loop.taskId);
     void sendRuntimeMessage({
@@ -3184,7 +3173,7 @@ function armManualStopDetection(): void {
  * `/c/<id>`，只有这里能补上真值 —— 否则自动化会一直显示会话「未创建」。
  */
 async function terminateDomTaskAsStopped(taskId: string, requestId: string): Promise<void> {
-  const liveSessionId = readZaiChatSessionId();
+  const liveSessionId = getCurrentChatSessionId();
   taskIdByRequestId.delete(requestId);
   respondedRequestIds.add(requestId);
   manualStopTimers.delete(requestId);
@@ -3391,10 +3380,6 @@ async function waitForAutomationComposer(timeoutMs = 60_000): Promise<boolean> {
   return document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR) !== null;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function waitForRequestObserved(sinceTs: number): Promise<boolean> {
   // 判定「注入的续跑 prompt 真的发出去」：看 AUGMENT_REQUEST_BODY 是否观察到一条续跑请求。
   // 不能用 continuationLoop.status 判定（会自锁：RESPONSE_COMPLETE 在串行队列里被本函数阻塞，
@@ -3575,7 +3560,7 @@ export default defineContentScript({
             type: 'DOM_TASK_FAILED',
             taskId,
             error: ZAI_DOM_TASK_CANCELLED_CODE,
-            chatSessionId: readZaiChatSessionId(),
+            chatSessionId: getCurrentChatSessionId(),
           });
         }
         sendResponse({ ok: true });

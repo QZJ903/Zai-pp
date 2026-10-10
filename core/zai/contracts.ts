@@ -8,6 +8,12 @@
 
 export const ZAI_WEB_ORIGIN = 'https://chat.z.ai';
 
+/** chat.z.ai 主页（带尾斜杠）：自动化「新对话」时找/开的目标标签页。 */
+export const ZAI_HOME_URL = 'https://chat.z.ai/';
+
+/** chat.z.ai 标签页的匹配模式（`chrome.tabs.query` / 广播筛选共用的唯一来源）。 */
+export const ZAI_TAB_URL_PATTERN = '*://chat.z.ai/*';
+
 /**
  * chat.z.ai 前端实际使用的两个可增强路由。
  * completion 是 agent/chat 共用的补全端点；chatNew 是首条消息前建的会话。

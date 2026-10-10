@@ -106,6 +106,41 @@ describe('zai signature', () => {
 });
 
 describe('zai request codec', () => {
+  /**
+   * ⚠️⚠️ **`parseZaiBody` 的失败语义必须按契约返回 `null`。**
+   *
+   * 它是「这次请求要不要被我们改写」的判据（`fetch-hook.ts` 的 `prepareRequest` 与
+   * `zai.content.ts` 的 `handleAugmentRequestBody` 都在它返回 null 时**原样放行**），
+   * 所以失败时**不能**退化成 `{}` —— 那会让一个解析不了的请求被当成空 body 继续往下走。
+   *
+   * ⚠️ **为什么单独写这一组**：整条「解析失败就放行」的设计原先由
+   * `zai-content-augment-order-contract.test.ts` 的三条断言守着，而那三条**全是源码扫描**
+   * （`indexOf('parseZaiBody(bodyStr)')` 拿位置再比先后）—— **没有一条真的调用过这个函数**。
+   * 把 `catch` 里的 `return null` 改成 `return {}` 时，全量测试依然全绿。
+   * **位置类断言守接线，行为断言守语义，两者缺一不可。**
+   */
+  it('returns null for anything that is not a JSON object', () => {
+    // 解析不了 ⇒ null（调用方据此原样放行）。
+    expect(parseZaiBody('{bad json}')).toBeNull();
+    expect(parseZaiBody('')).toBeNull();
+    expect(parseZaiBody('   ')).toBeNull();
+    expect(parseZaiBody('not json at all')).toBeNull();
+    // 能解析、但形状不是「一个对象」⇒ 同样 null（数组 / 标量都不是请求体）。
+    expect(parseZaiBody('null')).toBeNull();
+    expect(parseZaiBody('[]')).toBeNull();
+    expect(parseZaiBody('[{"model":"x-preview-l"}]')).toBeNull();
+    expect(parseZaiBody('"a string"')).toBeNull();
+    expect(parseZaiBody('42')).toBeNull();
+    expect(parseZaiBody('true')).toBeNull();
+  });
+
+  it('returns the parsed object itself for a JSON object', () => {
+    const body = parseZaiBody('{"model":"x-preview-l","features":{"web_search":true}}');
+    expect(body).toEqual({ model: 'x-preview-l', features: { web_search: true } });
+    // 空对象是**合法**请求体（不是失败）—— 别把它与 null 混为一谈。
+    expect(parseZaiBody('{}')).toEqual({});
+  });
+
   it('resolves a request to its route name, or null when it belongs to none', () => {
     expect(
       matchZaiWebRoute({

@@ -1,32 +1,45 @@
 import http from 'node:http';
 import assert from 'node:assert/strict';
 
+/**
+ * MCP 的**活体往返**冒烟：起一个本地 mock MCP server，走真实 HTTP + JSON-RPC，
+ * 验证 `initialize` / `tools/list` / `tools/call` / 超时四条路径的**传输形状**。
+ *
+ * ⚠️⚠️ **本脚本刻意只验传输层，不复刻任何生产逻辑。**
+ * 它曾经手抄了 9 个生产函数（`normalizeMcpToolDescriptor` / `applyMcpToolPolicy` /
+ * `renderToolSchemas` / `createToolInvocationCatalog` / `createMcpInvocationName` /
+ * `fetchWithTimeout` / `extractToolCalls` / `stripToolCalls` / `escapeRegExp`），
+ * 断言的两侧**都来自脚本自己** —— 往生产里注入缺陷（改 `### Tool` 前缀、让长名不进 catalog）
+ * 时它**三次全绿**。那部分已经搬进 `tests/mcp-live-roundtrip.test.ts`，
+ * 那里**直接 import 生产**、并且进 `npm test`（GitHub CI 也跑得到）。
+ *
+ * ⚠️ **超时也走平台原语**（`AbortSignal.timeout`），不再手抄生产的
+ * `fetchWithTimeout` + `mcp_transport_timeout` 映射 —— 那种副本会把
+ * 「超时被映射成哪个错误码」这件事变成脚本自证。该契约由
+ * `tests/mcp-live-roundtrip.test.ts` 对着生产 transport 测。
+ *
+ * ⚠️ **本脚本保留的理由**：它验的是「真 HTTP + 真 JSON-RPC 信封」这一层 ——
+ * vitest 那份虽然也起真 server，但它用的是生产 transport；这里是**手写的最小客户端**，
+ * 能反过来确认「服务端契约本身」没变（两者互为对照）。
+ *
+ * ⚠️ **本脚本不 import 任何 `core/` 模块**（只依赖 `node:http` 与 `node:assert`）。
+ * 解析 / 渲染 / 描述符投影的契约由 `tests/mcp-live-roundtrip.test.ts` 对着真源测。
+ */
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 
+/**
+ * ⚠️ **只保留本脚本真正消费的字段**（`transport.url` 与 `timeouts.requestMs`）。
+ * 不镜像生产 `McpServerConfig` 的完整形状 —— 那样会让读者以为这里的
+ * `allowlist` / `limits` / `execution` 也在被验证，而它们没有任何消费者。
+ * 那些字段的语义由 `tests/mcp-live-roundtrip.test.ts` 对着生产测。
+ */
 const serverConfig = {
-  id: 'mock',
-  displayName: 'Mock MCP',
-  enabled: true,
   transport: {
     kind: 'streamable_http',
     url: '',
   },
   timeouts: {
-    connectMs: 1000,
     requestMs: 1000,
-    discoveryMs: 1000,
-  },
-  limits: {
-    maxResultBytes: 64000,
-    maxToolCount: 128,
-  },
-  allowlist: {
-    mode: 'deny',
-    toolNames: ['blocked'],
-  },
-  execution: {
-    mode: 'auto',
-    enabled: true,
   },
 };
 
@@ -61,96 +74,38 @@ try {
   const initialize = await requestJsonRpc(serverConfig, 'initialize', {
     protocolVersion: MCP_PROTOCOL_VERSION,
     capabilities: { tools: {} },
-    clientInfo: { name: 'GLM++ smoke', version: '0.0.0' },
+    clientInfo: { name: 'Zai++ smoke', version: '0.0.0' },
   });
   assert.equal(initialize.protocolVersion, MCP_PROTOCOL_VERSION);
+  assert.equal(initialize.serverInfo.name, 'mock-mcp');
 
   const listed = await requestJsonRpc(serverConfig, 'tools/list');
-  const descriptors = applyMcpToolPolicy(
-    listed.tools.map((tool) => normalizeMcpToolDescriptor(serverConfig, tool)),
-    serverConfig,
+  assert.deepEqual(listed.tools.map((tool) => tool.name), ['echo', 'blocked']);
+
+  const callResult = await requestJsonRpc(serverConfig, 'tools/call', {
+    name: 'echo',
+    arguments: { text: 'hello' },
+  });
+  assert.equal(callResult.isError, false);
+  assert.deepEqual(callResult.structuredContent, { echoed: 'hello' });
+  assert.match(callResult.content[0].text, /hello/);
+
+  // 服务端报错走 JSON-RPC `error` 分支（不是 HTTP 错误）：断言**传输形状**本身，
+  // 不引用任何错误码字符串 —— 脚本侧的码与生产不是同一套，比它等于自证。
+  await assert.rejects(
+    requestJsonRpc(serverConfig, 'explode', {}),
+    (error) => /boom/.test(error.message),
   );
-  assert.equal(descriptors.length, 2);
 
-  const injectable = descriptors.filter((tool) => tool.execution.enabled && tool.execution.mode === 'auto');
-  assert.deepEqual(injectable.map((tool) => tool.name), ['echo']);
-
-  const rendered = renderToolSchemas(injectable);
-  assert.match(rendered, /Accepted tag names: mcp_mock_echo, echo/);
-  assert.match(rendered, /<echo>/);
-  assert.match(rendered, /Invalid formats: <invoke name="echo">/);
-  assert.doesNotMatch(rendered, /mcp_mock_blocked/);
-  assert.doesNotMatch(rendered, /"type":"function"/);
-
-  const responseText = 'Before <mcp_mock_echo>{"text":"hello"}</mcp_mock_echo> After';
-  const calls = extractToolCalls(responseText, injectable);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].name, 'echo');
-  assert.deepEqual(calls[0].payload, { text: 'hello' });
-  assert.equal(stripToolCalls(responseText, injectable).trim(), 'Before  After');
-
-  const shortResponseText = 'Before <echo>{"text":"short"}</echo> After';
-  const shortCalls = extractToolCalls(shortResponseText, injectable);
-  assert.equal(shortCalls.length, 1);
-  assert.equal(shortCalls[0].name, 'echo');
-  assert.deepEqual(shortCalls[0].payload, { text: 'short' });
-  assert.equal(stripToolCalls(shortResponseText, injectable).trim(), 'Before  After');
-
-  const emptyBodyCalls = extractToolCalls('<echo></echo>', injectable);
-  assert.equal(emptyBodyCalls.length, 1);
-  assert.deepEqual(emptyBodyCalls[0].payload, {});
-  assert.equal(emptyBodyCalls[0].parseError, undefined);
-
-  const badPathText = String.raw`<echo>{"path":"D:\ai project\glm-pp-main"}</echo>`;
-  const badPathCalls = extractToolCalls(badPathText, injectable);
-  assert.equal(badPathCalls.length, 1);
-  assert.equal(badPathCalls[0].parseError.code, 'tool_call_json_invalid');
-
-  const genericWrapperText = '<tool_call>{"name":"mcp_mock_echo","arguments":{"text":"hello"}}</tool_call>';
-  assert.equal(extractToolCalls(genericWrapperText, injectable).length, 0);
-  const invokeWrapperText = '<invoke name="mcp_mock_echo">{"text":"hello"}</invoke>';
-  assert.equal(extractToolCalls(invokeWrapperText, injectable).length, 0);
-
-  const genericTools = [
-    createLocalToolDescriptor('memory_save', 'GLM++ Memory'),
-    ...injectable,
-    createLocalToolDescriptor('custom_lookup', 'Custom Tool Provider'),
-  ];
-  const multiToolText = [
-    '<memory_save>{"type":"topic","name":"n","content":"c","tags":[]}</memory_save>',
-    '<mcp_mock_echo>{"text":"hello"}</mcp_mock_echo>',
-    '<custom_lookup>{"query":"hello"}</custom_lookup>',
-  ].join('\n');
-  const genericCalls = extractToolCalls(multiToolText, genericTools);
-  assert.deepEqual(genericCalls.map((call) => call.provider.displayName), [
-    'GLM++ Memory',
-    'Mock MCP',
-    'Custom Tool Provider',
-  ]);
-  assert.equal(stripToolCalls(multiToolText, genericTools).trim(), '');
-  assert.match(renderToolBlockSnapshot(genericCalls.map((call) => ({
-    name: call.name,
-    provider: call.provider,
-    result: {
-      ok: true,
-      summary: 'executed',
-      output: { tool: call.name },
-    },
-  }))), /Custom Tool Provider \/ custom_lookup/);
-
-  const callResult = await callMcpTool(serverConfig, calls[0]);
-  assert.equal(callResult.ok, true);
-  assert.equal(callResult.output.echoed, 'hello');
-  assert.match(callResult.detail, /hello/);
-
+  // 超时：只验「到点会中止」这个传输行为，错误码的映射归生产的 transport 测。
   await assert.rejects(
     requestJsonRpc(serverConfig, 'slow', {}, { timeoutMs: 10 }),
-    (error) => error.code === 'mcp_transport_timeout',
+    (error) => error.name === 'TimeoutError' || error.name === 'AbortError',
   );
 
   console.log('mcp smoke: discovery ok');
-  console.log('mcp smoke: descriptor render/parser/filter ok');
-  console.log('mcp smoke: tool call and timeout paths ok');
+  console.log('mcp smoke: tool call ok');
+  console.log('mcp smoke: json-rpc error + timeout paths ok');
 } finally {
   await new Promise((resolve) => server.close(resolve));
 }
@@ -168,12 +123,12 @@ function startMockMcpServer() {
       await delay(100);
     }
 
-    const result = routeJsonRpc(message);
+    const { result, error } = routeJsonRpc(message);
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify({
       jsonrpc: '2.0',
       id: message.id,
-      result,
+      ...(error ? { error } : { result }),
     }));
   });
 
@@ -189,27 +144,34 @@ function startMockMcpServer() {
 function routeJsonRpc(message) {
   if (message.method === 'initialize') {
     return {
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: { tools: {} },
-      serverInfo: { name: 'mock-mcp', version: '1.0.0' },
+      result: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        serverInfo: { name: 'mock-mcp', version: '1.0.0' },
+      },
     };
   }
   if (message.method === 'tools/list') {
-    return { tools: mockTools };
+    return { result: { tools: mockTools } };
   }
   if (message.method === 'tools/call') {
     const args = message.params?.arguments ?? {};
     return {
-      content: [{ type: 'text', text: `echo:${args.text ?? ''}` }],
-      structuredContent: { echoed: args.text ?? '' },
-      isError: false,
+      result: {
+        content: [{ type: 'text', text: `echo:${args.text ?? ''}` }],
+        structuredContent: { echoed: args.text ?? '' },
+        isError: false,
+      },
     };
   }
-  return {};
+  if (message.method === 'explode') {
+    return { error: { code: -32603, message: 'boom' } };
+  }
+  return { result: {} };
 }
 
 async function requestJsonRpc(config, method, params, options = {}) {
-  const response = await fetchWithTimeout(config.transport.url, {
+  const response = await fetch(config.transport.url, {
     method: 'POST',
     headers: {
       accept: 'application/json',
@@ -221,283 +183,18 @@ async function requestJsonRpc(config, method, params, options = {}) {
       method,
       ...(params ? { params } : {}),
     }),
-  }, options.timeoutMs ?? config.timeouts.requestMs);
+    signal: AbortSignal.timeout(options.timeoutMs ?? config.timeouts.requestMs),
+  });
 
   if (!response.ok) {
-    const error = new Error(`HTTP ${response.status}`);
-    error.code = 'mcp_http_error';
-    throw error;
+    throw new Error(`HTTP ${response.status}`);
   }
 
   const data = await response.json();
   if (data.error) {
-    const error = new Error(data.error.message);
-    error.code = 'mcp_json_rpc_error';
-    throw error;
+    throw new Error(data.error.message);
   }
   return data.result;
-}
-
-async function callMcpTool(config, call) {
-  const result = await requestJsonRpc(config, 'tools/call', {
-    name: call.name,
-    arguments: call.payload,
-  });
-  const output = result.structuredContent ?? result.content ?? null;
-  return {
-    ok: result.isError !== true,
-    summary: result.isError ? 'MCP tool returned an error' : 'MCP tool executed',
-    detail: JSON.stringify(output, null, 2),
-    output,
-  };
-}
-
-async function fetchWithTimeout(input, init, timeoutMs) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      const transportError = new Error(`MCP request exceeded ${timeoutMs} ms.`);
-      transportError.code = 'mcp_transport_timeout';
-      throw transportError;
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function normalizeMcpToolDescriptor(config, tool) {
-  const invocationName = createMcpInvocationName(config.id, tool.name);
-  return {
-    id: `mcp:${config.id}:${tool.name}`,
-    provider: {
-      kind: 'mcp',
-      id: config.id,
-      displayName: config.displayName,
-      transport: config.transport.kind,
-    },
-    name: tool.name,
-    invocationName,
-    title: tool.title || tool.name,
-    description: tool.description || `MCP tool ${tool.name}`,
-    inputSchema: {
-      ...tool.inputSchema,
-      type: 'object',
-      properties: tool.inputSchema?.properties ?? {},
-    },
-    execution: {
-      mode: config.execution.mode,
-      enabled: config.enabled && config.execution.enabled,
-      risk: 'medium',
-      timeoutMs: config.timeouts.requestMs,
-      maxResultBytes: config.limits.maxResultBytes,
-    },
-  };
-}
-
-function createLocalToolDescriptor(name, displayName) {
-  return {
-    id: `local:${name}`,
-    provider: {
-      kind: 'local',
-      id: displayName.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
-      displayName,
-      transport: 'in_process',
-    },
-    name,
-    invocationName: name,
-    title: name,
-    description: `${name} test tool`,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string' },
-        type: { type: 'string' },
-        name: { type: 'string' },
-        content: { type: 'string' },
-        tags: { type: 'array', items: { type: 'string' } },
-      },
-    },
-    execution: {
-      mode: 'auto',
-      enabled: true,
-      risk: 'low',
-    },
-  };
-}
-
-function applyMcpToolPolicy(tools, config) {
-  const names = new Set(config.allowlist.toolNames);
-  return tools.map((tool) => {
-    const selected = names.has(tool.name) || names.has(tool.invocationName);
-    const allowed = config.allowlist.mode === 'all'
-      ? true
-      : config.allowlist.mode === 'allow'
-        ? selected
-        : !selected;
-    return {
-      ...tool,
-      execution: {
-        ...tool.execution,
-        mode: config.execution.mode,
-        enabled: config.enabled && config.execution.enabled && config.execution.mode !== 'disabled' && allowed,
-      },
-    };
-  });
-}
-
-function renderToolSchemas(descriptors) {
-  const catalog = createToolInvocationCatalog(descriptors);
-  return descriptors.map((descriptor) => {
-    const names = catalog.namesById.get(descriptor.id) ?? [descriptor.invocationName];
-    const trimmedName = descriptor.name.trim();
-    const preferred = (trimmedName && names.includes(trimmedName)) ? trimmedName : (names[0] ?? descriptor.invocationName);
-    return [
-      `### Tool ${preferred}`,
-      `Title: ${descriptor.title}`,
-      `Description: ${descriptor.description}`,
-      names.length > 1 ? `Accepted tag names: ${names.join(', ')}` : '',
-      `Valid call format for ${preferred}:`,
-      `<${preferred}>`,
-      JSON.stringify(createExamplePayload(descriptor), null, 2),
-      `</${preferred}>`,
-      `Invalid formats: <invoke name="${preferred}">...</invoke>, <tool_call>...</tool_call>`,
-      `Parameters JSON Schema: ${JSON.stringify(descriptor.inputSchema)}`,
-    ].filter(Boolean).join('\n');
-  }).join('\n\n');
-}
-
-function createExamplePayload(descriptor) {
-  const properties = descriptor.inputSchema.properties ?? {};
-  const required = descriptor.inputSchema.required ?? Object.keys(properties);
-  return Object.fromEntries(required.map((key) => [key, exampleValue(properties[key])]));
-}
-
-function exampleValue(schema) {
-  if (!schema || typeof schema !== 'object') return 'value';
-  if (Array.isArray(schema.type)) return exampleValue({ ...schema, type: schema.type[0] });
-  if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0];
-  switch (schema.type) {
-    case 'number':
-    case 'integer':
-      return 0;
-    case 'boolean':
-      return false;
-    case 'array':
-      return [];
-    case 'object':
-      return {};
-    case 'string':
-    default:
-      return 'value';
-  }
-}
-
-function extractToolCalls(text, descriptors) {
-  const catalog = createToolInvocationCatalog(descriptors);
-  if (catalog.byName.size === 0) return [];
-  const names = [...catalog.byName.keys()].map(escapeRegExp).join('|');
-  const regex = new RegExp(`<(${names})>\\s*([\\s\\S]*?)\\s*<\\/\\1>`, 'g');
-  const calls = [];
-  let match;
-  while ((match = regex.exec(text))) {
-    const descriptor = catalog.byName.get(match[1]);
-    const body = match[2].trim();
-    let payload = {};
-    let parseError;
-    try {
-      payload = body.length === 0 ? {} : JSON.parse(body);
-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-        parseError = { code: 'tool_call_payload_invalid', message: 'Tool call body must be a JSON object.', retryable: false };
-        payload = {};
-      }
-    } catch (error) {
-      parseError = { code: 'tool_call_json_invalid', message: error instanceof Error ? error.message : String(error), retryable: false };
-    }
-    calls.push({
-      descriptorId: descriptor.id,
-      provider: descriptor.provider,
-      name: descriptor.name,
-      invocationName: descriptor.invocationName,
-      payload,
-      raw: match[0],
-      parseError,
-    });
-  }
-  return calls;
-}
-
-function stripToolCalls(text, descriptors) {
-  const names = createToolInvocationCatalog(descriptors).names.map(escapeRegExp).join('|');
-  return text.replace(new RegExp(`<(${names})>\\s*[\\s\\S]*?\\s*<\\/\\1>`, 'g'), '');
-}
-
-function renderToolBlockSnapshot(executions) {
-  return [
-    `Executed tools (${executions.length})`,
-    ...executions.map((execution) => {
-      const name = execution.provider?.displayName
-        ? `${execution.provider.displayName} / ${execution.name}`
-        : execution.name;
-      const output = execution.result.output === undefined
-        ? ''
-        : JSON.stringify(execution.result.output, null, 2);
-      return `${name}\n${execution.result.summary}\n${output}`;
-    }),
-  ].join('\n---\n');
-}
-
-function createMcpInvocationName(serverId, toolName) {
-  return `mcp_${sanitizeName(serverId)}_${sanitizeName(toolName)}`.slice(0, 96);
-}
-
-function createToolInvocationCatalog(descriptors) {
-  const byName = new Map();
-  const namesById = new Map();
-  const toolNameCounts = new Map();
-  for (const descriptor of descriptors) {
-    const name = descriptor.name.trim();
-    if (!isValidToolTagName(name)) continue;
-    toolNameCounts.set(name, (toolNameCounts.get(name) ?? 0) + 1);
-  }
-  for (const descriptor of descriptors) {
-    const invocationName = descriptor.invocationName.trim();
-    const name = descriptor.name.trim();
-    const accepted = [];
-    addAcceptedName(byName, accepted, invocationName, descriptor);
-    if (
-      name !== invocationName &&
-      isValidToolTagName(name) &&
-      toolNameCounts.get(name) === 1
-    ) {
-      addAcceptedName(byName, accepted, name, descriptor);
-    }
-    namesById.set(descriptor.id, accepted);
-  }
-  return { byName, names: [...byName.keys()], namesById };
-}
-
-function addAcceptedName(byName, accepted, name, descriptor) {
-  if (!isValidToolTagName(name) || byName.has(name)) return;
-  byName.set(name, descriptor);
-  accepted.push(name);
-}
-
-function isValidToolTagName(value) {
-  return /^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(value);
-}
-
-function sanitizeName(value) {
-  const normalized = value.trim().replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
-  const safe = normalized || 'tool';
-  return /^[A-Za-z_]/.test(safe) ? safe : `t_${safe}`;
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function readBody(request) {

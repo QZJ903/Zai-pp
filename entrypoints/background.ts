@@ -150,6 +150,7 @@ import {
   scanDueAutomations,
 } from '../core/automation/scheduler';
 import { createDomTaskCoordinator } from '../core/zai/dom-task-coordinator';
+import { ZAI_HOME_URL, ZAI_TAB_URL_PATTERN } from '../core/zai/contracts';
 import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
 import { AUTH_READ_TIMEOUT_MS, loadZaiAuthFromStorage } from '../core/zai/auth';
 import { createZaiModelCatalog } from '../core/zai/models';
@@ -200,8 +201,6 @@ import type { McpServerConfig } from '../core/mcp/types';
 import type { AutomationRunnerRequest, AutomationRunnerResult } from '../core/automation/types';
 import type { AutomationExecutionContext } from '../core/automation/execution';
 
-const ZAI_HOME_URL = 'https://chat.z.ai/';
-const ZAI_TAB_URL_PATTERN = '*://chat.z.ai/*';
 /**
  * ⚠️ **当前无人发送** —— 上游用它在 token 缓存失效时向 z.ai 标签页要一次 auth 刷新
  * （`loadOrRefreshClientHeaders` → 自动化 runner 与侧边栏登录态），本项目这两处都没有：

@@ -20,7 +20,8 @@
 
 import type { ToolExecutionRecord } from '../types';
 import { buildZaiChatSessionUrl } from './chat-session';
-import { ZAI_DOM_TASK_CANCELLED_CODE } from './contracts';
+import { sleep } from './async';
+import { ZAI_DOM_TASK_CANCELLED_CODE, ZAI_HOME_URL, ZAI_TAB_URL_PATTERN } from './contracts';
 
 export type DomTaskKind = 'automation';
 
@@ -127,8 +128,6 @@ export interface DomTaskCoordinator {
   onFailed(event: DomTaskFailedEvent): void;
 }
 
-const DEFAULT_HOME_URL = 'https://chat.z.ai/';
-const DEFAULT_TAB_URL_PATTERN = '*://chat.z.ai/*';
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 8_000;
 
 const RETRYABLE_PRE_SEND_ERRORS: ReadonlySet<string> = new Set([
@@ -156,8 +155,8 @@ interface PendingDomTask {
 export function createDomTaskCoordinator(
   deps: DomTaskCoordinatorDeps = {},
 ): DomTaskCoordinator {
-  const homeUrl = (deps.homeUrl ?? DEFAULT_HOME_URL).replace(/\/+$/, '') + '/';
-  const tabUrlPattern = deps.tabUrlPattern ?? DEFAULT_TAB_URL_PATTERN;
+  const homeUrl = (deps.homeUrl ?? ZAI_HOME_URL).replace(/\/+$/, '') + '/';
+  const tabUrlPattern = deps.tabUrlPattern ?? ZAI_TAB_URL_PATTERN;
   const queryTabs = deps.queryTabs ?? ((query) => chrome.tabs.query(query));
   const createTab = deps.createTab ?? ((props) => chrome.tabs.create(props));
   const updateTab = deps.updateTab ?? ((tabId, props) => chrome.tabs.update(tabId, props));
@@ -447,8 +446,4 @@ function abortReason(signal: AbortSignal): unknown {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

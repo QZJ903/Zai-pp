@@ -130,22 +130,26 @@ export function decodeZaiResponseCompleteMessage(
   };
 }
 
-/** 主世界 → 隔离世界：请求结束/失败。只用到 `requestId`。 */
-export function decodeZaiRequestTerminalMessage(
-  value: unknown,
-): { requestId: string } | null {
+/**
+ * 「只用到 `requestId`」类载荷的共用校验：带非空请求 id 的纯对象。
+ *
+ * `REQUEST_TERMINAL` 与 `HTML_CHALLENGE` 两个 decoder 的形状完全相同，
+ * 抽成私有函数，避免两份逐字节相同的实现各自演化。
+ */
+function decodeRequestIdPayload(value: unknown): { requestId: string } | null {
   if (!isPlainRecord(value)) return null;
   if (typeof value.requestId !== 'string' || !value.requestId) return null;
   return { requestId: value.requestId };
 }
 
+/** 主世界 → 隔离世界：请求结束/失败。只用到 `requestId`。 */
+export function decodeZaiRequestTerminalMessage(value: unknown): { requestId: string } | null {
+  return decodeRequestIdPayload(value);
+}
+
 /** 主世界 → 隔离世界：completion 返回 HTML 挑战页。只用到 `requestId`。 */
-export function decodeZaiHtmlChallengeMessage(
-  value: unknown,
-): { requestId: string } | null {
-  if (!isPlainRecord(value)) return null;
-  if (typeof value.requestId !== 'string' || !value.requestId) return null;
-  return { requestId: value.requestId };
+export function decodeZaiHtmlChallengeMessage(value: unknown): { requestId: string } | null {
+  return decodeRequestIdPayload(value);
 }
 
 /**

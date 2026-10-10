@@ -412,8 +412,9 @@ function hookXHR(): () => void {
   return () => {
     if (prototype.open === origOpen) prototype.open = origOpen as typeof XMLHttpRequest.prototype.open;
     if (prototype.send === origSend) prototype.send = origSend;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (prototype as any)[XHR_HOOK_MARKER] = undefined;
+    // `defineProperty` 没有 `writable` ⇒ 该属性只读，只能 `delete`（`configurable: true`
+    // 使 delete 合法），赋值在严格模式下会抛。
+    delete prototype[XHR_HOOK_MARKER];
   };
 }
 
