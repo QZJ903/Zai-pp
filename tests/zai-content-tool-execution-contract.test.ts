@@ -372,6 +372,133 @@ describe('request-scoped state is released once per request', () => {
 });
 
 /**
+ * **每一轮结束时都要把这一轮的块收起来**（`toolPanel.sealTurn`）。
+ *
+ * ⚠️⚠️ **这一条守的是接线，不是行为** —— `sealTurn` 漏调**不会**让任何东西变红：
+ * `tsc` 绿（它是个可选调用、不是必需参数）、面板用例绿（它们直接调控制器）。
+ * 而后果是可见的：一轮跑完那一大块一直摊着，**跑 N 轮就是 N 大块全展开**
+ * （真机截图实测过 3 轮 3 大块），而正确形态是 N 行块头。
+ *
+ * ⚠️ **两个收尾点都必须收**：
+ * ① `RESPONSE_COMPLETE` 分支（续跑轮 + 原生轮共用）—— 它后面还有两条早返回
+ *    （推进下一轮 / nudge），所以**不能只放在 run 收尾**；
+ * ② `REQUEST_TERMINAL` 分支 —— 流被 abort（用户点 Stop）的轮次只走这条路，
+ *    不收的话那一大块永远摊着。
+ *
+ * ⚠️ **顺序也承重：`finalizePending` 在前、`sealTurn` 在后** —— 前者可能重发一次
+ * 记录（把「执行中」换成失败），那次重发带着 `live: true` 会把块重新画成展开。
+ */
+describe('every finished turn seals its tool block', () => {
+  /** 在 `source` 子树里数某个 `对象.方法(...)` 调用。 */
+  function countCalls(source: t.Node, objectName: string, methodName: string): number {
+    let count = 0;
+    walkSourceAst(source, (node) => {
+      if (!t.isCallExpression(node) || !t.isMemberExpression(node.callee)) return;
+      if (!t.isIdentifier(node.callee.object) || !t.isIdentifier(node.callee.property)) return;
+      if (node.callee.object.name === objectName && node.callee.property.name === methodName) count += 1;
+    });
+    return count;
+  }
+
+  /** 找出 `handleResponseComplete` 的函数体。 */
+  function findCompletionBody(program: t.Program): t.BlockStatement {
+    let body: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'handleResponseComplete') body = node.body;
+    });
+    expect(body, '应当存在 handleResponseComplete').toBeDefined();
+    return body!;
+  }
+
+  it('seals the turn in the completion handler', () => {
+    const body = findCompletionBody(readContentProgram());
+    // ⚠️ **两处**：续跑轮一处、原生轮一处（两条分支各自收尾）。
+    expect(countCalls(body, 'toolPanel', 'sealTurn')).toBe(2);
+  });
+
+  it('seals the turn in the REQUEST_TERMINAL branch too', () => {
+    // ⚠️ 流被 abort 的轮次**不走 RESPONSE_COMPLETE**，只走这里。
+    const program = readContentProgram();
+    const caseBodies = new Map<string, t.Node[]>();
+    walkSourceAst(program, (node) => {
+      if (!t.isSwitchCase(node) || !t.isStringLiteral(node.test)) return;
+      caseBodies.set(node.test.value, node.consequent);
+    });
+    const terminal = caseBodies.get('REQUEST_TERMINAL');
+    expect(terminal, '应当有 REQUEST_TERMINAL 分支').toBeDefined();
+
+    let sealed = 0;
+    for (const statement of terminal!) sealed += countCalls(statement, 'toolPanel', 'sealTurn');
+    expect(sealed, 'REQUEST_TERMINAL 分支里必须收一次').toBe(1);
+  });
+
+  it('finalizes the pending rows before sealing', () => {
+    // ⚠️⚠️ **顺序反了收尾就被顶掉**：`finalizePending` 会把「执行中」换成失败并
+    // 重发一次记录（带 `live: true`），那次重发会把块重新画成展开。
+    const body = findCompletionBody(readContentProgram());
+    const order: string[] = [];
+    walkSourceAst(body, (node) => {
+      if (!t.isCallExpression(node) || !t.isMemberExpression(node.callee)) return;
+      if (!t.isIdentifier(node.callee.object) || !t.isIdentifier(node.callee.property)) return;
+      if (node.callee.object.name !== 'toolPanel') return;
+      if (node.callee.property.name !== 'finalizePending' && node.callee.property.name !== 'sealTurn') return;
+      order.push(node.callee.property.name);
+    });
+
+    expect(order).toEqual(['finalizePending', 'sealTurn', 'finalizePending', 'sealTurn']);
+  });
+
+  it('registers the tool call raw from the execution path', () => {
+    // ⚠️⚠️ **这条守的是接线，删掉不会让任何东西变红**（实测：去掉那行调用点，
+    // 全量 1626 条用例 + `tsc` 全绿）。而后果是真缺陷 —— 原生轮的**兜底执行路径**
+    // 刻意不调 `beginToolCall`（避免稍纵即逝的「执行中」行），而 `raw` 只有它会登记
+    // ⇒ 那条路上实时腿的签名恒为「工具名 + 空串」、**与历史腿永远配不上**
+    // ⇒ 同一轮画两块面板（一块有结果、一块没有）。
+    //
+    // 判据：`toolPanel.noteToolCallRaw(...)` 必须出现在 `executeDetected` 里。
+    const program = readContentProgram();
+    let executeBody: t.BlockStatement | undefined;
+    walkSourceAst(program, (node) => {
+      if (t.isFunctionDeclaration(node) && node.id?.name === 'executeDetected') executeBody = node.body;
+    });
+    expect(executeBody, '应当存在 executeDetected').toBeDefined();
+    expect(countCalls(executeBody!, 'toolPanel', 'noteToolCallRaw')).toBe(1);
+  });
+
+  it('drops the old conversation records when the session changes', () => {
+    // ⚠️⚠️ **这条守的是接线，删掉不会让任何东西变红**（实测：去掉这段接线，
+    // 全量 1610 条用例 + `tsc` 全绿）。而后果是真缺陷 —— 切过会话之后，
+    // 旧会话记录的三条定位腿在新会话全 miss，兜底腿把它挂到**新会话的消息**上
+    // （真机实测：旧会话的 web_fetch / web_search / shell_status 出现在新会话里）。
+    //
+    // 判据：`toolPanel.handleSessionChange()` 必须出现在某个
+    // **`onZaiSessionChange(...)` 的回调体**里（不能只断言「源码里出现过这个方法名」）。
+    const program = readContentProgram();
+    const callbacks: t.Node[] = [];
+    walkSourceAst(program, (node) => {
+      if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+      if (node.callee.name !== 'onZaiSessionChange') return;
+      const [callback] = node.arguments;
+      if (callback) callbacks.push(callback);
+    });
+    expect(callbacks.length, '应当有 onZaiSessionChange 的订阅').toBeGreaterThan(0);
+
+    let wired = 0;
+    for (const callback of callbacks) {
+      walkSourceAst(callback, (node) => {
+        if (t.isCallExpression(node) && t.isMemberExpression(node.callee)
+          && t.isIdentifier(node.callee.object) && t.isIdentifier(node.callee.property)
+          && node.callee.object.name === 'toolPanel'
+          && node.callee.property.name === 'handleSessionChange') {
+          wired += 1;
+        }
+      });
+    }
+    expect(wired, 'toolPanel.handleSessionChange 必须在 onZaiSessionChange 回调里被调').toBe(1);
+  });
+});
+
+/**
  * 状态同步**失败时不能中断主流程，也不能清空工具目录**。
  *
  * ⚠️⚠️ **这个 catch 当前静态不可达** —— `Promise.all` 八条腿里唯一可能 reject 的

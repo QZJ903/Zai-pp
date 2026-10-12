@@ -1,6 +1,6 @@
 {
   "name": "glm-pp-shell-host",
-  "version": "2.15.37",
+  "version": "2.15.43",
   "description": "Native Messaging Shell MCP host installer for GLM++",
   "type": "module",
   "private": true,

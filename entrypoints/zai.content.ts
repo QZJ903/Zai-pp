@@ -69,9 +69,11 @@ import {
   ZAI_INLINE_AGENT_MAX_NUDGES,
   ZAI_INLINE_AGENT_MAX_STEPS,
 } from '../core/zai/continuation';
+import { installContinuationBubbleHider } from '../core/zai/continuation-bubble';
 import {
   ZAI_CONTENT_TO_MAIN,
   ZAI_MAIN_TO_CONTENT,
+  decodeZaiHistoryToolRecordsMessage,
   decodeZaiHtmlChallengeMessage,
   decodeZaiRequestTerminalMessage,
   decodeZaiResponseCompleteMessage,
@@ -116,7 +118,18 @@ import { createToolInvocationCatalog } from '../core/tool/invocation';
 import { createLatestSyncGate } from '../core/tool/latest-sync';
 import { MCP_CAPABILITY_TOOL_PROVIDER_ID } from '../core/mcp/capability-contract';
 import { mountToolResultCards } from '../core/ui/tool-result-cards';
+import { renderToolResultWithRegistry } from '../core/ui/tool-result-renderer';
 import { injectInjectedThemeStyles, syncInjectedTheme } from '../core/ui/injected-theme';
+import { initSkillPopup, stopSkillPopup } from '../core/ui/skill-popup';
+import { resolveZaiComposerInput, resolveZaiComposerShell } from '../core/zai/composer';
+import {
+  listZaiAssistantMessages,
+  readZaiMessageId,
+} from '../core/zai/tool-block-adapter';
+import {
+  createToolPanelController,
+  type ToolHistoryRecordLike,
+} from '../core/zai/tool-panel';
 import {
   AUTH_READ_TIMEOUT_MS,
   loadZaiAuthFromStorage,
@@ -323,6 +336,21 @@ function getCurrentChatSessionId(): string | null {
 }
 
 /**
+ * 这一轮所属的**助手消息 uuid**（取最后一条助手消息、往上找 `message-<uuid>` 类）。
+ *
+ * ⚠️ **与 `core/zai/tool-panel.ts` 的 `publishLiveSession` 同口径** ——
+ * 那边用同一对函数算块 id，所以「块 id 是 `history:<uuid>`」与「这条工具记录的
+ * `assistantMessageId` 是同一个 uuid」天然一致（探针 12 已真机验证读得到）。
+ *
+ * ⚠️ **读不到返回 null**（首条消息流式期间、页面还没挂类）⇒ 调用方**不写**这个字段。
+ */
+function readCurrentAssistantMessageId(): string | null {
+  const messages = listZaiAssistantMessages(document);
+  const lastMessage = messages[messages.length - 1];
+  return lastMessage ? readZaiMessageId(lastMessage) : null;
+}
+
+/**
  * 取当前会话的标题，**读侧边栏里被选中那一行**。
  *
  * ⚠️ **这是二手源，只作兜底** —— 侧边栏只是服务端列表的投影：页面收到 WebSocket
@@ -384,6 +412,11 @@ function isExtensionInvalidatedError(error: unknown): boolean {
 
 function invalidateExtensionContext(): void {
   extensionContextValid = false;
+  // 扩展被重载 / 卸载后这个内容脚本已经死了，但它挂在 `document` 上的捕获阶段
+  // keydown 监听还在（会一直掐断 Enter）。把补全整块卸掉，别留一个掐键的孤儿。
+  stopSkillPopup();
+  // 面板那边同理：它的 MutationObserver 还挂在页面上，卸掉别留一个观察孤儿。
+  toolPanel.dispose();
 }
 
 // ---------------------------------------------------------------------------
@@ -554,6 +587,35 @@ function syncHookState(): void {
   const names = catalogNamesFor(currentToolDescriptors);
   currentCatalogNames = names;
   postToMainWorld({ type: 'SYNC_HOOK_STATE', toolDescriptorNames: names });
+  syncSkillPopup();
+}
+
+/**
+ * 把技能候选喂给输入框的斜杠命令补全。
+ *
+ * ⚠️ **候选只列启用中的技能** —— 与 `resolveActiveLocalSkill` 的口径一致：
+ * 禁用技能被补全出来也用不了（`parseSkillCommand` 那条路同样会把它滤掉），
+ * 列出来只会让人白点一次。
+ *
+ * ⚠️ **描述缺失时留空串而不是丢掉这一条** —— 名字本身才是可用的那部分；
+ * 上游同样只做「字段是字符串」的过滤。
+ *
+ * ⚠️ **由本文件注入依赖，模块本身不 import 技能清单也不 import i18n**：
+ * 写输入框复用自动化发送链那个真机验证过的原语（`setTextareaValue`），
+ * 锚点复用真机实测过的外壳解析（`resolveZaiComposerShell`）。
+ */
+function syncSkillPopup(): void {
+  initSkillPopup(
+    currentSkills
+      .filter((skill) => skill.enabled !== false)
+      .map((skill) => ({ name: skill.name, description: skill.description })),
+    { hint: translate(currentContentLocale, 'content.skillPopup.hint') },
+    {
+      resolveInput: resolveZaiComposerInput,
+      resolveAnchor: (input) => resolveZaiComposerShell(input),
+      setInputValue: setTextareaValue,
+    },
+  );
 }
 
 /**
@@ -1591,6 +1653,24 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         await handleResponseComplete(complete);
         return;
       }
+      case 'HISTORY_TOOL_RECORDS': {
+        // 历史清洗剥出工具块时顺手送来的归属记录 —— 面板跨刷新恢复的**锚点来源**。
+        // ⚠️ 形状不对一律丢弃（同其它 decoder）：这几条会变成页面上的可见内容。
+        // ⚠️⚠️ **传的是整条信封 `data`，不是 `data.records`** —— 主世界把数组**平铺**
+        // 挂在信封上（`postToContent({ type, records })`），而 decoder 读的是 `value.records`
+        // ⇒ 传数组进去会让 `isPlainRecord` 判否、**整批记录被静默丢弃**。
+        // 这个坑的成因是 decoder 的调用口径在两种形状之间摇摆：
+        // `TOOL_CALL` 那几条传的是嵌套载荷（`data.data` / `data.payload`），
+        // 而 `SYNC_HOOK_STATE` 与这条一样是**平铺**在信封上 ⇒ 传 `data`。
+        // **判据是「字段长在哪一层」，不是「别人怎么传」。**
+        const decoded = decodeZaiHistoryToolRecordsMessage(data);
+        if (!decoded) {
+          console.error('[GLM++] rejected a malformed HISTORY_TOOL_RECORDS payload');
+          return;
+        }
+        toolPanel.rememberHistoryRecords(decoded.records, decoded.chatSessionId);
+        return;
+      }
       case 'USAGE_SNAPSHOT': {
         await handleUsageSnapshot(data.payload);
         return;
@@ -1619,6 +1699,22 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         if (!respondedRequestIds.has(requestId)) {
           armManualStopDetection();
         }
+        // 64：请求终态到了 —— 该请求下还标着「执行中」的行收成失败。
+        // ⚠️ **排在 `releaseRequestState` 之前**：那个函数会清掉本请求的所有请求级
+        // 状态，而面板的收尾要读「这一轮有哪些 pending」（它读的是自己的会话表，
+        // 但顺序上仍应与其它终态消费者一致：先消费、后释放）。
+        // ⚠️ **正常结束的轮次这里什么都不做** —— `RESPONSE_COMPLETE` 已经收过一遍了，
+        // `finalizePending` 在没有 pending 行时是 no-op。
+        toolPanel.finalizePending(
+          requestId,
+          translate(currentContentLocale, 'content.toolBlock.summaries.failed'),
+          translate(currentContentLocale, 'content.toolBlock.summaries.incomplete'),
+        );
+        // ⚠️ **顺序：先 `finalizePending` 再 `sealTurn`** —— 前者可能重发一次记录
+        // （把「执行中」换成失败），那次重发会带着 `live: true` 把块重新画成展开；
+        // 反过来收尾就被顶掉了。这条路径（流被 abort）尤其要收 —— 否则那一大块
+        // 会一直摊在页面上。
+        toolPanel.sealTurn(requestId);
         // 释放这一轮的请求级状态。放最后：上面的判定都读完了才清。
         releaseRequestState(requestId);
         return;
@@ -1660,6 +1756,20 @@ async function handleDetectedToolCall(
   // 载荷已过 `decodeZaiToolCallMessage`（name / raw / requestId 都是字符串、name 非空），
   // 这里的判空只作为防御性兜底保留。
   if (!detected?.name) return;
+  // 面板：先落一行「执行中」（64 要收尾的就是它）。
+  // ⚠️ **在这里而不是 `executeDetected` 内**：`executeDetected` 也会从
+  // `handleResponseComplete` 的兜底路径被调，而那条路是「补执行」——
+  // 那时这一轮已经快结束了，再塞一行「执行中」会给用户一个稍纵即逝的闪烁。
+  // ⚠️ **callId 用 `detected.raw` 的哈希** —— 与 `executeDetected` 里算 `stableCallId`
+  // 的输入一致（同一条 raw 两个通道拿到的 id 相同），否则替换那一步会找不到行。
+  toolPanel.beginToolCall(detected.requestId, {
+    callId: `xml:${djb2Hash(detected.raw || detected.name)}`,
+    name: detected.name,
+    // ⚠️ **raw 也传下去** —— 它是面板记录合流签名的一半。不传的话实时腿的签名
+    // 恒为「工具名 + 空串」，与历史腿的「工具名 + XML 原文」永远配不上
+    // ⇒ 一旦消息 uuid 读不到（id 退化成 `live:<requestId>`），同一轮会画两块面板。
+    raw: detected.raw,
+  });
   try {
     await executeDetectedFromDetected(detected);
   } catch (error) {
@@ -1794,6 +1904,15 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
     chatSessionIdByRequestId.get(requestId) ??
     getCurrentChatSessionId();
 
+  // 这一轮所属的**助手消息 uuid**（存储腿自带锚点用，见 `ToolCallSource.assistantMessageId`）。
+  //
+  // ⚠️ **与 `publishLiveSession` 同口径**：取最后一条助手消息、往上找
+  // `message-<uuid>` 类。**真机已验证那一刻读得到**（探针 12：面板出生时的块 id 是
+  // `history:<uuid>` 而不是 `live:<requestId>`）。
+  // ⚠️ **读不到就不写**（首条消息流式期间、或页面还没把类挂上）—— 下游按「没有锚点」
+  // 处理、退回签名合流，与改造前行为一致。
+  const assistantMessageId = readCurrentAssistantMessageId();
+
   // 关键：callId 必须是「本条 raw 内容的稳定且唯一」的 id。
   // parseToolXml 对「单条 raw」解析时 id 恒为 xml:0，三条 memory_save 会撞同一个
   // callId，background 授权层 grant 里 callId 去重（tool_call_replayed）就把后面两条拦截。
@@ -1807,6 +1926,8 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
       trigger: 'manual_chat',
       requestId,
       chatSessionId,
+      // ⚠️ 读不到时是 `undefined`（不是 null）—— 见上面那段说明。
+      ...(assistantMessageId ? { assistantMessageId } : {}),
     },
   };
   // 同一 toolCall 签名重复执行保护（TOOL_CALL 通道 + response 通道可能并发，二者 requestId 相同）。
@@ -1843,6 +1964,14 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
   const list = executionsByRequest.get(requestId) ?? [];
   list.push(execution);
   executionsByRequest.set(requestId, list);
+  // 面板：**只登记 raw**（不画「执行中」行）—— 覆盖「兜底执行路径没调过 `beginToolCall`」
+  // 那一格（见 `ToolPanelController.noteToolCallRaw` 的说明）。
+  // ⚠️ **幂等**：正常路径上 `beginToolCall` 已经登记过同一条 raw，重复写没有副作用。
+  toolPanel.noteToolCallRaw(requestId, { callId: stableCallId, raw: call.raw ?? '' });
+  // 面板：把「执行中」那行换成真实结果。
+  // ⚠️ **必须在 `executionsByRequest` 落账之后** —— 面板读的是同一份结果，
+  // 顺序反了会让「面板显示成功、续跑判定看到空」这种分叉出现。
+  toolPanel.completeToolCall(requestId, execution);
   return execution;
 }
 
@@ -2012,6 +2141,23 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     // 续跑轮每轮更新最终回传正文（方案 §4.1）。
     continuationLoop.finalAssistantText = complete.assistantText;
 
+    // 工具调用面板（本节所有执行过的工具收成一块）。**尽力而为** ——
+    // 找不到锚点就不挂，不影响执行链与续跑判定。
+    // ⚠️ 它**先于**卡片：面板是「这一轮做了什么」的总览，卡片是其中某几条的
+    // 可操作结果，两者都在同一个宿主里，顺序错了卡片会被面板挤到下面。
+    toolPanel.rememberExecutions(complete.requestId, executedThisTurn, complete.assistantText);
+    // 64：这一轮到此为止，仍标着「执行中」的行收成失败（正常收尾时通常一条都没有）。
+    toolPanel.finalizePending(
+      complete.requestId,
+      translate(currentContentLocale, 'content.toolBlock.summaries.failed'),
+      translate(currentContentLocale, 'content.toolBlock.summaries.incomplete'),
+    );
+    // ⚠️ **本轮到此为止 ⇒ 把这一轮的块收起来**（顺序：先 finalize 再 seal）。
+    // ⚠️ **必须在这里、不能只放在 run 收尾** —— 本分支下面还有两条早返回
+    // （`advanceContinuationLoop()` 推进下一轮、nudge 分支），
+    // 只放收尾的话中间那些轮的块会一直摊着。
+    toolPanel.sealTurn(complete.requestId);
+
     // 结构化结果（Skill 起草 / 记忆导入预览）挂成卡片。**尽力而为** ——
     // 找不到助手消息锚点就不挂，不影响执行链与续跑判定。
     mountToolResultCards(executedThisTurn, {
@@ -2092,6 +2238,19 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       if (execution) executions.push(execution);
     }
   }
+
+  // 工具调用面板（与续跑轮同一入口）。
+  toolPanel.rememberExecutions(complete.requestId, executions, complete.assistantText);
+  toolPanel.finalizePending(
+    complete.requestId,
+    translate(currentContentLocale, 'content.toolBlock.summaries.failed'),
+    translate(currentContentLocale, 'content.toolBlock.summaries.incomplete'),
+  );
+  // ⚠️ **一轮结束就把这一轮的块收起来**（顺序：先 `finalizePending` 再 `sealTurn`）。
+  // 上游同口径（sealed group 收起、当前 group 展开）⇒ 跑 N 轮看到的是
+  // 「N 行块头 + 最后一行展开」，而不是 N 大块全摊着。
+  // ⚠️ **这里就要收，不能等到整个 run 收尾** —— 续跑轮还有早返回（推进 / nudge）。
+  toolPanel.sealTurn(complete.requestId);
 
   // 结构化结果挂卡片（与续跑轮同一入口）。原生轮是「模型直接答完、不续跑」的形态，
   // 正是 Skill 起草 / 记忆导入预览这类终态工具最常见的落点。
@@ -2830,6 +2989,52 @@ const conversationTitleResolver = createZaiConversationTitleResolver({
   },
   fetchImpl: (input, init) => fetch(input, init),
 });
+
+/**
+ * 工具调用面板（一轮回答里执行过的工具收成一块可折叠列表）。
+ *
+ * ⚠️ **模块级单例**：它内部持有「已恢复记录」的 map 与待渲染集合 ——
+ * 每次新建会让那些状态丢掉，表现是「刷新后卡片出现又消失」。
+ * ⚠️ **依赖全部在此注入**（站点选择器 / 文案 / runtime 读取），
+ * `core/zai/tool-panel.ts` 自己不 import 任何 i18n 或 runtime 命令。
+ */
+const toolPanel = createToolPanelController({
+  statusLabels: () => ({
+    running: translate(currentContentLocale, 'content.toolBlock.summaries.running'),
+    executed: translate(currentContentLocale, 'content.toolBlock.summaries.executed'),
+    failed: translate(currentContentLocale, 'content.toolBlock.summaries.failed'),
+  }),
+  formatTitle: (count) => translate(
+    currentContentLocale,
+    'content.toolBlock.title',
+    { count },
+  ),
+  renderDetail: (target, result) => renderToolResultWithRegistry({
+    target,
+    result,
+    locale: currentContentLocale,
+  }),
+  getChatSessionId: getCurrentChatSessionId,
+  // ⚠️ **命令字面量必须留在本文件**（`tests/runtime-boundary.test.ts` 用 AST 从内容脚本
+  // 抓「实际发出的命令」做双向比对）；所以这里只做一层转发，不把命令写进 `core/`。
+  loadToolHistory: async () => {
+    const history = await sendRuntimeMessage<ToolHistoryRecordLike[]>({
+      type: 'GET_TOOL_CALL_HISTORY',
+      payload: { limit: TOOL_PANEL_HISTORY_LIMIT },
+    });
+    return Array.isArray(history) ? history : [];
+  },
+  observeRoot: () => document.getElementById('app') ?? document.body,
+});
+
+/**
+ * 一次读多少条存储腿记录。
+ *
+ * ⚠️ **不是「越多越好」**：这些记录每条都带 `detail` / 输出快照（写入时截到
+ * 4k / 8k），读回来要逐条按会话过滤并渲染。100（存储上限）在长会话里够用，
+ * 而更大只会拖慢会话切换。**失败方向是安全的** —— 读少了只是「较早的那几轮
+ * 没有真结果」，面板仍会由历史腿画出来（只是摘要）。 */
+const TOOL_PANEL_HISTORY_LIMIT = 100;
 
 /**
  * 注入 UI 的主题跟随：把 z.ai 页面的 `html.light` / `html.dark` 投影成
@@ -3575,6 +3780,29 @@ export default defineContentScript({
     void installBackgroundCapability();
     installInjectedThemeWatch();
     installProjectPanel();
+    // 隐藏续跑 / nudge 模板气泡：那是我们注入的 prompt，页面把它当用户消息渲染出来。
+    // 刷新后那一份由历史清洗换占位符处理；这里管**当场这份**。
+    // ⚠️ 站点选择器假设在 `core/zai/continuation-bubble.ts` 的常量里（错了只是气泡
+    // 照旧可见，不连累主流程）。
+    installContinuationBubbleHider({
+      onHidden: (count) => console.warn('[GLM++] hid continuation bubble', { count }),
+    });
+
+    // 工具调用面板：注入样式、启动「被页面重建后重挂」的观察、
+    // 并拉一次存储腿（`glm_pp_tool_history`）补真结果。
+    // ⚠️ **必须 `void` 且吞错**（`install` 内部已吞）—— 面板是可选增强，
+    // 读取失败不该拦住后面的启动链（`loadAndSyncRuntimeState` 还在后面）。
+    void toolPanel.install();
+
+    // 切会话 ⇒ 面板丢掉旧会话的记录并重拉存储腿。
+    // ⚠️⚠️ **不接这条会出真缺陷**（真机实测）：旧会话记录的三条定位腿在新会话
+    // 全 miss，兜底腿「第一个还没被占用的消息」把它挂到**新会话的消息**上
+    // ⇒ 页面上出现几个属于别的会话的工具面板。
+    // ⚠️ 与项目面板共用同一个订阅（`notifySessionChange` 已按会话 id 去重，
+    // 不会每秒触发）。
+    onZaiSessionChange(() => {
+      toolPanel.handleSessionChange();
+    });
 
     // 启动时把页面 localStorage 里的登录态 token 主动推进 chrome.storage。
     // ⚠️ 后台的 service worker 读不到页面 localStorage/performance，token 只能由内容脚本给；

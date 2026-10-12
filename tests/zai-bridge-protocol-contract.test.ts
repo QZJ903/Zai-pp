@@ -27,6 +27,7 @@ import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-sourc
 
 const MAIN_WORLD_SOURCE = 'entrypoints/zai-main-world.content.ts';
 const CONTENT_SOURCE = 'entrypoints/zai.content.ts';
+const MESSAGES_SOURCE = 'core/zai/messages.ts';
 
 function readProgram(path: string): t.Program {
   return parseTypeScriptSource(path, readFileSync(path, 'utf8'));
@@ -50,7 +51,92 @@ function collectPostedTypes(program: t.Program, calleeName: string): Set<string>
 }
 
 /**
- * 收集 switch 分支里接收的消息类型。
+ * 收集「以某个函数调用发出的消息类型」→ 该类型在信封上**平铺的载荷字段名**。
+ *
+ * ⚠️ **这是从发送点派生的，不是手抄的第二份清单**（守则 B9）。它的用途是：
+ * 判断接收侧该把**整条信封**还是**信封里的某个字段**交给 decoder。
+ */
+function collectPostedPayloadKeys(program: t.Program, calleeName: string): Map<string, Set<string>> {
+  const byType = new Map<string, Set<string>>();
+  walkSourceAst(program, (node) => {
+    if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+    if (node.callee.name !== calleeName) return;
+    const options = node.arguments[0];
+    if (!t.isObjectExpression(options)) return;
+
+    let type: string | null = null;
+    const keys = new Set<string>();
+    for (const property of options.properties) {
+      if (!t.isObjectProperty(property) || !t.isIdentifier(property.key)) continue;
+      if (property.key.name === 'type') {
+        if (t.isStringLiteral(property.value)) type = property.value.value;
+        continue;
+      }
+      keys.add(property.key.name);
+    }
+    if (type) byType.set(type, keys);
+  });
+  return byType;
+}
+
+/** 某个接收块里，把某个 decoder 的**实参**取出来（`decode(<arg>)` 的那个 `<arg>`）。 */
+function collectDecoderArguments(  program: t.Program,
+  type: string,
+  decoderName: string,
+): string[] {
+  const args: string[] = [];
+  for (const block of findReceiverBlocks(program, type)) {
+    walkSourceAst(block, (node) => {
+      if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+      if (node.callee.name !== decoderName) return;
+      const arg = node.arguments[0];
+      if (t.isIdentifier(arg)) {
+        args.push(arg.name);
+        return;
+      }
+      if (t.isMemberExpression(arg) && t.isIdentifier(arg.object) && t.isIdentifier(arg.property)) {
+        args.push(`${arg.object.name}.${arg.property.name}`);
+        return;
+      }
+      args.push('<其它表达式>');
+    });
+  }
+  return args;
+}
+
+/**
+ * 某个 decoder 函数体里读了哪些**信封字段**（`value.<键>`）。
+ *
+ * ⚠️ **只收函数体，不收签名** —— 参数名本身不是字段。
+ * ⚠️ **`value.records[0].calls` 这种链式访问只取第一段**（`records`）——
+ * 后面的是载荷内部的键，与信封无关。
+ * ⚠️ **用正则而不是 AST**：这里要的是「读到了哪些键」这个字面事实，
+ * 而 decoder 的写法统一（都是 `value.<键>`）；用 AST 还得处理解构与可选链，
+ * 换来的精度对这条判据没有意义。
+ */
+function collectReadEnvelopeKeys(program: t.Program, decoderName: string): Set<string> {
+  const keys = new Set<string>();
+  let body: string | null = null;
+  walkSourceAst(program, (node) => {
+    if (!t.isFunctionDeclaration(node) || node.id?.name !== decoderName || !node.body) return;
+    const start = node.body.start;
+    const end = node.body.end;
+    if (typeof start !== 'number' || typeof end !== 'number') return;
+    body = sourceSlice(start, end);
+  });
+  if (!body) return keys;
+  for (const match of (body as string).matchAll(/\bvalue\.([A-Za-z_$][\w$]*)/g)) {
+    keys.add(match[1]);
+  }
+  return keys;
+}
+
+/** 按字符偏移从 `core/zai/messages.ts` 的源码里取一段（`collectReadEnvelopeKeys` 用）。 */
+function sourceSlice(start: number, end: number): string {
+  return readFileSync(MESSAGES_SOURCE, 'utf8').slice(start, end);
+}
+
+/** 收集 switch 分支里接收的消息类型。
  *
  * 只看 `switch (data.type)` 这种形状 —— 拿全文件所有 `case '<大写串>'` 会把
  * `chrome.runtime` 消息、`route` 分支等无关的 case 一起收进来。
@@ -322,11 +408,83 @@ describe('bridge protocol contract', () => {
   it('keeps every decoder referenced by the table free of duplicate definitions in entrypoints', () => {
     // 反向：桥模块里的 decoder 只应定义一次（在 core/zai/messages.ts），
     // 两个 entrypoint 只许 import。这条挡的是「复制一份改改」这种分叉。
-    const messagesProgram = readProgram('core/zai/messages.ts');
+    const messagesProgram = readProgram(MESSAGES_SOURCE);
     const declaredInMessages = collectFunctionDeclarationNames(messagesProgram);
     for (const decoder of Object.values(ZAI_BRIDGE_PAYLOAD_DECODERS)) {
       expect(declaredInMessages.has(decoder.name), `${decoder.name} 应当在 core/zai/messages.ts 定义`)
         .toBe(true);
+    }
+  });
+
+  it('hands each decoder the layer its payload actually lives on', () => {
+    // ⚠️⚠️ **这条是本轮补的，它抓的是一个「全绿但功能不通」的缺陷。**
+    // 接收侧对 decoder 的实参有两种合法形状：**整条信封**（`data`）或**信封里的某个字段**
+    // （`data.payload` / `data.data`）。选错时 `isPlainRecord` 判否 ⇒ **整条消息被静默丢弃**
+    // （有 `console.error`，但**没有任何测试会红**）—— 实测「接收侧传 `data.records`」
+    // 这个变异，全量 1581 条用例**全绿**。
+    //
+    // 判据**从发送点派生**（不手抄）：主世界 `postToContent({ type, records })` 把载荷
+    // **平铺**在信封上 ⇒ 接收侧该传 `data`；而 `postToContent({ type, payload })` 是
+    // **嵌套**的 ⇒ 该传 `data.payload`。
+    // ⚠️ **两个发送函数都要收**：`postToContent` 是主世界发的（主→隔），
+    // `postToMainWorld` 是隔离世界发的（隔→主）—— 只收前者会漏掉 `SYNC_HOOK_STATE`。
+    const posted = new Map([
+      ...collectPostedPayloadKeys(readProgram(MAIN_WORLD_SOURCE), 'postToContent'),
+      ...collectPostedPayloadKeys(readProgram(CONTENT_SOURCE), 'postToMainWorld'),
+    ]);
+    const contentProgram = readProgram(CONTENT_SOURCE);
+    const mainWorldProgram = readProgram(MAIN_WORLD_SOURCE);
+    const mainToContent = new Set<string>(ZAI_MAIN_TO_CONTENT_TYPES);
+
+    for (const [type, decoder] of Object.entries(ZAI_BRIDGE_PAYLOAD_DECODERS)) {
+      const keys = posted.get(type);
+      expect(keys, `${type} 必须在主世界有发送点（否则这条判据无从派生）`).toBeDefined();
+      const isMainToContent = mainToContent.has(type);
+      const program = isMainToContent ? contentProgram : mainWorldProgram;
+      const args = collectDecoderArguments(program, type, decoder.name);
+      expect(args.length, `${type} 的接收块里应当有一次 ${decoder.name} 调用`).toBeGreaterThan(0);
+
+      // 平铺：载荷字段直接挂在信封上（`records` / `toolDescriptorNames`）⇒ 传 `data`。
+      // 嵌套：只有一个 `payload` / `data` 字段 ⇒ 传 `data.payload` / `data.data`。
+      const payloadKey = keys!.has('payload') ? 'payload' : (keys!.has('data') ? 'data' : null);
+      const expected = payloadKey === null ? 'data' : `data.${payloadKey}`;
+      expect(args, `${type} 的 decoder 实参应当是 ${expected}（按发送点的载荷层次派生）`)
+        .toEqual([expected]);
+    }
+  });
+
+  it('posts every envelope field its decoder reads', () => {
+    // ⚠️⚠️ **这条补的是上面那条挡不住的一类**：接收侧传对了层次（`data`），
+    // 但**发送点漏掉了某个字段** ⇒ decoder 读到 `undefined`、按缺省处理
+    // ⇒ **静默降级**（不报错、不丢消息，只是那条信息永远为空）。
+    // 实测：把 `postToContent({ type, records, chatSessionId })` 改成
+    // `{ type, records }`，全量 1609 条用例**全绿**、`tsc` 也绿
+    // （字段是 `string | null`，缺省是合法的）—— 只有这条能抓住它。
+    //
+    // 判据**从两侧分别派生**：发送点 post 了哪些键（`collectPostedPayloadKeys`）
+    // × decoder 函数体里读了哪些 `value.<键>`（`collectReadEnvelopeKeys`）。
+    const posted = new Map([
+      ...collectPostedPayloadKeys(readProgram(MAIN_WORLD_SOURCE), 'postToContent'),
+      ...collectPostedPayloadKeys(readProgram(CONTENT_SOURCE), 'postToMainWorld'),
+    ]);
+    const messagesProgram = readProgram(MESSAGES_SOURCE);
+
+    for (const [type, decoder] of Object.entries(ZAI_BRIDGE_PAYLOAD_DECODERS)) {
+      const keys = posted.get(type);
+      expect(keys, `${type} 必须在主世界有发送点`).toBeDefined();
+      // ⚠️⚠️ **只对「平铺」载荷成立**：嵌套那几条（`payload` / `data`）的 decoder
+      // 参数是**信封里的那个字段**，它读的 `value.name` / `value.requestId` 是
+      // **内层载荷的字段**、不是信封字段 ⇒ 拿信封键去要求它们会造出假红。
+      // 嵌套那几条的层次由上面那条用例守（实参必须是 `data.payload`）。
+      if (keys!.has('payload') || keys!.has('data')) continue;
+
+      const read = collectReadEnvelopeKeys(messagesProgram, decoder.name);
+      for (const key of read) {
+        expect(
+          keys!.has(key),
+          `${type} 的 ${decoder.name} 读了信封字段 ${key}，但发送点没 post 它`,
+        ).toBe(true);
+      }
     }
   });
 });

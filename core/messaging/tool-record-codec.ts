@@ -141,6 +141,11 @@ function isToolCallSource(value: unknown): boolean {
     optionalString(value.taskId) &&
     optionalString(value.runId) &&
     optionalNullableNumber(value.messageId) &&
+    // ⚠️⚠️ **z.ai 的助手消息 id（uuid 字符串）** —— 与上面那个数字的 `messageId`
+    // 是两回事（见 `ToolCallSource.assistantMessageId` 的说明）。
+    // **漏了这一行会让整条工具记录被判非法**：`isToolCallHistoryRecord` 走这里，
+    // 判否 ⇒ 记录进不了历史、刷新后面板没有真结果（静默）。
+    optionalString(value.assistantMessageId) &&
     optionalString(value.automationId) &&
     optionalString(value.automationRunId);
 }

@@ -17,7 +17,7 @@ import {
   ZAI_WEB_ORIGIN,
   type ZaiWebRouteName,
 } from './contracts';
-import { stripZaiHistoryResponse } from './history-cleanup';
+import { stripZaiHistoryResponse, type ZaiHistoryToolRecord } from './history-cleanup';
 import { resolveHistoryToolNames } from './history-tool-names';
 import {
   isZaiAugmentableRoute,
@@ -29,7 +29,6 @@ import {
 } from './request-codec';
 import {
   createZaiStreamAccumulator,
-  type ZaiSseEvent,
   type ZaiSseParseResult,
   type ZaiStreamAccumulator,
 } from './stream-codec';
@@ -57,6 +56,20 @@ export interface ZaiHookState {
   onHtmlChallenge: (payload: { requestId: string }) => void;
   /** 一轮 completion 结束时的用量快照（含中断的轮次）。 */
   onUsageSnapshot: (snapshot: ZaiUsageSnapshot) => void;
+  /**
+   * 历史响应清洗时剥出来的**工具调用归属记录**（面板跨刷新恢复的锚点来源）。
+   *
+   * ⚠️ **它只在历史端点触发**（`chatDetail` / `chatMessages`），completion 不会。
+   * ⚠️ **同一批会被反复送**（页面每次拉历史都会跑一遍清洗）⇒ 接的一方按
+   * `messageId` 去重，重挂是幂等的。
+   * ⚠️ **`chatSessionId` 是「这批记录属于哪条会话」**（由请求 URL 读出，
+   * 读不到时 null）—— 记录要带会话归属，否则切过会话之后兜底定位会把旧记录
+   * 挂到新会话的消息上（真机实测过）。null 表示「不知道」，接的一方按放行处理。
+   */
+  onHistoryToolRecords: (
+    records: readonly ZaiHistoryToolRecord[],
+    chatSessionId: string | null,
+  ) => void;
 }
 
 export interface ZaiRequestBodyModification {
@@ -101,6 +114,7 @@ function createEmptyHookState(): ZaiHookState {
     onRequestTerminal: () => {},
     onHtmlChallenge: () => {},
     onUsageSnapshot: () => {},
+    onHistoryToolRecords: () => {},
   };
 }
 
@@ -354,7 +368,10 @@ function hookFetch(): () => void {
     // ⚠️ 这一判**不能写成 `route === 'chatDetail'`**：历史路由是**两条**，
     // 漏一条的表现是「其中一个端点静默不剥」。
     if (route && isZaiHistoryRoute(route)) {
-      return interceptHistoryResponse(originalFetch.call(this, input, init));
+      return interceptHistoryResponse(
+        originalFetch.call(this, input, init),
+        readHistoryRouteChatSessionId(url),
+      );
     }
 
     // ⚠️ **匹配上路由 ≠ 该增强** —— 未匹配（`null`）与「匹配上但不在增强白名单」
@@ -574,14 +591,41 @@ async function interceptCompletionResponse(
  * 实测量级：`messages/batch` 80 KB、`chats/{id}` 34 KB。与「六处刻意不加限」
  * 同一取舍（那些是 GitHub / Bing / chatNew 诊断这类非必需响应）。
  */
+/**
+ * 从历史请求的 URL 里读出会话 id（`/api/v1/chats/<id>[/messages/batch]`）。
+ *
+ * ⚠️ **不能复用 `readZaiChatSessionId`** —— 那个认的是**页面地址** `/c/<id>`，
+ * 而这里是 API 路径 `/api/v1/chats/<id>`，两套形状不同（各写一遍的代价是
+ * 将来站点改路径时只改一处）。
+ * ⚠️ **读不到返回 null**（不是抛错、也不是空串）：下游按「不知道 ⇒ 放行」处理。
+ */
+function readHistoryRouteChatSessionId(url: string): string | null {
+  try {
+    const pathname = new URL(url, ZAI_WEB_ORIGIN).pathname;
+    const match = /^\/api\/v1\/chats\/([^/]+)/.exec(pathname);
+    if (!match?.[1]) return null;
+    const decoded = decodeURIComponent(match[1]);
+    return decoded.trim() ? decoded.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 历史响应拦截：剥掉我们注入的文本与工具 XML，并**顺手把工具记录送出去**。
+ *
+ * ⚠️ **`chatSessionId` 由调用方从请求 URL 读出来传进来**（`/api/v1/chats/<id>/…`
+ * 里的 `<id>`）—— 记录要带会话归属，否则切过会话之后兜底定位会把旧记录挂到
+ * 新会话的消息上（真机实测过）。
+ */
 async function interceptHistoryResponse(
   responsePromise: Promise<Response>,
+  chatSessionId: string | null,
 ): Promise<Response> {
   // ⚠️ 网络层失败要让 rejection 原样传给页面（页面自己有错误处理），不能吞掉换成空响应。
   const response = await responsePromise;
   const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
   if (!contentType.includes('json') || !response.body) return response;
-
   // ⚠️⚠️ **`await response.text()` 之后这个 Response 就已经读干了** —— 所以**每一条**
   // 后续路径都必须走 `rebuildHistoryResponse` 重建，绝不能 `return response`。
   // 返回已读干的响应给页面，表现是**整个会话加载不出来**（页面读 body 拿到空串）。
@@ -602,9 +646,15 @@ async function interceptHistoryResponse(
 
   const stats = stripZaiHistoryResponse(json, {
     toolNames: resolveHistoryToolNames(hookState.toolDescriptorNames),
+    // 顺手把「这条消息调用过哪些工具」送出去（面板恢复的锚点来源）。
+    onToolRecords: (records) => hookState.onHistoryToolRecords(records, chatSessionId),
   });
   // 一处都没改时也**必须重建**（理由见上），只是不做序列化、直接把原文放回去。
-  if (stats.restoredUserMessages === 0 && stats.strippedToolBlocks === 0) {
+  // ⚠️ **三个计数都要判** —— 漏一个的表现是「那类清洗静默不生效」（响应被原样放回）。
+  const changed = stats.restoredUserMessages > 0
+    || stats.replacedContinuationMessages > 0
+    || stats.strippedToolBlocks > 0;
+  if (!changed) {
     return rebuildHistoryResponse(raw, response);
   }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  decodeZaiHistoryToolRecordsMessage,
   decodeZaiHtmlChallengeMessage,
   decodeZaiRequestTerminalMessage,
   decodeZaiResponseCompleteMessage,
@@ -138,5 +139,67 @@ describe('decodeZaiSyncHookStateMessage', () => {
     // 非字符串抛 TypeError → `controller.error` → **打断回给页面的响应流**。
     // `new Set()` 不做类型收敛（`[...new Set(['a', 123])]` 仍是 `['a', 123]`），别指望它兜。
     expect(decodeZaiSyncHookStateMessage({ toolDescriptorNames: names })).toBeNull();
+  });
+});
+
+describe('decodeZaiHistoryToolRecordsMessage', () => {
+  const RECORD = {
+    messageId: 'aaaaaaaa-1111-2222-3333-444444444444',
+    parentMessageId: 'bbbbbbbb-1111-2222-3333-444444444444',
+    content: '正文',
+    calls: [{ name: 'shell_exec', raw: '<shell_exec>{}</shell_exec>' }],
+  };
+
+  it('accepts the envelope shape the main world actually posts', () => {
+    // ⚠️⚠️ **主世界把数组平铺挂在信封上**（`postToContent({ type, records })`）
+    // ⇒ decoder 必须按 `value.records` 读。这一条钉住「接收侧要传整条信封」——
+    // 传 `data.records` 进去会让 `isPlainRecord` 判否、**整批记录被静默丢弃**。
+    expect(decodeZaiHistoryToolRecordsMessage({ type: 'HISTORY_TOOL_RECORDS', records: [RECORD] }))
+      .toEqual({ records: [RECORD], chatSessionId: null });
+  });
+
+  it('carries the conversation id the records belong to', () => {
+    // ⚠️⚠️ **会话归属是「切过会话后旧记录不许挂到新会话」的判据来源**
+    // （真机实测过：旧会话的 web_fetch / web_search / shell_status 出现在新会话里）。
+    // 主世界从请求 URL `/api/v1/chats/<id>/…` 读出它，与 `records` **同层**平铺。
+    expect(decodeZaiHistoryToolRecordsMessage({
+      records: [RECORD],
+      chatSessionId: 'chat-9',
+    })).toEqual({ records: [RECORD], chatSessionId: 'chat-9' });
+  });
+
+  it('accepts a null parent id and an empty call list', () => {
+    expect(decodeZaiHistoryToolRecordsMessage({
+      records: [{ ...RECORD, parentMessageId: null, calls: [] }],
+    })).toEqual({ records: [{ ...RECORD, parentMessageId: null, calls: [] }], chatSessionId: null });
+  });
+
+  it.each([
+    ['null', null],
+    ['an array (the receiver passing `data.records` by mistake)', [RECORD]],
+    ['missing records', {}],
+    ['records not an array', { records: 'x' }],
+  ])('rejects a malformed envelope: %s', (_label, value) => {
+    expect(decodeZaiHistoryToolRecordsMessage(value)).toBeNull();
+  });
+
+  it.each([
+    ['a number', 7],
+    ['an object', {}],
+  ])('rejects a non-string conversation id: %s', (_label, chatSessionId) => {
+    // ⚠️ 类型不对判否；**缺省与 null 是合法的**（读不到就是「不知道」）。
+    expect(decodeZaiHistoryToolRecordsMessage({ records: [RECORD], chatSessionId })).toBeNull();
+  });
+
+  it.each([
+    ['missing messageId', { ...RECORD, messageId: undefined }],
+    ['empty messageId', { ...RECORD, messageId: '' }],
+    ['non-string messageId', { ...RECORD, messageId: 7 }],
+    ['content not a string', { ...RECORD, content: null }],
+    ['calls not an array', { ...RECORD, calls: 'x' }],
+    ['call missing name', { ...RECORD, calls: [{ raw: 'r' }] }],
+    ['call raw not a string', { ...RECORD, calls: [{ name: 'shell_exec', raw: 1 }] }],
+  ])('rejects a malformed record: %s', (_label, record) => {
+    expect(decodeZaiHistoryToolRecordsMessage({ records: [record] })).toBeNull();
   });
 });

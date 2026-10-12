@@ -73,6 +73,9 @@ export const GLM_CONTENT_RUNTIME_COMMANDS: ReadonlySet<string> = new Set([
   'GET_PROMPT_INJECTION_SETTINGS',
   'GET_SKILL_AUTO_ACTIVATION_SETTINGS',
   'GET_SKILLS',
+  // 工具面板的存储腿（L2）：读回本会话最近执行过的工具，补上「真实结果」。
+  // ⚠️ 它**只读不写**，与侧边栏 MCP 页读同一份历史（`glm_pp_tool_history`）。
+  'GET_TOOL_CALL_HISTORY',
   'GET_TOOL_DESCRIPTORS',
   'GET_WEB_TOOL_SETTINGS',
   'IMPORT_MEMORY_DRAFTS',

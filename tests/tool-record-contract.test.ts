@@ -19,6 +19,7 @@ import {
 import type { ToolCardResult, ToolExecutionRecord } from '../core/types';
 import {
   CONTRACT_EXECUTION_RECORD,
+  CONTRACT_TOOL_CALL,
   MALFORMED_TOOL_RECORDS,
   LEGAL_TOOL_RECORDS,
 } from './fixtures/runtime-contract/tool-records';
@@ -66,6 +67,26 @@ describe('tool record compatibility contract', () => {
     expect(isToolCallHistoryRecord(LEGAL_TOOL_RECORDS.historyRecord)).toBe(true);
     expect(isToolExecutionRecord(LEGAL_TOOL_RECORDS.executionRecord)).toBe(true);
     expect(isToolCallRestoreRecord(LEGAL_TOOL_RECORDS.restoreRecord)).toBe(true);
+  });
+
+  it('rejects a wrong-typed assistant message id on a call source', () => {
+    // ⚠️⚠️ **`isToolCallSource` 是「逐字段校验」不是白名单** —— 未知键会通过，
+    // 所以「新增字段忘了加校验」这个变异**不会让任何用例变红**（实测：删掉那行，
+    // `tsc` 与全量 1622 条用例全绿）。
+    // 这一条把**类型约束**钉住：`assistantMessageId` 必须是字符串 ——
+    // 它由内容脚本从 DOM 读出、要过桥存进 `glm_pp_tool_history`，
+    // 类型不对时下游会按「有锚点」处理并拿它去比消息 id（永远不相等 ⇒ 静默不挂）。
+    expect(isToolCallRecord({
+      ...CONTRACT_TOOL_CALL,
+      source: { ...CONTRACT_TOOL_CALL.source, assistantMessageId: 123 },
+    })).toBe(false);
+    expect(isToolCallRecord({
+      ...CONTRACT_TOOL_CALL,
+      source: { ...CONTRACT_TOOL_CALL.source, assistantMessageId: null },
+    })).toBe(false);
+    // ⚠️ **缺省是合法的**（读不到那一刻的 uuid 时不写这个字段）。
+    const { assistantMessageId: _omitted, ...sourceWithoutAnchor } = CONTRACT_TOOL_CALL.source;
+    expect(isToolCallRecord({ ...CONTRACT_TOOL_CALL, source: sourceWithoutAnchor })).toBe(true);
   });
 
   it('preserves released restore normalization and storage sanitization fields', () => {

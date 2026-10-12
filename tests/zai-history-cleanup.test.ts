@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ZAI_BUILTIN_HISTORY_TOOL_NAMES,
   resolveHistoryToolNames,
 } from '../core/zai/history-tool-names';
 import { stripZaiHistoryResponse } from '../core/zai/history-cleanup';
+import { ZAI_CONTINUATION_PLACEHOLDER } from '../core/zai/continuation-marker';
 import { installZaiFetchHook, updateZaiHookState } from '../core/zai/fetch-hook';
 import {
   findZaiToolXmlStripRanges,
@@ -285,8 +286,10 @@ describe('stripZaiHistoryResponse: shape tolerance', () => {
   ])('returns zero stats for %s', (_name, input) => {
     expect(stripZaiHistoryResponse(input, { toolNames })).toEqual({
       restoredUserMessages: 0,
+      replacedContinuationMessages: 0,
       strippedToolFields: 0,
       strippedToolBlocks: 0,
+      collectedToolRecords: 0,
     });
   });
 
@@ -338,6 +341,140 @@ describe('stripZaiHistoryResponse: shape tolerance', () => {
     const before = snapshot(body);
     stripZaiHistoryResponse(body, { toolNames });
     expect(changedPaths(before, snapshot(body))).toEqual([`chat.history.messages.${UUID_A}.content`]);
+  });
+});
+
+describe('stripZaiHistoryResponse: continuation / nudge templates', () => {
+  const toolNames = resolveHistoryToolNames(new Set<string>());
+
+  /** 续跑模板的真实形态（与 `buildZaiContinuationPrompt` 的拼接同序）。 */
+  const CONTINUATION_TEMPLATE = [
+    '以下是工具续跑任务刚刚执行的工具结果。请像真正的 Agent 一样，基于原始任务和这些工具结果继续推进。',
+    '如果结果已经足够，请输出最终结论；只有确实需要更多信息、验证或文件修改时才继续调用工具。',
+    '不要要求用户点击继续，也不要输出伪工具调用 JSON；需要继续操作时只输出可执行 XML 工具标签。',
+    '本轮可用的本地工具标签（只输出这些，别用沙箱工具）：memory_save, shell_exec',
+    '',
+    '<original_task>',
+    '看看桌面有什么',
+    '</original_task>',
+    '',
+    '<tool_results>',
+    '[{"tool":"shell_exec","ok":true,"summary":"列出 3 个文件"}]',
+    '</tool_results>',
+  ].join('\n');
+
+  /** nudge 模板（用的是 `<tool_results_so_far>`，与续跑模板只差这一个标签）。 */
+  const NUDGE_TEMPLATE = [
+    '上一轮回复没有包含任何可执行工具 XML，因此自动化续跑无法继续执行。',
+    '请根据原始任务和工具结果二选一：',
+    '1. 如果任务仍未完成，本轮必须直接输出下一步可执行工具 XML。',
+    '2. 如果任务已经完成，输出 <task_complete>{"summary":"..."}</task_complete>。',
+    '这是第 1 次无工具调用纠偏。',
+    '',
+    '<original_task>',
+    '看看桌面有什么',
+    '</original_task>',
+    '',
+    '<tool_results_so_far>',
+    '[]',
+    '</tool_results_so_far>',
+  ].join('\n');
+
+  function userMessageBody(content: string): unknown {
+    return { data: { [UUID_A]: { id: UUID_A, role: 'user', content } } };
+  }
+
+  it('replaces a stored continuation template with the invisible placeholder', () => {
+    // ⚠️ 这是本次修复的**目的**：续跑 prompt 是我们注入的，刷新后会作为一条用户消息
+    // 原样显示（用户报的现象）。
+    const body = userMessageBody(CONTINUATION_TEMPLATE);
+    const stats = stripZaiHistoryResponse(body, { toolNames });
+    expect(stats.replacedContinuationMessages).toBe(1);
+    const content = (body as any).data[UUID_A].content;
+    // ⚠️ **不能是空串** —— 服务端按 parent/child 链组织消息，空内容会让链断掉。
+    expect(content).not.toBe('');
+    expect(content).toBe(ZAI_CONTINUATION_PLACEHOLDER);
+    expect(content).not.toContain('original_task');
+    expect(content).not.toContain('工具续跑任务');
+  });
+
+  it('replaces a stored nudge template too (tool_results_so_far)', () => {
+    // ⚠️ 只认 `<tool_results>` 会漏掉 nudge 轮 —— 那是**同一份判据**的第二个标签，
+    // 漏认的表现是「nudge 轮的气泡刷新后照旧可见」。
+    const body = userMessageBody(NUDGE_TEMPLATE);
+    const stats = stripZaiHistoryResponse(body, { toolNames });
+    expect(stats.replacedContinuationMessages).toBe(1);
+    expect((body as any).data[UUID_A].content).toBe(ZAI_CONTINUATION_PLACEHOLDER);
+  });
+
+  it('is idempotent across repeated cleanups', () => {
+    // 历史清洗会被反复调用（切会话、每轮回答结束）⇒ 第二次拿到的是已替换过的内容。
+    const body = userMessageBody(CONTINUATION_TEMPLATE);
+    stripZaiHistoryResponse(body, { toolNames });
+    const second = stripZaiHistoryResponse(body, { toolNames });
+    expect(second.replacedContinuationMessages).toBe(0);
+    expect((body as any).data[UUID_A].content).toBe(ZAI_CONTINUATION_PLACEHOLDER);
+  });
+
+  it('does not touch an ordinary user message that merely mentions the tags', () => {
+    // ⚠️ **只带一个标签不算模板** —— 用户可能就是在讨论这套机制。
+    const single = '我看了 `<original_task>` 这个标签，它是干嘛的？';
+    const body = userMessageBody(single);
+    const stats = stripZaiHistoryResponse(body, { toolNames });
+    expect(stats.replacedContinuationMessages).toBe(0);
+    expect((body as any).data[UUID_A].content).toBe(single);
+  });
+
+  it('prefers the continuation branch over the visible-prompt restore', () => {
+    // 万一一条消息同时带标记与模板标签（不该发生），判据必须**先认模板** ——
+    // 否则会把它还原成标记对里的内容（那是模板的一部分），等于没处理。
+    const both = `${CONTINUATION_TEMPLATE}\n<!-- glm-visible-user-prompt:start -->\nhi\n<!-- glm-visible-user-prompt:end -->`;
+    const body = userMessageBody(both);
+    const stats = stripZaiHistoryResponse(body, { toolNames });
+    expect(stats.replacedContinuationMessages).toBe(1);
+    expect(stats.restoredUserMessages).toBe(0);
+    expect((body as any).data[UUID_A].content).toBe(ZAI_CONTINUATION_PLACEHOLDER);
+  });
+
+  it('still processes content_blocks on a template message (no early return)', () => {
+    // ⚠️⚠️ 模板分支**刻意用 `else if` 而不是提前 `return`** —— 提前返回会连带跳过
+    // 工具 XML 剥离。这条把「两个清洗不是互斥的」钉死：模板换占位符 **且**
+    // `content_blocks` 里的工具块被剥。
+    // ⚠️ 当前形状下续跑模板不会有 `content_blocks`，但那是**数据的性质**、不是这条
+    // 分支该背的假设 —— 少一层隐含前提就少一处将来会静默失效的地方。
+    const body = {
+      data: {
+        [UUID_A]: {
+          id: UUID_A,
+          role: 'user',
+          content: CONTINUATION_TEMPLATE,
+          content_blocks: [
+            { type: 'text', content: '附带一句 <shell_exec>{"command":"ls"}</shell_exec> 说明' },
+          ],
+        },
+      },
+    };
+    const stats = stripZaiHistoryResponse(body, { toolNames });
+    expect(stats.replacedContinuationMessages).toBe(1);
+    expect(stats.strippedToolBlocks).toBe(1);
+    expect((body as any).data[UUID_A].content).toBe(ZAI_CONTINUATION_PLACEHOLDER);
+    expect((body as any).data[UUID_A].content_blocks[0].content).toBe('附带一句  说明');
+  });
+
+  it('still strips tool XML from a non-template message', () => {
+    // 反面对照：非模板消息走 else 分支，工具 XML 照样要剥。
+    const body = userMessageBody('看这个 <shell_exec>{"command":"ls"}</shell_exec> 输出');
+    const stats = stripZaiHistoryResponse(body, { toolNames });
+    expect(stats.strippedToolBlocks).toBe(1);
+    expect((body as any).data[UUID_A].content).toBe('看这个  输出');
+  });
+
+  it('does not replace a continuation template on an assistant message', () => {
+    // 判据只在 user 分支里 —— assistant 消息里的模板标签（模型复述）不该被动。
+    const body = { data: { [UUID_A]: { id: UUID_A, role: 'assistant', content: CONTINUATION_TEMPLATE } } };
+    const stats = stripZaiHistoryResponse(body, { toolNames });
+    expect(stats.replacedContinuationMessages).toBe(0);
+    expect((body as any).data[UUID_A].content).toBe(CONTINUATION_TEMPLATE);
   });
 });
 
@@ -505,5 +642,108 @@ describe('the real fetch hook cleans history responses', () => {
     } finally {
       uninstall();
     }
+  });
+});
+
+describe('stripZaiHistoryResponse: tool record collection (panel anchors)', () => {
+  const toolNames = resolveHistoryToolNames(new Set<string>());
+  const ASSISTANT = 'aaaaaaaa-1111-2222-3333-444444444444';
+  const USER = 'bbbbbbbb-1111-2222-3333-444444444444';
+  const RAW = '<shell_exec>{"command":"ls"}</shell_exec>';
+
+  it('collects one record per assistant message that had tool blocks', () => {
+    const body = {
+      data: {
+        [ASSISTANT]: {
+          id: ASSISTANT,
+          parent_id: USER,
+          role: 'assistant',
+          content_blocks: [{ type: 'text', content: `前缀\n${RAW}\n后缀` }],
+        },
+      },
+    };
+    const collected: any[] = [];
+    const stats = stripZaiHistoryResponse(body, {
+      toolNames,
+      onToolRecords: (records) => collected.push(...records),
+    });
+
+    expect(collected).toHaveLength(1);
+    expect(stats.collectedToolRecords).toBe(1);
+    expect(collected[0].messageId).toBe(ASSISTANT);
+    expect(collected[0].parentMessageId).toBe(USER);
+    // ⚠️ 调用记录要带**工具名与原文** —— 名字是面板要显示的，原文是与存储腿对齐的依据。
+    expect(collected[0].calls).toEqual([{ name: 'shell_exec', raw: RAW }]);
+  });
+
+  it('anchors on the text that remains after stripping', () => {
+    const body = {
+      data: {
+        [ASSISTANT]: {
+          id: ASSISTANT,
+          role: 'assistant',
+          content_blocks: [{ type: 'text', content: `可见正文\n${RAW}` }],
+        },
+      },
+    };
+    const collected: any[] = [];
+    stripZaiHistoryResponse(body, { toolNames, onToolRecords: (r) => collected.push(...r) });
+
+    // ⚠️ 锚点必须是**剥完**的那份 —— 页面渲染的就是它；拿剥前那份去比对永远失配。
+    expect(collected[0].content).toContain('可见正文');
+    expect(collected[0].content).not.toContain('shell_exec');
+  });
+
+  it('never collects from a user message even if it quotes a tool tag', () => {
+    const body = {
+      data: {
+        [USER]: {
+          id: USER,
+          role: 'user',
+          content: `提示词示例：${RAW}`,
+        },
+      },
+    };
+    const collected: any[] = [];
+    stripZaiHistoryResponse(body, { toolNames, onToolRecords: (r) => collected.push(...r) });
+
+    // ⚠️ 用户消息里出现工具标签是**提示词示例**，不是「调用过」。
+    expect(collected).toEqual([]);
+  });
+
+  it('skips a message with no id at all', () => {
+    const body = {
+      data: { x: { role: 'assistant', content_blocks: [{ content: RAW }] } },
+    };
+    const collected: any[] = [];
+    stripZaiHistoryResponse(body, { toolNames, onToolRecords: (r) => collected.push(...r) });
+    // 没有 id 就没有锚点，收了也挂不上。
+    expect(collected).toEqual([]);
+  });
+
+  it('does not call back when nothing was stripped', () => {
+    const onToolRecords = vi.fn();
+    stripZaiHistoryResponse({ data: {} }, { toolNames, onToolRecords });
+    expect(onToolRecords).not.toHaveBeenCalled();
+  });
+
+  it('merges several blocks of the same message into one record', () => {
+    const body = {
+      data: {
+        [ASSISTANT]: {
+          id: ASSISTANT,
+          role: 'assistant',
+          content_blocks: [
+            { type: 'text', content: '<memory_save>{"a":1}</memory_save>' },
+            { type: 'text', content: '<memory_update>{"b":2}</memory_update>' },
+          ],
+        },
+      },
+    };
+    const collected: any[] = [];
+    stripZaiHistoryResponse(body, { toolNames, onToolRecords: (r) => collected.push(...r) });
+    // ⚠️ 同一条消息的多个块**同属一次回答** ⇒ 一条记录、两个 calls。
+    expect(collected).toHaveLength(1);
+    expect(collected[0].calls.map((call: any) => call.name)).toEqual(['memory_save', 'memory_update']);
   });
 });

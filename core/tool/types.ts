@@ -91,6 +91,27 @@ export interface ToolCallSource {
   taskId?: string;
   runId?: string;
   messageId?: number | null;
+  /**
+   * **z.ai 的助手消息 id（uuid 字符串）** —— 与上面那个数字的 `messageId` 是两回事。
+   *
+   * ⚠️⚠️ **`messageId` / `parentMessageId` 是上游 DeepSeek 的数字 id**（`number | null`），
+   * 而 z.ai 的消息 id 是 **uuid 字符串**（DOM 上是 wrapper 的 `message-<uuid>` 类，
+   * 逐字等于服务端 `messages/batch` 的键）。**别把两者合成一个字段** ——
+   * 一个字段担两种语义，将来必然混。那两个数字字段在本项目**零写入点**。
+   *
+   * ⚠️ **用途是让存储腿自带锚点**：上游 `persistToolBlockSession` 把
+   * `metadata.assistantMessageId` 写进持久化块，于是存储腿**不依赖历史腿也能定位**
+   * （`findRestoredToolTargetByMessageId`）。我们原先没有等价物 ⇒ 存储腿没有锚点、
+   * 只能靠「工具签名」与历史腿猜着合流 —— 真机出过两个缺陷：「用了好几次工具、
+   * 刷新后只显示一次」与「两条消息同命令时跨消息错并」。
+   *
+   * ⚠️ **真机已验证读得到**（探针 12）：工具执行那一刻面板的块 id 是
+   * `history:<uuid>`（不是 `live:<requestId>`）⇒ 那一刻 `readZaiMessageId` 返回了 uuid。
+   * ⚠️ **但仍然可能读不到**（助手消息还在流式、wrapper 上的类还没挂）⇒ 类型可选、
+   * 读不到就**不写**（`undefined`），下游按「没有锚点」处理、退回签名合流 ——
+   * 与改造前行为一致，不会更糟。
+   */
+  assistantMessageId?: string;
   automationId?: string;
   automationRunId?: string;
 }

@@ -44,7 +44,18 @@ const BASELINE = Object.freeze({
   // 两个 section 都是**整份**进初始 shell。
   // **教训**：基线长期偏大时门禁是「靠实测比基线小」蒙过去的（2.15.16→2.15.19 差了 378 字节），
   // 所以**降了也要回写**，不能只满足于「门禁还绿」。
-  initialShell: { raw: 338_044, gzip: 105_470 },
+  // ⚠️⚠️ **2026-10-11 五测（输入框斜杠命令补全）**：新增 `content.skillPopup.hint`
+  // （中英各 1 键）后实测 raw 338219 / gzip 105546 —— **+175 raw / +76 gzip**。
+  // ⚠️ 只加了 2 个键、涨幅却接近「加 1 键 ≈ +276 raw」的量级：**因为整份 `content`
+  // section 都进初始 shell**（同上面那几条注释），键本身只占其中一小部分，
+  // 剩下的是 content 段重排后压缩率的变化。
+  // **涨了也要回写**（同下面那条教训），不能只满足于「门禁还绿」。
+  // ⚠️⚠️ **2026-10-11 六测（工具调用面板）**：`content.toolBlock` 加极简
+  // `title` + `summaries.{running,executed,failed,incomplete}`（中英各 5 键）后
+  // 实测 raw 338580 / gzip 105644 —— **+361 raw / +98 gzip**。
+  // **同源的又一条例证**：只加 5 对键、raw 涨 361，正是因为**整份 `content` section
+  // 都进初始 shell**，键本身只占小头，剩下的是段内重排后压缩率的变化。
+  initialShell: { raw: 338_580, gzip: 105_644 },
   // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
   // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
   // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，

@@ -51,6 +51,11 @@ export const CONTRACT_TOOL_CALL = {
     requestId: 'request-contract-1',
     chatSessionId: 'chat-contract-1',
     parentMessageId: 10,
+    // ⚠️⚠️ **z.ai 的助手消息 uuid**（与上面那个数字的 `parentMessageId` 不是一回事）
+    // —— 存储腿靠它自带锚点。**它必须出现在这份「合法记录」样本里**：
+    // `isToolCallSource` 是白名单式的形状校验，漏了它整条记录会被判非法
+    // （`isToolCallHistoryRecord` 走它 ⇒ 记录进不了历史、刷新后面板没有真结果，静默）。
+    assistantMessageId: 'aaaaaaaa-1111-2222-3333-444444444444',
   },
   createdAt: 1_752_384_000_000,
 } as const satisfies ToolCall;

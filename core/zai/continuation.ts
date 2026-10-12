@@ -22,6 +22,14 @@
  */
 
 import type { ToolError, ToolExecutionRecord } from '../types';
+// 续跑轮识别与占位符在**零依赖**的 `continuation-marker.ts` 里 —— 页面主世界
+// （历史清洗 + 气泡隐藏）也要用同一份判据，而本文件带着一条约 1.5 KB 的待办话术
+// 大正则，不该被拖进主世界。这里原样转出，**既有 import 路径全部不变**。
+export {
+  ZAI_CONTINUATION_PLACEHOLDER,
+  isZaiContinuationPlaceholder,
+  isZaiContinuationPrompt,
+} from './continuation-marker';
 
 export const ZAI_INLINE_AGENT_MAX_STEPS = 25;
 export const ZAI_CONTINUATION_DELAY_MS = 2_500;
@@ -35,19 +43,6 @@ export const ZAI_INLINE_AGENT_MAX_NUDGES = 8;
  * detail 与 output）。窗口化之后稳定在常数级（约 18KB）。
  */
 export const ZAI_INLINE_AGENT_FULL_TOOL_RESULT_WINDOW = 4;
-
-/**
- * 续跑轮识别：带 `<original_task>`，且带 `<tool_results>` 或 `<tool_results_so_far>`。
- *
- * 两个标签都要认：`buildZaiContinuationPrompt` 用 `<tool_results>`，
- * `buildZaiNudgePrompt` 用 `<tool_results_so_far>`。漏认后者会把 nudge 轮当成原生轮，
- * 于是新起一个 `taskId` 为 null 的续跑循环覆盖掉原循环，原循环再也无人推进，
- * 自动化任务收不到终态、一直挂在「运行中」。
- */
-export function isZaiContinuationPrompt(content: string): boolean {
-  if (!content.includes('<original_task>')) return false;
-  return content.includes('<tool_results>') || content.includes('<tool_results_so_far>');
-}
 
 const ORIGINAL_TASK_MAX_CHARS = 8_000;
 const NUDGE_PREVIOUS_TEXT_MAX_CHARS = 4_000;

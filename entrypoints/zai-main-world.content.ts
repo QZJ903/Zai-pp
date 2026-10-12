@@ -162,6 +162,11 @@ export default defineContentScript({
       onUsageSnapshot(snapshot) {
         postToContent({ type: 'USAGE_SNAPSHOT', payload: snapshot });
       },
+      onHistoryToolRecords(records, chatSessionId) {
+        // ⚠️ **`chatSessionId` 平铺在信封上**（与 `records` 同级）—— decoder 读
+        // `value.chatSessionId`，两边必须同层（桥的载荷层次是踩过的坑）。
+        postToContent({ type: 'HISTORY_TOOL_RECORDS', records, chatSessionId });
+      },
     });
 
     installZaiFetchHook();

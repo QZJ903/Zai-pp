@@ -22,6 +22,7 @@
 
 import { ZAI_MSG_SOURCE } from './contracts';
 import type { ZaiDetectedToolCall, ZaiResponseCompletePayload } from './fetch-hook';
+import type { ZaiHistoryToolRecord } from './history-cleanup';
 
 export const ZAI_MAIN_TO_CONTENT = `${ZAI_MSG_SOURCE}:main-to-content`;
 export const ZAI_CONTENT_TO_MAIN = `${ZAI_MSG_SOURCE}:content-to-main`;
@@ -51,6 +52,7 @@ export const ZAI_MAIN_TO_CONTENT_TYPES = [
   'HEADERS_CAPTURED',          // 捕获 Authorization / X-Signature / X-FE-Version
   'HTML_CHALLENGE',            // completion 返回 text/html → 推进续跑别挂死
   'USAGE_SNAPSHOT',            // 一轮 completion 的用量快照 → 落库统计
+  'HISTORY_TOOL_RECORDS',      // 历史清洗剥出工具块 → 面板跨刷新恢复的锚点
 ] as const;
 
 /** 隔离世界向主世界发出的动作类型。 */
@@ -67,6 +69,7 @@ export type ZaiContentToMainType = (typeof ZAI_CONTENT_TO_MAIN_TYPES)[number];
  * `core/zai/messages` 一个 import 源，不必各自再去 `core/zai/fetch-hook` 取类型。
  */
 export type { ZaiDetectedToolCall, ZaiResponseCompletePayload } from './fetch-hook';
+export type { ZaiHistoryToolRecord } from './history-cleanup';
 
 // ---------------------------------------------------------------------------
 // 载荷级 decoder
@@ -208,6 +211,57 @@ export const ZAI_BRIDGE_PAYLOAD_DECODER_EXEMPTIONS = {
   },
 } as const satisfies Partial<Record<ZaiMainToContentType | ZaiContentToMainType, ZaiBridgePayloadDecoderExemption>>;
 
+/**
+ * 主世界 → 隔离世界：历史清洗剥出来的**工具调用归属记录**。
+ *
+ * ⚠️ **形状校验必须严**：这几条记录会变成页面上的可见内容（工具名与详情），
+ * 而且它们的 `messageId` 会被当成 DOM 选择器的一部分用（`message-<uuid>` 类名比对）
+ * ⇒ 非字符串或太离谱的值会让定位函数白白扫一遍。
+ * ⚠️ **失败方向仍然是「丢弃该条消息」** —— 与其它 decoder 一致（可选增强，判错不该卡住谁）。
+ */
+export function decodeZaiHistoryToolRecordsMessage(
+  value: unknown,
+): { records: ZaiHistoryToolRecord[]; chatSessionId: string | null } | null {
+  if (!isPlainRecord(value)) return null;
+  const records = value.records;
+  if (!Array.isArray(records)) return null;
+  // ⚠️ **会话 id 是可选的**（读不到就是 null）—— 它不是形状约束的一部分，
+  // 缺了照收（下游按「不知道 ⇒ 放行」处理）。类型不对才判否。
+  const rawSessionId = value.chatSessionId;
+  if (rawSessionId !== null && rawSessionId !== undefined && typeof rawSessionId !== 'string') {
+    return null;
+  }
+
+  const decoded: ZaiHistoryToolRecord[] = [];
+  for (const item of records) {
+    if (!isPlainRecord(item)) return null;
+    if (typeof item.messageId !== 'string' || !item.messageId) return null;
+    if (item.parentMessageId !== null && item.parentMessageId !== undefined
+      && typeof item.parentMessageId !== 'string') return null;
+    if (typeof item.content !== 'string') return null;
+    if (!Array.isArray(item.calls)) return null;
+
+    const calls: { name: string; raw: string }[] = [];
+    for (const call of item.calls) {
+      if (!isPlainRecord(call)) return null;
+      if (typeof call.name !== 'string' || !call.name) return null;
+      if (typeof call.raw !== 'string') return null;
+      calls.push({ name: call.name, raw: call.raw });
+    }
+
+    decoded.push({
+      messageId: item.messageId,
+      parentMessageId: typeof item.parentMessageId === 'string' ? item.parentMessageId : null,
+      content: item.content,
+      calls,
+    });
+  }
+  return {
+    records: decoded,
+    chatSessionId: typeof rawSessionId === 'string' && rawSessionId ? rawSessionId : null,
+  };
+}
+
 /** 载荷 decoder 表 —— 与两个类型清单互补，`tests/zai-bridge-protocol-contract.test.ts` 守着覆盖率。 */
 export const ZAI_BRIDGE_PAYLOAD_DECODERS = {
   SYNC_HOOK_STATE: decodeZaiSyncHookStateMessage,
@@ -215,6 +269,7 @@ export const ZAI_BRIDGE_PAYLOAD_DECODERS = {
   RESPONSE_COMPLETE: decodeZaiResponseCompleteMessage,
   REQUEST_TERMINAL: decodeZaiRequestTerminalMessage,
   HTML_CHALLENGE: decodeZaiHtmlChallengeMessage,
+  HISTORY_TOOL_RECORDS: decodeZaiHistoryToolRecordsMessage,
 } as const satisfies Partial<Record<ZaiMainToContentType | ZaiContentToMainType, (value: unknown) => unknown>>;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

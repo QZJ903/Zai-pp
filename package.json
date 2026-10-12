@@ -3,7 +3,7 @@
   "description": "Agentic memory, skills, agentic execution, automation, and MCP tools for Z.ai",
   "private": true,
   "license": "Apache-2.0",
-  "version": "2.15.37",
+  "version": "2.15.43",
   "type": "module",
   "workspaces": [
     "packages/*"
