@@ -206,19 +206,23 @@ export function createToolBlockRestoreController(
    *
    * 判据按**优先级**从上往下试，任一条成立即认为相同：
    * ① 两条都有 `messageId` 且相等 —— 最硬；
-   * ② 两条都有 `parentMessageId` 且相等 **且** 工具签名一致；
-   * ③ **工具签名一致**（两条都至少有一个调用）—— storage 腿没有消息 id，
+   * ② **工具签名一致**（两条都至少有一个调用）—— storage 腿没有消息 id，
    *    所以对「history ↔ storage」这一对，**只有这条能用**。
    *
-   * ⚠️ **第 ③ 条是承重的**：它是两条腿唯一的公共维度。少了它，
+   * ⚠️ **第 ② 条是承重的**：它是两条腿唯一的公共维度。少了它，
    * storage 腿的真结果永远合流不进来（表现：刷新后只看得见工具名、看不见结果）。
    * ⚠️ 签名用「工具名 + XML 原文」—— 同一次调用的 XML 在两条腿上**逐字相同**
    * （都来自服务端存的那份正文）。
+   *
+   * ⚠️ **曾有过一条「父消息 id 相同 + 签名一致」的中间判据，已删除**：它形式上排在
+   * 签名判据之前，但**成立时下面那条签名判据必然也成立**（它的条件是「签名一致」的
+   * 超集）⇒ 原实现等价于 `if (X && Y) return true; return Y;` —— 分支触发时 `Y` 必真、
+   * 不触发时唯一出口仍是 `Y`，**对任意输入返回值恒等**（另按 messageId × parentMessageId
+   * × calls 的取值组合穷举比对过一遍，无一处不同）。删掉不影响任何行为；
+   * `parentMessageId` 字段本身仍在 `merge` / `refresh` 里用来跨腿保留锚点。
    */
   function isCompatible(a: ToolBlockRestoreRecord, b: ToolBlockRestoreRecord): boolean {
     if (a.messageId && b.messageId) return a.messageId === b.messageId;
-    const sameParent = Boolean(a.parentMessageId && b.parentMessageId && a.parentMessageId === b.parentMessageId);
-    if (sameParent && haveMatchingSignatures(a, b)) return true;
     return haveMatchingSignatures(a, b);
   }
 

@@ -1,7 +1,18 @@
 import { readFileSync } from 'node:fs';
 import * as t from '@babel/types';
 import { describe, expect, it } from 'vitest';
-import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-source';
+import { walkSourceAst } from './helpers/typescript-source';
+import {
+  directObjectMembers,
+  findCallWithSourceObject,
+  findFunctionBody,
+  isMethodCallTo,
+  isNamedKey,
+  isRawValueExpression,
+  collectMessageCaseBodies,
+  readContentProgram,
+  walkReachable,
+} from './helpers/content-source-ast';
 
 const CONTENT_SOURCE = 'entrypoints/zai.content.ts';
 
@@ -26,10 +37,6 @@ const AWAITED_FUNCTIONS = [
   'handleDetectedToolCall',
   'handleResponseComplete',
 ] as const;
-
-function readContentProgram(): t.Program {
-  return parseTypeScriptSource(CONTENT_SOURCE, readFileSync(CONTENT_SOURCE, 'utf8'));
-}
 
 interface CallSite {
   name: string;
@@ -98,20 +105,20 @@ describe('tool execution call sites are awaited', () => {
     // 而失败信息（「应当同步一次」）会指向与真实意图不符的地方。
     // 这里只断言**意图**：最后一次同步的解构结果被用于 `descriptorIds`。
     const program = readContentProgram();
-    let retryBody: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (!t.isFunctionDeclaration(node) || node.id?.name !== 'requestToolAuthorization') return;
-      const tryStatement = node.body.body.find((statement) => t.isTryStatement(statement));
-      if (tryStatement && t.isTryStatement(tryStatement)) {
-        retryBody = tryStatement.handler?.body;
-      }
-    });
-    expect(retryBody, 'requestToolAuthorization 里应当有 catch 分支').toBeDefined();
+    // ⚠️⚠️ **走共享实现**（只认 `program.body` 的顶层声明）—— 本地 `walkSourceAst` 版本
+    // 会被一个**嵌套在同名可达函数体内**的诱饵顶替（实测：诱饵版能让这条断言照绿，
+    // 而真身里的 `descriptorIds` 已经改回读模块状态）。
+    const retryBody = findFunctionBody(program, 'requestToolAuthorization');
+    const tryStatement = retryBody.body.find((statement) => t.isTryStatement(statement));
+    const catchBody = tryStatement && t.isTryStatement(tryStatement)
+      ? tryStatement.handler?.body
+      : undefined;
+    expect(catchBody, 'requestToolAuthorization 里应当有 catch 分支').toBeDefined();
 
     // 收集 catch 里每一处 `const { … } = await loadAndSyncRuntimeState();` 的解构名，
     // 取**最后一次**（若将来加了第二次同步，生效的是最后一次）。
     const destructuredRuns: string[][] = [];
-    walkSourceAst(retryBody!, (node) => {
+    walkSourceAst(catchBody!, (node) => {
       if (!t.isVariableDeclarator(node) || !node.init) return;
       // `await` 包一层：init 是 AwaitExpression，调用在它的 argument 里。
       const init = t.isAwaitExpression(node.init) ? node.init.argument : node.init;
@@ -166,11 +173,9 @@ describe('tool execution call sites are awaited', () => {
     // ⚠️ 这条是评审查出的 P1：改造闸门时只改了授权重试那一处，漏了这两个调用点。
     const program = readContentProgram();
     for (const fnName of ['advanceContinuationLoop', 'handleResponseComplete'] as const) {
-      let body: t.BlockStatement | undefined;
-      walkSourceAst(program, (node) => {
-        if (t.isFunctionDeclaration(node) && node.id?.name === fnName) body = node.body;
-      });
-      expect(body, `应当存在 ${fnName}`).toBeDefined();
+      // ⚠️ **走共享实现**（只认 `program.body` 的顶层声明）—— 本地 `walkSourceAst` 版本
+      // 会被一个**嵌套在同名可达函数体内**的诱饵顶替。
+      const body = findFunctionBody(program, fnName);
 
       // 该函数体里 `modelFacingDescriptorsFor(第一个参数, …)` 的**根标识符**。
       // 两种写法都要认：`descriptors`（解构）与 `loopState.descriptors`（整体持有）。
@@ -249,12 +254,9 @@ describe('tool execution call sites are awaited', () => {
 describe('runtime state sync is gated by the latest attempt', () => {
   /** 找出 `loadAndSyncRuntimeState` 的函数体。 */
   function findSyncBody(program: t.Program): t.BlockStatement {
-    let body: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'loadAndSyncRuntimeState') body = node.body;
-    });
-    expect(body, '应当存在 loadAndSyncRuntimeState').toBeDefined();
-    return body!;
+    // ⚠️ **走共享实现**（只认 `program.body` 的顶层声明）—— 本地 `walkSourceAst` 版本
+    // 会被一个**嵌套在同名可达函数体内**的诱饵顶替（实测：诱饵版能让全部断言照绿）。
+    return findFunctionBody(program, 'loadAndSyncRuntimeState');
   }
 
   it('lands module state through the gate, so an older sync cannot overwrite a newer one', () => {
@@ -313,12 +315,9 @@ describe('runtime state sync is gated by the latest attempt', () => {
 describe('request-scoped state is released once per request', () => {
   /** 找出 `releaseRequestState` 的函数体。 */
   function findReleaseBody(program: t.Program): t.BlockStatement {
-    let body: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'releaseRequestState') body = node.body;
-    });
-    expect(body, '应当存在 releaseRequestState').toBeDefined();
-    return body!;
+    // ⚠️ **走共享实现**（只认 `program.body` 的顶层声明）—— 本地 `walkSourceAst` 版本
+    // 会被一个**嵌套在同名可达函数体内**的诱饵顶替（实测：诱饵版能让全部断言照绿）。
+    return findFunctionBody(program, 'releaseRequestState');
   }
 
   it('releases every request-scoped container except the one with a delayed reader', () => {
@@ -349,12 +348,10 @@ describe('request-scoped state is released once per request', () => {
     // ⚠️ 不能只断言「源码里出现过 releaseRequestState」—— 函数定义体本身就含这个标识符，
     // 删掉调用点那种断言照样为 true。这里断言**调用出现在 REQUEST_TERMINAL 的 case 里**。
     const program = readContentProgram();
-    const caseBodies = new Map<string, t.Node[]>();
-    walkSourceAst(program, (node) => {
-      if (!t.isSwitchCase(node) || !t.isStringLiteral(node.test)) return;
-      caseBodies.set(node.test.value, node.consequent);
-    });
-
+    // ⚠️⚠️ **必须收「那一个 `switch (data.type)`」的分支** —— 全程序扫 `SwitchCase`
+    // 是 last-wins，而 TS 允许重复 case ⇒ 在真分支后面补一个同名、内容合规但
+    // **不可达**的 case 就能让这条断言照绿（实测：全量 1659 条全绿而真分支已被掏空）。
+    const caseBodies = collectMessageCaseBodies(program);
     const terminal = caseBodies.get('REQUEST_TERMINAL');
     expect(terminal, '应当有 REQUEST_TERMINAL 分支').toBeDefined();
 
@@ -402,12 +399,9 @@ describe('every finished turn seals its tool block', () => {
 
   /** 找出 `handleResponseComplete` 的函数体。 */
   function findCompletionBody(program: t.Program): t.BlockStatement {
-    let body: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'handleResponseComplete') body = node.body;
-    });
-    expect(body, '应当存在 handleResponseComplete').toBeDefined();
-    return body!;
+    // ⚠️ **走共享实现**（只认 `program.body` 的顶层声明）—— 本地 `walkSourceAst` 版本
+    // 会被一个**嵌套在同名可达函数体内**的诱饵顶替（实测：诱饵版能让全部断言照绿）。
+    return findFunctionBody(program, 'handleResponseComplete');
   }
 
   it('seals the turn in the completion handler', () => {
@@ -419,11 +413,10 @@ describe('every finished turn seals its tool block', () => {
   it('seals the turn in the REQUEST_TERMINAL branch too', () => {
     // ⚠️ 流被 abort 的轮次**不走 RESPONSE_COMPLETE**，只走这里。
     const program = readContentProgram();
-    const caseBodies = new Map<string, t.Node[]>();
-    walkSourceAst(program, (node) => {
-      if (!t.isSwitchCase(node) || !t.isStringLiteral(node.test)) return;
-      caseBodies.set(node.test.value, node.consequent);
-    });
+    // ⚠️⚠️ **必须收「那一个 `switch (data.type)`」的分支** —— 全程序扫 `SwitchCase`
+    // 是 last-wins，而 TS 允许重复 case ⇒ 在真分支后面补一个同名、内容合规但
+    // **不可达**的 case 就能让这条断言照绿（实测：全量 1659 条全绿而真分支已被掏空）。
+    const caseBodies = collectMessageCaseBodies(program);
     const terminal = caseBodies.get('REQUEST_TERMINAL');
     expect(terminal, '应当有 REQUEST_TERMINAL 分支').toBeDefined();
 
@@ -450,52 +443,116 @@ describe('every finished turn seals its tool block', () => {
 
   it('registers the tool call raw from the execution path', () => {
     // ⚠️⚠️ **这条守的是接线，删掉不会让任何东西变红**（实测：去掉那行调用点，
-    // 全量 1626 条用例 + `tsc` 全绿）。而后果是真缺陷 —— 原生轮的**兜底执行路径**
+    // 当时全量 1626 条用例 + `tsc` 全绿）。而后果是真缺陷 —— 原生轮的**兜底执行路径**
     // 刻意不调 `beginToolCall`（避免稍纵即逝的「执行中」行），而 `raw` 只有它会登记
     // ⇒ 那条路上实时腿的签名恒为「工具名 + 空串」、**与历史腿永远配不上**
     // ⇒ 同一轮画两块面板（一块有结果、一块没有）。
     //
     // 判据：`toolPanel.noteToolCallRaw(...)` 必须出现在 `executeDetected` 里。
     const program = readContentProgram();
-    let executeBody: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'executeDetected') executeBody = node.body;
-    });
-    expect(executeBody, '应当存在 executeDetected').toBeDefined();
+    const executeBody = findFunctionBody(program, 'executeDetected');
     expect(countCalls(executeBody!, 'toolPanel', 'noteToolCallRaw')).toBe(1);
   });
-
-  it('drops the old conversation records when the session changes', () => {
-    // ⚠️⚠️ **这条守的是接线，删掉不会让任何东西变红**（实测：去掉这段接线，
-    // 全量 1610 条用例 + `tsc` 全绿）。而后果是真缺陷 —— 切过会话之后，
-    // 旧会话记录的三条定位腿在新会话全 miss，兜底腿把它挂到**新会话的消息**上
-    // （真机实测：旧会话的 web_fetch / web_search / shell_status 出现在新会话里）。
+  it('passes the raw itself, not an empty placeholder, into noteToolCallRaw', () => {
+    // ⚠️⚠️ **只数「调用出现过几次」挡不住这一格**（实测：把实参改成
+    // `{ callId: stableCallId }`、或把 `raw` 写成空串，当时全量 1629 条用例 + `tsc`
+    // **全绿**）—— 而 `raw` 是合流签名的一半，写空等于把上面那条修好的缺陷
+    // （同一轮画两块面板）原样放回来，失败方向静默。
     //
-    // 判据：`toolPanel.handleSessionChange()` 必须出现在某个
-    // **`onZaiSessionChange(...)` 的回调体**里（不能只断言「源码里出现过这个方法名」）。
+    // 判据：那次调用的**第二个实参**必须是一个对象字面量，且它的 `raw` 属性
+    // 通过 `isRawValueExpression`（**与 `beginToolCall` 那处共用同一份判据** ——
+    // 同一个语义在两个文件里各写一遍时，一处认 `??` 兜底、一处只认裸成员表达式，
+    // 实测确实漂过）。
     const program = readContentProgram();
-    const callbacks: t.Node[] = [];
-    walkSourceAst(program, (node) => {
-      if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
-      if (node.callee.name !== 'onZaiSessionChange') return;
-      const [callback] = node.arguments;
-      if (callback) callbacks.push(callback);
-    });
-    expect(callbacks.length, '应当有 onZaiSessionChange 的订阅').toBeGreaterThan(0);
+    const executeBody = findFunctionBody(program, 'executeDetected');
 
-    let wired = 0;
-    for (const callback of callbacks) {
-      walkSourceAst(callback, (node) => {
-        if (t.isCallExpression(node) && t.isMemberExpression(node.callee)
-          && t.isIdentifier(node.callee.object) && t.isIdentifier(node.callee.property)
-          && node.callee.object.name === 'toolPanel'
-          && node.callee.property.name === 'handleSessionChange') {
-          wired += 1;
-        }
-      });
-    }
-    expect(wired, 'toolPanel.handleSessionChange 必须在 onZaiSessionChange 回调里被调').toBe(1);
+    const rawValues: t.Node[] = [];
+    walkReachable(executeBody!, (node) => {
+      if (!isMethodCallTo(node, 'toolPanel', 'noteToolCallRaw')) return;
+      const options = node.arguments[1];
+      if (!t.isObjectExpression(options)) return;
+      for (const property of directObjectMembers(options)) {
+        if (!isNamedKey(property.key, 'raw')) continue;
+        rawValues.push(property.value);
+      }
+    });
+
+    expect(rawValues, 'noteToolCallRaw 的实参里必须有 raw 键').toHaveLength(1);
+    expect(
+      isRawValueExpression(rawValues[0]),
+      'raw 必须取到原始 XML（形如 `call.raw` / `call.raw ?? ""`）—— '
+      + '取成别的字段、写成空串字面量、或用 `&&` 兜底（值恒空）都不算',
+    ).toBe(true);
   });
+
+  it('writes the assistant message anchor into the tool call source', () => {
+    // ⚠️⚠️ **存储腿自带锚点这条链路的唯一发送点，此前零覆盖**（实测：删掉那行展开，
+    // 当时全量 1629 条用例 + `tsc` **全绿**）。它的字段是 `string | null` 的可选字段，
+    // 缺省**合法** ⇒ `isToolCallSource` 照样放过记录，只是那条记录退回「靠签名合流」
+    // —— 静默降级，正是这条链路当初要消掉的那一格。
+    //
+    // 判据两条，缺一不可：
+    // ① `executeDetected` 体内必须调 `readCurrentAssistantMessageId()`（值从 DOM 读）；
+    // ② 那个值必须被写进 **`callWithSource` 的 `source: { … }` 里**。
+    //
+    // ⚠️⚠️ **② 必须锚在 `source` 那个对象字面量上**，不能全函数扫 `assistantMessageId`
+    // 属性 —— 把它挪到 `ToolCall` 顶层（`callWithSource` 的兄弟属性）时**全函数扫描照样绿**
+    // 且 `tsc` 也绿（对象展开不触发多余属性检查），而下游读的是
+    // `item.call?.source?.assistantMessageId` ⇒ 锚点**永久为 null**、静默退回签名合流。
+    const program = readContentProgram();
+    const executeBody = findFunctionBody(program, 'executeDetected');
+
+    let readsAnchor = 0;
+    const anchorNames = new Set<string>();
+    walkSourceAst(executeBody!, (node) => {
+      if (t.isCallExpression(node) && t.isIdentifier(node.callee)
+        && node.callee.name === 'readCurrentAssistantMessageId') {
+        readsAnchor += 1;
+      }
+      // `const assistantMessageId = readCurrentAssistantMessageId();`
+      if (t.isVariableDeclarator(node) && t.isIdentifier(node.id) && node.init) {
+        const init = t.isAwaitExpression(node.init) ? node.init.argument : node.init;
+        if (t.isCallExpression(init) && t.isIdentifier(init.callee)
+          && init.callee.name === 'readCurrentAssistantMessageId') {
+          anchorNames.add(node.id.name);
+        }
+      }
+    });
+    expect(readsAnchor, 'executeDetected 里应当读一次当前助手消息锚点').toBe(1);
+    expect(anchorNames.size, '读到的锚点应当绑定到一个标识符上').toBe(1);
+    const anchorName = [...anchorNames][0]!;
+
+    // ② `callWithSource` 的 `source` 对象字面量。
+    const sourceObject = findCallWithSourceObject(executeBody!);
+    expect(sourceObject, '应当能定位 callWithSource 的 source 对象字面量').toBeDefined();
+
+    // ⚠️⚠️ **判据必须是「`source` 的*直接*成员」**，两个方向都踩过：
+    // - 用 `walkSourceAst` 扫子树 ⇒ `source: { meta: { assistantMessageId } }` 那种
+    //   **嵌套一层**的写法会被算成「写进了 source」，而下游多一层就读不到（假绿）；
+    // - 只遍历 `sourceObject.properties` 的 `ObjectProperty` ⇒ 当前的条件展开
+    //   `...(assistantMessageId ? { assistantMessageId } : {})` **一个都收不到**（假红）。
+    // ⇒ 用 `directObjectMembers`（直接属性 + **展开里那一层**的属性，且只跟一层）。
+    const sourceWrites = directObjectMembers(sourceObject!)
+      .filter((property) => isNamedKey(property.key, 'assistantMessageId'));
+    expect(
+      sourceWrites.length,
+      'source 里应当写入 assistantMessageId（写错层 ⇒ 下游读 item.call.source.assistantMessageId 永远拿到 null）',
+    ).toBe(1);
+
+    // ⚠️⚠️ **必须直接判「值」，不能扫属性子树** —— `assistantMessageId` 这个**键名**
+    // 与绑定变量同名，扫子树时它自己就把断言满足了 ⇒ 值写成字面量 / 别的变量都绿
+    // （实测：`assistantMessageId: 'deadbeef'` 与 `assistantMessageId: chatSessionId`
+    // 两种写法下，扫子树版全绿）。
+    expect(
+      t.isIdentifier(sourceWrites[0]!.value, { name: anchorName }),
+      `写入 source 的 assistantMessageId 的值必须直接是 ${anchorName}（字面量 / 别的变量都不算接线）`,
+    ).toBe(true);
+  });
+
+  // ⚠️ **「切会话时丢掉旧记录」那条守卫已移到 `zai-content-startup-wiring-contract.test.ts`。**
+  // 它在这里曾有一份「全程序扫 `onZaiSessionChange` 回调」的弱版本，与那边那条
+  // **是同一件事的两个消费者** —— 两处各写一遍时口径必然漂（弱的那版连
+  // 「订阅被挪进死函数」都拦不住，却看着像有防护）。同一判据只留一个入口。
 });
 
 /**
@@ -515,12 +572,9 @@ describe('every finished turn seals its tool block', () => {
  */
 describe('runtime state sync failure keeps the flow and the catalog', () => {
   function findSyncBody(program: t.Program): t.BlockStatement {
-    let body: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'loadAndSyncRuntimeState') body = node.body;
-    });
-    expect(body, '应当存在 loadAndSyncRuntimeState').toBeDefined();
-    return body!;
+    // ⚠️ **走共享实现**（只认 `program.body` 的顶层声明）—— 本地 `walkSourceAst` 版本
+    // 会被一个**嵌套在同名可达函数体内**的诱饵顶替（实测：诱饵版能让全部断言照绿）。
+    return findFunctionBody(program, 'loadAndSyncRuntimeState');
   }
 
   function catchClausesOf(body: t.BlockStatement): t.CatchClause[] {
@@ -588,23 +642,15 @@ describe('runtime state sync failure keeps the flow and the catalog', () => {
 describe('authorization retry only resends a freshly synced catalog', () => {
   /** 找出 `loadAndSyncRuntimeState` 的函数体。 */
   function findSyncBody(program: t.Program): t.BlockStatement {
-    let body: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'loadAndSyncRuntimeState') body = node.body;
-    });
-    expect(body, '应当存在 loadAndSyncRuntimeState').toBeDefined();
-    return body!;
+    // ⚠️ **走共享实现**（只认 `program.body` 的顶层声明）—— 本地 `walkSourceAst` 版本
+    // 会被一个**嵌套在同名可达函数体内**的诱饵顶替（实测：诱饵版能让全部断言照绿）。
+    return findFunctionBody(program, 'loadAndSyncRuntimeState');
   }
 
   it('bails out when the sync did not produce fresh data', () => {
     const program = readContentProgram();
-    let retryBody: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'requestToolAuthorization') {
-        retryBody = node.body;
-      }
-    });
-    expect(retryBody, '应当存在 requestToolAuthorization').toBeDefined();
+    // ⚠️ **走共享实现**（只认 `program.body` 的顶层声明）。
+    const retryBody = findFunctionBody(program, 'requestToolAuthorization');
 
     // catch 分支里必须先判 `fresh`，且判为假时抛出。
     let guardsFresh = false;
@@ -648,11 +694,7 @@ describe('tool tag recognition uses the descriptors injected into this request',
   /** `handleAugmentRequestBody` 的 `handleAugmentRequestBody` 函数体。 */
   function findAugmentBody(): t.BlockStatement {
     const program = readContentProgram();
-    let body: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'handleAugmentRequestBody') body = node.body;
-    });
-    expect(body, '应当存在 handleAugmentRequestBody').toBeDefined();
+    const body = findFunctionBody(program, 'handleAugmentRequestBody');
     return body!;
   }
 
@@ -685,11 +727,7 @@ describe('tool tag recognition uses the descriptors injected into this request',
    */
   it('returns this request\'s model-facing descriptor names in the augment result', () => {
     const program = readContentProgram();
-    let body: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'handleAugmentRequestBody') body = node.body;
-    });
-    expect(body, '应当存在 handleAugmentRequestBody').toBeDefined();
+    const body = findFunctionBody(program, 'handleAugmentRequestBody');
 
     // ⚠️⚠️ **回传的必须是「模型可见目录」，不是「授权目录」。**
     // 这两者曾经混用：提示词用过滤后的、识别用未过滤的 ⇒ 用户在侧边栏关掉的 web 工具
@@ -802,11 +840,7 @@ describe('tool tag recognition uses the descriptors injected into this request',
    */
   it('binds every model-facing catalog to a single filtered computation', () => {
     const program = readContentProgram();
-    let body: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'handleAugmentRequestBody') body = node.body;
-    });
-    expect(body, '应当存在 handleAugmentRequestBody').toBeDefined();
+    const body = findFunctionBody(program, 'handleAugmentRequestBody');
 
     let filterCalls = 0;
     walkSourceAst(body!, (node) => {
@@ -925,11 +959,7 @@ describe('tool tag recognition uses the descriptors injected into this request',
 
   it('releases the per-request descriptor map alongside the other request-scoped state', () => {
     const program = readContentProgram();
-    let body: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'releaseRequestState') body = node.body;
-    });
-    expect(body, '应当存在 releaseRequestState').toBeDefined();
+    const body = findFunctionBody(program, 'releaseRequestState');
 
     let released = false;
     walkSourceAst(body!, (node) => {
@@ -1027,11 +1057,7 @@ describe('chatNew does not write request-scoped state it can never release', () 
   /** `handleAugmentRequestBody` 里 `route === 'chatNew'` 那个 if 节点。 */
   function findChatNewBranch(): t.IfStatement {
     const program = readContentProgram();
-    let body: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'handleAugmentRequestBody') body = node.body;
-    });
-    expect(body, '应当存在 handleAugmentRequestBody').toBeDefined();
+    const body = findFunctionBody(program, 'handleAugmentRequestBody');
 
     const branches: t.IfStatement[] = [];
     walkSourceAst(body!, (node) => {
@@ -1090,13 +1116,9 @@ describe('chatNew does not write request-scoped state it can never release', () 
     // 手抄的第二份清单必然分叉（B9），而这里的分叉形态是静默的：新容器没人守，
     // chatNew 一旦写了它就成了永不释放的孤儿，且不会有任何测试变红。
     const program = readContentProgram();
-    let releaseBody: t.BlockStatement | undefined;
-    walkSourceAst(program, (node) => {
-      if (t.isFunctionDeclaration(node) && node.id?.name === 'releaseRequestState') {
-        releaseBody = node.body;
-      }
-    });
-    expect(releaseBody, '应当存在 releaseRequestState').toBeDefined();
+    // ⚠️ **走共享实现**（只认 `program.body` 的顶层声明）—— 本地 `walkSourceAst` 版本
+    // 会被一个嵌套在同名可达函数体内的诱饵顶替（实测：诱饵版能让全部断言照绿）。
+    const releaseBody = findFunctionBody(program, 'releaseRequestState');
 
     const owned = new Set<string>();
     walkSourceAst(releaseBody!, (node) => {

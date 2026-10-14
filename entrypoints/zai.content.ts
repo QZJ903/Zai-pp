@@ -121,6 +121,8 @@ import { mountToolResultCards } from '../core/ui/tool-result-cards';
 import { renderToolResultWithRegistry } from '../core/ui/tool-result-renderer';
 import { injectInjectedThemeStyles, syncInjectedTheme } from '../core/ui/injected-theme';
 import { initSkillPopup, stopSkillPopup } from '../core/ui/skill-popup';
+import { wireSkillPopup } from '../core/ui/skill-popup-wiring';
+import { disposeZaiCapabilities, installZaiCapabilities, installZaiSessionWatch, notifyZaiSessionChange, syncRuntimeStateBeforeUse } from '../core/zai/capability-install';
 import { resolveZaiComposerInput, resolveZaiComposerShell } from '../core/zai/composer';
 import {
   listZaiAssistantMessages,
@@ -412,11 +414,14 @@ function isExtensionInvalidatedError(error: unknown): boolean {
 
 function invalidateExtensionContext(): void {
   extensionContextValid = false;
-  // 扩展被重载 / 卸载后这个内容脚本已经死了，但它挂在 `document` 上的捕获阶段
-  // keydown 监听还在（会一直掐断 Enter）。把补全整块卸掉，别留一个掐键的孤儿。
-  stopSkillPopup();
-  // 面板那边同理：它的 MutationObserver 还挂在页面上，卸掉别留一个观察孤儿。
-  toolPanel.dispose();
+  // 扩展被重载 / 卸载后这个内容脚本已经死了，但它挂在页面上的东西还活着 ——
+  // 补全的**捕获阶段** keydown 监听会一直掐断 Enter、面板的 MutationObserver
+  // 会一直观察一个再也无人消费的 DOM。两者都不报错，用户看到的是
+  // 「扩展重载后输入框打不了字 / 回车没反应」。
+  disposeZaiCapabilities({
+    disposeSkillPopup: stopSkillPopup,
+    disposeToolPanel: () => toolPanel.dispose(),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -605,17 +610,13 @@ function syncHookState(): void {
  * 锚点复用真机实测过的外壳解析（`resolveZaiComposerShell`）。
  */
 function syncSkillPopup(): void {
-  initSkillPopup(
-    currentSkills
-      .filter((skill) => skill.enabled !== false)
-      .map((skill) => ({ name: skill.name, description: skill.description })),
-    { hint: translate(currentContentLocale, 'content.skillPopup.hint') },
-    {
-      resolveInput: resolveZaiComposerInput,
-      resolveAnchor: (input) => resolveZaiComposerShell(input),
-      setInputValue: setTextareaValue,
-    },
-  );
+  wireSkillPopup(currentSkills, {
+    hint: translate(currentContentLocale, 'content.skillPopup.hint'),
+    init: initSkillPopup,
+    resolveInput: resolveZaiComposerInput,
+    resolveAnchor: resolveZaiComposerShell,
+    setInputValue: setTextareaValue,
+  });
 }
 
 /**
@@ -2890,18 +2891,16 @@ function reportLiveSessionToActiveTasks(): void {
 function installSessionWatch(ctx: { addEventListener: (t: Window, type: string, h: () => void) => void }): void {
   if (sessionWatchInstalled) return;
   sessionWatchInstalled = true;
-  const onLocationMaybeChanged = () => {
-    reportLiveSessionToActiveTasks();
-    notifySessionChange();
-  };
-  try {
-    ctx.addEventListener(window, 'wxt:locationchange', onLocationMaybeChanged);
-  } catch (error) {
-    console.warn('[GLM++] locationchange listener unavailable', error);
-  }
-  window.addEventListener('popstate', onLocationMaybeChanged);
-  window.addEventListener('hashchange', onLocationMaybeChanged);
-  setInterval(onLocationMaybeChanged, SESSION_WATCH_INTERVAL_MS);
+  // 三个监听源 + 一个轮询的编排搬到了 `core/zai/capability-install.ts`
+  // （依赖注入、可被测试直接调用，见那边的说明）。
+  installZaiSessionWatch({
+    reportLiveSession: reportLiveSessionToActiveTasks,
+    notifySessionChange,
+    addLocationChangeListener: (handler) => {
+      ctx.addEventListener(window, 'wxt:locationchange', handler);
+    },
+    intervalMs: SESSION_WATCH_INTERVAL_MS,
+  });
 }
 
 /** 订阅「地址里的会话变了」。返回取消订阅函数。 */
@@ -2913,18 +2912,14 @@ function onZaiSessionChange(listener: () => void): () => void {
 }
 
 function notifySessionChange(): void {
-  // 1s 轮询会每秒调到这里，所以先比对会话 id —— 没真变就不打扰订阅者，
-  // 否则项目面板会被每秒重绘一次。
-  const sessionId = getCurrentChatSessionId();
-  if (sessionId === lastNotifiedSessionId) return;
-  lastNotifiedSessionId = sessionId;
-  for (const listener of sessionChangeListeners) {
-    try {
-      listener();
-    } catch (error) {
-      console.warn('[GLM++] session change listener failed', error);
-    }
-  }
+  notifyZaiSessionChange({
+    getCurrentSessionId: getCurrentChatSessionId,
+    listeners: sessionChangeListeners,
+    readLastNotified: () => lastNotifiedSessionId,
+    writeLastNotified: (value) => {
+      lastNotifiedSessionId = value;
+    },
+  });
 }
 
 /** 上一次通知出去的会话 id（含 null：从会话页回到首页也算一次变化）。 */
@@ -3774,45 +3769,27 @@ export default defineContentScript({
       return undefined;
     });
 
-    installPeakDialogAutoDismiss();
-    installStopObserver();
-    installSessionWatch(ctx);
-    void installBackgroundCapability();
-    installInjectedThemeWatch();
-    installProjectPanel();
-    // 隐藏续跑 / nudge 模板气泡：那是我们注入的 prompt，页面把它当用户消息渲染出来。
-    // 刷新后那一份由历史清洗换占位符处理；这里管**当场这份**。
-    // ⚠️ 站点选择器假设在 `core/zai/continuation-bubble.ts` 的常量里（错了只是气泡
-    // 照旧可见，不连累主流程）。
-    installContinuationBubbleHider({
-      onHidden: (count) => console.warn('[GLM++] hid continuation bubble', { count }),
+    // 启动链的编排搬到了 `core/zai/capability-install.ts`（依赖注入、可被测试直接调用）。
+    // ⚠️ **顺序与「哪几处不等 promise」都是契约的一部分**，理由逐条写在那边的注释里。
+    installZaiCapabilities({
+      installPeakDialogAutoDismiss,
+      installStopObserver,
+      installSessionWatch: () => installSessionWatch(ctx),
+      installBackgroundCapability,
+      installInjectedThemeWatch,
+      installProjectPanel,
+      installContinuationBubbleHider,
+      installToolPanel: () => toolPanel.install(),
+      onSessionChange: onZaiSessionChange,
+      handleSessionChange: () => toolPanel.handleSessionChange(),
+      refreshAuth: refreshZaiAuth,
+      syncRuntimeState: loadAndSyncRuntimeState,
+      onContinuationBubblesHidden: (count) => {
+        console.warn('[GLM++] hid continuation bubble', { count });
+      },
     });
 
-    // 工具调用面板：注入样式、启动「被页面重建后重挂」的观察、
-    // 并拉一次存储腿（`glm_pp_tool_history`）补真结果。
-    // ⚠️ **必须 `void` 且吞错**（`install` 内部已吞）—— 面板是可选增强，
-    // 读取失败不该拦住后面的启动链（`loadAndSyncRuntimeState` 还在后面）。
-    void toolPanel.install();
-
-    // 切会话 ⇒ 面板丢掉旧会话的记录并重拉存储腿。
-    // ⚠️⚠️ **不接这条会出真缺陷**（真机实测）：旧会话记录的三条定位腿在新会话
-    // 全 miss，兜底腿「第一个还没被占用的消息」把它挂到**新会话的消息**上
-    // ⇒ 页面上出现几个属于别的会话的工具面板。
-    // ⚠️ 与项目面板共用同一个订阅（`notifySessionChange` 已按会话 id 去重，
-    // 不会每秒触发）。
-    onZaiSessionChange(() => {
-      toolPanel.handleSessionChange();
-    });
-
-    // 启动时把页面 localStorage 里的登录态 token 主动推进 chrome.storage。
-    // ⚠️ 后台的 service worker 读不到页面 localStorage/performance，token 只能由内容脚本给；
-    // 而 fetch hook 那条捕获链要**用户发出第一条消息**才会触发 —— 在此之前后台读 token
-    // 只会拿到 null（表现：自动化页的模型下拉退化成内置兜底清单）。
-    // 这里是那条兜底链的**发送方**（`REFRESH_ZAI_AUTH` 那条 runtime 消息已无人使用，
-    // 见 core/zai/auth.ts 的说明）—— 推送取代了「后台来问」。
-    void refreshZaiAuth();
-
-    await loadAndSyncRuntimeState();
+    await syncRuntimeStateBeforeUse({ syncRuntimeState: loadAndSyncRuntimeState });
   },
 });
 

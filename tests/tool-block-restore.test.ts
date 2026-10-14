@@ -630,14 +630,43 @@ describe('records from another conversation are never mounted', () => {
     // ⚠️⚠️ **真机实测的错挂场景**：切过会话后，旧记录的三条定位腿全 miss
     // （`messageId` 与正文片段在新会话的 DOM 里都不存在），兜底腿
     // 「第一个还没被占用的消息」就把它挂到了**新会话的消息**上。
+    //
+    // ⚠️⚠️ **这条走的是「有锚点的记录不许用兜底腿」那条规则**（`resolveTarget` 里
+    // `if (record.messageId) return null;`），**不是会话判据** —— 实测：把
+    // `isRecordOnCurrentSession` 改成恒 `true`，这条**照样绿**。
+    // 会话判据的覆盖在同组的孪生用例（`messageId: null`）里。
     const harness = buildHarness({ getChatSessionId: () => 'session-new' });
     harness.messages[0].classList.add(`message-${UUID_A}`);
 
     harness.controller.remember([record({
       id: 'history:old',
       // ⚠️ 故意给一个当前 DOM 里**不存在**的 messageId + 一段匹配不上的正文
-      // ⇒ 前三条腿必然 miss，只剩兜底腿。
       messageId: UUID_B,
+      content: '这段正文在新会话里不存在',
+      chatSessionId: 'session-old',
+    })]);
+    harness.controller.renderPending();
+
+    expect(harness.rendered).toEqual([]);
+  });
+
+  it('refuses the fallback leg for an anchor-less record from another session', () => {
+    // ⚠️⚠️ **这才是 `isRecordOnCurrentSession` 的唯一覆盖**（上面那条被
+    // 「有锚点的记录不许用兜底腿」提前拦掉了）。实测：把 `isRecordOnCurrentSession`
+    // 改成恒 `true`，**当时全量 1642 条用例全绿** —— 因为整个文件里 `parentMessageId`
+    // 与 `chatSessionId` 的非 null 组合从没喂到这条路上。
+    //
+    // 形状必须**同时**满足三件事，否则走不到兜底腿：
+    // ① `messageId: null`（有锚点会提前 return）；② 正文片段匹配不上任何消息；
+    // ③ `source !== 'storage'`（存储腿不用兜底腿）。缺任何一条，
+    // 这条用例就变成在测别的规则了。
+    const harness = buildHarness({ getChatSessionId: () => 'session-new' });
+    harness.messages[0].classList.add(`message-${UUID_A}`);
+
+    harness.controller.remember([record({
+      id: 'history:old',
+      messageId: null,
+      source: 'history',
       content: '这段正文在新会话里不存在',
       chatSessionId: 'session-old',
     })]);

@@ -43,6 +43,34 @@ function buildRealisticMessage(uuid: string, text = '正文内容足够长用于
 }
 
 /**
+ * 造一条**不带 `message-<uuid>` 锚点**的助手消息。
+ *
+ * ⚠️⚠️ **它是「只能靠签名合流」那一格的载体，不是省事的写法** —— 实时腿的块 id 是
+ * 「有锚点用 `history:<uuid>`、没有才退回 `live:<requestId>`」，而历史腿恒为
+ * `history:<uuid>`。**气泡带 uuid 时两条腿同 id、走 `refresh` 那条路**，
+ * 于是「实时腿的签名对不对」这件事**根本参与不到判定里**（签名只在跨 id 合流时用）。
+ * ⇒ 凡是要验「`raw` 有没有真的登记进去」的用例，**都必须用这个 helper**。
+ */
+function buildMessageWithoutAnchor(text = '这是一段足够长的助手正文内容'): HTMLElement {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'flex w-full gap-4';   // ⚠️ 刻意不带 message-<uuid>
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-assistant w-full min-w-full markdown-prose';
+  const host = document.createElement('div');
+  host.id = 'response-content-container';
+  const prose = document.createElement('div');
+  prose.className = 'markdown-prose';
+  const paragraph = document.createElement('p');
+  paragraph.textContent = text;
+  prose.appendChild(paragraph);
+  host.appendChild(prose);
+  bubble.appendChild(host);
+  wrapper.appendChild(bubble);
+  document.body.appendChild(wrapper);
+  return bubble;
+}
+
+/**
  * 让恢复编排层的调度跑完。
  *
  * ⚠️⚠️ **不能只等一次宏任务** —— 编排层的重试间隔是 250ms（生产值），
@@ -51,6 +79,10 @@ function buildRealisticMessage(uuid: string, text = '正文内容足够长用于
  * 第一版只等一次 `setTimeout(…, 0)`，于是「合流后有没有重画」这件事根本没被观察到。
  * ⚠️ 测试里把 `retryDelayMs` 压到 1ms（生产是 250ms，那是与「页面重建 DOM 需要多久」
  * 相称的值，缩短会把重试次数在 DOM 就绪前耗光）。
+ * ⚠️ **这里是真实墙钟等待**（不是 `vi.useFakeTimers()`）：面板的调度链上挂着
+ * `requestAnimationFrame` 与 `queueMicrotask`，把它们全换成假时钟要连编排层与
+ * observer 一起接管，收益不抵风险。等待量（20ms）比链上最长的间隔（1ms）高一个量级，
+ * 连跑多轮无抖动 —— 若将来要收紧，改法是换假时钟，**不是把 20 调小**。
  */
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
 
@@ -634,13 +666,20 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
   });
 
   it('registers a raw without drawing a running row', async () => {
-    // ⚠️⚠️ **P1-1**：原生轮那条**兜底执行路径**（`handleResponseComplete` 里
+    // ⚠️⚠️ **原生轮那条兜底执行路径**（`handleResponseComplete` 里
     // `executionsByRequest` 为空时现场 `executeDetected`）**刻意不调 `beginToolCall`**
     // —— 那时这一轮已快结束，塞一行「执行中」只会给用户一个稍纵即逝的闪烁。
     // 但 `raw` 是**合流签名的一半**，只有 `beginToolCall` 会写它 ⇒ 那条路上
     // 实时腿的签名恒为「工具名 + 空串」、**与历史腿永远配不上** ⇒ 同一轮画两块面板。
     // ⇒ 把「画不画 pending 行」与「登记不登记 raw」解耦，这条用例守后者。
-    buildRealisticMessage(UUID_A, '这是一段足够长的助手正文内容');
+    //
+    // ⚠️⚠️ **必须用「不带锚点」的气泡**（见 `buildMessageWithoutAnchor`）：带 uuid 时
+    // 两条腿同 id、走 `refresh` 那条路，**签名根本不参与判定** ⇒ 这条用例会变成同义反复
+    // （实测：把 `noteToolCallRaw` 改成存空串，带锚点版本**照样全绿**）。
+    // ⚠️ **判据用记录条数而不是块数**：块数在这里其实也能区分（没合上时历史腿会走
+    // **内容片段腿**自己画出一块 ⇒ 2），但它受「正文片段有没有命中」影响，
+    // 多一个无关变量；`records` 直接量的是合流结果本身。
+    buildMessageWithoutAnchor();
     const raw = '<shell_exec>{"command":"ls"}</shell_exec>';
     const panel = makePanel();
     await panel.install();
@@ -665,6 +704,7 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
       calls: [{ name: 'shell_exec', raw }],
     }], 'chat-1');
     await settle();
+    expect(panel.snapshot().records, '两条腿必须按签名合成一条（没合上 = 2）').toBe(1);
     expect(document.querySelectorAll('.dpp-tool-block')).toHaveLength(1);
   });
 
@@ -673,25 +713,11 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     // 记进会话、并在投给编排层时填进 `calls[].raw`。写死空串的话实时腿的签名
     // 恒为「工具名 + 空串」，与历史腿永远配不上。
     //
-    // ⚠️ **必须造「读不到消息 uuid」那一格**（气泡不带 `message-<uuid>` 类）——
+    // ⚠️ **必须造「读不到消息 uuid」那一格**（见 `buildMessageWithoutAnchor`）——
     // 那时实时腿的 id 退化成 `live:<requestId>`，与历史腿的 `history:<uuid>` 不同，
     // **只能靠签名合流** ⇒ raw 有没有带上就决定了「一块还是两块」。
     // 气泡带 uuid 时两条腿同 id、走 refresh 那条路，raw 对不对都看不出来。
-    const wrapper = document.createElement('div');
-    wrapper.className = 'flex w-full gap-4';   // ⚠️ 刻意不带 message-<uuid>
-    const bubble = document.createElement('div');
-    bubble.className = 'chat-assistant w-full min-w-full markdown-prose';
-    const host = document.createElement('div');
-    host.id = 'response-content-container';
-    const prose = document.createElement('div');
-    prose.className = 'markdown-prose';
-    const paragraph = document.createElement('p');
-    paragraph.textContent = '这是一段足够长的助手正文内容';
-    prose.appendChild(paragraph);
-    host.appendChild(prose);
-    bubble.appendChild(host);
-    wrapper.appendChild(bubble);
-    document.body.appendChild(wrapper);
+    buildMessageWithoutAnchor();
 
     const panel = makePanel();
     await panel.install();

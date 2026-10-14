@@ -5,6 +5,10 @@ import {
 } from '../core/zai/history-tool-names';
 import { stripZaiHistoryResponse } from '../core/zai/history-cleanup';
 import { ZAI_CONTINUATION_PLACEHOLDER } from '../core/zai/continuation-marker';
+import {
+  buildZaiContinuationPrompt,
+  buildZaiNudgePrompt,
+} from '../core/zai/continuation';
 import { installZaiFetchHook, updateZaiHookState } from '../core/zai/fetch-hook';
 import {
   findZaiToolXmlStripRanges,
@@ -347,38 +351,41 @@ describe('stripZaiHistoryResponse: shape tolerance', () => {
 describe('stripZaiHistoryResponse: continuation / nudge templates', () => {
   const toolNames = resolveHistoryToolNames(new Set<string>());
 
-  /** 续跑模板的真实形态（与 `buildZaiContinuationPrompt` 的拼接同序）。 */
-  const CONTINUATION_TEMPLATE = [
-    '以下是工具续跑任务刚刚执行的工具结果。请像真正的 Agent 一样，基于原始任务和这些工具结果继续推进。',
-    '如果结果已经足够，请输出最终结论；只有确实需要更多信息、验证或文件修改时才继续调用工具。',
-    '不要要求用户点击继续，也不要输出伪工具调用 JSON；需要继续操作时只输出可执行 XML 工具标签。',
-    '本轮可用的本地工具标签（只输出这些，别用沙箱工具）：memory_save, shell_exec',
-    '',
-    '<original_task>',
+  /** 模板里那条工具结果的真实形状（与生产 `ToolExecutionRecord` 同形）。 */
+  function execution(overrides: Record<string, unknown> = {}) {
+    return {
+      name: 'shell_exec',
+      result: { ok: true, summary: '列出 3 个文件' },
+      ...overrides,
+    } as never;
+  }
+
+  /**
+   * 续跑 / nudge 模板 —— **真渲染派生，不手抄文案**。
+   *
+   * ⚠️⚠️ **为什么必须派生**（同批的 `zai-continuation-bubble.test.ts` 已把这条写成守则）：
+   * 这两份文本是**我们自己拼的**，生产端唯一的真源是 `buildZaiContinuationPrompt` /
+   * `buildZaiNudgePrompt`。手抄一份的失效形态是**静默**的 —— 改模板（换一句话、
+   * 加一段失败恢复、改 `isAgent` 分支的措辞、甚至换掉结构标签）之后，
+   * 这里的 fixture 仍是旧的，于是**这些用例开始测一个生产里已经不存在的字符串**，
+   * 而它们恰好是「刷新后用户看得见」那一半的唯一守卫。
+   * ⚠️ 实测：把 `continuation.ts` 的结构标签从 `<original_task>` 换成别的，
+   * 手抄版的 47 条用例**全绿**、而派生版的气泡侧用例**红 11 条**。
+   */
+  const CONTINUATION_TEMPLATE = buildZaiContinuationPrompt(
     '看看桌面有什么',
-    '</original_task>',
-    '',
-    '<tool_results>',
-    '[{"tool":"shell_exec","ok":true,"summary":"列出 3 个文件"}]',
-    '</tool_results>',
-  ].join('\n');
+    [execution()],
+    ['memory_save', 'shell_exec'],
+  );
 
   /** nudge 模板（用的是 `<tool_results_so_far>`，与续跑模板只差这一个标签）。 */
-  const NUDGE_TEMPLATE = [
-    '上一轮回复没有包含任何可执行工具 XML，因此自动化续跑无法继续执行。',
-    '请根据原始任务和工具结果二选一：',
-    '1. 如果任务仍未完成，本轮必须直接输出下一步可执行工具 XML。',
-    '2. 如果任务已经完成，输出 <task_complete>{"summary":"..."}</task_complete>。',
-    '这是第 1 次无工具调用纠偏。',
-    '',
-    '<original_task>',
+  const NUDGE_TEMPLATE = buildZaiNudgePrompt(
     '看看桌面有什么',
-    '</original_task>',
-    '',
-    '<tool_results_so_far>',
-    '[]',
-    '</tool_results_so_far>',
-  ].join('\n');
+    '上轮正文',
+    [],
+    1,
+    ['memory_save', 'shell_exec'],
+  );
 
   function userMessageBody(content: string): unknown {
     return { data: { [UUID_A]: { id: UUID_A, role: 'user', content } } };
@@ -675,6 +682,55 @@ describe('stripZaiHistoryResponse: tool record collection (panel anchors)', () =
     // ⚠️ 调用记录要带**工具名与原文** —— 名字是面板要显示的，原文是与存储腿对齐的依据。
     expect(collected[0].calls).toEqual([{ name: 'shell_exec', raw: RAW }]);
   });
+
+  it.each(['id', 'message_id', 'messageId'])(
+    'accepts the message-id alias `%s`',
+    (key) => {
+      // ⚠️⚠️ **服务端在两个端点上用的是不同的键名**（`GET /chats/{id}` 的
+      // `chat.history.messages.<uuid>` 与 `POST …/messages/batch` 的 `data.<uuid>`
+      // 形状不同，同端点不同版本也漂过），所以收集侧用 `firstString` 兼容三个别名。
+      // **只喂其中一个别名时，另外两个是零覆盖** —— 实测：把 `firstString` 里的
+      // `record.messageId` 那一项删掉，只喂 `message_id` 的版本**照样全绿**，
+      // 而真机上那条路径会静默变成「这条消息没有 id」⇒ 面板失去锚点。
+      const body = {
+        data: {
+          [ASSISTANT]: {
+            [key]: ASSISTANT,
+            role: 'assistant',
+            content_blocks: [{ type: 'text', content: `前缀\n${RAW}\n后缀` }],
+          },
+        },
+      };
+      const collected: any[] = [];
+      stripZaiHistoryResponse(body, { toolNames, onToolRecords: (r) => collected.push(...r) });
+      expect(collected, `消息 id 走 \`${key}\` 时应当收到一条记录`).toHaveLength(1);
+      expect(collected[0].messageId, `\`${key}\` 应当被认成消息 id`).toBe(ASSISTANT);
+    },
+  );
+
+  it.each(['parentId', 'parent_id', 'parentMessageId'])(
+    'accepts the parent-message-id alias `%s`',
+    (key) => {
+      // ⚠️⚠️ 与上面那条同源：`parentMessageId` 在**桥的那一侧**也叫这个名字
+      // （`ZaiHistoryToolRecord.parentMessageId`），最容易被误当成唯一形状。
+      // 实测：把 `firstString` 里的 `record.parentMessageId` 那一项删掉，
+      // 只喂 `parent_id` 的版本**全绿**。
+      const body = {
+        data: {
+          [ASSISTANT]: {
+            id: ASSISTANT,
+            [key]: USER,
+            role: 'assistant',
+            content_blocks: [{ type: 'text', content: `前缀\n${RAW}\n后缀` }],
+          },
+        },
+      };
+      const collected: any[] = [];
+      stripZaiHistoryResponse(body, { toolNames, onToolRecords: (r) => collected.push(...r) });
+      expect(collected, `父消息 id 走 \`${key}\` 时应当收到一条记录`).toHaveLength(1);
+      expect(collected[0].parentMessageId, `\`${key}\` 应当被认成父消息 id`).toBe(USER);
+    },
+  );
 
   it('anchors on the text that remains after stripping', () => {
     const body = {

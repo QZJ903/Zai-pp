@@ -5,6 +5,7 @@ import {
   isZaiContinuationPrompt,
 } from '../core/zai/continuation-marker';
 import {
+  ZAI_INLINE_AGENT_MAX_STEPS,
   buildZaiContinuationPrompt,
   buildZaiNudgePrompt,
 } from '../core/zai/continuation';
@@ -190,15 +191,21 @@ describe('zai continuation bubble hider', () => {
     expect(hideContinuationBubbles({ root, maxCandidates: 80 })).toBe(1);
   });
 
-  it('covers a full 25-step run plus headroom within the default window', () => {
-    // ⚠️ 默认窗口的**取值依据**：一次跑满的自动化任务最多产生 26 条用户消息
-    // （1 条原始 + 25 条续跑 prompt，见 `ZAI_INLINE_AGENT_MAX_STEPS`），
-    // 而默认窗口是 64 ⇒ 即使全部落在窗口内也够。这条把「默认值 ≥ 26」钉住，
-    // 免得将来有人把它调小到步数之下。
+  it('covers a full run plus headroom within the default window', () => {
+    // ⚠️ 默认窗口的**取值依据**：一次跑满的自动化任务最多产生 `ZAI_INLINE_AGENT_MAX_STEPS + 1`
+    // 条用户消息（1 条原始 + 每步一条续跑 prompt），而默认窗口是 64 ⇒ 即使全部落在
+    // 窗口内也够。这条把「默认值 ≥ 步数 + 1」钉住，免得将来有人把它调小到步数之下。
+    //
+    // ⚠️⚠️ **条数必须从 `ZAI_INLINE_AGENT_MAX_STEPS` 派生，不能写死** ——
+    // 实测：把步数从 25 调到 **64**（此时 `stepCount = 65 > 默认窗口 64`，窗口真的不够了）
+    // 派生版**立刻红**，而写死 26 的版本**永远不会红** —— 用例标题自称守的正是这件事。
+    // ⚠️ 调到 **40 时两版都是绿的**，而那是**正确**的（`41 ≤ 64`，窗口确实够）——
+    // 别把这个「不红」当成判据失灵。
+    const stepCount = ZAI_INLINE_AGENT_MAX_STEPS + 1;
     const prompt = buildZaiContinuationPrompt('任务', [execution()], ['shell_exec']);
-    const nodes = Array.from({ length: 26 }, () => ({ text: prompt }));
+    const nodes = Array.from({ length: stepCount }, () => ({ text: prompt }));
     const { root } = fakeRoot(nodes);
-    expect(hideContinuationBubbles({ root })).toBe(26);
+    expect(hideContinuationBubbles({ root })).toBe(stepCount);
   });
 
   it('returns 0 instead of throwing when the selector is invalid', () => {
