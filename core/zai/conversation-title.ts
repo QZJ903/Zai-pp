@@ -43,8 +43,12 @@ const TITLE_CACHE_TTL_MS = 10_000;
 const TITLE_REQUEST_TIMEOUT_MS = 5_000;
 
 export interface ZaiConversationTitleResolverDependencies {
-  /** 读登录态 token；拿不到就放弃（返回 null）。 */
-  loadToken: () => Promise<string | null>;
+  /**
+   * 读**指定站点**的登录态 token；拿不到就放弃（返回 null）。
+   *
+   * ⚠️ **站点由 `resolveOrigin()` 给，不由 token 自己带** —— 两站的 token 互不认。
+   */
+  loadToken: (origin: string) => Promise<string | null>;
   fetchImpl: (
     input: string,
     init: RequestInit,
@@ -85,12 +89,15 @@ export function createZaiConversationTitleResolver(
   const inFlight = new Map<string, Promise<string | null>>();
 
   const fetchTitle = async (conversationId: string): Promise<string | null> => {
-    const token = await dependencies.loadToken();
+    // ⚠️ **先定站点、再取那一站的 token**（同 `models.ts` 的口径）——
+    // 两次读各自发生的话，中间可以被「用户切站」插进来，token 与请求 URL 就分属两站了。
+    const origin = dependencies.resolveOrigin();
+    const token = await dependencies.loadToken(origin);
     if (!token) return null;
     let response: Awaited<ReturnType<ZaiConversationTitleResolverDependencies['fetchImpl']>>;
     try {
       response = await dependencies.fetchImpl(
-        `${dependencies.resolveOrigin()}${zaiChatDetailPath(conversationId)}`,
+        `${origin}${zaiChatDetailPath(conversationId)}`,
         {
           method: 'GET',
           headers: {

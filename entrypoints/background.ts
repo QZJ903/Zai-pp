@@ -230,10 +230,10 @@ const domTaskCoordinator = createDomTaskCoordinator({
 // ⚠️ 读 token 要带上界：`inFlight` 槽位在 `fetchLive` 的 `finally` 里释放，
 // 而 storage 半死时那个 await 永不落地 ⇒ 槽位永久占住、清单再也刷不出来。
 const zaiModelCatalog = createZaiModelCatalog({
-  loadToken: async () => (await loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS))?.token ?? null,
+  // ⚠️ **按站点取** —— 抓取器先定站点（下面那个 `resolveOrigin`）再把站点传进来。
+  // 取别站的 token 打这一站只会 401（两站 token 互不认）。
+  loadToken: async (origin) => (await loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS, origin))?.token ?? null,
   // A 兜底：后台没有页面上下文，「抓哪个站的清单」跟随最近活跃站。
-  // ⚠️ 已知缺口（本批未处置）：token 目前是**单槽**存法，可能属于另一个站 ⇒
-  // 跨站时会拿到 401、退回内置兜底清单（失败方向安全，不串数据）。
   resolveOrigin: () => readActiveZaiSiteOrigin(),
   fetchImpl: (input, init) => fetch(input, init),
 });

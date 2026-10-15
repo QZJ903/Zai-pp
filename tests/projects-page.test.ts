@@ -23,6 +23,7 @@ let root: Root | null;
 let runtimeListeners: Array<(message: unknown) => void>;
 let tabUpdatedListeners: Array<(tabId: number, changeInfo: { url?: string }) => void>;
 let tabActivatedListeners: Array<() => void>;
+let activeSiteStore: Record<string, unknown>;
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -32,6 +33,7 @@ beforeEach(() => {
   runtimeListeners = [];
   tabUpdatedListeners = [];
   tabActivatedListeners = [];
+  activeSiteStore = {};
 });
 
 afterEach(() => {
@@ -290,6 +292,69 @@ describe('ProjectsPage', () => {
     expect(container.textContent).not.toContain('当前活动标签页不是 Zai 对话');
   });
 
+  it('links a conversation to the site that owns it, not to the current site', async () => {
+    // ⚠️ **对应一个真实缺陷**：原来按「与当前页同源」判 —— 在国际站的侧边栏里，
+    // 一条**国区站**的会话会被拼成当前站的 `/c/<id>`，而那一站没有它 ⇒ 跳转失败。
+    // 两个站各有一份会话，同一条会话**只存在于它自己那一站**。
+    const state: ProjectContextState = {
+      ...EMPTY_PROJECT_STATE,
+      projects: [createProject('project-1', 'Alpha')],
+      conversations: [{
+        conversationId: 'cn-1',
+        projectId: 'project-1',
+        title: '国区站的对话',
+        url: 'https://zchat.z.ai/c/cn-1',
+        addedAt: 1,
+        lastSeenAt: 5,
+      }],
+    };
+    const sendMessage = vi.fn(async (message: { type: string }) => {
+      if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
+      if (message.type === 'GET_MEMORIES') return [];
+      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: false, error: 'none' };
+      return { ok: true };
+    });
+
+    // ⚠️ **活跃站设成国际站** —— 这样「兜底站」与「记录里的站」是两个不同的值，
+    // 判据才分得清链接是**按记录**来的还是被兜底站顶掉的（两者相同时这条断言恒真）。
+    stubActiveSite('https://chat.z.ai');
+    await renderProjectsPage(sendMessage);
+    await settle();
+
+    const link = container.querySelector<HTMLAnchorElement>('a[href*="/c/cn-1"]');
+    expect(link).toBeTruthy();
+    expect(link!.href).toBe('https://zchat.z.ai/c/cn-1');
+  });
+
+  it('falls back to a rebuilt URL when the stored one is not one of our sites', async () => {
+    const state: ProjectContextState = {
+      ...EMPTY_PROJECT_STATE,
+      projects: [createProject('project-1', 'Alpha')],
+      conversations: [{
+        conversationId: 'c1',
+        projectId: 'project-1',
+        title: '导入来的对话',
+        url: 'https://evil.test/c/c1',
+        addedAt: 1,
+        lastSeenAt: 5,
+      }],
+    };
+    const sendMessage = vi.fn(async (message: { type: string }) => {
+      if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
+      if (message.type === 'GET_MEMORIES') return [];
+      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: false, error: 'none' };
+      return { ok: true };
+    });
+
+    await renderProjectsPage(sendMessage);
+    await settle();
+
+    const link = container.querySelector<HTMLAnchorElement>('a[href*="/c/c1"]');
+    expect(link).toBeTruthy();
+    expect(link!.href).not.toContain('evil.test');
+    expect(link!.href).toMatch(/^https:\/\/(?:zchat|chat)\.z\.ai\/c\/c1$/);
+  });
+
   it('ignores tab URL changes from unrelated sites', async () => {
     const state: ProjectContextState = {
       ...EMPTY_PROJECT_STATE,
@@ -380,12 +445,27 @@ async function renderProjectsPage(sendMessage: ReturnType<typeof vi.fn>) {
         removeListener: vi.fn(),
       },
     },
+    storage: {
+      // 「最近活跃站」由内容脚本写在这把键上（见 `core/zai/active-site.ts`）。
+      // 环境没桩时读不到 ⇒ 兜底站是默认站（国区站），所以需要区分两个站的用例
+      // 得自己设一个值（见 `stubActiveSite`）。
+      local: {
+        get: vi.fn(async (key: string) => (key in activeSiteStore ? { [key]: activeSiteStore[key] } : {})),
+        set: vi.fn(async () => undefined),
+        remove: vi.fn(async () => undefined),
+      },
+    },
   });
 
   await act(async () => {
     root = createRoot(container);
     root.render(React.createElement(ProjectsPage));
   });
+}
+
+/** 设「最近活跃站」的值（侧边栏兜底拼链接时读它）。 */
+function stubActiveSite(origin: string) {
+  activeSiteStore.glm_pp_active_site = { origin, at: 1 };
 }
 
 async function enterProjectName(value: string) {

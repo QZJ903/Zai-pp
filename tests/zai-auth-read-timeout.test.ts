@@ -142,18 +142,29 @@ describe('conversation title resolver with a stalled auth read', () => {
  */
 describe('auth read deadline wiring', () => {
   function callArgsOfLoadZaiAuth(file: string): (t.Node | null | undefined)[][] {
+    return callArgsOf(file, 'loadZaiAuthFromStorage');
+  }
+
+  function callArgsOf(file: string, calleeName: string): (t.Node | null | undefined)[][] {
     const program = parseTypeScriptSource(file, readFileSync(file, 'utf8'));
     const calls: t.CallExpression[] = [];
     walkSourceAst(program, (node) => {
       if (!t.isCallExpression(node)) return;
       const callee = node.callee;
-      if (t.isIdentifier(callee) && callee.name === 'loadZaiAuthFromStorage') calls.push(node);
+      if (t.isIdentifier(callee) && callee.name === calleeName) calls.push(node);
     });
     return calls.map((call) => call.arguments);
   }
 
   function isDeadlineConstant(node: t.Node | null | undefined): boolean {
     return t.isIdentifier(node) && node.name === 'AUTH_READ_TIMEOUT_MS';
+  }
+
+  /** 这个实参是不是「就地判定的本页站点」——即 `currentSiteOrigin()` 调用。 */
+  function isCurrentSiteOriginCall(node: t.Node | null | undefined): boolean {
+    return t.isCallExpression(node)
+      && t.isIdentifier(node.callee)
+      && node.callee.name === 'currentSiteOrigin';
   }
 
   it('passes the deadline at both token-reading call sites', () => {
@@ -168,11 +179,47 @@ describe('auth read deadline wiring', () => {
     }
   });
 
+  it('names the site at every token-reading call site', () => {
+    // 两个站点各有自己的 token 桶，读的时候必须说清要哪一站 —— 少了这个实参，
+    // 实现只能去吃默认值，而默认站是国区站 ⇒ 在国际站上读到的会是别站的 token（401）。
+    // ⚠️ 判据同时排除**字符串字面量**：站点必须来自由调用方判定的值
+    //（内容脚本是 `currentSiteOrigin()`、后台是抓取器传进来的 `origin`），
+    // 不能在调用点写死一个站 —— 那样另一站永远拿不到自己的 token。
+    for (const file of ['entrypoints/zai.content.ts', 'entrypoints/background.ts']) {
+      for (const args of callArgsOfLoadZaiAuth(file)) {
+        expect(args[1], `${file} must pass a site origin`).toBeDefined();
+        expect(t.isStringLiteral(args[1]), `${file} must not hard-code the site`).toBe(false);
+      }
+    }
+  });
+
+  it('buckets every capture write by the page the content script runs on', () => {
+    // ⚠️ **写侧也要按站点分桶**，而且内容脚本里的正确来源只有一个：`currentSiteOrigin()`
+    //（内容脚本就在页面上，`location.origin` 是「这个 token 属于哪一站」的直接证据）。
+    // 少了这个实参或写死一个站，另一站的写入就会落到错误的桶里 —— 同样**不报错**，
+    // 只会让那一站读回一个别站的 token。
+    const calls = callArgsOf('entrypoints/zai.content.ts', 'mergeZaiAuthFromCapture');
+    expect(calls.length, 'the content script should write the captured auth').toBeGreaterThan(0);
+    for (const args of calls) {
+      expect(
+        isCurrentSiteOriginCall(args[1]),
+        'every capture write must be bucketed by currentSiteOrigin()',
+      ).toBe(true);
+    }
+  });
+
   it('keeps the merge-and-write path without a deadline', () => {
-    // ⚠️ 写路径**必须不传**：它读旧记录再覆盖写，读到 null 会把 userId / feVersion /
+    // ⚠️ 写路径**必须不传**上界：它读旧记录再覆盖写，读到 null 会把 userId / feVersion /
     // deviceId / expiresAt 一起写成 null。这条与上面那条是一对，改一边要改另一边。
+    // ⚠️ 站点参数在**第二位**（这样上面那条「第 0 个实参必须是 AUTH_READ_TIMEOUT_MS」
+    // 仍然成立），所以这里第一个实参是显式的 `undefined`。
     const calls = callArgsOfLoadZaiAuth('core/zai/auth.ts');
     expect(calls.length).toBe(1);
-    expect(calls[0]).toHaveLength(0);
+    expect(calls[0]).toHaveLength(2);
+    expect(
+      t.isIdentifier(calls[0]![0]) && (calls[0]![0] as t.Identifier).name === 'undefined',
+      'the merge path must not pass a deadline',
+    ).toBe(true);
+    expect(calls[0]![1], 'the merge path must still say which site it writes').toBeDefined();
   });
 });

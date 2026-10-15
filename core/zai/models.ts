@@ -2,8 +2,9 @@
  * z.ai 模型清单（自动化表单模型下拉的数据源）。两个站点的清单形状相同、
  * 由调用方指明抓哪一个（见 `ZaiModelCatalogDependencies.resolveOrigin`）。
  *
- * 取法：GET `/api/models`，带 `authorization: Bearer <token>`（登录态 token，即
- * content script 捕获到的 `zaiCachedAuth`），返回按「新 → 旧」排列。
+ * 取法：GET `/api/models`，带 `authorization: Bearer <token>`（登录态 token，取自
+ * content script 捕获后**按站点分桶存下**的那一份，见 `core/zai/auth.ts`），
+ * 返回按「新 → 旧」排列。
  *
  * **只保留网页模型菜单里可选的对话模型。** `/api/models` 会把服务端全部条目都返回
  * （含非对话的 Z1 / 视觉 / 内部实验 id），直接全列出来会让人选到发出去就失败的 id。
@@ -164,8 +165,13 @@ function readNonEmptyString(value: unknown): string | null {
 }
 
 export interface ZaiModelCatalogDependencies {
-  /** 读取当前登录态 token；没有则返回 null（此时直接走兜底清单）。 */
-  loadToken(): Promise<string | null>;
+  /**
+   * 读取**指定站点**的登录态 token；没有则返回 null（此时直接走兜底清单）。
+   *
+   * ⚠️ **站点的来源是 `resolveOrigin()`，不是 token 自己** —— 两站的 token 互不认，
+   * 拿别站的 token 打这一站只会 401。所以这里收站点、再由实现去取那一站的桶。
+   */
+  loadToken(origin: string): Promise<string | null>;
   fetchImpl(input: string, init: RequestInit): Promise<Pick<Response, 'ok' | 'status' | 'json'>>;
   /**
    * 抓哪个站的清单（**不含尾斜杠**）。
@@ -198,9 +204,12 @@ export function createZaiModelCatalog(
   let inFlight: Promise<ZaiModelList> | null = null;
 
   const fetchLive = async (): Promise<ZaiModelList> => {
-    const token = await dependencies.loadToken();
+    // ⚠️ **先定站点、再取那一站的 token** —— 反过来（先取 token 再定站点）会让
+    // 两次读各自发生，中间可以被「用户切站」插进来 ⇒ token 与请求 URL 分属两站。
+    const origin = await dependencies.resolveOrigin();
+    const token = await dependencies.loadToken(origin);
     if (!token) return { models: [...ZAI_FALLBACK_MODEL_OPTIONS], source: 'fallback' };
-    const response = await dependencies.fetchImpl(`${await dependencies.resolveOrigin()}${ZAI_MODEL_LIST_PATH}`, {
+    const response = await dependencies.fetchImpl(`${origin}${ZAI_MODEL_LIST_PATH}`, {
       method: 'GET',
       headers: {
         Accept: 'application/json',

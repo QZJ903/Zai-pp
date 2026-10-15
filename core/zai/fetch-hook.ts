@@ -115,6 +115,11 @@ const XHR_HOOK_MARKER = Symbol.for('zai-pp.xhr-hook-installed');
  * ⚠️ **认不出（页面不在站点集合里）时回落默认站** —— 那意味着这个页面的请求本来
  * 就不该被我们处理（路由匹配会因 origin 对不上而返回 null），回落只是让解析有个
  * 合法基准，不会放宽判据。
+ *
+ * ⚠️⚠️ **那个回落分支在同一份实现的隔离世界侧（`zai.content.ts` 的 `currentSiteOrigin`）
+ * 有对应的一段说明，两处必须同改** —— 要点：本钩子所在脚本没开 `all_frames`
+ * （只注入顶层帧）⇒ 顶层帧的 origin 必然是站点表里的一员 ⇒ 回落不可达。
+ * **打开 `all_frames` 会让它变成可达**，改之前先读那一处。
  */
 function readPageOrigin(): string {
   try {

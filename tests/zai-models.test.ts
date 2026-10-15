@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ZAI_FALLBACK_MODEL_OPTIONS,
   ZAI_MODEL_LIST_TTL_MS,
@@ -135,6 +135,25 @@ describe('zai model catalog', () => {
     expect(recorder.calls[0]!.url).toBe('https://chat.z.ai/api/models');
     const headers = recorder.calls[0]!.init.headers as Record<string, string>;
     expect(headers.authorization).toBe('Bearer token-1');
+  });
+
+  it('asks for the token of the site it is about to request', async () => {
+    // 站点与 token 必须同源：两站的 token 互不认，拿别站的 token 打这一站只会 401。
+    // ⚠️ 判据是「`loadToken` 收到的是 `resolveOrigin` 那一次的结果」——
+    // 若让 `loadToken` 自己去算站点（或先取 token 再定站点），
+    // 两次读之间可以被「用户切站」插进来，token 与 URL 就分属两站了。
+    const recorder = recordingFetch(() => jsonResponse(LIVE_RESPONSE));
+    const loadToken = vi.fn(async () => 'token-cn');
+    const catalog = createZaiModelCatalog({
+      loadToken,
+      resolveOrigin: async () => 'https://zchat.z.ai',
+      fetchImpl: recorder.fetchImpl,
+    });
+
+    await catalog.list();
+
+    expect(loadToken).toHaveBeenCalledWith('https://zchat.z.ai');
+    expect(recorder.calls[0]!.url).toBe('https://zchat.z.ai/api/models');
   });
 
   it('serves from cache inside the TTL and refetches after it expires', async () => {

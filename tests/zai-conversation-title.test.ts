@@ -83,6 +83,46 @@ describe('zai conversation title resolver', () => {
     await expect(resolver.resolve('c1')).resolves.toBeNull();
   });
 
+  it('returns null when the server answers with a rejection status', async () => {
+    // ⚠️ 这条与上面那条**走的是不同的分支**：上面是 `catch`（网络层抛），
+    // 这里是 `if (!response.ok)`。跨站时（拿别站的 token 打这一站）服务端回的是
+    // **401**，走的就是这条 —— 它会从「异常路径」变成**预期路径**。
+    const loadToken = vi.fn(async () => 'tok-from-other-site');
+    const resolver = createZaiConversationTitleResolver({
+      loadToken,
+      resolveOrigin: () => 'https://chat.z.ai',
+      fetchImpl: vi.fn(async () => ({
+        ok: false,
+        status: 401,
+        json: async () => ({ detail: 'unauthorized' }),
+      })) as never,
+    });
+
+    await expect(resolver.resolve('c1')).resolves.toBeNull();
+    expect(loadToken).toHaveBeenCalled();
+  });
+
+  it('asks for the token of the site it is about to request', async () => {
+    // 站点与 token 必须同源：解析器先定站点，再拿这个站点去取 token，
+    // 最后把请求打到同一个 origin。三者若各算一次，跨站时就会拿 A 站的 token 打 B 站。
+    const loadToken = vi.fn(async () => 'tok-cn');
+    const fetchImpl = vi.fn(async (_url: string, _init: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: async () => detail('c1', '真实会话名'),
+    }));
+    const resolver = createZaiConversationTitleResolver({
+      loadToken,
+      resolveOrigin: () => 'https://zchat.z.ai',
+      fetchImpl: fetchImpl as never,
+    });
+
+    await resolver.resolve('c1');
+
+    expect(loadToken).toHaveBeenCalledWith('https://zchat.z.ai');
+    expect(fetchImpl.mock.calls[0]![0]).toBe('https://zchat.z.ai/api/v1/chats/c1');
+  });
+
   it('caches a real title so repeated calls do not re-request', async () => {
     const { resolver, fetchImpl } = createResolver(async () => detail('c1', '真实会话名'));
 

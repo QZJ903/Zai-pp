@@ -15,7 +15,7 @@ import {
 import { PROJECT_CONTEXT_SCHEMA_VERSION } from '../../../core/project/types';
 import { ZAI_WEB_ORIGIN, isZaiSiteOrigin } from '../../../core/zai/contracts';
 import { readActiveZaiSiteOrigin } from '../../../core/zai/active-site';
-import { buildZaiChatSessionUrl } from '../../../core/zai/chat-session';
+import { resolveZaiConversationUrl } from '../../../core/zai/chat-session';
 import { createRequestGenerationFence } from '../async-state';
 import MemoryCard from '../components/MemoryCard';
 import MemoryForm from '../components/MemoryForm';
@@ -643,7 +643,10 @@ function FolderIcon() {
  *
  * ⚠️ **不能直接 `href={conversation.url || '#'}`** —— `url` 可能是空的（旧记录、
  * 或同步快照导入），那时链接会落到 `'#'`，点开是「侧边栏的放大版」而不是会话。
- * 拿不到同源 url 就按会话 id 拼（`buildZaiChatSessionUrl` 是唯一真源）。
+ * 判定与拼链接的唯一入口是 `resolveZaiConversationUrl`（**页面内的项目面板用的是同一个**）。
+ *
+ * ⚠️ **它认的是「站点集合」而不是「与当前页同源」** —— 一条国区站的会话在国际站的页面上
+ * 照样要跳得过去（会话只存在于自己那一站）。按同源判的表现是「跳转失败」。
  *
  * ⚠️ **兜底拼 URL 的 origin 走「最近活跃站」** —— 这条路径上没有任何归属信息
  * （记录里连 url 都没有），能用的只有「用户眼下在用哪个站」。它由调用方读好传进来
@@ -651,9 +654,7 @@ function FolderIcon() {
  * ⚠️ 拿不到时回落**默认站**（`readActiveZaiSiteOrigin` 的行为），比拼 `'#'` 安全。
  */
 function conversationHref(conversation: ProjectConversation, fallbackOrigin: string): string {
-  const stored = conversation.url;
-  if (stored && isZaiPageUrl(stored)) return stored;
-  return buildZaiChatSessionUrl(conversation.conversationId, fallbackOrigin);
+  return resolveZaiConversationUrl(conversation, fallbackOrigin);
 }
 
 /**

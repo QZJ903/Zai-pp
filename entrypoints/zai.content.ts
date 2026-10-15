@@ -97,6 +97,7 @@ import { decodeProjectContextState } from '../core/project/codec';
 import { selectPendingProjectPrompt } from '../core/project/prompt-context';
 import { PROJECT_UNTITLED_CONVERSATION } from '../core/project/title';
 import { buildZaiChatSessionUrl, readZaiChatSessionId } from '../core/zai/chat-session';
+import { navigateToZaiConversation } from '../core/zai/project-nav';
 import { findZaiToolXmlBlocks } from '../core/zai/tool-xml';
 import { createZaiConversationTitleResolver } from '../core/zai/conversation-title';
 import { readZaiSidebarAgentMode, zaiNewConversationPath } from '../core/zai/mode';
@@ -347,6 +348,13 @@ function getCurrentChatSessionId(): string | null {
  * 用错站的 origin 拼出来的链接会打开 401 或「会话不存在」。
  * ⚠️ 与 `fetch-hook.ts` 的 `readPageOrigin` 是同一件事的两份实现（那边跑在主世界、
  * 不能 import 本模块的东西）—— 判据都走 `resolveZaiSiteOrigin`，改口径要两处同改。
+ *
+ * ⚠️⚠️ **那个回落分支（`?? ZAI_WEB_ORIGIN`）在生产里不可达，而这条依赖一个前提**：
+ * 两条 content script（本文件与 `zai-main-world.content.ts`）的 `matches` 只声明两个站点，
+ * 且**没有开 `all_frames`**（MV3 默认 false）⇒ 只注入顶层帧 ⇒ `location.origin`
+ * 必然是站点表里的一员。**若将来为别的功能打开 `all_frames`**，iframe 里的 origin
+ * 可能落在站点表之外，这个回落就会真的生效 —— 那时它会把别处的 origin 当成默认站，
+ * 写入侧（按本页 origin 分桶）也会跟着挪到默认站的桶。改 `all_frames` 前先看这里。
  */
 function currentSiteOrigin(): string {
   return resolveZaiSiteOrigin(location.origin) ?? ZAI_WEB_ORIGIN;
@@ -1638,12 +1646,14 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
         // automation 后台复用（后台 service worker 拿不到页面 localStorage/performance）。
         const captured = data.headers as Record<string, string> | undefined;
         if (captured && (captured.token || captured.user_id || captured.Authorization)) {
+          // ⚠️ **写进本页所属站的桶** —— 内容脚本就在页面上，`location.origin` 是
+          // 「这个 token 属于哪一站」的直接证据，不需要任何推断。
           void mergeZaiAuthFromCapture({
             token: captured.token,
             userId: captured.user_id,
             feVersion: captured['X-FE-Version'] ?? captured.feVersion,
             deviceId: captured['x-device-id'] ?? captured.deviceId,
-          });
+          }, currentSiteOrigin());
         }
         return;
       }
@@ -2987,14 +2997,18 @@ async function installBackgroundCapability(): Promise<void> {
  * `window.fetch` —— 不会被自己的 hook 拦到，所以不需要绕过标记。
  */
 const conversationTitleResolver = createZaiConversationTitleResolver({
-  loadToken: async () => {
+  // ⚠️ **按站点取**（站点来自下面那个 `resolveOrigin`，即本页所属站）——
+  // 两站的 token 互不认，用别站的 token 拉标题必然 401。
+  loadToken: async (origin) => {
     // ⚠️ 读 token 要带上界：解析器的 `inFlight` 在 `fetchTitle` 之后才释放，
     // 而 storage 半死时那个 await 永不落地 ⇒ 槽位永久占住、之后每次触发都落
     // 「已尝试」跳过分支、**不自愈**。超时返回 null 后会走下面的 localStorage 兜底，
     // 那是同步读、不受影响。
-    const auth = await loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS);
+    const auth = await loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS, origin);
     if (auth?.token) return auth.token;
-    // 缓存里没有就现读页面 localStorage（与 refreshZaiAuth 同一条兜底路径）。
+    // 桶里没有就现读页面 localStorage（与 refreshZaiAuth 同一条兜底路径）。
+    // ⚠️ 页面 localStorage 属于**本页那一站**，所以这条兜底天然是站点正确的；
+    // 只要调用方给的 origin 就是本页站点（这里就是），它就是最后一道站内兜底。
     return typeof localStorage === 'undefined' ? null : localStorage.getItem('token');
   },
   // 有页面上下文 ⇒ 就地判定当前站（标题请求要打到**本页所属**的那一站）。
@@ -3201,19 +3215,14 @@ function installProjectPanel(): void {
       };
     },
     openConversation(conversation) {
-      // 存储里的 url 可能来自同步快照导入（codec 只要求它是字符串），所以不能
-      // 直接 assign —— `javascript:` 之类会被执行。非同源一律回退到按 id 拼。
-      const stored = conversation.url;
-      let target = `/c/${encodeURIComponent(conversation.conversationId)}`;
-      if (stored) {
-        try {
-          const parsed = new URL(stored, location.origin);
-          if (parsed.origin === location.origin) target = parsed.href;
-        } catch {
-          // 解析不了就用上面的回退值。
-        }
-      }
-      window.location.assign(target);
+      // ⚠️ 跳转目标由 `navigateToZaiConversation` 决定（**站点取自记录本身**，
+      // 不是当前页）—— 一条国区站的会话在国际站的页面上也要跳得过去。
+      // 它同时挡掉存储里可能混进来的非站点值（同步快照导入不校验 url 形状），
+      // 所以这里不需要再自己判一次协议安全。
+      navigateToZaiConversation(conversation, {
+        currentOrigin: currentSiteOrigin(),
+        assign: (url) => window.location.assign(url),
+      });
     },
     startNewConversation() {
       // 待绑已经在调用方置好；开新会话时**沿用页面当前的模式**（chat / agent），
@@ -3822,12 +3831,13 @@ async function refreshZaiAuth(): Promise<boolean> {
     const raw = (typeof localStorage === 'undefined' ? '' : localStorage.getItem('token') ?? '');
     const token = raw.trim();
     if (!token) return false;
+    // ⚠️ **写进本页所属站的桶**（同 HEADERS_CAPTURED 那条）。
     return await mergeZaiAuthFromCapture({
       token,
       userId: readZaiUserIdFromToken(token),
       feVersion: undefined,
       deviceId: undefined,
-    });
+    }, currentSiteOrigin());
   } catch {
     return false;
   }
