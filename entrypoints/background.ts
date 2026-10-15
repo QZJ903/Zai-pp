@@ -150,7 +150,16 @@ import {
   scanDueAutomations,
 } from '../core/automation/scheduler';
 import { createDomTaskCoordinator } from '../core/zai/dom-task-coordinator';
-import { ZAI_HOME_URL, ZAI_TAB_URL_PATTERN } from '../core/zai/contracts';
+import {
+  ZAI_HOME_URL,
+  ZAI_TAB_URL_PATTERN,
+  ZAI_TAB_URL_PATTERNS,
+  ZAI_WEB_ORIGIN,
+  ZAI_WEB_ORIGINS,
+  isZaiSiteOrigin,
+  resolveZaiSiteOrigin,
+} from '../core/zai/contracts';
+import { readActiveZaiSiteOrigin } from '../core/zai/active-site';
 import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
 import { AUTH_READ_TIMEOUT_MS, loadZaiAuthFromStorage } from '../core/zai/auth';
 import { createZaiModelCatalog } from '../core/zai/models';
@@ -213,8 +222,8 @@ import type { AutomationExecutionContext } from '../core/automation/execution';
  */
 const REFRESH_AUTH_MESSAGE = { type: 'REFRESH_ZAI_AUTH' } as const;
 const domTaskCoordinator = createDomTaskCoordinator({
-  homeUrl: ZAI_HOME_URL,
-  tabUrlPattern: ZAI_TAB_URL_PATTERN,
+  // 两个站都查：只查默认站会让另一站上已开着的空闲标签页永远找不到。
+  tabUrlPatterns: ZAI_TAB_URL_PATTERNS,
   reportError: reportBackgroundStartupError,
 });
 // 模型清单：token 取自内容脚本捕获的登录态；抓不到就退回内置清单。
@@ -222,6 +231,10 @@ const domTaskCoordinator = createDomTaskCoordinator({
 // 而 storage 半死时那个 await 永不落地 ⇒ 槽位永久占住、清单再也刷不出来。
 const zaiModelCatalog = createZaiModelCatalog({
   loadToken: async () => (await loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS))?.token ?? null,
+  // A 兜底：后台没有页面上下文，「抓哪个站的清单」跟随最近活跃站。
+  // ⚠️ 已知缺口（本批未处置）：token 目前是**单槽**存法，可能属于另一个站 ⇒
+  // 跨站时会拿到 401、退回内置兜底清单（失败方向安全，不串数据）。
+  resolveOrigin: () => readActiveZaiSiteOrigin(),
   fetchImpl: (input, init) => fetch(input, init),
 });
 const externalPayloadAuthorizationCache = new ExternalPayloadAuthorizationCache();
@@ -518,11 +531,7 @@ export default defineBackground(() => {
     let context: RuntimeMessageContext;
     try {
       envelope = decodeRuntimeMessageEnvelope(message);
-      context = createRuntimeMessageContext(sender, {
-        runtimeId: chrome.runtime.id,
-        extensionOrigin: chrome.runtime.getURL('/'),
-        glmOrigin: new URL(ZAI_HOME_URL).origin,
-      });
+      context = createRuntimeMessageContext(sender, createZaiTrustPolicy());
       authorizeRuntimeMessage(envelope, context);
     } catch (error) {
       sendResponse(createRuntimeBoundaryErrorResponse(error, envelope));
@@ -532,7 +541,7 @@ export default defineBackground(() => {
     const contextForDispatch = requiresCurrentToolAuthorizationSubject(envelope.type)
       ? refreshRuntimeMessageContextFromBrowserTab(context, {
         tabs: chrome.tabs,
-        glmOrigin: new URL(ZAI_HOME_URL).origin,
+        ...createZaiTrustPolicy(),
       })
       : Promise.resolve(context);
 
@@ -658,9 +667,40 @@ async function executeLocalSkillImporterToolCall(call: ToolCall): Promise<ToolRe
   return executeBackgroundRuntimeToolCall(call, 'manual_chat');
 }
 
+/**
+ * 内容脚本 / 标签页的信任策略。
+ *
+ * ⚠️⚠️ **`additionalWebOrigins` 必须带齐另一站** —— `glmOrigin` 只是**主站**（默认站），
+ * 少了这一项，另一站（如国际站）上开着的内容脚本发来的消息会被
+ * `createRuntimeMessageContext` 判成「不受信的 web 顶层帧」而**全部拒绝**
+ * （表现：那一站的页面看着正常，但项目面板、工具执行、自动化回传全部静默失效）。
+ *
+ * ⚠️ **`glmOrigin` 只取默认站**（不是「当前站」）—— 信任判定是**集合**语义，
+ * 两个站都该受信；把「当前站」塞进主位只会让判据多一个与信任无关的变量。
+ */
+function createZaiTrustPolicy(): {
+  runtimeId: string;
+  extensionOrigin: string;
+  glmOrigin: string;
+  additionalWebOrigins: readonly string[];
+} {
+  const primary = new URL(ZAI_HOME_URL).origin;
+  return {
+    runtimeId: chrome.runtime.id,
+    extensionOrigin: chrome.runtime.getURL('/'),
+    glmOrigin: primary,
+    additionalWebOrigins: ZAI_WEB_ORIGINS.filter((origin) => origin !== primary),
+  };
+}
+
 async function broadcastToTabs(payload: Record<string, unknown>, excludeTabId?: number) {
   await broadcastRuntimeUpdate(payload, excludeTabId, {
     tabUrlPattern: ZAI_TAB_URL_PATTERN,
+    // ⚠️ **两站都要广播** —— 只发默认站会让另一站的页面收不到状态更新
+    // （表现：侧边栏改了记忆 / 技能 / 背景，那一站要刷新页面才生效）。
+    additionalTabUrlPatterns: ZAI_TAB_URL_PATTERNS.filter(
+      (pattern) => pattern !== ZAI_TAB_URL_PATTERN,
+    ),
     sendRuntimeMessage: (message) => chrome.runtime.sendMessage(message),
     queryTabsByUrl: (urlPattern) => chrome.tabs.query({ url: urlPattern }),
     sendTabMessage: (tabId, message) => chrome.tabs.sendMessage(tabId, message),
@@ -740,17 +780,26 @@ async function getCurrentGLMConversation(): Promise<
   }
 }
 
+/**
+ * 这个 URL 是不是「某条会话的页面」（两个站都认）。
+ *
+ * ⚠️ **origin 判据走 `isZaiSiteOrigin`（精确集合相等）**，不是
+ * `hostname === 'chat.z.ai'` —— 后者会让国区站的会话页**永远不被认出来**
+ * （项目页抓不到「当前对话」，面板上那一块恒空）。
+ * ⚠️ 也**不是**后缀匹配：站点自己有 `zcode.z.ai` 之类的同域子站，放宽会把信任
+ * 范围从一个站放大到一个域。
+ */
 function isGLMChatUrl(url: string | undefined): boolean {
   if (!url) return false;
   try {
     const parsed = new URL(url);
-    return parsed.hostname === 'chat.z.ai' && /^\/c\//.test(parsed.pathname);
+    return isZaiSiteOrigin(parsed.origin) && /^\/c\//.test(parsed.pathname);
   } catch {
     return false;
   }
 }
 
-/** 当前活跃对话 URL（只匹配 chat.z.ai，项目页据此抓当前对话）。已不再支持 glm 域名。 */
+/** 当前活跃对话 URL（两个站都认，项目页据此抓当前对话）。 */
 function isChatConversationUrl(url: string | undefined): boolean {
   return isGLMChatUrl(url);
 }
@@ -791,10 +840,11 @@ function getPromptInsertionErrorMessage(error: unknown): string {
     : backgroundT('background.auth.missingGLM');
 }
 
+/** 这个 URL 是不是某个站的页面（两个站都认，`INSERT_PROMPT_TEXT` 据此找 tab）。 */
 function isGLMPageUrl(url: string | undefined): boolean {
   if (!url) return false;
   try {
-    return new URL(url).hostname === 'chat.z.ai';
+    return isZaiSiteOrigin(new URL(url).origin);
   } catch {
     return false;
   }
@@ -902,6 +952,8 @@ async function executeAutomationWithContext(
         kind: 'automation',
         prompt,
         chatSessionId,
+        // B 为主的输入侧：这条记录上次跑在哪个站，这次就去哪个站找/开标签页。
+        siteOrigin: request.siteOrigin ?? null,
         searchEnabled,
         model,
       },
@@ -911,8 +963,11 @@ async function executeAutomationWithContext(
         // 新会话在 chatNew 阶段读不到 /c/<id>，要等 SPA 跳转后才有值。一旦拿到就
         // 立刻落库：否则运行期间（以及中途暂停/点 Stop 之后的失败收尾）侧边栏
         // 一直显示会话「未创建」，「打开会话」按钮是灰的。
-        onSessionStarted: (liveChatSessionId) => {
-          void persistAutomationSession(request.automationId, liveChatSessionId);
+        // ⚠️ **站点必须一起拿到**（协调器在挑中标签页时就知道）—— 消费者要当场
+        // 拼一条可打开的会话 URL，而**记录里**的站点是「上一次运行」写的，
+        // 首次运行时还是 null ⇒ 会拼成默认站的链接（国际站上跑任务时点开是 401）。
+        onSessionStarted: (liveChatSessionId, siteOrigin) => {
+          void persistAutomationSession(request.automationId, liveChatSessionId, siteOrigin);
         },
       },
     );
@@ -944,6 +999,8 @@ async function executeAutomationWithContext(
       // 失败也要把「页面上已经建好的会话」带回后台：用户中途暂停 / 点 Stop 时
       // 请求里的 chatSessionId 还是 null（新会话），只有这里能补上。
       outcome.chatSessionId,
+      // 站点同理：`'tab'` 阶段失败时是 null（还没挑中标签页），下游按「不知道」处理。
+      outcome.siteOrigin ?? null,
     );
   }
 
@@ -952,15 +1009,24 @@ async function executeAutomationWithContext(
   return {
     ok: true,
     chatSessionId: finalChatSessionId ?? '',
-    sessionUrl: finalChatSessionId ? buildZaiSessionUrl(finalChatSessionId) : null,
+    sessionUrl: finalChatSessionId ? buildZaiSessionUrl(finalChatSessionId, outcome.siteOrigin) : null,
+    siteOrigin: outcome.siteOrigin,
     assistantText: outcome.assistantText,
     toolExecutions: outcome.toolExecutions,
     completedAt,
   };
 }
 
-function buildZaiSessionUrl(chatSessionId: string): string {
-  return buildZaiChatSessionUrl(chatSessionId);
+/**
+ * 拼会话 URL。
+ *
+ * ⚠️ **`siteOrigin` 是必需的** —— 会话 id 在两站之间不通用，用错站的 origin
+ * 拼出来的链接会打开一个 401 或「会话不存在」的页面。拿不到站点（旧记录、
+ * `'tab'` 阶段失败）时由调用方传默认站，**不要在这里吃 `ZAI_WEB_ORIGIN` 的默认值**
+ * —— 那会让「忘记了」看起来像「选对了」。
+ */
+function buildZaiSessionUrl(chatSessionId: string, siteOrigin: string): string {
+  return buildZaiChatSessionUrl(chatSessionId, siteOrigin);
 }
 
 /**
@@ -969,15 +1035,27 @@ function buildZaiSessionUrl(chatSessionId: string): string {
  * 运行期间就落库（不等 run 收尾）：中途暂停 / 点 Stop 会让 run 走失败收尾，
  * 而失败收尾的 runtimePatch 只有在 result 带 chatSessionId 时才写会话状态。
  * 提前落库能保证任何收尾路径下侧边栏都拿得到可打开的会话。
+ *
+ * ⚠️⚠️ **`siteOrigin` 由调用方（协调器）给，不从记录里读** —— 记录里那份是
+ * **上一次**运行写的，首次运行时还是 null；而会话 id 在两站之间不通用，
+ * 用错站的 origin 拼出来的链接点开是 401（国际站上跑任务时表现最明显）。
+ * 协调器在挑中标签页那一刻就知道本次落在哪个站，信息是齐的。
  */
 async function persistAutomationSession(
   automationId: string,
   chatSessionId: string,
+  siteOrigin: string,
 ): Promise<void> {
   try {
     const automation = await getAutomationById(automationId);
     if (!automation) return;
-    const nextSessionUrl = buildZaiSessionUrl(chatSessionId);
+    // 兜底：调用方给的站点认不出时，退回「记录里已有的证据」（记录站点 → url 的 origin
+    // → 默认站）。生产路径上不会走到 —— 协调器给的一定是站点集合里的一员。
+    const resolvedSiteOrigin = resolveZaiSiteOrigin(siteOrigin)
+      ?? resolveZaiSiteOrigin(automation.glm.siteOrigin)
+      ?? resolveZaiSiteOrigin(automation.glm.sessionUrl)
+      ?? ZAI_WEB_ORIGIN;
+    const nextSessionUrl = buildZaiSessionUrl(chatSessionId, resolvedSiteOrigin);
     // 早退条件必须校验 URL 与 id 一致：早期版本可能留下「新 id + 旧 url」的记录，
     // 只判存在性会跳过修复，「打开会话」会一直跳到上一次的对话。
     if (
@@ -991,6 +1069,7 @@ async function persistAutomationSession(
         ...automation.glm,
         chatSessionId,
         sessionUrl: nextSessionUrl,
+        siteOrigin: resolvedSiteOrigin,
       },
     });
     // 立刻广播：运行期间侧边栏就该能打开这个会话，不必等 run 收尾。

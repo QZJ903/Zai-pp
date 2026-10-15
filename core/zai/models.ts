@@ -1,5 +1,6 @@
 /**
- * chat.z.ai 模型清单（自动化表单模型下拉的数据源）。
+ * z.ai 模型清单（自动化表单模型下拉的数据源）。两个站点的清单形状相同、
+ * 由调用方指明抓哪一个（见 `ZaiModelCatalogDependencies.resolveOrigin`）。
  *
  * 取法：GET `/api/models`，带 `authorization: Bearer <token>`（登录态 token，即
  * content script 捕获到的 `zaiCachedAuth`），返回按「新 → 旧」排列。
@@ -10,8 +11,6 @@
  * 恰好命中网页菜单里那几条旗舰模型。**用字段而不是写死 id**，服务端上新模型时
  * 无需改代码。
  */
-
-import { ZAI_WEB_ORIGIN } from './contracts';
 
 export interface ZaiModelOption {
   id: string;
@@ -168,6 +167,17 @@ export interface ZaiModelCatalogDependencies {
   /** 读取当前登录态 token；没有则返回 null（此时直接走兜底清单）。 */
   loadToken(): Promise<string | null>;
   fetchImpl(input: string, init: RequestInit): Promise<Pick<Response, 'ok' | 'status' | 'json'>>;
+  /**
+   * 抓哪个站的清单（**不含尾斜杠**）。
+   *
+   * ⚠️ **必须注入、不能吃 `ZAI_WEB_ORIGIN`** —— 后者是**默认站点**（国区站）。
+   * 这个抓取器跑在**后台**、没有页面上下文，所以它的选择只有两个：
+   * ① 跟随「最近活跃站」（`readActiveZaiSiteOrigin()`，跨上下文记录，见
+   *    `core/zai/active-site.ts`）；
+   * ② 记录里带的站点（自动化那条链有明确归属时）。
+   * 这里是 ① —— 清单服务的是**自动化表单的下拉**，用户眼下在用哪个站就该列哪个站的模型。
+   */
+  resolveOrigin(): Promise<string>;
   now?(): number;
 }
 
@@ -190,7 +200,7 @@ export function createZaiModelCatalog(
   const fetchLive = async (): Promise<ZaiModelList> => {
     const token = await dependencies.loadToken();
     if (!token) return { models: [...ZAI_FALLBACK_MODEL_OPTIONS], source: 'fallback' };
-    const response = await dependencies.fetchImpl(`${ZAI_WEB_ORIGIN}${ZAI_MODEL_LIST_PATH}`, {
+    const response = await dependencies.fetchImpl(`${await dependencies.resolveOrigin()}${ZAI_MODEL_LIST_PATH}`, {
       method: 'GET',
       headers: {
         Accept: 'application/json',

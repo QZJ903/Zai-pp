@@ -67,6 +67,8 @@ function buildDeps(overrides: Partial<ZaiCapabilityDeps> = {}): {
     },
     handleSessionChange: () => record('handleSessionChange'),
     refreshAuth: async () => { record('refreshAuth'); return true; },
+    // 站点记录：与另外两处「可选增强」一样是 `void` 调用（写不进去只是兜底退回默认站）。
+    rememberActiveSite: async () => { record('rememberActiveSite'); return true; },
     syncRuntimeState: async () => { record('syncRuntimeState'); },
     onContinuationBubblesHidden: (count) => { hiddenCounts.push(count); },
     ...overrides,
@@ -93,6 +95,7 @@ describe('installZaiCapabilities: every install runs exactly once', () => {
     'installToolPanel',
     'onSessionChange',
     'refreshAuth',
+    'rememberActiveSite',
   ])('calls %s', (name) => {
     const harness = buildDeps();
     installZaiCapabilities(harness.deps);
@@ -139,13 +142,18 @@ describe('installZaiCapabilities: every install runs exactly once', () => {
   });
 
   it('does not await the optional enhancements', () => {
-    // ⚠️⚠️ **「不等」是契约的一部分** —— 背景配置 / 面板 / token 推送都是可选增强，
-    // 让它们挂住启动链会让 `syncRuntimeState` 迟迟不跑。
-    // 判据：这三处必须在**同步的那一轮**里就被调到（如果被 await 了，
+    // ⚠️⚠️ **「不等」是契约的一部分** —— 背景配置 / 面板 / token 推送 / 站点记录
+    // 都是可选增强，让它们挂住启动链会让 `syncRuntimeState` 迟迟不跑。
+    // 判据：这几处必须在**同步的那一轮**里就被调到（如果被 await 了，
     // 它们会排在 microtask 之后，而下面这行同步断言就看不到它们了）。
     const harness = buildDeps();
     installZaiCapabilities(harness.deps);
-    for (const name of ['installBackgroundCapability', 'installToolPanel', 'refreshAuth']) {
+    for (const name of [
+      'installBackgroundCapability',
+      'installToolPanel',
+      'refreshAuth',
+      'rememberActiveSite',
+    ]) {
       expect(harness.count(name), `${name} 必须在同步阶段就被发起（不能被 await 挂住）`).toBe(1);
     }
   });

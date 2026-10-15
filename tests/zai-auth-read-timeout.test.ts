@@ -118,6 +118,8 @@ describe('conversation title resolver with a stalled auth read', () => {
         status: 200,
         json: async () => ({ id: 'c1', user_id: 'u1', title: '真实会话名', chat: { id: 'c1' } }),
       })),
+      // 站点注入点：形状与 `zai.content.ts` 一致（有页面上下文 ⇒ 就地判定）。
+      resolveOrigin: () => 'https://chat.z.ai',
     });
 
     getImpl = () => new Promise<Record<string, unknown>>(() => {});

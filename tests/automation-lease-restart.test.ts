@@ -161,6 +161,7 @@ describe('automation durable lease and restart recovery', () => {
         glm: {
           chatSessionId: lateSuccess.chatSessionId,
           sessionUrl: lateSuccess.sessionUrl,
+          siteOrigin: lateSuccess.siteOrigin,
         },
       }),
     });
@@ -185,6 +186,7 @@ describe('automation durable lease and restart recovery', () => {
       glm: {
         chatSessionId: 'newer-chat',
         sessionUrl: 'https://chat.z.ai/a/chat/s/newer-chat',
+        siteOrigin: null,
       },
     });
     const oldResult = successResult(oldCompletedAt);
@@ -210,6 +212,70 @@ describe('automation durable lease and restart recovery', () => {
       },
     });
     expect((await getAutomationById(automation.id))?.nextRunAt).toBeGreaterThan(now);
+  });
+
+  it('recovers the site from the stored session URL when reconciling an interrupted run', async () => {
+    // ⚠️ **这条守的是「运行期间落库、站点没写」的旧记录** —— 会话 URL 是唯一证据。
+    // 场景：上一版（无 `siteOrigin` 字段）运行中途落库了 `sessionUrl`，随后 service worker
+    // 被杀；reconcile 改判时必须**顺手把站点补上**，否则记录会一直停在「站点未知」，
+    // 下一次运行退回 A 兜底 / 默认站 ⇒ 跑到另一站上去（会话 id 在两站不通用）。
+    vi.stubGlobal('chrome', createChromeStub());
+    const now = Date.parse('2026-07-13T08:00:00Z');
+    const automation = await createScheduledAutomation();
+    // 只写 url、`siteOrigin` 保持 null（模拟本字段之前落库的记录）。
+    await updateAutomationRuntime(automation.id, {
+      nextRunAt: now,
+      glm: {
+        chatSessionId: 'mid-run-session',
+        sessionUrl: 'https://chat.z.ai/c/mid-run-session',
+        siteOrigin: null,
+      },
+    });
+    await seedPersistedRun(makePersistedRun({
+      id: 'orphan-mid-run',
+      automationId: automation.id,
+      status: 'running',
+      scheduledFor: now,
+      createdAt: now - AUTOMATION_RUN_TIMEOUT_MS - 1,
+      startedAt: null,
+    }));
+
+    await scanDueAutomations(vi.fn(), now);
+
+    // 站点从 `sessionUrl` 的 origin 反推出来 —— 这是回退链的第三级。
+    expect((await getAutomationById(automation.id))?.glm.siteOrigin)
+      .toBe('https://chat.z.ai');
+  });
+
+  it('also writes the site on the early-return branch of the reconcile patch', async () => {
+    // ⚠️ 那条早退分支（`lastRunAt` 比这次 reconcile 的完成时间还晚）**也必须写站点** ——
+    // 只改主返回分支的话，「有更新的手动运行」这类记录会被永久跳过，站点永远修不回来。
+    vi.stubGlobal('chrome', createChromeStub());
+    const now = Date.parse('2026-07-13T08:00:00Z');
+    const automation = await createScheduledAutomation();
+    const newerCompletedAt = now - 1_000;
+    await updateAutomationRuntime(automation.id, {
+      nextRunAt: now,
+      lastRunAt: newerCompletedAt,
+      glm: {
+        chatSessionId: 'mid-run-session',
+        sessionUrl: 'https://zchat.z.ai/c/mid-run-session',
+        siteOrigin: null,
+      },
+    });
+    await seedPersistedRun(makePersistedRun({
+      id: 'orphan-older',
+      automationId: automation.id,
+      status: 'running',
+      scheduledFor: now - 60_000,
+      createdAt: now - AUTOMATION_RUN_TIMEOUT_MS - 60_000,
+      startedAt: null,
+    }));
+
+    await scanDueAutomations(vi.fn(), now);
+
+    expect((await getAutomationById(automation.id))?.glm.siteOrigin)
+      .toBe('https://zchat.z.ai');
   });
 
   it('normalizes historical runner requests that predate persisted deadlines', async () => {
@@ -304,6 +370,8 @@ function claimInput(
       prompt: current.prompt,
       trigger,
       chatSessionId: current.glm.chatSessionId,
+      // 与生产同形：请求带上「这条记录上次跑的站点」。
+      siteOrigin: current.glm.siteOrigin,
       promptOptions: current.promptOptions,
       requestedAt: startedAt,
     }),
@@ -347,6 +415,7 @@ function successResult(completedAt: number): Extract<AutomationRunnerResult, { o
     ok: true,
     chatSessionId: 'late-chat',
     sessionUrl: 'https://chat.z.ai/a/chat/s/late-chat',
+    siteOrigin: 'https://chat.z.ai',
     assistantText: 'late',
     completedAt,
   };
@@ -358,6 +427,8 @@ function failureResult(
   return {
     ok: false,
     chatSessionId: request?.chatSessionId ?? null,
+    // 超时 / 租约丢失这类失败拿不到协调器的结论 ⇒ 站点未知。
+    siteOrigin: null,
     completedAt: 4_000_100,
     error: {
       code: 'automation_run_timeout',

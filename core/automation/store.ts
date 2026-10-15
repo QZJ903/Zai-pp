@@ -77,6 +77,8 @@ export async function createAutomation(input: AutomationCreateInput): Promise<Au
       glm: {
         chatSessionId: null,
         sessionUrl: null,
+        // 新记录没有「上次跑的站点」⇒ null = 不知道（协调器据此走 A 兜底/默认站）。
+        siteOrigin: null,
       },
       createdAt: now,
       updatedAt: now,
@@ -330,6 +332,8 @@ export async function reconcileStaleRunsDetailed(
         result: {
           ok: false,
           chatSessionId: run.request?.chatSessionId ?? null,
+          // 悬挂 run 被 reconcile 改判时拿不到协调器的结果 ⇒ 站点「不知道」。
+          siteOrigin: null,
           completedAt,
           error,
         },

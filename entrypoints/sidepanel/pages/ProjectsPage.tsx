@@ -13,7 +13,8 @@ import {
   decodeProjectContextState,
 } from '../../../core/project/codec';
 import { PROJECT_CONTEXT_SCHEMA_VERSION } from '../../../core/project/types';
-import { ZAI_WEB_ORIGIN } from '../../../core/zai/contracts';
+import { ZAI_WEB_ORIGIN, isZaiSiteOrigin } from '../../../core/zai/contracts';
+import { readActiveZaiSiteOrigin } from '../../../core/zai/active-site';
 import { buildZaiChatSessionUrl } from '../../../core/zai/chat-session';
 import { createRequestGenerationFence } from '../async-state';
 import MemoryCard from '../components/MemoryCard';
@@ -67,6 +68,14 @@ export default function ProjectsPage() {
   const [showMemoryForm, setShowMemoryForm] = useState(false);
   const [editingMemory, setEditingMemory] = useState<Memory | null>(null);
   const [currentConversation, setCurrentConversation] = useState<CurrentGLMConversation | null>(null);
+  /**
+   * 兜底拼会话 URL 时用的 origin（「最近活跃站」）。
+   *
+   * ⚠️ **在侧边栏里读它而不是让 `conversationHref` 自己读** —— 那个函数是纯函数、
+   * 只做字符串判断，保持这样才好测；这里读一次、渲染时复用。
+   * 初值是默认站，异步读回来后更新（`readActiveZaiSiteOrigin` 读不到时也返回默认站）。
+   */
+  const [fallbackSiteOrigin, setFallbackSiteOrigin] = useState<string | null>(null);
   const loadFence = useRef(createRequestGenerationFence());
   const conversationFence = useRef(createRequestGenerationFence());
   const banner = useBanner();
@@ -75,6 +84,9 @@ export default function ProjectsPage() {
   useEffect(() => {
     void loadAll().catch(showProjectError);
     void refreshCurrentConversation();
+    // 兜底拼链接用的站点：读一次即可（它是「用户眼下在用哪个站」，切换站点会
+    // 触发 onUpdated/onActivated 让本页重渲染，那时会再读一次）。
+    void readActiveZaiSiteOrigin().then(setFallbackSiteOrigin).catch(() => undefined);
     const handler = (message: unknown) => {
       if (isSidepanelRuntimeEvent(message, PROJECT_UPDATE_EVENTS)) {
         void loadAll().catch(showProjectError);
@@ -91,9 +103,12 @@ export default function ProjectsPage() {
     // 触发 focus 才更新。
     const handleTabUpdated = (_tabId: number, changeInfo: chrome.tabs.OnUpdatedInfo) => {
       if (!changeInfo.url || !isZaiPageUrl(changeInfo.url)) return;
+      // 站点可能变了（用户在两站之间切）⇒ 重读兜底站点，再刷当前对话。
+      void readActiveZaiSiteOrigin().then(setFallbackSiteOrigin).catch(() => undefined);
       void refreshCurrentConversation();
     };
     const handleTabActivated = () => {
+      void readActiveZaiSiteOrigin().then(setFallbackSiteOrigin).catch(() => undefined);
       void refreshCurrentConversation();
     };
     // 可选链：单测里的 chrome stub 不一定带 tabs。
@@ -550,7 +565,7 @@ export default function ProjectsPage() {
                   <div className="space-y-1.5">
                     {projectConversations.map((conversation) => (
                       <div key={conversation.conversationId} className="flex items-center gap-2 rounded-lg border px-2.5 py-2" style={{ borderColor: 'var(--ds-border)', background: 'var(--ds-bg)' }}>
-                        <a href={conversationHref(conversation)} target="_blank" rel="noreferrer" className="flex-1 min-w-0 text-[11px] truncate" style={{ color: 'var(--ds-text)' }}>
+                        <a href={conversationHref(conversation, fallbackSiteOrigin ?? ZAI_WEB_ORIGIN)} target="_blank" rel="noreferrer" className="flex-1 min-w-0 text-[11px] truncate" style={{ color: 'var(--ds-text)' }}>
                           {conversation.title}
                         </a>
                         <span className="text-[10px] shrink-0" style={{ color: 'var(--ds-text-tertiary)' }}>
@@ -629,24 +644,25 @@ function FolderIcon() {
  * ⚠️ **不能直接 `href={conversation.url || '#'}`** —— `url` 可能是空的（旧记录、
  * 或同步快照导入），那时链接会落到 `'#'`，点开是「侧边栏的放大版」而不是会话。
  * 拿不到同源 url 就按会话 id 拼（`buildZaiChatSessionUrl` 是唯一真源）。
+ *
+ * ⚠️ **兜底拼 URL 的 origin 走「最近活跃站」** —— 这条路径上没有任何归属信息
+ * （记录里连 url 都没有），能用的只有「用户眼下在用哪个站」。它由调用方读好传进来
+ * （`fallbackOrigin`），本函数保持纯函数以便测试。
+ * ⚠️ 拿不到时回落**默认站**（`readActiveZaiSiteOrigin` 的行为），比拼 `'#'` 安全。
  */
-function conversationHref(conversation: ProjectConversation): string {
+function conversationHref(conversation: ProjectConversation, fallbackOrigin: string): string {
   const stored = conversation.url;
   if (stored && isZaiPageUrl(stored)) return stored;
-  return buildZaiChatSessionUrl(conversation.conversationId);
+  return buildZaiChatSessionUrl(conversation.conversationId, fallbackOrigin);
 }
 
 /**
- * 这个 URL 是不是 chat.z.ai 的页面。用来过滤 `chrome.tabs.onUpdated` ——
+ * 这个 URL 是不是某个站的页面。用来过滤 `chrome.tabs.onUpdated` ——
  * 只要带 `url` 的变更（SPA 的 pushState 也会触发）都过一遍这个判断，
- * 避免别的标签页导航时白刷一次。
+ * 避免别的标签页导航时白刷一次。**两个站都认**（`isZaiSiteOrigin`，精确相等）。
  */
 function isZaiPageUrl(url: string): boolean {
-  try {
-    return new URL(url).origin === new URL(ZAI_WEB_ORIGIN).origin;
-  } catch {
-    return false;
-  }
+  return isZaiSiteOrigin(url);
 }
 
 function decodeCurrentConversationResponse(value: unknown): CurrentGLMConversation | null {

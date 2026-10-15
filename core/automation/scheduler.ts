@@ -10,6 +10,7 @@ import {
 } from './store';
 import { calculateNextRunAt } from './schedule';
 import { buildZaiChatSessionUrl } from '../zai/chat-session';
+import { ZAI_WEB_ORIGIN, resolveZaiSiteOrigin } from '../zai/contracts';
 import {
   AutomationExecutionStoppedError,
   createAutomationExecutionContext,
@@ -185,6 +186,8 @@ export async function runAutomation(options: RunAutomationOptions): Promise<Auto
         prompt: automation.prompt,
         trigger: options.trigger,
         chatSessionId: automation.glm.chatSessionId,
+        // B 为主的输入侧：把这条记录上次跑的站点带进请求，协调器据此决定去哪个站。
+        siteOrigin: automation.glm.siteOrigin,
         promptOptions: automation.promptOptions,
         requestedAt: now,
       }),
@@ -329,6 +332,8 @@ async function executeWithRetry(
       result = {
         ok: false,
         chatSessionId: request.chatSessionId,
+        // 执行器自己抛错时，协调器还没来得及回传站点 ⇒ 「不知道」，守记录里的旧值。
+        siteOrigin: null,
         completedAt: now,
         error: toAutomationError(
           'automation_executor_failed',
@@ -375,6 +380,9 @@ function createRunTimeoutFailure(
   return {
     ok: false,
     chatSessionId: request.chatSessionId,
+    // 超时那一刻协调器已经挑好标签页了，但它的结果还没回来（超时就是因为它没回）
+    // ⇒ 只能按「不知道」处理，守记录里的旧站点。
+    siteOrigin: null,
     completedAt: now,
     error: toAutomationError(
       'automation_run_timeout',
@@ -403,6 +411,8 @@ function createStoppedRunFailure(
   return {
     ok: false,
     chatSessionId: request.chatSessionId,
+    // 取消 / 租约丢失都发生在「协调器还没回传结果」的时刻 ⇒ 站点「不知道」。
+    siteOrigin: null,
     completedAt: now,
     error: toAutomationError(
       cancelled ? 'automation_run_cancelled' : 'automation_run_lease_lost',
@@ -485,6 +495,33 @@ async function refreshAutomationFromExistingRun(
   });
 }
 
+/**
+ * 「这条运行落在哪个站」的**唯一**回退链 —— `createAutomationRuntimePatch` 与
+ * `createInterruptedRuntimePatch` 共用它，两条收尾路径必须给出一致的结论。
+ *
+ * 三条证据的可靠度从高到低：
+ *   ① `reportedSiteOrigin` —— **本次运行实际落在哪**（协调器挑标签页时定下的）。
+ *      只有正常收尾（`result.siteOrigin`）才拿得到；reconcile 路径恒为 null。
+ *   ② `automation.glm.siteOrigin` —— 上次运行记下的。
+ *   ③ `automation.glm.sessionUrl` 的 origin —— 本字段之前落库的旧记录只有 url，
+ *      而**那条 url 本身就是站点证据**（少了这一步，旧记录会被当成「默认站」，
+ *      于是下一次运行把会话链接指向另一站）。
+ *   ④ 默认站收口。
+ *
+ * ⚠️ **两条收尾路径共用它是必需的**：service worker 在运行中途死掉时走 reconcile，
+ * 而它拿不到 ① —— 若那条路径不写站点，「运行期间落库的错站值」会一直留到下一次
+ * 运行成功收尾才被纠正（用户看到的是侧边栏「打开会话」长期指向另一站）。
+ */
+function resolveAutomationSiteOrigin(
+  automation: Automation,
+  reportedSiteOrigin: string | null | undefined,
+): string {
+  return resolveZaiSiteOrigin(reportedSiteOrigin)
+    ?? resolveZaiSiteOrigin(automation.glm.siteOrigin)
+    ?? resolveZaiSiteOrigin(automation.glm.sessionUrl)
+    ?? ZAI_WEB_ORIGIN;
+}
+
 function createInterruptedRuntimePatch(
   automation: Automation,
   run: AutomationRun,
@@ -496,10 +533,20 @@ function createInterruptedRuntimePatch(
     run,
     Math.max(completedAt, automation.lastRunAt ?? completedAt),
   );
+  // 站点收尾：reconcile 拿不到本次运行的结论（进程都死了），所以走回退链的
+  // ② / ③ —— **但必须写**，否则 record 里可能留着「运行期间落库的错站值」，
+  // 而下次运行要靠它决定去哪一站（见 `resolveAutomationSiteOrigin` 的说明）。
+  const siteOrigin = resolveAutomationSiteOrigin(automation, null);
+  const siteChanged = automation.glm.siteOrigin !== siteOrigin;
   if (automation.lastRunAt !== null && completedAt <= automation.lastRunAt) {
-    return { nextRunAt };
+    return {
+      // 早退分支也要带上站点 —— 否则「上一次运行更晚」的情况下站点永远修不回来。
+      ...(siteChanged ? { glm: { ...automation.glm, siteOrigin } } : {}),
+      nextRunAt,
+    };
   }
   return {
+    ...(siteChanged ? { glm: { ...automation.glm, siteOrigin } } : {}),
     lastRunAt: completedAt,
     nextRunAt,
     lastError: run.error,
@@ -534,12 +581,19 @@ function createAutomationRuntimePatch(
     ? nextRunAfterCompletion(automation, completedAt)
     : automation.nextRunAt;
 
+  // 站点收尾：本次运行报了什么就用什么（那是**标签页实际所在**的站），没报就按
+  // 「记录里已有的证据」倒推，最后才吃默认站。
+  // ⚠️ **写回的值必须与 `sessionUrl` 同源** —— 下面拼 URL 用的是同一个 `siteOrigin`，
+  // 否则会出现「url 指向 A 站、记录的站点写着 B 站」的自相矛盾记录。
+  const siteOrigin = resolveAutomationSiteOrigin(automation, result.siteOrigin);
+
   if (result.ok) {
     return {
       glm: {
         ...automation.glm,
         chatSessionId: result.chatSessionId,
         sessionUrl: result.sessionUrl,
+        siteOrigin,
       },
       lastRunAt: completedAt,
       nextRunAt,
@@ -552,20 +606,24 @@ function createAutomationRuntimePatch(
   // - result 没带（超时 / 租约丢失 / 中途暂停走 request.chatSessionId 的路径）→
   //   退回记录里已有的会话，别把运行期间 persistAutomationSession 写进去的值抹掉；
   // - sessionUrl 与 id 不一致也要重写：早期版本可能留下「新 id + 旧 url」的记录，
-  //   只判「url 缺不缺」会跳过修复，「打开会话」会一直跳到上一次的对话。
+  //   只判「url 缺不缺」会跳过修复，「打开会话」会一直跳到上一次的对话；
+  // - **站点也要一起写**：即使这次没拿到会话 id，本次跑在哪个站仍是已知事实，
+  //   下一次运行要靠它决定去哪一站。
   const nextSessionId = result.chatSessionId ?? automation.glm.chatSessionId;
+  const siteChanged = automation.glm.siteOrigin !== siteOrigin;
   const sessionPatch = nextSessionId && (
     nextSessionId !== automation.glm.chatSessionId ||
-    automation.glm.sessionUrl !== buildZaiChatSessionUrl(nextSessionId)
+    automation.glm.sessionUrl !== buildZaiChatSessionUrl(nextSessionId, siteOrigin)
   )
     ? {
         glm: {
           ...automation.glm,
           chatSessionId: nextSessionId,
-          sessionUrl: buildZaiChatSessionUrl(nextSessionId),
+          sessionUrl: buildZaiChatSessionUrl(nextSessionId, siteOrigin),
+          siteOrigin,
         },
       }
-    : {};
+    : (siteChanged ? { glm: { ...automation.glm, siteOrigin } } : {});
 
   return {
     // Persist a session created during a failed run so the retry reuses it

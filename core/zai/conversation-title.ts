@@ -14,7 +14,6 @@
  */
 
 import { isPlaceholderProjectConversationTitle } from '../project/title';
-import { ZAI_WEB_ORIGIN } from './contracts';
 
 /** 单会话端点（真机实测：响应形状与 `chats/new` 同源，顶层带 `title`）。 */
 export function zaiChatDetailPath(conversationId: string): string {
@@ -50,6 +49,16 @@ export interface ZaiConversationTitleResolverDependencies {
     input: string,
     init: RequestInit,
   ) => Promise<Pick<Response, 'ok' | 'status' | 'json'>>;
+  /**
+   * 本会话所属站点的 origin（**不含尾斜杠**）。
+   *
+   * ⚠️ **必须注入、不能吃 `ZAI_WEB_ORIGIN`** —— 后者是**默认站点**（国区站）。
+   * 在国际站上，解析器用默认站的 origin 去拉标题会：
+   * ① 请求打到国区站，而两站的 token 互不认 ⇒ 401 ⇒ 拿不到标题；
+   * ② 就算拿得到，也会把请求发到一个与当前页无关的站。
+   * 内容脚本那一半传 `resolveZaiSite(location.origin)?.origin`。
+   */
+  resolveOrigin: () => string;
   now?: () => number;
 }
 
@@ -81,7 +90,7 @@ export function createZaiConversationTitleResolver(
     let response: Awaited<ReturnType<ZaiConversationTitleResolverDependencies['fetchImpl']>>;
     try {
       response = await dependencies.fetchImpl(
-        `${ZAI_WEB_ORIGIN}${zaiChatDetailPath(conversationId)}`,
+        `${dependencies.resolveOrigin()}${zaiChatDetailPath(conversationId)}`,
         {
           method: 'GET',
           headers: {

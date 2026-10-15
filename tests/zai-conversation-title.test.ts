@@ -25,6 +25,7 @@ function createResolver(
   const resolver = createZaiConversationTitleResolver({
     loadToken,
     fetchImpl: fetchImpl as never,
+    resolveOrigin: () => 'https://chat.z.ai',
     ...(options.now ? { now: options.now } : {}),
   });
   return { resolver, fetchImpl, loadToken };
@@ -75,6 +76,7 @@ describe('zai conversation title resolver', () => {
   it('returns null instead of throwing when the request fails', async () => {
     const resolver = createZaiConversationTitleResolver({
       loadToken: async () => 'tok-1',
+    resolveOrigin: () => 'https://chat.z.ai',
       fetchImpl: async () => { throw new Error('offline'); },
     });
 
@@ -178,6 +180,7 @@ describe('zai conversation title refusal paths', () => {
     let attempt = 0;
     const resolver = createZaiConversationTitleResolver({
       loadToken: async () => 'tok-1',
+      resolveOrigin: () => 'https://chat.z.ai',
       fetchImpl: async () => {
         attempt += 1;
         // 第一次模拟超时（AbortSignal 触发的 reject 也是普通异常）。

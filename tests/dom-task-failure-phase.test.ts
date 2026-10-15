@@ -25,20 +25,27 @@ function createCoordinator() {
     sendTabMessage: vi.fn(async () => ({ ok: true })),
     updateTab: vi.fn(async (tabId) => ({ id: tabId } as chrome.tabs.Tab)),
     createTab: vi.fn(async () => ({ id: 8 } as chrome.tabs.Tab)),
+    // 站点兜底：桩掉它，测试就不必依赖 chrome.storage。
+    readActiveSiteOrigin: vi.fn(async () => 'https://chat.z.ai'),
     reportError: vi.fn(),
   });
 }
 
-/** 走一遍握手把 task 登记进 pending，再回传给定的错误码。 */
+/**
+ * 走一遍握手把 task 登记进 pending，再回传给定的错误码。
+ *
+ * ⚠️ **等待用宏任务、不用「两拍微任务」** —— `startTask` 在登记 pending 之前要
+ * `await resolveDomTab`，而那里现在会**按站点逐个查标签页**（几拍微任务取决于站点数量）。
+ * 用固定拍数会在站点数量变化时静默失效（表现：`onFailed` 早于登记、promise 永不 settle
+ * ⇒ 5 秒超时）。宏任务能一次性冲干所有待决微任务。
+ */
 async function settleWithError(error: string) {
   const coordinator = createCoordinator();
   const pending = coordinator.startTask(
     { taskId: 'task-1', kind: 'automation', prompt: 'run', chatSessionId: null },
     { handshakeTimeoutMs: 1_000 },
   );
-  // 握手是异步的（sendTabMessage → 等 pending 登记），给它一拍。
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   coordinator.onFailed({ taskId: 'task-1', error });
   return pending;

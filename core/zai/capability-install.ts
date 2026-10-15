@@ -53,6 +53,14 @@ export interface ZaiCapabilityDeps {
   /** 把页面 localStorage 的登录态 token 推进 chrome.storage。**调用方不 await**。 */
   refreshAuth: () => Promise<boolean>;
   /**
+   * 记下「当前页面属于哪个站」（A 兜底用的跨上下文记录）。
+   *
+   * ⚠️ **不 await** —— 写不进去只是那几条没有页面上下文的兜底链路退回默认站
+   * （侧边栏兜底拼会话链接、后台抓模型清单），不该拖住启动。
+   * ⚠️ **只有内容脚本知道这个事实**（后台读不到 `location`），所以必须由它写。
+   */
+  rememberActiveSite: () => Promise<boolean>;
+  /**
    * 同步运行时状态（记忆 / 技能 / 工具目录 / 预设 / 联网开关）。**这一步要 await**。
    *
    * ⚠️ 返回值类型写成 `Promise<unknown>` 而不是 `Promise<void>` —— 生产的实现
@@ -114,6 +122,12 @@ export function installZaiCapabilities(deps: ZaiCapabilityDeps): () => void {
   //    **不 await**：拿不到 token 只是那条兜底链失效，不该拖住启动。
   void deps.refreshAuth();
 
+  // ⑧ 记下「当前页面属于哪个站」（A 兜底用的跨上下文记录）。
+  //    ⚠️ **不 await** —— 写不进去只是那几条没有页面上下文的兜底链路退回默认站。
+  //    ⚠️ 放在启动链里而不是别处：页面每次加载都会跑一次，正好覆盖「用户切站后
+  //    第一次打开该站页面」这个时点。
+  void deps.rememberActiveSite();
+
   return unsubscribe;
 }
 
@@ -166,6 +180,7 @@ export const ZAI_CAPABILITY_DEP_KEYS = [
   'onSessionChange',
   'handleSessionChange',
   'refreshAuth',
+  'rememberActiveSite',
   'syncRuntimeState',
   'onContinuationBubblesHidden',
 ] as const satisfies readonly (keyof ZaiCapabilityDeps)[];

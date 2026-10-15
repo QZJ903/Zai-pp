@@ -1,5 +1,9 @@
 /**
- * chat.z.ai 请求签名（HMAC-SHA256 双哈希）。
+ * z.ai 请求签名（HMAC-SHA256 双哈希）。
+ *
+ * ⚠️ **两站同一套签名** —— 真机实测（登录态、两站各自抓包）国区站发出的
+ * `X-Signature` 与本模块用 `ZAI_SIGNATURE_SECRET` 现算的值逐字一致，
+ * 所以密钥与算法都不分站点。
  *
  * 算法与 zhipu-ai-proxy/proxy/intl-sign.js、GLM-Free-API zai.go 一致，
  * 测试向量见 tests/zai.test.ts。

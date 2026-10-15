@@ -1,5 +1,5 @@
 /**
- * chat.z.ai SSE 流解析。
+ * z.ai SSE 流解析（两站同形）。
  *
  * 每行 `data: {...}`，envelope `{type:"chat:completion", data:{phase}}`。
  * phase 全集见 contracts.ts；文本三语义：

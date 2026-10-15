@@ -15,6 +15,7 @@
 import {
   ZAI_BYPASS_HOOK_HEADER,
   ZAI_WEB_ORIGIN,
+  resolveZaiSiteOrigin,
   type ZaiWebRouteName,
 } from './contracts';
 import { stripZaiHistoryResponse, type ZaiHistoryToolRecord } from './history-cleanup';
@@ -101,6 +102,27 @@ interface ZaiRequestContext {
 
 const FETCH_HOOK_MARKER = Symbol.for('zai-pp.fetch-hook-installed');
 const XHR_HOOK_MARKER = Symbol.for('zai-pp.xhr-hook-installed');
+
+/**
+ * 本 hook 所在页面的站点 origin。
+ *
+ * ⚠️⚠️ **相对 URL 的解析基准必须是它，不能是 `ZAI_WEB_ORIGIN`** —— 后者是
+ * **默认站点**（国区站）的 origin。在国际站上，页面发出的是相对路径
+ * （`/api/v2/chat/completions`），拿国区站的 origin 当 base 解析出来的
+ * origin 与请求实际的 origin 对不上 ⇒ `matchZaiWebRoute` 的站点判据失败 ⇒
+ * **增广、工具剥离、用量统计在这条链上全部静默失效**。
+ *
+ * ⚠️ **认不出（页面不在站点集合里）时回落默认站** —— 那意味着这个页面的请求本来
+ * 就不该被我们处理（路由匹配会因 origin 对不上而返回 null），回落只是让解析有个
+ * 合法基准，不会放宽判据。
+ */
+function readPageOrigin(): string {
+  try {
+    return resolveZaiSiteOrigin(location.origin) ?? ZAI_WEB_ORIGIN;
+  } catch {
+    return ZAI_WEB_ORIGIN;
+  }
+}
 
 let hookState: ZaiHookState = createEmptyHookState();
 
@@ -197,7 +219,7 @@ function captureClientHeaders(
 function readQueryToken(url: string | undefined): string {
   if (!url) return '';
   try {
-    return new URL(url, ZAI_WEB_ORIGIN).searchParams.get('token')?.trim() ?? '';
+    return new URL(url, readPageOrigin()).searchParams.get('token')?.trim() ?? '';
   } catch {
     return '';
   }
@@ -207,7 +229,7 @@ function readQueryToken(url: string | undefined): string {
 function readQueryParam(url: string | undefined, name: string): string {
   if (!url) return '';
   try {
-    return new URL(url, ZAI_WEB_ORIGIN).searchParams.get(name)?.trim() ?? '';
+    return new URL(url, readPageOrigin()).searchParams.get(name)?.trim() ?? '';
   } catch {
     return '';
   }
@@ -361,7 +383,9 @@ function hookFetch(): () => void {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input instanceof Request ? input.url : '';
     const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
 
-    const route = url && method ? matchZaiWebRoute({ url, method, baseUrl: ZAI_WEB_ORIGIN }) : null;
+    const route = url && method
+      ? matchZaiWebRoute({ url, method, baseUrl: readPageOrigin() })
+      : null;
 
     // ⚠️⚠️ **历史路由先于增广分支** —— 它们的响应体里有我们注入过的文本与工具 XML，
     // 要剥；而它们的**请求体里没有提示词**，绝不能进增广（见 `isZaiAugmentableRoute`）。
@@ -423,7 +447,7 @@ function hookXHR(): () => void {
   XMLHttpRequest.prototype.open = function (method: string, url: string | URL, ...rest: unknown[]) {
     const routeUrl = typeof url === 'string' ? url : url instanceof URL ? url.href : '';
     const route = routeUrl && typeof method === 'string'
-      ? matchZaiWebRoute({ url: routeUrl, method, baseUrl: ZAI_WEB_ORIGIN })
+      ? matchZaiWebRoute({ url: routeUrl, method, baseUrl: readPageOrigin() })
       : null;
     routes.set(this, route);
     return origOpen.apply(this, [method, url, ...rest] as Parameters<typeof origOpen>);
@@ -601,7 +625,7 @@ async function interceptCompletionResponse(
  */
 function readHistoryRouteChatSessionId(url: string): string | null {
   try {
-    const pathname = new URL(url, ZAI_WEB_ORIGIN).pathname;
+    const pathname = new URL(url, readPageOrigin()).pathname;
     const match = /^\/api\/v1\/chats\/([^/]+)/.exec(pathname);
     if (!match?.[1]) return null;
     const decoded = decodeURIComponent(match[1]);

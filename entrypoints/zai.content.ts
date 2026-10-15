@@ -112,7 +112,10 @@ import {
   ZAI_AGENT_FLAG,
   ZAI_CHAT_INPUT_SELECTOR as CHAT_INPUT_SELECTOR,
   ZAI_DOM_TASK_CANCELLED_CODE,
+  ZAI_WEB_ORIGIN,
+  resolveZaiSiteOrigin,
 } from '../core/zai/contracts';
+import { rememberActiveZaiSite } from '../core/zai/active-site';
 import { sleep } from '../core/zai/async';
 import { createToolInvocationCatalog } from '../core/tool/invocation';
 import { createLatestSyncGate } from '../core/tool/latest-sync';
@@ -335,6 +338,18 @@ const activeToolAuthorizations = new Map<string, ToolAuthorizationGrantSummary>(
 /** 当前会话 id：从地址栏 `/c/<id>` 读（`core/zai/chat-session` 是唯一核心实现）。 */
 function getCurrentChatSessionId(): string | null {
   return readZaiChatSessionId(location.pathname);
+}
+
+/**
+ * **当前页所属站点**的 origin（认不出时回落默认站）。
+ *
+ * ⚠️ **内容脚本里一切「拼本页 URL」的地方都用它** —— 会话 id 在两站之间不通用，
+ * 用错站的 origin 拼出来的链接会打开 401 或「会话不存在」。
+ * ⚠️ 与 `fetch-hook.ts` 的 `readPageOrigin` 是同一件事的两份实现（那边跑在主世界、
+ * 不能 import 本模块的东西）—— 判据都走 `resolveZaiSiteOrigin`，改口径要两处同改。
+ */
+function currentSiteOrigin(): string {
+  return resolveZaiSiteOrigin(location.origin) ?? ZAI_WEB_ORIGIN;
 }
 
 /**
@@ -785,7 +800,7 @@ async function resolveProjectContextForRequest(
         conversation: {
           conversationId: chatSessionId,
           title: cachedTitle ?? getCurrentConversationTitle(),
-          url: buildZaiChatSessionUrl(chatSessionId),
+          url: buildZaiChatSessionUrl(chatSessionId, currentSiteOrigin()),
         },
       },
     });
@@ -2982,6 +2997,8 @@ const conversationTitleResolver = createZaiConversationTitleResolver({
     // 缓存里没有就现读页面 localStorage（与 refreshZaiAuth 同一条兜底路径）。
     return typeof localStorage === 'undefined' ? null : localStorage.getItem('token');
   },
+  // 有页面上下文 ⇒ 就地判定当前站（标题请求要打到**本页所属**的那一站）。
+  resolveOrigin: currentSiteOrigin,
   fetchImpl: (input, init) => fetch(input, init),
 });
 
@@ -3161,7 +3178,7 @@ function installProjectPanel(): void {
         type: 'ADD_CONVERSATION_TO_PROJECT',
         payload: {
           projectId,
-          conversation: { conversationId, title, url: buildZaiChatSessionUrl(conversationId) },
+          conversation: { conversationId, title, url: buildZaiChatSessionUrl(conversationId, currentSiteOrigin()) },
         },
       });
     },
@@ -3644,7 +3661,9 @@ function autoSendAfterDialogDismiss(): void {
 // ---------------------------------------------------------------------------
 
 export default defineContentScript({
-  matches: ['*://chat.z.ai/*'],
+  // ⚠️ **两站都要挂** —— 见 `zai-main-world.content.ts` 的说明；manifest 阶段是
+  // 字面量、引不到真源 ⇒ **改要两处同改**。
+  matches: ['*://zchat.z.ai/*', '*://chat.z.ai/*'],
   runAt: 'document_idle',
   async main(ctx) {
     extensionContextValid = true;
@@ -3704,7 +3723,7 @@ export default defineContentScript({
             conversation: {
               conversationId,
               title: resolved ?? getCurrentConversationTitle(),
-              url: buildZaiChatSessionUrl(conversationId),
+              url: buildZaiChatSessionUrl(conversationId, currentSiteOrigin()),
             },
           });
         })();
@@ -3783,6 +3802,10 @@ export default defineContentScript({
       onSessionChange: onZaiSessionChange,
       handleSessionChange: () => toolPanel.handleSessionChange(),
       refreshAuth: refreshZaiAuth,
+      // 「最近活跃站」（A 兜底）：内容脚本是唯一知道页面在哪一站的上下文，
+      // 由它把这个事实写进 storage 供没有页面上下文的链路（侧边栏兜底拼链接、
+      // 后台抓模型清单）读取。**不 await** —— 写不进去只是那条兜底退回默认站。
+      rememberActiveSite: () => rememberActiveZaiSite(location.origin),
       syncRuntimeState: loadAndSyncRuntimeState,
       onContinuationBubblesHidden: (count) => {
         console.warn('[GLM++] hid continuation bubble', { count });

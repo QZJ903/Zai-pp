@@ -1,5 +1,5 @@
 /**
- * chat.z.ai 请求体的路由匹配、解析与重写。
+ * z.ai 请求体的路由匹配、解析与重写（两个站点共用同一套路由与形状）。
  *
  * - completion body：`signature_prompt` 是服务端权威 prompt；`messages` 只含
  *   最后一条 user 消息；agent/chat 区分靠 features.flags。
@@ -13,6 +13,7 @@ import {
   ZAI_HISTORY_WEB_ROUTES,
   ZAI_WEB_ORIGIN,
   ZAI_WEB_ROUTES,
+  isZaiSiteOrigin,
   type ZaiAugmentableWebRoute,
   type ZaiHistoryWebRoute,
   type ZaiWebRouteName,
@@ -89,12 +90,20 @@ const ZAI_ROUTE_PATTERNS: ReadonlyMap<ZaiWebRouteName, RegExp> = new Map(
 /**
  * 匹配一条请求属于哪个路由；不属于任何一个则返回 `null`。
  *
- * ⚠️ 判据是 origin 与 pathname **整串相等**（不是 `includes` / `startsWith`）——
- * 近似匹配会把「加后缀 / 藏在 query 里 / 异源」这几类一起放进来，表现是
- * **把提示词注进了不该注的请求**。拒绝面由 `tests/zai.test.ts` 逐条钉住。
+ * ⚠️ 判据是 origin 属于**站点集合**、且 pathname 与模板**整串相等**
+ * （不是 `includes` / `startsWith`）—— 近似匹配会把「加后缀 / 藏在 query 里 / 异源」
+ * 这几类一起放进来，表现是**把提示词注进了不该注的请求**。拒绝面由
+ * `tests/zai.test.ts` 逐条钉住。
+ *
+ * ⚠️ **origin 判据是「集合相等」而不是「等于某一个站」** —— z.ai 有两个站点
+ * （国区站 `zchat.z.ai` 与国际站 `chat.z.ai`，跑同一份前端产物），只认一个会让
+ * 另一个站上的扩**一条路由都匹配不上**（增广、工具剥离、用量统计全部静默失效）。
+ * ⚠️ 但它**不是**「后缀匹配」：`isZaiSiteOrigin` 是精确 equals，站点自己有
+ * `zcode.z.ai` 之类的同域子站，放宽到后缀等于把信任范围放大到一个域。
  *
  * ⚠️ **相对 URL 必须用 `new URL(url, baseUrl ?? ZAI_WEB_ORIGIN)` 兜底** ——
- * fetch hook 里拿到的就是相对路径。
+ * fetch hook 里拿到的就是相对路径（而那个 base 必须是**当前页**那一站，
+ * 否则解析出来的 origin 对不上、路由匹配失败）。
  *
  * ⚠️⚠️ **匹配上 ≠ 该增强** —— 该不该增强看 `isZaiAugmentableRoute` /
  * `isZaiHistoryRoute`。三条名单互相独立，理由见 `contracts.ts` 的说明。
@@ -105,7 +114,7 @@ export function matchZaiWebRoute(input: {
   baseUrl?: string;
 }): ZaiWebRouteName | null {
   const url = readUrl(input.url, input.baseUrl);
-  if (!url || url.origin !== ZAI_WEB_ORIGIN) return null;
+  if (!url || !isZaiSiteOrigin(url.origin)) return null;
   const method = input.method.toUpperCase();
   for (const policy of Object.values(ZAI_ROUTE_POLICY)) {
     if (method !== policy.method) continue;

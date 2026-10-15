@@ -13,6 +13,7 @@ import {
 } from '../../../core/automation/storage-codec';
 import { validateAutomationSchedule } from '../../../core/automation/schedule';
 import { buildZaiChatSessionUrl } from '../../../core/zai/chat-session';
+import { ZAI_WEB_ORIGIN, resolveZaiSiteOrigin } from '../../../core/zai/contracts';
 import {
   decodeZaiModelListResponse,
   type ZaiModelOption,
@@ -721,11 +722,25 @@ function shortId(id: string): string {
  * 会话 URL：优先用记录里的 sessionUrl；缺失**或与 id 不一致**时按 `/c/<id>` 兜底拼。
  * 后者用于历史数据、以及早期版本留下的「新 id + 旧 url」记录 —— 直接信 url 会跳到
  * 上一次的对话。URL 形状与后台共用 `buildZaiChatSessionUrl`，避免两处各拼一遍。
+ *
+ * ⚠️⚠️ **origin 必须取这条记录自己的站点，不是「当前站」** —— 会话 id 在两站之间
+ * 不通用（token 也互不认），拿错站拼出来的链接会打开一个 401 或「会话不存在」的页面。
+ * 判定顺序（每条都是**这条记录自己的证据**，越靠越可靠）：
+ *
+ * 1. `glm.siteOrigin` —— 上一次运行明确记下的站点（B 为主那一半的落点）；
+ * 2. `sessionUrl` 自身的 origin —— 旧记录没有 `siteOrigin`，但那条 url 就是证据；
+ * 3. 默认站 —— 两者都没有（从未跑过的新记录，本来也没有会话可打开）。
+ *
+ * ⚠️ **不要用「最近活跃站」** —— 那会让一条跑在 A 站的记录，在用户切到 B 站之后
+ * 被拼成 B 站的链接（B 站既没有这条会话、token 也不通用）。
  */
 function resolveSessionUrl(automation: Automation): string | null {
-  const { chatSessionId, sessionUrl } = automation.glm;
+  const { chatSessionId, sessionUrl, siteOrigin } = automation.glm;
+  const base = resolveZaiSiteOrigin(siteOrigin)
+    ?? resolveZaiSiteOrigin(sessionUrl)
+    ?? ZAI_WEB_ORIGIN;
   if (!chatSessionId) return sessionUrl;
-  const canonical = buildZaiChatSessionUrl(chatSessionId);
+  const canonical = buildZaiChatSessionUrl(chatSessionId, base);
   return sessionUrl === canonical ? sessionUrl : canonical;
 }
 

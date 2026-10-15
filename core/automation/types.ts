@@ -63,6 +63,19 @@ export interface AutomationPromptOptions {
 export interface AutomationGLMSession {
   chatSessionId: string | null;
   sessionUrl: string | null;
+  /**
+   * 这条任务**上一次运行落在哪个站**（站点 origin，如 `https://zchat.z.ai`）。
+   *
+   * ⚠️ **它与 `sessionUrl` 不是同一件事，不能互相推导**：
+   * `sessionUrl` 只有在**页面上真的建出会话**之后才有值，而这个字段在「跑过、
+   * 但没来得及建会话就失败」时也是有值的 —— 而那种情况恰恰是最需要它的：
+   * 下一次运行该去哪个站，取决于上次落在哪，与「上次有没有建成会话」无关。
+   * （从 `sessionUrl` 反推得到的是 `''`，会让下一次退回默认站、跑到另一个站上去。）
+   *
+   * ⚠️ **`null` = 不知道**（旧记录、或 `'tab'` 阶段就失败、还没挑中标签页）——
+   * 消费方要退回默认站，**不能当成「不属于任何站」**。
+   */
+  siteOrigin: string | null;
 }
 
 export interface AutomationErrorState {
@@ -107,6 +120,13 @@ export interface AutomationRunnerRequest {
   prompt: string;
   trigger: AutomationTrigger;
   chatSessionId: string | null;
+  /**
+   * 这条任务**上次跑在哪个站**（origin）。`null` = 没有归属信息（旧记录）。
+   *
+   * ⚠️ 它是「B 为主」的输入侧：协调器拿它决定去哪个站找/开标签页，
+   * 而不是去猜「用户此刻在看哪个站」。
+   */
+  siteOrigin: string | null;
   promptOptions: AutomationPromptOptions;
   locale?: SupportedLocale;
   promptContext?: AutomationPromptContext;
@@ -124,6 +144,14 @@ export interface AutomationRunnerSuccess {
   ok: true;
   chatSessionId: string;
   sessionUrl: string | null;
+  /**
+   * 本次运行落在哪个站（origin）。
+   *
+   * ⚠️ **与 `sessionUrl` 并列、不从它推导** —— `sessionUrl` 可能因为「还没建出会话」
+   * 而为 null，那时站点仍然是已知的（标签页已经挑好了），下次运行该去哪个站要靠它。
+   * ⚠️ `null` = 不知道（`'tab'` 阶段就失败）⇒ 消费方退回默认站。
+   */
+  siteOrigin: string | null;
   assistantText: string;
   toolExecutions?: ToolExecutionRecord[];
   completedAt: number;
@@ -132,6 +160,8 @@ export interface AutomationRunnerSuccess {
 export interface AutomationRunnerFailure {
   ok: false;
   chatSessionId: string | null;
+  /** 失败前已经落定的站点（`null` = 还没挑中标签页，不知道）。 */
+  siteOrigin: string | null;
   error: AutomationErrorState;
   completedAt: number;
 }

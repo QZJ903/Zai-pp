@@ -121,6 +121,7 @@ describe('zai model catalog', () => {
     const recorder = recordingFetch(() => jsonResponse(LIVE_RESPONSE));
     const catalog = createZaiModelCatalog({
       loadToken: async () => 'token-1',
+      resolveOrigin: async () => 'https://chat.z.ai',
       fetchImpl: recorder.fetchImpl,
     });
 
@@ -129,6 +130,8 @@ describe('zai model catalog', () => {
     expect(result.source).toBe('live');
     expect(result.models.map((model) => model.id)).toEqual(['x-preview-l', 'glm-5.3', 'glm-5.2']);
     expect(recorder.calls).toHaveLength(1);
+    // ⚠️ **站点由 `resolveOrigin` 注入**（默认站是国区站）—— 这里显式传国际站，
+    // 顺带钉住「抓取器不再吃 ZAI_WEB_ORIGIN 的默认值」这件事。
     expect(recorder.calls[0]!.url).toBe('https://chat.z.ai/api/models');
     const headers = recorder.calls[0]!.init.headers as Record<string, string>;
     expect(headers.authorization).toBe('Bearer token-1');
@@ -139,6 +142,7 @@ describe('zai model catalog', () => {
     const recorder = recordingFetch(() => jsonResponse(LIVE_RESPONSE));
     const catalog = createZaiModelCatalog({
       loadToken: async () => 'token-1',
+      resolveOrigin: async () => 'https://chat.z.ai',
       fetchImpl: recorder.fetchImpl,
       now: () => now,
     });
@@ -157,6 +161,7 @@ describe('zai model catalog', () => {
     const recorder = recordingFetch(() => jsonResponse(LIVE_RESPONSE));
     const catalog = createZaiModelCatalog({
       loadToken: async () => 'token-1',
+      resolveOrigin: async () => 'https://chat.z.ai',
       fetchImpl: recorder.fetchImpl,
     });
 
@@ -168,6 +173,7 @@ describe('zai model catalog', () => {
     const recorder = recordingFetch(() => jsonResponse(LIVE_RESPONSE));
     const catalog = createZaiModelCatalog({
       loadToken: async () => null,
+      resolveOrigin: async () => 'https://chat.z.ai',
       fetchImpl: recorder.fetchImpl,
     });
 
@@ -181,6 +187,7 @@ describe('zai model catalog', () => {
   it('uses the built-in list when the request fails', async () => {
     const catalog = createZaiModelCatalog({
       loadToken: async () => 'token-1',
+      resolveOrigin: async () => 'https://chat.z.ai',
       fetchImpl: async () => jsonResponse({ detail: 'nope' }, 401),
     });
 
@@ -193,6 +200,7 @@ describe('zai model catalog', () => {
   it('treats a response with no selectable model as unusable', async () => {
     const catalog = createZaiModelCatalog({
       loadToken: async () => 'token-1',
+      resolveOrigin: async () => 'https://chat.z.ai',
       fetchImpl: async () => jsonResponse({ data: [{ id: 'glm-5.2' }] }),
     });
 
@@ -207,6 +215,7 @@ describe('zai model catalog', () => {
     let failing = false;
     const catalog = createZaiModelCatalog({
       loadToken: async () => 'token-1',
+      resolveOrigin: async () => 'https://chat.z.ai',
       fetchImpl: async () => (failing
         ? jsonResponse({}, 500)
         : jsonResponse(upstream([['glm-5.3', 'GLM-5.3', { reasoning_effort: true }]]))),

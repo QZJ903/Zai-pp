@@ -165,6 +165,7 @@ const automation: Automation = {
   glm: {
     chatSessionId: null,
     sessionUrl: null,
+    siteOrigin: null,
   },
   createdAt: 1_000,
   updatedAt: 1_000,

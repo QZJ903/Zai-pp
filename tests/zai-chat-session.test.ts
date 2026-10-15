@@ -55,11 +55,19 @@ describe('zai chat session route', () => {
     expect(readZaiChatSessionId('https://evil.test/c/session-7')).toBe('session-7');
   });
 
-  it('builds an openable conversation URL from an id', () => {
-    expect(buildZaiChatSessionUrl('abc')).toBe('https://chat.z.ai/c/abc');
+  it('builds an openable conversation URL from an id (default site is the CN station)', () => {
+    // ⚠️ **默认站是国区站** —— 这个默认值只服务「没有页面上下文、也拿不到归属」的兜底；
+    // 有上下文的调用方**必须**显式传 origin（见 `buildZaiChatSessionUrl` 的说明）。
+    expect(buildZaiChatSessionUrl('abc')).toBe('https://zchat.z.ai/c/abc');
     // id 会被 URL 编码，斜杠不会逃出路径段。
-    expect(buildZaiChatSessionUrl('a/b')).toBe('https://chat.z.ai/c/a%2Fb');
-    expect(buildZaiChatSessionUrl('a b')).toBe('https://chat.z.ai/c/a%20b');
+    expect(buildZaiChatSessionUrl('a/b')).toBe('https://zchat.z.ai/c/a%2Fb');
+    expect(buildZaiChatSessionUrl('a b')).toBe('https://zchat.z.ai/c/a%20b');
+  });
+
+  it('builds against whichever site origin the caller names', () => {
+    // 两个站都拼得出来（会话 id 在两站之间不通用 ⇒ origin 必须由调用方给对）。
+    expect(buildZaiChatSessionUrl('abc', 'https://chat.z.ai')).toBe('https://chat.z.ai/c/abc');
+    expect(buildZaiChatSessionUrl('abc', 'https://zchat.z.ai')).toBe('https://zchat.z.ai/c/abc');
   });
 
   it('trims trailing slashes on a custom base url', () => {

@@ -2,10 +2,12 @@
  * GLM++ DOM 任务协调器（方案 §4.3 Step 2）。
  *
  * 自动化任务不再在后台 fetch completion，而是由后台「找到/打开一个
- * chat.z.ai 标签页 → 把 prompt 交给该页 content script → content 复用
+ * z.ai 标签页 → 把 prompt 交给该页 content script → content 复用
  * zai.content.ts 的 DOM 注入 + 续跑循环让页面自己发请求」。本模块负责：
  *
- *   1. resolveTab：找/开 chat.z.ai 标签页（优先复用空闲后台 tab，busy 一 tab 一任务）；
+ *   1. resolveTab：找/开 z.ai 标签页（优先复用空闲后台 tab，busy 一 tab 一任务；
+ *      **两个站点都查**，站点归属按「显式指定 → 已开着的标签页 → 最近活跃站」定下，
+ *      见 `resolveDomTab`）；
  *   2. startTask：握手（RUN_DOM_TASK，退避重试）→ 登记 pending → 等终态事件；
  *   3. on*Event：消费 content 回传的 DOM_TASK_STARTED/COMPLETE/FAILED。
  *
@@ -21,7 +23,15 @@
 import type { ToolExecutionRecord } from '../types';
 import { buildZaiChatSessionUrl } from './chat-session';
 import { sleep } from './async';
-import { ZAI_DOM_TASK_CANCELLED_CODE, ZAI_HOME_URL, ZAI_TAB_URL_PATTERN } from './contracts';
+import {
+  ZAI_DOM_TASK_CANCELLED_CODE,
+  ZAI_HOME_URL,
+  ZAI_SITES,
+  ZAI_TAB_URL_PATTERNS,
+  ZAI_WEB_ORIGIN,
+  resolveZaiSiteOrigin,
+} from './contracts';
+import { readActiveZaiSiteOrigin } from './active-site';
 
 export type DomTaskKind = 'automation';
 
@@ -49,11 +59,28 @@ export interface DomTaskFailedEvent {
   chatSessionId?: string | null;
 }
 
+/**
+ * 一次 DOM 任务落在**哪个站点**（origin，不含尾斜杠）。
+ *
+ * ⚠️⚠️ **它是「B 为主」那一半的载体** —— 后台没有页面上下文，而会话链接必须有
+ * 正确的 origin。协调器在 `resolveDomTab` 那一刻就知道这个任务用的是哪个站的标签页
+ * （那是它自己挑的/自己开的），所以把结论**随结果带回来**，而不是让下游去猜
+ * 「当前站是哪个」。
+ *
+ * ⚠️ **为什么不读「最近活跃站」**：一条固定会话的自动化任务可能一直跑在 A 站，
+ * 而用户此刻在 B 站看别的东西 —— 跟随「活跃站」会让那条记录的链接在用户切站时
+ * 跳到另一个站（那个站既没有这条会话、token 也不通用 ⇒ 打开是 401）。
+ * 「这条任务跑在哪」是**这条任务自己的属性**，只能由跑它的那一刻决定。
+ */
+export type DomTaskSiteOrigin = string;
+
 export type DomTaskOutcome =
   | {
       ok: true;
       taskId: string;
       chatSessionId: string | null;
+      /** 本次运行落在哪个站（`resolveDomTab` 挑中的标签页所属站点）。 */
+      siteOrigin: DomTaskSiteOrigin;
       assistantText: string;
       toolExecutions: ToolExecutionRecord[];
       steps: number;
@@ -79,6 +106,13 @@ export type DomTaskOutcome =
        * 会话「未创建」——页面明明已经建了对话，侧边栏却打不开。
        */
       chatSessionId?: string | null;
+      /**
+       * 失败前已经落定的站点。⚠️ **`'tab'` 阶段失败时它可能是 `null`** ——
+       * 那一刻还没挑中任何标签页（如 `zai_tab_create_failed`），无从知道站点。
+       * 下游要按「null = 不知道」处理，退回记录里已有的站点或默认站，
+       * **不能当成「不属于任何站」**。
+       */
+      siteOrigin?: DomTaskSiteOrigin | null;
     };
 
 export interface DomTaskStartInput {
@@ -86,6 +120,14 @@ export interface DomTaskStartInput {
   kind: DomTaskKind;
   prompt: string;
   chatSessionId: string | null;
+  /**
+   * 这条任务**上次跑在哪个站**（origin）。`null` / 缺省 = 没有归属信息。
+   *
+   * ⚠️ **固定会话任务必须带上它** —— 会话 id 在两站之间不通用（token 也互不认），
+   * 拿错站去拼 `/c/<id>` 会打开一个 401 或「会话不存在」的页面。
+   * 这是「B 为主」那一半的**输入侧**（输出侧是 `DomTaskOutcome.siteOrigin`）。
+   */
+  siteOrigin?: string | null;
   /** 自动化任务是否开启 z.ai 联网搜索（任务归属请求体里置 features.web_search/auto_web_search）。 */
   searchEnabled?: boolean;
   /** 自动化任务选定的模型 id（chat 模式下覆写请求体的 model）；null = 跟随页面默认。 */
@@ -101,13 +143,34 @@ export interface DomTaskStartOptions {
    * `/c/<id>`，要等 SPA 跳转后的那次 DOM_TASK_STARTED 才有值）。
    * 消费者据此立刻把会话落库，而不是等 run 收尾 —— 否则运行期间（以及失败收尾后）
    * 侧边栏一直显示会话「未创建」、打不开。
+   *
+   * ⚠️⚠️ **站点必须随回调一起给出** —— 消费者要**当场**拼一条可打开的会话 URL，
+   * 而会话 id 在两站之间不通用（token 也互不认）。它自己只能读到「记录里**上一次**
+   * 运行的站点」，首次运行时那个值是 null ⇒ 会拼成默认站的链接（国际站上跑任务时
+   * 点开是 401）。
+   * ⚠️ 站点在 `resolveDomTab` 挑中标签页时就已经定下（`entry.siteOrigin`），
+   * 信息是齐的，**不许让消费者去猜**（也不要让它读「最近活跃站」—— 那条路在
+   * 「任务跑在 A 站、用户正在看 B 站」时必然给错）。
    */
-  onSessionStarted?(chatSessionId: string): void;
+  onSessionStarted?(chatSessionId: string, siteOrigin: DomTaskSiteOrigin): void;
 }
 
 export interface DomTaskCoordinatorDeps {
-  homeUrl?: string;
-  tabUrlPattern?: string;
+  /**
+   * 找标签页用的 URL 匹配模式（`chrome.tabs.query` 的 `url` 字段）。
+   *
+   * ⚠️ **不传时用 `ZAI_TAB_URL_PATTERNS`（两个站都查）** —— 只查默认站会让
+   * 国际站上已经开着的空闲标签页**永远找不到**，于是每次任务都新开一个国区站的
+   * 标签页，而那个标签页在用户的代理环境下未必打得开。
+   */
+  tabUrlPatterns?: readonly string[];
+  /**
+   * 读「最近活跃站」（A 兜底）。不传时用 `readActiveZaiSiteOrigin`。
+   *
+   * ⚠️ **只有在「显式站点」与「已开着的标签页」都给不出结论时才读它** ——
+   * 见 `resolveDomTab` 的判定顺序说明。
+   */
+  readActiveSiteOrigin?: () => Promise<string>;
   queryTabs?(query: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab[]>;
   createTab?(props: chrome.tabs.CreateProperties): Promise<chrome.tabs.Tab>;
   updateTab?(
@@ -142,9 +205,11 @@ interface PendingDomTask {
   tabId: number;
   chatSessionId: string | null;
   startedChatSessionId: string | null;
+  /** 本任务落在哪个站（`resolveDomTab` 挑中标签页时定下，沿用到收尾）。 */
+  siteOrigin: DomTaskSiteOrigin;
   /** 会话 id 是否已经回调过 onSessionStarted（只回调一次）。 */
   sessionReported: boolean;
-  onSessionStarted?: (chatSessionId: string) => void;
+  onSessionStarted?: (chatSessionId: string, siteOrigin: DomTaskSiteOrigin) => void;
   settled: boolean;
   resolve: (outcome: DomTaskOutcome) => void;
   reject: (error: unknown) => void;
@@ -155,12 +220,13 @@ interface PendingDomTask {
 export function createDomTaskCoordinator(
   deps: DomTaskCoordinatorDeps = {},
 ): DomTaskCoordinator {
-  const homeUrl = (deps.homeUrl ?? ZAI_HOME_URL).replace(/\/+$/, '') + '/';
-  const tabUrlPattern = deps.tabUrlPattern ?? ZAI_TAB_URL_PATTERN;
+  // ⚠️ **不传时用两个站的模式** —— 只查默认站会让另一站的空闲标签页永远找不到。
+  const tabUrlPatterns = deps.tabUrlPatterns ?? ZAI_TAB_URL_PATTERNS;
   const queryTabs = deps.queryTabs ?? ((query) => chrome.tabs.query(query));
   const createTab = deps.createTab ?? ((props) => chrome.tabs.create(props));
   const updateTab = deps.updateTab ?? ((tabId, props) => chrome.tabs.update(tabId, props));
   const sendTabMessage = deps.sendTabMessage ?? ((tabId, message) => chrome.tabs.sendMessage(tabId, message));
+  const readActiveSiteOrigin = deps.readActiveSiteOrigin ?? readActiveZaiSiteOrigin;
   const reportError = deps.reportError ?? ((code, error) => console.error(`[GLM++] ${code}`, error));
 
   /** tabId → taskId：一 tab 同一时刻只跑一个后台任务（busy 锁）。 */
@@ -191,10 +257,13 @@ export function createDomTaskCoordinator(
 
   /**
    * 会话 URL 与会话 id 的拼接只保留 `chat-session.ts` 一处真源 ——
-   * 这里把 deps 注入的 `homeUrl` 作为 baseUrl 传进去，保证自定义 host 时两边仍然一致。
+   * 这里把**该任务所属站点**的 origin 作为 baseUrl 传进去。
+   *
+   * ⚠️ **不能再用 deps 注入的 `homeUrl`** —— 那是单个站的主页，而两个站的主页不同。
+   * 站点由 `resolveDomTab` 在挑中标签页时定下，这里只负责把它转成 origin。
    */
-  function buildSessionUrl(chatSessionId: string): string {
-    return buildZaiChatSessionUrl(chatSessionId, homeUrl);
+  function buildSessionUrl(chatSessionId: string, siteOrigin: DomTaskSiteOrigin): string {
+    return buildZaiChatSessionUrl(chatSessionId, siteOrigin);
   }
 
   function normalizeTabUrl(url: string | undefined): string {
@@ -207,8 +276,27 @@ export function createDomTaskCoordinator(
     }
   }
 
+  /** 某站的主页（带尾斜杠）；认不出站点时退回默认站。 */
+  function homeUrlFor(siteOrigin: DomTaskSiteOrigin | null): string {
+    const site = Object.values(ZAI_SITES).find((candidate) => candidate.origin === siteOrigin);
+    return (site?.homeUrl ?? ZAI_HOME_URL).replace(/\/+$/, '') + '/';
+  }
+
   /**
-   * 解析要用的 chat.z.ai 标签页，并返回「实际生效的会话 id」。
+   * 解析要用的 z.ai 标签页，并返回「实际生效的会话 id」与**该标签页所属站点**。
+   *
+   * 站点的**判定顺序**（B 为主 + A 兜底 + 默认站收口）：
+   *
+   * 1. **调用方显式给的 `input.siteOrigin`** —— 自动化记录的固定会话场景：那条记录
+   *    上次跑在哪个站，这次就去哪个站（它是这条任务自己的属性，与用户此刻在看哪个站无关）。
+   * 2. **已有的空闲标签页**：续用会话时按精确 URL 在两站里找；新对话时按两站的主页找。
+   *    命中哪个站就用哪个站 —— 复用用户已经开着的页面，比新开一个更少打扰。
+   * 3. **「最近活跃站」**（`deps.readActiveSiteOrigin`，跨上下文记录）：前两条都没结论时，
+   *    用户眼下在用哪个站就去哪个站。
+   * 4. **默认站**（国区站）收口。
+   *
+   * ⚠️ **顺序不可颠倒**：把 3 提到 1 前面会让固定会话任务跟着用户切站乱跑；
+   * 把 2 提到 1 前面会让「记录说 A 站」被「B 站恰好开着个主页」顶掉。
    *
    * 返回的 chatSessionId 与输入可能不同：续用会话时找不到精确 /c/<id> tab，
    * 就降级为「新会话」语义（chatSessionId 置 null、走新对话的标签页解析），
@@ -217,31 +305,94 @@ export function createDomTaskCoordinator(
    */
   async function resolveDomTab(
     chatSessionId: string | null,
-  ): Promise<{ tabId: number; chatSessionId: string | null; isNewlyCreated: boolean }> {
+    requestedSiteOrigin: string | null,
+  ): Promise<{
+    tabId: number;
+    chatSessionId: string | null;
+    siteOrigin: DomTaskSiteOrigin;
+    isNewlyCreated: boolean;
+  }> {
     const sessionId = chatSessionId && chatSessionId.trim() ? chatSessionId : null;
-    const tabs = await queryTabs({ url: tabUrlPattern });
+    // 两站一起查：只查默认站会让另一站上开着的空闲标签页永远找不到。
+    const tabs: chrome.tabs.Tab[] = [];
+    for (const pattern of tabUrlPatterns) {
+      try {
+        tabs.push(...await queryTabs({ url: pattern }));
+      } catch (error) {
+        // 某个模式查失败不该让整次解析失败（另一个站仍可用）。
+        reportError('dom_task_tab_query_failed', error);
+      }
+    }
     const idleTabs = tabs.filter((tab) => tab.id != null && !busyTabs.has(tab.id));
+
+    const fallbackSiteOrigin = (): Promise<string> => (
+      readActiveSiteOrigin().then(
+        (origin) => resolveZaiSiteOrigin(origin) ?? ZAI_WEB_ORIGIN,
+        () => ZAI_WEB_ORIGIN,
+      )
+    );
 
     // 续用会话：必须落在精确的 /c/<id>（content 侧会做 wrong_conversation 校验）。
     if (sessionId != null) {
-      const target = buildSessionUrl(sessionId);
-      const exact = idleTabs.find((tab) => normalizeTabUrl(tab.url) === target);
-      if (exact?.id != null) return { tabId: exact.id, chatSessionId: sessionId, isNewlyCreated: false };
+      for (const candidateSite of candidateSitesFor(requestedSiteOrigin)) {
+        const target = buildSessionUrl(sessionId, candidateSite);
+        const exact = idleTabs.find((tab) => normalizeTabUrl(tab.url) === target);
+        if (exact?.id != null) {
+          return {
+            tabId: exact.id,
+            chatSessionId: sessionId,
+            siteOrigin: candidateSite,
+            isNewlyCreated: false,
+          };
+        }
+      }
       // 找不到精确 tab：**新开目标会话 tab**（固定会话场景），而不是降级新会话。
       // 让用户即使关掉了原会话窗口，后续运行也能找回同一个对话继续。
-      const created = await createTab({ url: target, active: false });
+      // 站点取「显式给的」→「最近活跃站」→「默认站」。
+      const siteOrigin = requestedSiteOrigin
+        ? (resolveZaiSiteOrigin(requestedSiteOrigin) ?? await fallbackSiteOrigin())
+        : await fallbackSiteOrigin();
+      const created = await createTab({ url: buildSessionUrl(sessionId, siteOrigin), active: false });
       if (created.id == null) throw new Error('zai_tab_create_failed');
-      return { tabId: created.id, chatSessionId: sessionId, isNewlyCreated: true };
+      return { tabId: created.id, chatSessionId: sessionId, siteOrigin, isNewlyCreated: true };
     }
 
-    // 新对话：优先精确 home 页；找不到就新开一个 home tab。**绝不复用任何已有 /c/<id>
-    // 对话 tab**——否则会把 prompt 塞进用户当前停留的、不属于该任务的会话里。
-    const exactHome = idleTabs.find((tab) => normalizeTabUrl(tab.url) === homeUrl);
-    if (exactHome?.id != null) return { tabId: exactHome.id, chatSessionId: null, isNewlyCreated: false };
+    // 新对话：优先精确 home 页（两站任一）；**绝不复用任何已有 /c/<id> 对话 tab**——
+    // 否则会把 prompt 塞进用户当前停留的、不属于该任务的会话里。
+    if (!requestedSiteOrigin) {
+      for (const site of Object.values(ZAI_SITES)) {
+        const exactHome = idleTabs.find((tab) => normalizeTabUrl(tab.url) === site.homeUrl);
+        if (exactHome?.id != null) {
+          return {
+            tabId: exactHome.id,
+            chatSessionId: null,
+            siteOrigin: site.origin,
+            isNewlyCreated: false,
+          };
+        }
+      }
+    }
 
-    const created = await createTab({ url: homeUrl, active: false });
+    const siteOrigin = requestedSiteOrigin
+      ? (resolveZaiSiteOrigin(requestedSiteOrigin) ?? await fallbackSiteOrigin())
+      : await fallbackSiteOrigin();
+    const created = await createTab({ url: homeUrlFor(siteOrigin), active: false });
     if (created.id == null) throw new Error('zai_tab_create_failed');
-    return { tabId: created.id, chatSessionId: null, isNewlyCreated: true };
+    return { tabId: created.id, chatSessionId: null, siteOrigin, isNewlyCreated: true };
+  }
+
+  /**
+   * 续用会话时「先在哪些站里找那个精确标签页」。
+   *
+   * ⚠️ **显式指定的站排在最前**，其余站也会找一遍 —— 因为请求方给的站可能来自一条
+   * 较早的记录（那时用户可能在另一站跑过同一条会话），而**标签页存在才是硬证据**：
+   * 页面在哪一站，会话就真的在哪一站。
+   */
+  function candidateSitesFor(requestedSiteOrigin: string | null): readonly string[] {
+    const explicit = resolveZaiSiteOrigin(requestedSiteOrigin);
+    const all = Object.values(ZAI_SITES).map((site) => site.origin);
+    if (!explicit) return all;
+    return [explicit, ...all.filter((origin) => origin !== explicit)];
   }
 
   async function handshake(
@@ -305,14 +456,18 @@ export function createDomTaskCoordinator(
 
     let tabId: number;
     let effectiveChatSessionId: string | null;
+    let siteOrigin: DomTaskSiteOrigin;
     let isNewlyCreated = false;
     try {
-      const resolved = await resolveDomTab(input.chatSessionId);
+      const resolved = await resolveDomTab(input.chatSessionId, input.siteOrigin ?? null);
       tabId = resolved.tabId;
       effectiveChatSessionId = resolved.chatSessionId;
+      siteOrigin = resolved.siteOrigin;
       isNewlyCreated = resolved.isNewlyCreated;
     } catch (error) {
-      return { ok: false, taskId, error: errorMessage(error), phase: 'tab' };
+      // ⚠️ `'tab'` 阶段失败时**站点未知** —— 这里还没挑中任何标签页。
+      // 下游按「null = 不知道」处理（退回记录里的站点或默认站），不当成「不属于任何站」。
+      return { ok: false, taskId, error: errorMessage(error), phase: 'tab', siteOrigin: null };
     }
     busyTabs.set(tabId, taskId);
 
@@ -333,6 +488,7 @@ export function createDomTaskCoordinator(
         tabId,
         chatSessionId: effectiveChatSessionId,
         startedChatSessionId: effectiveChatSessionId,
+        siteOrigin,
         sessionReported: false,
         onSessionStarted: options.onSessionStarted,
         settled: false,
@@ -373,11 +529,13 @@ export function createDomTaskCoordinator(
             taskId,
             error: result.error ?? 'dom_task_rejected',
             phase: result.phase ?? 'bridge',
+            // 站点此时已经定下（标签页是 resolveDomTab 挑的），沿用它。
+            siteOrigin,
           });
         },
         (error) => {
           if (!entry.settled) {
-            settleEntry(entry, { ok: false, taskId, error: errorMessage(error), phase: 'bridge' });
+            settleEntry(entry, { ok: false, taskId, error: errorMessage(error), phase: 'bridge', siteOrigin });
           }
         },
       );
@@ -390,10 +548,12 @@ export function createDomTaskCoordinator(
     entry.startedChatSessionId = event.chatSessionId ?? entry.startedChatSessionId;
     // 首次拿到会话 id 就立刻回调：内容脚本在 SPA 跳到 /c/<id> 后才发得出这个值，
     // 此刻把会话落库，运行中/失败后侧边栏都能打开会话。
+    // ⚠️ **站点一起传**（`entry.siteOrigin`）—— 见 `onSessionStarted` 的说明：
+    // 消费者要当场拼 URL，而它自己读不到本次运行的站点。
     if (!entry.sessionReported && entry.startedChatSessionId) {
       entry.sessionReported = true;
       try {
-        entry.onSessionStarted?.(entry.startedChatSessionId);
+        entry.onSessionStarted?.(entry.startedChatSessionId, entry.siteOrigin);
       } catch (error) {
         reportError('dom_task_session_started_callback_failed', error);
       }
@@ -408,6 +568,7 @@ export function createDomTaskCoordinator(
       ok: true,
       taskId: event.taskId,
       chatSessionId,
+      siteOrigin: entry.siteOrigin,
       assistantText: event.assistantText ?? '',
       toolExecutions: event.toolExecutions ?? [],
       steps: event.steps ?? 0,
@@ -427,6 +588,8 @@ export function createDomTaskCoordinator(
       phase: event.error === ZAI_DOM_TASK_CANCELLED_CODE ? 'cancelled' : 'runner',
       retrySafe,
       chatSessionId: event.chatSessionId ?? entry.startedChatSessionId,
+      // 站点沿用它 —— 失败也要能拼出「跑在哪个站」的会话链接。
+      siteOrigin: entry.siteOrigin,
     });
   }
 

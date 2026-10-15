@@ -1,18 +1,111 @@
 /**
- * GLM++ (glm-plus-plus → chat.z.ai) 协议常量。
+ * GLM++ (glm-plus-plus → z.ai) 协议常量。
  *
- * 这些常量是把 glm-pp 骨架对接到 chat.z.ai 的「协议翻译层」的地基：
- * 域名、路由、签名密钥、时间窗、SSE envelope/phase 命名，以及 agent 模式的
+ * 这些常量是把 glm-pp 骨架对接到 z.ai 的「协议翻译层」的地基：
+ * 站点定义、路由、签名密钥、时间窗、SSE envelope/phase 命名，以及 agent 模式的
  * 标志位。所有值均来自真机抓包。
  */
 
-export const ZAI_WEB_ORIGIN = 'https://chat.z.ai';
+/** z.ai 的站点标识。 */
+export type ZaiSiteId = 'cn' | 'global';
 
-/** chat.z.ai 主页（带尾斜杠）：自动化「新对话」时找/开的目标标签页。 */
-export const ZAI_HOME_URL = 'https://chat.z.ai/';
+/** 一个站点的全部站点相关地址。三者的取值必须同源，所以放在一档里。 */
+export interface ZaiSiteDefinition {
+  readonly id: ZaiSiteId;
+  /** 站点的 origin（**精确值**，判信任时按相等比对，绝不做后缀匹配）。 */
+  readonly origin: string;
+  /** 站点主页（带尾斜杠）：自动化「新对话」时找/开的目标标签页。 */
+  readonly homeUrl: string;
+  /** 该站标签页的匹配模式（`chrome.tabs.query` / 广播筛选共用）。 */
+  readonly tabUrlPattern: string;
+}
 
-/** chat.z.ai 标签页的匹配模式（`chrome.tabs.query` / 广播筛选共用的唯一来源）。 */
-export const ZAI_TAB_URL_PATTERN = '*://chat.z.ai/*';
+/**
+ * 站点表。
+ *
+ * ⚠️ **两个站点跑的是同一份前端产物**（同一个 CDN 路径下的 `prod-fe-*` 资源），
+ * 路由 / 请求体形状 / 历史端点形状 / DOM 锚点**逐项同构**；差异只有
+ * `enable_captcha`（国区站 false）、登录方式、以及页面自己给同源请求加的 `x-region`。
+ * ⇒ 适配的实质是「认两个 origin」，不是「维护两套适配层」。
+ *
+ * ⚠️ **`origin` 是精确值**：判「这个请求/标签页是不是我们的站」一律走
+ * `isZaiSiteOrigin`（集合相等），**不要写成 `endsWith('.z.ai')`** ——
+ * 站点自己有 `zcode.z.ai`、`space-z.ai` 之类的同域子站，后缀匹配会把信任范围
+ * 从「两个站」放大到「整个 z.ai 域」。
+ */
+export const ZAI_SITES: Readonly<Record<ZaiSiteId, ZaiSiteDefinition>> = {
+  cn: {
+    id: 'cn',
+    origin: 'https://zchat.z.ai',
+    homeUrl: 'https://zchat.z.ai/',
+    tabUrlPattern: '*://zchat.z.ai/*',
+  },
+  global: {
+    id: 'global',
+    origin: 'https://chat.z.ai',
+    homeUrl: 'https://chat.z.ai/',
+    tabUrlPattern: '*://chat.z.ai/*',
+  },
+};
+
+/**
+ * **默认站点**（国区站）。
+ *
+ * ⚠️ **它只服务「没有页面上下文」的场景**：手里只有一个会话 id，不知道它属于哪个站时
+ * 按它兜底。**有页面上下文的链路一律按当前页 origin 就地判定**，不许读这个常量
+ * （否则在国际站上跑的内容脚本会去拼国区站的链接）。
+ *
+ * ⚠️ 选国区站作默认的理由是**用户的实际网络**：国内访问 `chat.z.ai` 会被导流到国区站，
+ * 所以「默认」应当与用户真正会落到的那个站一致。
+ */
+export const ZAI_DEFAULT_SITE_ID: ZaiSiteId = 'cn';
+
+/** 两个站点的 origin（顺序 = 黄金顺序，仅用于展示与遍历；判据一律走集合相等）。 */
+export const ZAI_WEB_ORIGINS: readonly string[] = [ZAI_SITES.cn.origin, ZAI_SITES.global.origin];
+
+/** 两个站点的 tab URL 匹配模式（广播 / `chrome.tabs.query` 要逐个模式查）。 */
+export const ZAI_TAB_URL_PATTERNS: readonly string[] = [
+  ZAI_SITES.cn.tabUrlPattern,
+  ZAI_SITES.global.tabUrlPattern,
+];
+
+/** 把任意 origin / URL 归一成「站点 origin」；认不出的返回 null。 */
+export function resolveZaiSiteOrigin(value: string | null | undefined): string | null {
+  if (!value) return null;
+  let origin: string;
+  try {
+    origin = new URL(value).origin;
+  } catch {
+    return null;
+  }
+  return ZAI_WEB_ORIGINS.includes(origin) ? origin : null;
+}
+
+/** 这个 origin / URL 是不是本站点集合里的一员。**精确相等，不做后缀匹配。** */
+export function isZaiSiteOrigin(value: string | null | undefined): boolean {
+  return resolveZaiSiteOrigin(value) !== null;
+}
+
+/** 由 origin / URL 反查站点定义；认不出的返回 null。 */
+export function resolveZaiSite(value: string | null | undefined): ZaiSiteDefinition | null {
+  const origin = resolveZaiSiteOrigin(value);
+  if (!origin) return null;
+  return Object.values(ZAI_SITES).find((site) => site.origin === origin) ?? null;
+}
+
+/**
+ * **默认站点**的 origin。
+ *
+ * ⚠️ **只给「没有页面上下文、且拿不到更具体归属」的兜底用** —— 详见
+ * `ZAI_DEFAULT_SITE_ID` 的说明。有页面上下文的链路请用 `resolveZaiSite(location.origin)`。
+ */
+export const ZAI_WEB_ORIGIN = ZAI_SITES[ZAI_DEFAULT_SITE_ID].origin;
+
+/** **默认站点**的主页（带尾斜杠）。同 `ZAI_WEB_ORIGIN` 的适用范围说明。 */
+export const ZAI_HOME_URL = ZAI_SITES[ZAI_DEFAULT_SITE_ID].homeUrl;
+
+/** **默认站点**的标签页匹配模式。同 `ZAI_WEB_ORIGIN` 的适用范围说明。 */
+export const ZAI_TAB_URL_PATTERN = ZAI_SITES[ZAI_DEFAULT_SITE_ID].tabUrlPattern;
 
 /**
  * chat.z.ai 前端实际使用的路由。

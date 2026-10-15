@@ -43,6 +43,8 @@ async function createTestAutomation() {
 function failureWithSession(
   request: AutomationRunnerRequest,
   chatSessionId: string | null,
+  /** 本次运行落在哪个站；默认国际站（与下面断言的 URL 一致）。 */
+  siteOrigin: string | null = 'https://chat.z.ai',
 ): AutomationRunnerResult {
   // 模拟「内容脚本回传 error: 'cancelled'」经 coordinator 定档后的真实形状：
   // code 仍是 `dom_automation_cancelled`（background 拼的），**phase 是 `'cancelled'`**
@@ -56,6 +58,7 @@ function failureWithSession(
     Date.now(),
     { externalOutcome: 'ambiguous', retrySafe: false },
     chatSessionId,
+    siteOrigin,
   );
 }
 
@@ -146,6 +149,7 @@ describe('automation failure persists the live session', () => {
       glm: {
         chatSessionId: 'persisted-mid-run',
         sessionUrl: 'https://chat.z.ai/c/persisted-mid-run',
+        siteOrigin: null,
       },
     });
 
@@ -182,6 +186,7 @@ describe('automation failure persists the live session', () => {
       glm: {
         chatSessionId: 'new-session',
         sessionUrl: 'https://chat.z.ai/c/old-session',
+        siteOrigin: null,
       },
     });
 

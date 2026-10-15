@@ -8,7 +8,7 @@ export interface ZaiModelRuntimeHandlerDependencies {
   getModelList(): Promise<ZaiModelList>;
 }
 
-/** chat.z.ai 模型清单（自动化表单的模型下拉数据源，带缓存与内置兜底）。 */
+/** z.ai 模型清单（自动化表单的模型下拉数据源，带缓存与内置兜底）。站点由抓取器决定。 */
 export function createZaiModelRuntimeHandlers(
   dependencies: ZaiModelRuntimeHandlerDependencies,
 ): readonly RuntimeCommandHandler[] {

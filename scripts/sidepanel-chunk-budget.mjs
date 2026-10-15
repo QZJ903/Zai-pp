@@ -55,7 +55,12 @@ const BASELINE = Object.freeze({
   // 实测 raw 338580 / gzip 105644 —— **+361 raw / +98 gzip**。
   // **同源的又一条例证**：只加 5 对键、raw 涨 361，正是因为**整份 `content` section
   // 都进初始 shell**，键本身只占小头，剩下的是段内重排后压缩率的变化。
-  initialShell: { raw: 338_580, gzip: 105_644 },
+  // ⚠️⚠️ **2026-10-15 七测（双站适配）**：把 `background.missingGLM` 文案里的
+  // `chat.z.ai` 换成 `Zai`（中英各 1 键，两站都成立）后实测
+  // raw 338568 / gzip 105635 —— **−12 raw / −9 gzip**。
+  // ⚠️ 涨跌幅度远小于「1 键 ≈ 276 raw」的量级，因为这次**没增删键**，
+  // 只是两处值的字符数变了（域名字符串变短）。**降了也要回写**（同下面那条教训）。
+  initialShell: { raw: 338_568, gzip: 105_635 },
   // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
   // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
   // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，

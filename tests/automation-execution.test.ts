@@ -370,6 +370,7 @@ function successResult(
     ok: true,
     chatSessionId: 'chat-1',
     sessionUrl: 'https://chat.z.ai/a/chat/s/chat-1',
+    siteOrigin: 'https://chat.z.ai',
     assistantText: 'done',
     completedAt,
   };
@@ -384,6 +385,8 @@ function failureResult(
   return {
     ok: false,
     chatSessionId: request.chatSessionId,
+    // 测试造的是「执行器自己抛错 / 超时」这类没有协调器结论的失败 ⇒ 站点未知。
+    siteOrigin: null,
     completedAt: Date.now(),
     error: {
       code,

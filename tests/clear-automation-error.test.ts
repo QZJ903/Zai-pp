@@ -42,7 +42,7 @@ const automation: Automation = {
     minimumIntervalMinutes: 0,
   },
   promptOptions: { model: null, searchEnabled: false, fixedSession: false },
-  glm: { chatSessionId: null, sessionUrl: null },
+  glm: { chatSessionId: null, sessionUrl: null , siteOrigin: null},
   createdAt: 1,
   updatedAt: 1,
   lastRunAt: null,

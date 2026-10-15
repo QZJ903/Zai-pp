@@ -28,7 +28,12 @@ import {
 import {
   ZAI_AUGMENTABLE_WEB_ROUTES,
   ZAI_HISTORY_WEB_ROUTES,
+  ZAI_SITES,
+  ZAI_WEB_ORIGINS,
   ZAI_WEB_ROUTES,
+  isZaiSiteOrigin,
+  resolveZaiSite,
+  resolveZaiSiteOrigin,
   type ZaiWebRouteName,
 } from '../core/zai/contracts';
 import { filterZaiModelFacingToolDescriptors } from '../core/zai/model-facing';
@@ -245,21 +250,26 @@ describe('zai request codec', () => {
   const SAMPLE_CHAT_ID = '4636417d-6084-4203-9a7a-f9246d5ed027';
   const pathOf = (route: ZaiWebRouteName) => ZAI_WEB_ROUTES[route].replace('{id}', SAMPLE_CHAT_ID);
   const otherMethodOf = (route: ZaiWebRouteName) => (ROUTE_METHOD[route] === 'POST' ? 'GET' : 'POST');
+  // ⚠️ **从站点表派生**（而不是手抄两串域名）—— 但下表另有一条**字面量钉真值**的断言，
+  // 否则「表本身写错」时派生的用例会跟着一起错（守则 B9/B16：全派生 = 同义反复）。
+  const SITE_ORIGINS = ZAI_WEB_ORIGINS;
   const encodedPath = (path: string) => `https://chat.z.ai/${path.split('/').slice(1).join('%2F')}`;
 
   const acceptedRouteCases: RouteCase[] = routeNames.flatMap((route) => {
     const path = pathOf(route);
     const method = ROUTE_METHOD[route];
-    return [
-      { name: `${route}: absolute URL`, route, url: `https://chat.z.ai${path}`, method, matched: true },
+    // ⚠️ **两个站点都要覆盖** —— 只测一个站会让「另一个站的路由整块不匹配」这种
+    // 静默失效（表现：增广 / 工具剥离 / 用量统计全都不生效）完全漏网。
+    return SITE_ORIGINS.flatMap((origin) => [
+      { name: `${route} @ ${origin}: absolute URL`, route, url: `${origin}${path}`, method, matched: true },
       // 相对路径必须按站点 origin 兜底解析 —— fetch hook 里拿到的就是相对路径。
-      { name: `${route}: relative path resolves against the site origin`, route, url: path, method, matched: true },
-      { name: `${route}: host is case-insensitive`, route, url: `https://CHAT.Z.AI${path}`, method, matched: true },
-      { name: `${route}: explicit default port`, route, url: `https://chat.z.ai:443${path}`, method, matched: true },
-      { name: `${route}: query string is ignored`, route, url: `https://chat.z.ai${path}?timestamp=1&requestId=abc`, method, matched: true },
-      { name: `${route}: fragment is ignored`, route, url: `https://chat.z.ai${path}#anchor`, method, matched: true },
-      { name: `${route}: method is case-insensitive`, route, url: `https://chat.z.ai${path}`, method: method.toLowerCase(), matched: true },
-    ];
+      { name: `${route} @ ${origin}: relative path resolves against the site origin`, route, url: path, method, matched: true, baseUrl: `${origin}/c/x` },
+      { name: `${route} @ ${origin}: host is case-insensitive`, route, url: `${origin.toUpperCase()}${path}`, method, matched: true },
+      { name: `${route} @ ${origin}: explicit default port`, route, url: `${origin}:443${path}`, method, matched: true },
+      { name: `${route} @ ${origin}: query string is ignored`, route, url: `${origin}${path}?timestamp=1&requestId=abc`, method, matched: true },
+      { name: `${route} @ ${origin}: fragment is ignored`, route, url: `${origin}${path}#anchor`, method, matched: true },
+      { name: `${route} @ ${origin}: method is case-insensitive`, route, url: `${origin}${path}`, method: method.toLowerCase(), matched: true },
+    ]);
   });
 
   const rejectedRouteCases: RouteCase[] = routeNames.flatMap((route) => {
@@ -267,13 +277,20 @@ describe('zai request codec', () => {
     const method = ROUTE_METHOD[route];
     return [
       { name: `${route}: different origin`, route, url: `https://evil.test${path}`, method, matched: false },
-      { name: `${route}: subdomain of the site`, route, url: `https://sub.chat.z.ai${path}`, method, matched: false },
+      // ⚠️⚠️ **「站点集合」不是「z.ai 域」** —— 站点自己有 zcode.z.ai 之类的同域子站，
+      // 放宽到后缀匹配等于把信任范围从一个站放大到一个域。
+      { name: `${route}: subdomain of a site`, route, url: `https://sub.chat.z.ai${path}`, method, matched: false },
+      { name: `${route}: site host as a prefix of another host`, route, url: `https://chat.z.ai.evil.test${path}`, method, matched: false },
+      { name: `${route}: sibling z.ai subdomain`, route, url: `https://zcode.z.ai${path}`, method, matched: false },
+      { name: `${route}: bare apex domain`, route, url: `https://z.ai${path}`, method, matched: false },
       { name: `${route}: insecure scheme`, route, url: `http://chat.z.ai${path}`, method, matched: false },
+      { name: `${route}: insecure scheme on the CN site`, route, url: `http://zchat.z.ai${path}`, method, matched: false },
       { name: `${route}: path embedded in a query parameter`, route, url: `https://evil.test/?next=${path}`, method, matched: false },
       { name: `${route}: path with a suffix`, route, url: `https://chat.z.ai${path}/suffix`, method, matched: false },
       { name: `${route}: trailing slash`, route, url: `https://chat.z.ai${path}/`, method, matched: false },
       { name: `${route}: percent-encoded slashes`, route, url: encodedPath(path), method, matched: false },
       { name: `${route}: userinfo looks like the site host`, route, url: `https://chat.z.ai@evil.test${path}`, method, matched: false },
+      { name: `${route}: userinfo looks like the CN site host`, route, url: `https://zchat.z.ai@evil.test${path}`, method, matched: false },
       { name: `${route}: wrong method`, route, url: `https://chat.z.ai${path}`, method: otherMethodOf(route), matched: false },
       { name: `${route}: empty method`, route, url: `https://chat.z.ai${path}`, method: '', matched: false },
       { name: `${route}: relative path with a foreign base`, route, url: path, method, baseUrl: 'https://evil.test/page', matched: false },
@@ -384,6 +401,46 @@ describe('zai request codec', () => {
     };
     const next = rewriteZaiChatNewUserMessages(body, ['augmented']);
     expect(parseZaiChatNewBody(next)!.userMessageTexts).toEqual(['augmented']);
+  });
+});
+
+describe('zai site table', () => {
+  it('pins the two sites to literal values', () => {
+    // ⚠️⚠️ **这是那张「按站点派生」的用例表的**外部真值**（守则 B16）。
+    // 少了它，`SITE_ORIGINS` 从 `ZAI_WEB_ORIGINS` 派生 ⇒ 表本身写错时
+    // 路由用例会跟着一起错、全绿（同义反复）。
+    expect(ZAI_SITES.cn.origin).toBe('https://zchat.z.ai');
+    expect(ZAI_SITES.cn.homeUrl).toBe('https://zchat.z.ai/');
+    expect(ZAI_SITES.cn.tabUrlPattern).toBe('*://zchat.z.ai/*');
+    expect(ZAI_SITES.global.origin).toBe('https://chat.z.ai');
+    expect(ZAI_SITES.global.homeUrl).toBe('https://chat.z.ai/');
+    expect(ZAI_SITES.global.tabUrlPattern).toBe('*://chat.z.ai/*');
+  });
+
+  it('exposes exactly the two site origins', () => {
+    expect([...ZAI_WEB_ORIGINS].sort()).toEqual(['https://chat.z.ai', 'https://zchat.z.ai']);
+  });
+
+  it('resolves an origin back to its site, exactly (never by suffix)', () => {
+    expect(resolveZaiSite('https://zchat.z.ai')?.id).toBe('cn');
+    expect(resolveZaiSite('https://chat.z.ai')?.id).toBe('global');
+    // 带上路径 / query 也能反查（解析成 origin 再比）。
+    expect(resolveZaiSiteOrigin('https://zchat.z.ai/c/abc?x=1')).toBe('https://zchat.z.ai');
+    // ⚠️ 站点自己有同域子站（`zcode.z.ai` 就是真的存在的一个）—— 一律不认。
+    for (const stranger of [
+      'https://zcode.z.ai',
+      'https://z.ai',
+      'https://sub.chat.z.ai',
+      'https://chat.z.ai.evil.test',
+      'http://chat.z.ai',
+      'https://space-z.ai',
+    ]) {
+      expect(isZaiSiteOrigin(stranger), `${stranger} 不该被当成站点`).toBe(false);
+      expect(resolveZaiSiteOrigin(stranger), `${stranger} 不该被反查出站点`).toBeNull();
+    }
+    expect(isZaiSiteOrigin(undefined)).toBe(false);
+    expect(isZaiSiteOrigin('')).toBe(false);
+    expect(isZaiSiteOrigin('not a url')).toBe(false);
   });
 });
 

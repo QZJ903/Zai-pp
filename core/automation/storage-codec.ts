@@ -218,6 +218,8 @@ function createEmptyGLMSession(): AutomationGLMSession {
   return {
     chatSessionId: null,
     sessionUrl: null,
+    // 旧记录（本字段之前落库的）没有它 ⇒ 视为「不知道」。
+    siteOrigin: null,
   };
 }
 
@@ -230,6 +232,9 @@ function decodeGLMSession(raw: unknown, path: string): AutomationGLMSession {
     ...value,
     chatSessionId: nullableString(value.chatSessionId, `${path}.chatSessionId`),
     sessionUrl: nullableString(value.sessionUrl, `${path}.sessionUrl`),
+    // ⚠️ **兼容缺省**：站点是后加字段，旧记录里没有 ⇒ 视为 null（不知道）。
+    // 写成 `requiredString` 会让所有旧记录直接判 corrupt、**整份自动化存储打不开**。
+    siteOrigin: defaultedNullableString(value.siteOrigin, `${path}.siteOrigin`),
   } as AutomationGLMSession;
 }
 
@@ -259,6 +264,8 @@ function decodeRunnerRequest(
     prompt: nonEmptyString(value.prompt, `${path}.prompt`),
     trigger: enumValue(value.trigger, AUTOMATION_TRIGGERS, `${path}.trigger`),
     chatSessionId: nullableString(value.chatSessionId, `${path}.chatSessionId`),
+    // ⚠️ **兼容缺省**：站点是后加字段，旧 run 记录里没有 ⇒ null（不知道）。
+    siteOrigin: defaultedNullableString(value.siteOrigin, `${path}.siteOrigin`),
     promptOptions: decodePromptOptions(value.promptOptions, `${path}.promptOptions`),
     ...(value.locale === undefined
       ? {}
@@ -324,6 +331,9 @@ function decodeRunnerSuccess(
     ok: true,
     chatSessionId: stringValue(value.chatSessionId, `${path}.chatSessionId`),
     sessionUrl: nullableString(value.sessionUrl, `${path}.sessionUrl`),
+    // ⚠️ **兼容缺省**（与 `AutomationGLMSession.siteOrigin` 同口径）：站点是后加字段，
+    // 旧记录里没有 ⇒ null（不知道）。写成必填会让旧记录判 corrupt、整份存储打不开。
+    siteOrigin: defaultedNullableString(value.siteOrigin, `${path}.siteOrigin`),
     assistantText: stringValue(value.assistantText, `${path}.assistantText`),
     ...(toolExecutions === undefined ? {} : { toolExecutions }),
     completedAt: finiteNumber(value.completedAt, `${path}.completedAt`),
@@ -338,6 +348,8 @@ function decodeRunnerFailure(
     ...value,
     ok: false,
     chatSessionId: nullableString(value.chatSessionId, `${path}.chatSessionId`),
+    // 同上的兼容缺省。
+    siteOrigin: defaultedNullableString(value.siteOrigin, `${path}.siteOrigin`),
     error: decodeError(value.error, `${path}.error`),
     completedAt: finiteNumber(value.completedAt, `${path}.completedAt`),
   } as AutomationRunnerFailure;

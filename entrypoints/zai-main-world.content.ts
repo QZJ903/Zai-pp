@@ -1,5 +1,5 @@
 /**
- * GLM++ MAIN world content script（chat.z.ai）。
+ * GLM++ MAIN world content script（z.ai：国区站 / 国际站两站共用）。
  *
  * 在页面主世界里安装 fetch/XHR hook，把 z.ai 的 completion + /chats/new 请求
  * 交给隔离世界增广，并把隔离世界回传的结果、以及响应流里识别出的本地工具
@@ -138,7 +138,11 @@ window.addEventListener('message', (event) => {
 });
 
 export default defineContentScript({
-  matches: ['*://chat.z.ai/*'],
+  // ⚠️ **两站都要挂** —— 国区站与国际站跑同一份前端产物、同一套路由与 SSE，
+  // 少一个会让那一站的增广 / 工具识别 / 历史剥离**整块静默失效**。
+  // ⚠️ manifest 阶段是字面量，引不到 `contracts.ts` 的常量 ⇒ **改要两处同改**
+  // （另一处是 `entrypoints/zai.content.ts`）。
+  matches: ['*://zchat.z.ai/*', '*://chat.z.ai/*'],
   world: 'MAIN',
   runAt: 'document_start',
   async main() {
