@@ -31,7 +31,7 @@ const DEFAULT_BACKGROUND_CONFIG: BackgroundConfig = {
 
 function settingsLoadFallback<T>(label: string, fallback: T): (error: unknown) => T {
   return (error) => {
-    console.error(`[GLM++] Failed to load ${label} settings.`, error);
+    console.error(`[Zai++] Failed to load ${label} settings.`, error);
     return fallback;
   };
 }

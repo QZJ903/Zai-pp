@@ -117,7 +117,7 @@ export function installContinuationBubbleHider(options?: {
       const hidden = hideContinuationBubbles({ root: doc });
       if (hidden > 0) options?.onHidden?.(hidden);
     } catch (error) {
-      console.warn('[GLM++] continuation bubble hide failed', error);
+      console.warn('[Zai++] continuation bubble hide failed', error);
     }
   };
   const schedule = () => {
@@ -143,7 +143,7 @@ export function installContinuationBubbleHider(options?: {
       observer = new MutationObserver(schedule);
       observer.observe(observeTarget, { childList: true, subtree: true });
     } catch (error) {
-      console.warn('[GLM++] continuation bubble observer unavailable', error);
+      console.warn('[Zai++] continuation bubble observer unavailable', error);
     }
   }
 

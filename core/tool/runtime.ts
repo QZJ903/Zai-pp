@@ -318,7 +318,7 @@ async function completeAuthorizationAfterProvider(
     // The executing reservation was persisted before provider I/O, so a failed
     // completion write remains fail-closed for replay. Preserve the real
     // provider result and history instead of replacing it with a storage error.
-    console.error('[GLM++] tool authorization completion persistence failed', error);
+    console.error('[Zai++] tool authorization completion persistence failed', error);
   }
 }
 
@@ -331,7 +331,7 @@ async function appendRuntimeToolHistory(
     await appendToolCallHistory(call, result, source);
   } catch (error) {
     if (!isRecoverableToolHistoryError(error)) throw error;
-    console.warn('[GLM++] tool history persistence failed', error);
+    console.warn('[Zai++] tool history persistence failed', error);
   }
 }
 

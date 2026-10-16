@@ -552,7 +552,7 @@ async function cancelUnusedWebResponseBody(response: Response): Promise<void> {
   try {
     await response.body.cancel();
   } catch (error) {
-    console.warn('[GLM++] Failed to cancel an unused web response body:', error);
+    console.warn('[Zai++] Failed to cancel an unused web response body:', error);
   }
 }
 

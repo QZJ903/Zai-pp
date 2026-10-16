@@ -336,7 +336,7 @@ function settleToolTurn(requestId: string): void {
         // 会合任务调，得自己接。文案与分发器那句**刻意不同**：排查时要能一眼分出
         // 「消息分发阶段炸的」还是「会合消费阶段炸的」。
         if (isExtensionInvalidatedError(error)) invalidateExtensionContext();
-        else console.error('[GLM++] handleResponseComplete failed inside the tool-turn rendezvous', error);
+        else console.error('[Zai++] handleResponseComplete failed inside the tool-turn rendezvous', error);
       }
     }
     await tryFinalizeRequest(requestId);
@@ -668,7 +668,7 @@ function postToMainWorld(message: Record<string, unknown>): void {
   try {
     window.postMessage({ source: ZAI_CONTENT_TO_MAIN, ...message }, '*');
   } catch (error) {
-    console.error('[GLM++] post to main failed', error);
+    console.error('[Zai++] post to main failed', error);
   }
 }
 
@@ -682,7 +682,7 @@ function recordAutomationSendError(kind: string): void {
   lastAutomationSendErrorKind = kind;
   // 本机可见性：这三个码决定后台要不要自动重跑，而失败本身只在后台侧可见
   // （`submitDomTaskPrompt` 回 `DOM_TASK_FAILED`）。这一行是页面 console 里唯一的根因。
-  console.warn('[GLM++] automation send fatal', { kind });
+  console.warn('[Zai++] automation send fatal', { kind });
 }
 
 function catalogNamesFor(descriptors: readonly ToolDescriptor[]): string[] {
@@ -874,7 +874,7 @@ async function loadAndSyncRuntimeState(): Promise<LoadedRuntimeState> {
     // fetch hook 识别工具标签，而 `extractAndNotifyToolCalls` 在名字集合为空时
     // **直接 return、一个工具都不识别**。清空等于把「识别」整条关掉。
     // 沿用旧值的口径与 `currentWebToolsEnabled` 一致（「读取失败时沿用上一次的值」）。
-    console.error('[GLM++] runtime state sync failed', error);
+    console.error('[Zai++] runtime state sync failed', error);
     return {
       descriptors: currentToolDescriptors,
       webToolsEnabled: currentWebToolsEnabled,
@@ -1045,7 +1045,7 @@ async function executeToolCall(
   if (result && typeof result === 'object' && typeof result.ok === 'boolean') {
     return result;
   }
-  console.error('[GLM++] execute_tool_call returned an invalid result', {
+  console.error('[Zai++] execute_tool_call returned an invalid result', {
     call: call.invocationName ?? call.name,
     requestId: call.source?.requestId ?? null,
     authorizationId: authorizationId ?? null,
@@ -1347,7 +1347,7 @@ async function resolvePendingProjectContextForFirstMessage(): Promise<ResolvedPr
     return { projectId: selection.projectId, context: selection.context };
   } catch (error) {
     if (isExtensionInvalidatedError(error)) invalidateExtensionContext();
-    else console.warn('[GLM++] first-message project context failed', error);
+    else console.warn('[Zai++] first-message project context failed', error);
     return null;
   }
 }
@@ -1505,7 +1505,7 @@ async function handleAugmentRequestBody(
       // 增广结果已经回传（主世界的 pending 请求在那一刻就 resolve 了），所以这里**不 await** ——
       // 关 grant 是一次后台往返，没必要压在请求热路径上。
       void closeToolAuthorizationGrant(authorization.id).catch((error: unknown) => {
-        console.error('[GLM++] closing the chatNew tool authorization failed', error);
+        console.error('[Zai++] closing the chatNew tool authorization failed', error);
       });
       return;
     }
@@ -1823,7 +1823,7 @@ async function dispatchMainWorldMessageInner(
         // 而那里查不到 grant 会现场建一个）。非法载荷一律丢弃，不新造拒绝分支。
         const call = decodeZaiToolCallMessage(data.data);
         if (!call) {
-          console.error('[GLM++] rejected a malformed TOOL_CALL payload');
+          console.error('[Zai++] rejected a malformed TOOL_CALL payload');
           return;
         }
         // ⚠️ **不 await** —— 执行会跑十几秒（web_fetch 上界 15 秒），await 会把它后面
@@ -1838,7 +1838,7 @@ async function dispatchMainWorldMessageInner(
         // executionsByRequest 为空时拿 assistantText 跑 parseToolXml 兜底执行工具。
         // 载荷由调用方在队列之外解好传进来（见 `dispatchMainWorldMessage`），这里不再解第二遍。
         if (!decodedResponseComplete) {
-          console.error('[GLM++] rejected a malformed RESPONSE_COMPLETE payload');
+          console.error('[Zai++] rejected a malformed RESPONSE_COMPLETE payload');
           return;
         }
         // 响应到达**不是**在这里消费 —— 先存进会合状态，等工具执行也齐了再一次性消费
@@ -1859,7 +1859,7 @@ async function dispatchMainWorldMessageInner(
         // **判据是「字段长在哪一层」，不是「别人怎么传」。**
         const decoded = decodeZaiHistoryToolRecordsMessage(data);
         if (!decoded) {
-          console.error('[GLM++] rejected a malformed HISTORY_TOOL_RECORDS payload');
+          console.error('[Zai++] rejected a malformed HISTORY_TOOL_RECORDS payload');
           return;
         }
         toolPanel.rememberHistoryRecords(decoded.records, decoded.chatSessionId);
@@ -1872,7 +1872,7 @@ async function dispatchMainWorldMessageInner(
       case 'REQUEST_TERMINAL': {
         const terminal = decodeZaiRequestTerminalMessage(data.payload);
         if (!terminal) {
-          console.error('[GLM++] rejected a malformed REQUEST_TERMINAL payload');
+          console.error('[Zai++] rejected a malformed REQUEST_TERMINAL payload');
           return;
         }
         const requestId = terminal.requestId;
@@ -1889,7 +1889,7 @@ async function dispatchMainWorldMessageInner(
         // completion 返回 HTML：推进续跑而不是干等。
         const challenge = decodeZaiHtmlChallengeMessage(data.payload);
         if (!challenge) {
-          console.error('[GLM++] rejected a malformed HTML_CHALLENGE payload');
+          console.error('[Zai++] rejected a malformed HTML_CHALLENGE payload');
           return;
         }
         const requestId = challenge.requestId;
@@ -1908,7 +1908,7 @@ async function dispatchMainWorldMessageInner(
     }
   } catch (error) {
     if (isExtensionInvalidatedError(error)) invalidateExtensionContext();
-    else console.error('[GLM++] main-world message handling failed', error);
+    else console.error('[Zai++] main-world message handling failed', error);
   }
 }
 
@@ -1955,7 +1955,7 @@ function startDetectedToolCall(detected: ZaiDetectedToolCall): void {
   state.executionChain = state.executionChain
     .then(() => executeDetectedFromDetected(detected))
     .catch((error) => {
-      console.error('[GLM++] executing a detected tool call failed', {
+      console.error('[Zai++] executing a detected tool call failed', {
         name: detected.name,
         requestId: detected.requestId,
         error: error instanceof Error ? error.message : String(error),
@@ -1988,7 +1988,7 @@ async function executeDetectedFromDetected(
   // 保住「老会话里的 XML 仍能执行」，同时保住「关掉的工具不被识别」。
   const calls = parseToolXml(detected.raw, modelFacingForRequest(detected.requestId));
   if (calls.length === 0) {
-    console.error('[GLM++] a detected tool call could not be parsed', {
+    console.error('[Zai++] a detected tool call could not be parsed', {
       name: detected.name,
       requestId: detected.requestId,
       catalogNames: currentCatalogNames,
@@ -2085,7 +2085,7 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
       const code = error instanceof ToolAuthorizationRequestError
         ? error.code
         : (error instanceof Error ? error.message : String(error));
-      console.error('[GLM++] creating a tool authorization failed', { name: call.name, requestId, code });
+      console.error('[Zai++] creating a tool authorization failed', { name: call.name, requestId, code });
       return null;
     }
   }
@@ -2137,7 +2137,7 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
 
   const effectiveAuthId = authorization?.id;
   if (!effectiveAuthId) {
-    console.error('[GLM++] no grant for this request; skipping the tool call', {
+    console.error('[Zai++] no grant for this request; skipping the tool call', {
       name: call.name,
       requestId,
     });
@@ -2203,7 +2203,7 @@ async function handleUsageSnapshot(raw: unknown): Promise<void> {
       },
     });
   } catch (error) {
-    console.error('[GLM++] usage record failed', error);
+    console.error('[Zai++] usage record failed', error);
   }
 }
 
@@ -2283,7 +2283,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       const orphanTaskId = taskIdByRequestId.get(complete.requestId);
       if (orphanTaskId) {
         clearActiveDomTask(orphanTaskId);
-        console.error('[GLM++] continuation turn without a running loop; failing the task', {
+        console.error('[Zai++] continuation turn without a running loop; failing the task', {
           taskId: orphanTaskId,
           requestId: complete.requestId,
         });
@@ -2400,7 +2400,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       );
       const submitted = await submitContinuationViaPage(nudgePrompt);
       if (!submitted) {
-        console.error('[GLM++] nudge continuation was not observed', {
+        console.error('[Zai++] nudge continuation was not observed', {
           step: continuationLoop.stepCount,
         });
         finishContinuationLoop(continuationLoop);
@@ -2484,7 +2484,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     const orphanTaskId = taskIdByRequestId.get(complete.requestId);
     if (orphanTaskId) {
       clearActiveDomTask(orphanTaskId);
-      console.error('[GLM++] no chat session id; failing the task instead of starting a loop', {
+      console.error('[Zai++] no chat session id; failing the task instead of starting a loop', {
         taskId: orphanTaskId,
         requestId: complete.requestId,
         pathname: location.pathname,
@@ -2506,7 +2506,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       const staleTaskId = staleLoop.taskId;
       staleLoop.taskId = null;
       clearActiveDomTask(staleTaskId);
-      console.error('[GLM++] superseding a running continuation loop; failing its task', {
+      console.error('[Zai++] superseding a running continuation loop; failing its task', {
         taskId: staleTaskId,
         requestId: complete.requestId,
       });
@@ -2606,7 +2606,7 @@ async function advanceContinuationLoop(): Promise<void> {
   }
 
   if (!submitted) {
-    console.error('[GLM++] continuation submit was not observed', { step: loop.stepCount });
+    console.error('[Zai++] continuation submit was not observed', { step: loop.stepCount });
     finishContinuationLoop(loop);
   }
 }
@@ -2775,7 +2775,7 @@ async function submitAutomationPromptViaPage(
     if (requestFired) {
       const recognized = await waitForDomTaskRecognized(taskId);
       if (recognized) return true;
-      console.error('[GLM++] automation send fired a request but it was never recognized', {
+      console.error('[Zai++] automation send fired a request but it was never recognized', {
         taskId,
         submitPath,
         jumped: getCurrentChatSessionId() !== null,
@@ -2785,7 +2785,7 @@ async function submitAutomationPromptViaPage(
     }
 
     // 三类发送动作都触发不了任何请求：这条链路在页面侧被完全拦截。
-    console.error('[GLM++] automation send fired no request at all', {
+    console.error('[Zai++] automation send fired no request at all', {
       taskId,
       submitPath,
       sendBtnExists: !!sendButton,
@@ -3130,7 +3130,7 @@ async function installBackgroundCapability(): Promise<void> {
     const config = await sendRuntimeMessage<BackgroundConfig | null>({ type: 'GET_BACKGROUND' });
     applyBackground(config ?? null);
   } catch (error) {
-    console.warn('[GLM++] background config load failed', error);
+    console.warn('[Zai++] background config load failed', error);
   }
 
   let scheduled = false;
@@ -3318,7 +3318,7 @@ function installProjectPanel(): void {
       try {
         return decodeProjectContextState(raw, 'projectPanelState');
       } catch (error) {
-        console.warn('[GLM++] project panel state decode failed', error);
+        console.warn('[Zai++] project panel state decode failed', error);
         return null;
       }
     },
@@ -3398,7 +3398,7 @@ function installProjectPanel(): void {
     },
     getLabels: labels,
     onError(error) {
-      console.warn('[GLM++] project panel operation failed', error);
+      console.warn('[Zai++] project panel operation failed', error);
     },
   });
 
@@ -3857,7 +3857,7 @@ export default defineContentScript({
         // ⚠️ `void` 的 rejection 没人接 —— 这条广播监听是 fire-and-forget，
         // 不该指望被调函数永不抛（后台的 `refreshBackgroundLocale` 也是自带 `.catch`）。
         void loadAndSyncRuntimeState().catch((error) => {
-          console.error('[GLM++] runtime state sync failed', error);
+          console.error('[Zai++] runtime state sync failed', error);
         });
         sendResponse({ ok: true });
         return true;
@@ -3990,9 +3990,10 @@ export default defineContentScript({
       // 后台抓模型清单）读取。**不 await** —— 写不进去只是那条兜底退回默认站。
       rememberActiveSite: () => rememberActiveZaiSite(location.origin),
       syncRuntimeState: loadAndSyncRuntimeState,
-      onContinuationBubblesHidden: (count) => {
-        console.warn('[GLM++] hid continuation bubble', { count });
-      },
+      // ⚠️ **`onContinuationBubblesHidden` 刻意不传** —— 它存在的唯一用途是打一条
+      // 「隐藏了几条气泡」的日志，而那是**正常路径上的成功事件**（每轮续跑都会发生）。
+      // 扩展没有 dev/prod 之分（unpacked 安装），所以只能逐条决定「这句话该不该被
+      // 用户看见」；这条不该。接口里那个可选钩子保留（编排层照常转发，只是没人接）。
     });
 
     await syncRuntimeStateBeforeUse({ syncRuntimeState: loadAndSyncRuntimeState });

@@ -581,7 +581,15 @@ function enableSidePanelActionClick() {
     () => (chrome as typeof chrome & { sidePanel?: SidePanelApi }).sidePanel,
   );
   sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true })
-    .catch((error) => reportBackgroundStartupError('sidepanel_behavior_failed', error));
+    // ⚠️ **这条失败刻意静默，不走 `reportBackgroundStartupError`。**
+    // 它在 service worker **每次启动**时都会跑，而 Chrome 会在「worker 刚被拉起、
+    // 注册还没就绪」的那一瞬间拒掉它（错误 message 是 `No SW`）。它没有任何副作用 ——
+    // 代价只是这一整个会话里点工具栏图标不会自动开侧边栏，下次 worker 重启成功即恢复。
+    // 但它的失败会进 `chrome://extensions` 的错误面板，而那句话对用户毫无意义
+    //（既不是扩展的问题，也没法照做），只会让人以为扩展坏了。
+    // ⚠️ **`.catch` 必须保留**：去掉它就成了 unhandled rejection，
+    // 那在错误面板里比原来更显眼。
+    .catch(() => undefined);
 }
 
 function registerWhatsNewInstallListener() {
@@ -647,7 +655,7 @@ async function ensureShellMcpCompatibility(server: McpServerConfig) {
 
 function reportBackgroundStartupError(code: string, error: unknown) {
   const detail = error instanceof Error ? error.message : String(error);
-  console.error(`[GLM++] ${code}: ${detail}`, error);
+  console.error(`[Zai++] ${code}: ${detail}`, error);
 }
 
 function acknowledgeReportedSyncRecoveryFailure(error: unknown): void {

@@ -70,7 +70,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
         if (!cancelled) setPreferenceState(nextPreference);
       })
       .catch((error) => {
-        console.error('[GLM++] Failed to load locale preference.', error);
+        console.error('[Zai++] Failed to load locale preference.', error);
       })
       .finally(() => {
         if (!cancelled) setReady(true);

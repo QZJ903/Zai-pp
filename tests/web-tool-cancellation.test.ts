@@ -75,7 +75,7 @@ describe('web tool cancellation', () => {
     expect(result.ok).toBe(ok);
     expect(cancel).toHaveBeenCalledOnce();
     expect(warn).toHaveBeenCalledWith(
-      '[GLM++] Failed to cancel an unused web response body:',
+      '[Zai++] Failed to cancel an unused web response body:',
       cancelError,
     );
     warn.mockRestore();

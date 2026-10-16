@@ -227,7 +227,7 @@ export function createDomTaskCoordinator(
   const updateTab = deps.updateTab ?? ((tabId, props) => chrome.tabs.update(tabId, props));
   const sendTabMessage = deps.sendTabMessage ?? ((tabId, message) => chrome.tabs.sendMessage(tabId, message));
   const readActiveSiteOrigin = deps.readActiveSiteOrigin ?? readActiveZaiSiteOrigin;
-  const reportError = deps.reportError ?? ((code, error) => console.error(`[GLM++] ${code}`, error));
+  const reportError = deps.reportError ?? ((code, error) => console.error(`[Zai++] ${code}`, error));
 
   /** tabId → taskId：一 tab 同一时刻只跑一个后台任务（busy 锁）。 */
   const busyTabs = new Map<number, string>();

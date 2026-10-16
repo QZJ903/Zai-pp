@@ -68,7 +68,13 @@ export interface ZaiCapabilityDeps {
    * 写成 `void` 会逼调用方包一层箭头把它丢掉（多一层没意义的包装）。
    */
   syncRuntimeState: () => Promise<unknown>;
-  /** 气泡隐藏时的回调（生产里只打一条 warn）。 */
+  /**
+   * 气泡隐藏时的回调。**可选，且生产当前不传。**
+   *
+   * ⚠️ 它原本的用途是打一条「隐藏了几条气泡」的日志，而那是**正常路径上的成功事件**
+   * （每轮续跑都会发生）⇒ 按「不把诊断摆给用户看」的口径去掉了接线。
+   * 钩子保留是为了**编排层不必为「没人听」写特例**（`onHidden` 那处照常转发）。
+   */
   onContinuationBubblesHidden?: (count: number) => void;
 }
 
@@ -228,7 +234,7 @@ export function installZaiSessionWatch(deps: ZaiSessionWatchDeps): void {
   try {
     deps.addLocationChangeListener(onLocationMaybeChanged);
   } catch (error) {
-    console.warn('[GLM++] locationchange listener unavailable', error);
+    console.warn('[Zai++] locationchange listener unavailable', error);
   }
   target.addEventListener('popstate', onLocationMaybeChanged);
   target.addEventListener('hashchange', onLocationMaybeChanged);
@@ -262,7 +268,7 @@ export function notifyZaiSessionChange(deps: ZaiSessionNotifyDeps): void {
     try {
       listener();
     } catch (error) {
-      console.warn('[GLM++] session change listener failed', error);
+      console.warn('[Zai++] session change listener failed', error);
     }
   }
 }

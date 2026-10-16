@@ -36,7 +36,7 @@ function postToContent(message: Record<string, unknown>): void {
   try {
     window.postMessage({ source: ZAI_MAIN_TO_CONTENT, ...message }, '*');
   } catch (error) {
-    console.error('[GLM++] post to content failed', error);
+    console.error('[Zai++] post to content failed', error);
   }
 }
 

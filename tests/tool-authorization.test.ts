@@ -573,7 +573,7 @@ describe('tool authorization context', () => {
     expect(result.output).toMatchObject({ content: 'provider-result' });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(consoleError).toHaveBeenCalledWith(
-      '[GLM++] tool authorization completion persistence failed',
+      '[Zai++] tool authorization completion persistence failed',
       expect.any(Error),
     );
   });

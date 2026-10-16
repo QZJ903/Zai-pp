@@ -41,7 +41,7 @@ describe('runtime tool history persistence', () => {
     expect(result).toEqual({ ok: true, summary: 'provider completed' });
     expect(execute).toHaveBeenCalledTimes(1);
     expect(console.warn).toHaveBeenCalledWith(
-      '[GLM++] tool history persistence failed',
+      '[Zai++] tool history persistence failed',
       expect.any(Error),
     );
   });

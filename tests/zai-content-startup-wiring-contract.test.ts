@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as t from '@babel/types';
 import { ZAI_CAPABILITY_DEP_KEYS } from '../core/zai/capability-install';
+import { walkSourceAst } from './helpers/typescript-source';
 import {
   countReachableMethodCalls,
   directObjectMembers,
@@ -68,6 +69,29 @@ describe('content script main(): the dependency object holds the real functions'
     return found!;
   }
 
+  /**
+   * `ZaiCapabilityDeps` 里**标了 `?` 的**键 —— 即「允许不传」的那几个。
+   *
+   * ⚠️ **从接口派生，不手抄**（守则 B9）：手抄的第二份清单会在改接口时静默分叉，
+   * 而这里的分叉形态是「本该允许不传的键被判成漏传」⇒ 假红。
+   */
+  function optionalCapabilityDepKeys(): Set<string> {
+    const program = readContentProgram('core/zai/capability-install.ts');
+    const optional = new Set<string>();
+    walkSourceAst(program, (node) => {
+      if (!t.isTSInterfaceDeclaration(node)) return;
+      if (!t.isIdentifier(node.id, { name: 'ZaiCapabilityDeps' })) return;
+      for (const member of node.body.body) {
+        if (!t.isTSPropertySignature(member) || member.optional !== true) continue;
+        if (t.isIdentifier(member.key)) optional.add(member.key.name);
+      }
+    });
+    // 先确认这份派生不是空的 —— 接口被改名 / 搬走时，「没有可选键」会让下面的
+    // 「允许不传」整条失效（本该红的漏传变成绿的）。
+    expect(optional.size, '应当从接口里派生出至少一个可选键').toBeGreaterThan(0);
+    return optional;
+  }
+
   it.each(ZAI_CAPABILITY_DEP_KEYS)('passes a real `%s`', (key) => {
     const object = findCapabilityDepObject();
     const matching = object.properties.filter((property): property is t.ObjectProperty => (
@@ -77,9 +101,17 @@ describe('content script main(): the dependency object holds the real functions'
     ));
     // ⚠️ **「最多一次」要排在「允许不传」之前** —— 反过来的话，可选键那一格
     // 重复出现时会被静默放过（重复的键里只有最后一个生效，等于有一项被悄悄丢掉）。
-    expect(matching, `\`${key}\` 在依赖对象里最多出现一次`).toHaveLength(1);
-    // 可选的几个（`onContinuationBubblesHidden`）允许不传 —— 但传了就必须是真东西。
-    if (matching.length === 0) return;
+    expect(matching.length, `\`${key}\` 在依赖对象里最多出现一次`).toBeLessThanOrEqual(1);
+    // 可选的几个允许不传 —— 但传了就必须是真东西。
+    // ⚠️ **「可选」的判据是接口上的 `?`**，不是一份手抄名单：它现在有真实消费者
+    // （`onContinuationBubblesHidden` 的接线已按「不把诊断摆给用户看」去掉）。
+    if (matching.length === 0) {
+      expect(
+        optionalCapabilityDepKeys().has(key),
+        `\`${key}\` 在接口上是必填的，main() 的依赖对象里不能少它`,
+      ).toBe(true);
+      return;
+    }
 
     const value = matching[0]!.value;
 

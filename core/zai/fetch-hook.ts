@@ -341,7 +341,7 @@ async function prepareRequest(
   try {
     modified = await hookState.onRequestBody(body, originalContext.requestId, route);
   } catch (error) {
-    console.error('[GLM++] request augmentation failed; sending original request', error);
+    console.error('[Zai++] request augmentation failed; sending original request', error);
   }
 
   // ⚠️ **保留 `undefined` 与 `[]` 的区别**：`modified` 为 null 只发生在「增广失败 / 结果非法」
@@ -469,7 +469,7 @@ function hookXHR(): () => void {
       void prepareRequest(body, route).then((prepared) => {
         return origSend.call(xhr, prepared.requestBody);
       }).catch((error: unknown) => {
-        console.error('[GLM++] XHR augmentation failed; sending original', error);
+        console.error('[Zai++] XHR augmentation failed; sending original', error);
         return origSend.call(xhr, body);
       });
       return;
@@ -534,7 +534,7 @@ async function interceptCompletionResponse(
       const snapshot = usageTracker.finish(accumulator.assistantText);
       if (snapshot) hookState.onUsageSnapshot(snapshot);
     } catch (error) {
-      console.error('[GLM++] usage snapshot failed', error);
+      console.error('[Zai++] usage snapshot failed', error);
     }
     hookState.onRequestTerminal({ requestId: context.requestId });
   };
