@@ -10,6 +10,7 @@ import {
   isNamedKey,
   isRawValueExpression,
   collectMessageCaseBodies,
+  countReachableMethodCalls,
   readContentProgram,
   walkReachable,
 } from './helpers/content-source-ast';
@@ -17,24 +18,24 @@ import {
 const CONTENT_SOURCE = 'entrypoints/zai.content.ts';
 
 /**
- * 工具执行的调用点**必须被 await**，且授权重试**必须绑定本次同步的返回值** ——
- * 这两条一起构成「`REQUEST_TERMINAL` 不需要等在飞执行」这条判断的前提。
+ * 工具执行**故意不再留在串行队列里** —— 它跑十几秒（`web_fetch` 上界 15 秒），
+ * 留在队列里会把后面的 `RESPONSE_COMPLETE` / `REQUEST_TERMINAL` 一起堵住，
+ * 而「是否用户手动停止」的判定只有 4 秒宽限窗口 ⇒ 慢工具被误判成手动停止。
  *
- * `REQUEST_TERMINAL` 关闭授权前不做任何等待（`zai.content.ts` 的对应分支里有说明），
- * 成立的前提是：`executeDetected` 的每个调用点都在 `mainWorldMessageQueue` 内被
- * **串行 await**，而 `REQUEST_TERMINAL` 排在同一条队列的 TOOL_CALL /
- * RESPONSE_COMPLETE 之后 —— 于是走到那里不可能还有在飞的执行。
+ * ⚠️⚠️ **代价是「终态不需要等在飞执行」这条老前提没了**，取而代之的是两条新不变式：
+ * ① **执行入口只有一个**（`startDetectedToolCall`，登记计数后挂到本请求的执行链上）；
+ * ② **终态收尾必须等**（`tryFinalizeRequest` 先判 `pendingExecutions` / `response`，
+ *    两条判据都在实际动作之前）—— 那条断言在下面 `every finished turn` 一节里。
  *
- * ⚠️ **一旦有人把它改成并发派发（`void executeDetected(...)` 或 `Promise.all` 里的
- * 裸调用），这个前提就没了**：工具可能在授权被关掉之后才真正执行，而表现是静默的
- * （执行失败或走懒建授权），不会报错、也不会让任何现有测试变红。所以把前提钉在这里。
+ * ⚠️ **仍然不允许「有人顺手把 `await executeDetected` 改成裸调用」** —— 那两处调用点
+ * （兜底路径 + `executeDetectedFromDetected` 内）本来就在队列内、串行、耗时可控，
+ * 改成并发只会让签名去重与面板状态进入竞态。所以这里继续钉住「必须 await」。
  *
  * ⚠️ **断言查的是调用点的语法位置（父节点是不是 `AwaitExpression`），不是源码里
  * 有没有出现函数名** —— 后者用 `includes` 就能过，删掉 await 照样为 true。
  */
 const AWAITED_FUNCTIONS = [
   'executeDetected',
-  'handleDetectedToolCall',
   'handleResponseComplete',
 ] as const;
 
@@ -86,12 +87,117 @@ describe('tool execution call sites are awaited', () => {
     }
   });
 
-  it('awaits every call, so REQUEST_TERMINAL cannot observe an in-flight execution', () => {
+  it('awaits every remaining call, so the in-queue paths stay serial', () => {
     const unawaited = collectCallSites(readContentProgram())
       .filter((site) => !site.awaited)
       .map((site) => `${site.name} (line ${site.line})`);
 
-    expect(unawaited, '这些调用点没有 await，会破坏 REQUEST_TERMINAL 的顺序保证').toEqual([]);
+    expect(unawaited, '这些调用点没有 await，会让队列内的执行进入并发').toEqual([]);
+  });
+
+  it('launches tool execution from one entry that counts the in-flight work first', () => {
+    // ⚠️⚠️ **这是「执行离开队列」之后唯一还兜住续跑判定的东西。**
+    // `RESPONSE_COMPLETE` 紧随 `TOOL_CALL` 之后排在队列里；若执行入口没有**同步**
+    // 把计数加上，会合点会以为「执行已齐」而提前消费响应
+    // ⇒ `handleResponseComplete` 读到空的 `executionsByRequest` ⇒ 续跑当场收尾。
+    //
+    // 判据四条：① 入口内有 `beginToolCall`（那行「执行中」仍画在这里，不在兜底路径）；
+    // ② `pendingExecutions` 有 +1 与 -1 各一处；③ +1 是**同步语句**（不在 `await` /
+    // `.then` / `.catch` 里 —— 后两者都要等一个 tick 才跑）；④ 启动执行没被 await。
+    const program = readContentProgram();
+    const body = findFunctionBody(program, 'startDetectedToolCall');
+
+    expect(countReachableMethodCalls(body, 'toolPanel', 'beginToolCall'), '必须调一次 beginToolCall').toBe(1);
+
+    let increments = 0;
+    let decrements = 0;
+    // ⚠️⚠️ **+1 必须走 `walkReachable`（跳过嵌套函数体）** —— 判据是「它在入口函数体的
+    // **顶层**同步执行」。用 `walkSourceAst` 收的话，把 +1 挪进 `.then(...)` 回调里
+    // （那里也会晚一个 tick，同样让会合点提前消费响应）**照样能被收到 ⇒ 假绿**（实测踩过）。
+    walkReachable(body, (node) => {
+      if (!t.isAssignmentExpression(node)) return;
+      if (!t.isMemberExpression(node.left) || !t.isIdentifier(node.left.object, { name: 'state' })) return;
+      if (!t.isIdentifier(node.left.property, { name: 'pendingExecutions' })) return;
+      if (node.operator === '+=') increments += 1;
+    });
+    // -1 刻意在异步链的末尾（`walkReachable` 收不到它），所以这里必须用全量遍历。
+    walkSourceAst(body, (node) => {
+      if (!t.isAssignmentExpression(node) || node.operator !== '-=') return;
+      if (!t.isMemberExpression(node.left) || !t.isIdentifier(node.left.object, { name: 'state' })) return;
+      if (t.isIdentifier(node.left.property, { name: 'pendingExecutions' })) decrements += 1;
+    });
+    expect(increments, '执行入口必须在顶层同步给在飞计数 +1（挪进回调会晚一个 tick）').toBe(1);
+    expect(decrements, '执行结束后必须给在飞计数 -1').toBe(1);
+
+    // ⚠️⚠️ **-1 必须落在 `finally` 里** —— 只在成功分支减的话，一次执行抛错就会让计数
+    // 永久 > 0 ⇒ 终态收尾永不执行 ⇒ 授权与请求级状态一起泄漏，而**表现是静默的**。
+    // 判据：那条赋值语句的父链上有 `TryStatement`，且它就在 `finalizer` 块里。
+    const parents = new Map<t.Node, t.Node>();
+    walkSourceAst(body, (node) => {
+      for (const key of t.VISITOR_KEYS[node.type] ?? []) {
+        const child = (node as unknown as Record<string, unknown>)[key];
+        const children = Array.isArray(child) ? child : [child];
+        for (const item of children) {
+          if (item && typeof item === 'object' && 'type' in item) parents.set(item as t.Node, node);
+        }
+      }
+    });
+    let decrementInFinally = false;
+    walkSourceAst(body, (node) => {
+      if (!t.isAssignmentExpression(node) || node.operator !== '-=') return;
+      if (!t.isMemberExpression(node.left) || !t.isIdentifier(node.left.property, { name: 'pendingExecutions' })) return;
+      // 判据：最近的那个「回调函数」（`.then/.catch/.finally` 的实参）必须是
+      // **`.finally(...)` 的回调** —— 落在 `.then` / `.catch` 里都会漏掉抛错那条路。
+      let cursor: t.Node | undefined = node;
+      while (cursor) {
+        const parent: t.Node | undefined = parents.get(cursor);
+        if (parent && (t.isArrowFunctionExpression(parent) || t.isFunctionExpression(parent))) {
+          const call = parents.get(parent);
+          if (t.isCallExpression(call) && t.isMemberExpression(call.callee)
+            && t.isIdentifier(call.callee.property, { name: 'finally' })) {
+            decrementInFinally = true;
+          }
+          break;
+        }
+        cursor = parent;
+      }
+    });
+    expect(decrementInFinally, '在飞计数必须在 `.finally(...)` 里减（只减成功分支会让一次抛错永久卡死收尾）')
+      .toBe(true);
+
+    // 执行启动不能是 `await executeDetectedFromDetected(...)`。
+    // ⚠️ 单独走一遍全程序 AST：那个函数**不在** `AWAITED_FUNCTIONS` 里（它本来就不该 await），
+    // 所以 `collectCallSites` 收不到它。
+    let awaitedLaunch = false;
+    walkSourceAst(program, (node) => {
+      if (!t.isAwaitExpression(node)) return;
+      const arg = node.argument;
+      if (t.isCallExpression(arg) && t.isIdentifier(arg.callee)
+        && arg.callee.name === 'executeDetectedFromDetected') {
+        awaitedLaunch = true;
+      }
+    });
+    expect(awaitedLaunch, '执行入口不得 await 执行（那正是把队列堵住的原因）').toBe(false);
+
+    // ⑤ **执行必须挂在本请求的执行串行链上** —— 现状里同一回复的多个工具由队列**逐条
+    //    await**、天然串行；踢出队列后若各自起跑就会并发，改变「同文件两次写、两次 shell
+    //    命令」这类组合的既有行为。判据：赋值右侧的子树里出现了 `state.executionChain`
+    //    （链条是 `.then().catch().then()`，根部必然是对它的成员访问）。
+    let chainedFromPrevious = false;
+    walkSourceAst(body, (node) => {
+      if (!t.isAssignmentExpression(node) || node.operator !== '=') return;
+      if (!t.isMemberExpression(node.left)) return;
+      if (!t.isIdentifier(node.left.property, { name: 'executionChain' })) return;
+      walkSourceAst(node.right, (inner) => {
+        if (!t.isMemberExpression(inner)) return;
+        if (t.isIdentifier(inner.object, { name: 'state' })
+          && t.isIdentifier(inner.property, { name: 'executionChain' })) {
+          chainedFromPrevious = true;
+        }
+      });
+    });
+    expect(chainedFromPrevious, '执行必须接在上一个执行之后（并发会改变多工具回复的既有行为）')
+      .toBe(true);
   });
 
   it('binds the authorization retry to the descriptors from this call, not to module state', () => {
@@ -344,9 +450,13 @@ describe('request-scoped state is released once per request', () => {
       .not.toContain('respondedRequestIds');
   });
 
-  it('calls releaseRequestState inside the REQUEST_TERMINAL branch, not just anywhere', () => {
+  it('releases request state from the terminal finalizer, not from the case body', () => {
     // ⚠️ 不能只断言「源码里出现过 releaseRequestState」—— 函数定义体本身就含这个标识符，
-    // 删掉调用点那种断言照样为 true。这里断言**调用出现在 REQUEST_TERMINAL 的 case 里**。
+    // 删掉调用点那种断言照样为 true。
+    //
+    // ⚠️⚠️ **释放搬进了 `tryFinalizeRequest`**（终态分支与会合点两处共用、最后满足条件的那个做），
+    // 所以判据拆成两条：① 终态分支**必须**调那个收尾函数；② 收尾函数体内**恰好**释放一次。
+    // 少任何一条，要么收尾永远不会被触发（授权永不关），要么释放点被搬走后无人覆盖。
     const program = readContentProgram();
     // ⚠️⚠️ **必须收「那一个 `switch (data.type)`」的分支** —— 全程序扫 `SwitchCase`
     // 是 last-wins，而 TS 允许重复 case ⇒ 在真分支后面补一个同名、内容合规但
@@ -359,12 +469,69 @@ describe('request-scoped state is released once per request', () => {
     for (const statement of terminal!) {
       walkSourceAst(statement, (node) => {
         if (t.isCallExpression(node) && t.isIdentifier(node.callee)
-          && node.callee.name === 'releaseRequestState') {
+          && node.callee.name === 'tryFinalizeRequest') {
           calledInTerminal += 1;
         }
       });
     }
-    expect(calledInTerminal, 'releaseRequestState 必须在 REQUEST_TERMINAL 分支内被调用').toBe(1);
+    expect(calledInTerminal, 'REQUEST_TERMINAL 分支必须触发一次终态收尾').toBe(1);
+
+    let releasedInFinalizer = 0;
+    walkSourceAst(findFunctionBody(program, 'tryFinalizeRequest'), (node) => {
+      if (t.isCallExpression(node) && t.isIdentifier(node.callee)
+        && node.callee.name === 'releaseRequestState') {
+        releasedInFinalizer += 1;
+      }
+    });
+    expect(releasedInFinalizer, '终态收尾函数里必须恰好释放一次请求级状态').toBe(1);
+  });
+
+  it('waits for in-flight executions before closing the grant and releasing state', () => {
+    // ⚠️⚠️ **这是「执行可以离开串行队列」之后唯一还成立的安全依据。**
+    // 执行踢出队列后，`REQUEST_TERMINAL` 可能赶在执行前面跑完 —— 若在那里就关授权，
+    // 在飞的工具执行会拿不到 grant、落到 `executeDetected` 的**懒建授权**兜底
+    // （那等价于「在内容脚本里给自己发许可」）；同理 `releaseRequestState` 会清掉
+    // `executionsByRequest`，而它的最后一个读者在 `handleResponseComplete` 里。
+    // ⇒ 收尾函数必须**两条前置判据都有**，且都在动作之前。
+    const program = readContentProgram();
+    const body = findFunctionBody(program, 'tryFinalizeRequest');
+
+    // ⚠️ 判据收窄到「`if` 的 test 子树里访问了 `state.<属性>`」——
+    // 只看 `test` 是不是 `MemberExpression` 会漏掉 `state.pendingExecutions > 0`
+    // （BinaryExpression）与 `state.response || …`（LogicalExpression）两种真实形态。
+    const guardProps = new Set<string>();
+    walkSourceAst(body, (node) => {
+      if (!t.isIfStatement(node)) return;
+      walkSourceAst(node.test, (inner) => {
+        const isStateMember = (t.isMemberExpression(inner) || t.isOptionalMemberExpression(inner))
+          && t.isIdentifier(inner.object, { name: 'state' })
+          && t.isIdentifier(inner.property);
+        if (isStateMember) guardProps.add((inner.property as t.Identifier).name);
+      });
+    });
+    expect(guardProps, '收尾函数必须先判「执行是否还在飞」').toContain('pendingExecutions');
+    expect(guardProps, '收尾函数必须先判「响应是否还没消费掉」').toContain('response');
+    expect(guardProps, '收尾函数必须先判「终态是否已到」').toContain('terminalSeen');
+
+    // ⚠️ **关授权这个动作本身也要在** —— 少一条「必须先等」的判据是过度提前，
+    // 整个动作消失则是grant 泄漏（后台 `MAX_ACTIVE_GRANTS = 32`，满了之后
+    // **之后所有轮次**的建授权都会抛 `tool_authorization_grant_limit`）。
+    expect(
+      /closeToolAuthorization\(/.test(readFileSync(CONTENT_SOURCE, 'utf8').slice(body.start!, body.end!)),
+      '收尾函数必须真的关掉授权',
+    ).toBe(true);
+
+    // 且必须先于释放（用源码偏移判前后）。
+    const source = readFileSync(CONTENT_SOURCE, 'utf8').slice(body.start!, body.end!);
+    const firstGuard = Math.min(
+      source.indexOf('state.pendingExecutions'),
+      source.indexOf('state.response'),
+    );
+    const actionOffsets = ['closeToolAuthorization(', 'releaseRequestState(']
+      .map((a) => source.indexOf(a))
+      .filter((i) => i >= 0);
+    expect(actionOffsets.length, '收尾函数里应当有关授权与释放两个动作').toBeGreaterThan(0);
+    expect(firstGuard, '前置判据必须在实际动作之前').toBeLessThan(Math.min(...actionOffsets));
   });
 });
 
@@ -410,8 +577,10 @@ describe('every finished turn seals its tool block', () => {
     expect(countCalls(body, 'toolPanel', 'sealTurn')).toBe(2);
   });
 
-  it('seals the turn in the REQUEST_TERMINAL branch too', () => {
-    // ⚠️ 流被 abort 的轮次**不走 RESPONSE_COMPLETE**，只走这里。
+  it('seals the turn from the terminal finalizer too', () => {
+    // ⚠️ 流被 abort 的轮次**不走 RESPONSE_COMPLETE**，只走终态这条路（经收尾函数）。
+    // 收尾动作搬进 `tryFinalizeRequest` 之后，judged 的对象也随之搬家 —— 但**触发点仍必须是
+    // 终态分支**：只判「收尾函数里 sealTurn 恰好一次」的话，把那个函数接到别处去也照样绿。
     const program = readContentProgram();
     // ⚠️⚠️ **必须收「那一个 `switch (data.type)`」的分支** —— 全程序扫 `SwitchCase`
     // 是 last-wins，而 TS 允许重复 case ⇒ 在真分支后面补一个同名、内容合规但
@@ -419,10 +588,31 @@ describe('every finished turn seals its tool block', () => {
     const caseBodies = collectMessageCaseBodies(program);
     const terminal = caseBodies.get('REQUEST_TERMINAL');
     expect(terminal, '应当有 REQUEST_TERMINAL 分支').toBeDefined();
+    let triggersFinalizer = 0;
+    for (const statement of terminal!) {
+      walkSourceAst(statement, (node) => {
+        if (t.isCallExpression(node) && t.isIdentifier(node.callee)
+          && node.callee.name === 'tryFinalizeRequest') {
+          triggersFinalizer += 1;
+        }
+      });
+    }
+    expect(triggersFinalizer, '终态分支必须触发收尾').toBe(1);
 
-    let sealed = 0;
-    for (const statement of terminal!) sealed += countCalls(statement, 'toolPanel', 'sealTurn');
-    expect(sealed, 'REQUEST_TERMINAL 分支里必须收一次').toBe(1);
+    const body = findFunctionBody(program, 'tryFinalizeRequest');
+    expect(countCalls(body, 'toolPanel', 'sealTurn'), '收尾函数里必须收一次').toBe(1);
+    // ⚠️ **顺序：先 `finalizePending` 再 `sealTurn`** —— 前者可能重发一次记录
+    // （把「执行中」换成失败），那次重发带着 `live: true` 会把块重新画成展开。
+    // 这条路径（流被 abort）尤其要收 —— 否则那一大块会一直摊在页面上。
+    const order: string[] = [];
+    walkSourceAst(body, (node) => {
+      if (!t.isCallExpression(node) || !t.isMemberExpression(node.callee)) return;
+      if (!t.isIdentifier(node.callee.object) || !t.isIdentifier(node.callee.property)) return;
+      if (node.callee.object.name !== 'toolPanel') return;
+      if (node.callee.property.name !== 'finalizePending' && node.callee.property.name !== 'sealTurn') return;
+      order.push(node.callee.property.name);
+    });
+    expect(order, '收尾函数里必须先 finalize 再 seal').toEqual(['finalizePending', 'sealTurn']);
   });
 
   it('finalizes the pending rows before sealing', () => {
@@ -1053,6 +1243,198 @@ describe('tool tag recognition uses the descriptors injected into this request',
  * 后台的 grant 名额是 `MAX_ACTIVE_GRANTS = 32`，满了会让**之后所有**建授权抛
  * `tool_authorization_grant_limit`（静默降级：工具全部不可用）。
  */
+describe('the arrival registration happens outside the serial queue', () => {
+  it('records the arrival in the synchronous probe, not inside the queued handler', () => {
+    // ⚠️⚠️ **这条抓的是一个「全绿但功能不通」的缺陷，且它曾经真的存在于生产代码里。**
+    // 「响应已到达」的登记（`respondedRequestIds` / 清手动停止 timer）是
+    // **「是否用户手动停止」的判据**，而那个判定只有 4 秒宽限窗口；
+    // `RESPONSE_COMPLETE` 却排在一段十几秒的工具执行之后（`TOOL_CALL` 分支曾 await
+    // 整条执行链，`web_fetch` 上界 15 秒）—— 登记留在队列内 ⇒ 慢工具被误判成手动停止，
+    // 并连带摘掉 taskId、回收续跑循环。
+    //
+    // 判据两条一起：① 登记出现在**队列外**那个函数（`dispatchMainWorldMessage`）里；
+    // ② 队列内的消费函数（`handleResponseComplete`）里**不再**登记。
+    // 少任何一条都拦不住「有人顺手把它挪回去」。
+    const program = readContentProgram();
+
+    const probe = findFunctionBody(program, 'dispatchMainWorldMessage');
+    const recordsArrival = (scope: t.Node): number => {
+      let count = 0;
+      walkSourceAst(scope, (node) => {
+        if (!t.isCallExpression(node) || !t.isMemberExpression(node.callee)) return;
+        if (!t.isIdentifier(node.callee.object, { name: 'respondedRequestIds' })) return;
+        if (!t.isIdentifier(node.callee.property, { name: 'add' })) return;
+        count += 1;
+      });
+      return count;
+    };
+    expect(recordsArrival(probe), '响应到达的登记必须在串行队列之外完成').toBe(1);
+    expect(
+      recordsArrival(findFunctionBody(program, 'handleResponseComplete')),
+      'handleResponseComplete 排在队列里，在那里登记会让慢工具被误判成手动停止',
+    ).toBe(0);
+    expect(
+      recordsArrival(findFunctionBody(program, 'tryFinalizeRequest')),
+      '收尾不是「响应到达」那一刻，不得在那里登记',
+    ).toBe(0);
+  });
+});
+
+describe('the tool-turn rendezvous consumes each response exactly once', () => {
+  it('guards the settle task with a scheduled flag cleared inside the task', () => {
+    // ⚠️ **多工具回复会让 `finally` 触发多次会合**（每个工具一次），加上响应到达那一次
+    // ——不去重就会让 `handleResponseComplete` 被调两次，续跑被注入两轮。
+    // ⚠️ **标志位必须在任务体内清**（不是同步清）：同步清会让下一页任务误以为「没有在排队的
+    // 会合」，而实际那个任务还没跑；反过来若只在任务体内清、却不在同步路径上设位，
+    // 两次触发会各自排一个任务。
+    const body = findFunctionBody(readContentProgram(), 'settleToolTurn');
+
+    let setTrue = 0;
+    let setFalse = 0;
+    walkSourceAst(body, (node) => {
+      if (!t.isAssignmentExpression(node) || node.operator !== '=') return;
+      if (!t.isMemberExpression(node.left)) return;
+      if (!t.isIdentifier(node.left.object, { name: 'state' })) return;
+      if (!t.isIdentifier(node.left.property, { name: 'settleScheduled' })) return;
+      if (node.right.type === 'BooleanLiteral' && (node.right as t.BooleanLiteral).value) setTrue += 1;
+      if (node.right.type === 'BooleanLiteral' && !(node.right as t.BooleanLiteral).value) setFalse += 1;
+    });
+    expect(setTrue, '会合点必须同步置位（否则两条触发路会各排一个任务）').toBe(1);
+    expect(setFalse, '会合点必须在任务体内清位').toBe(1);
+
+    // ⚠️⚠️ **光有标志位不够 —— 它必须真的被用作「提前返回」的判据。**
+    // 只数赋值次数的话，把 `|| state.settleScheduled` 从守卫里删掉照样绿（实测踩过），
+    // 而那时两条触发路会各排一个任务、`handleResponseComplete` 被调两次。
+    let guardReadsScheduled = false;
+    walkSourceAst(body, (node) => {
+      if (!t.isIfStatement(node) || !t.isReturnStatement(node.consequent)) return;
+      walkSourceAst(node.test, (inner) => {
+        if ((t.isMemberExpression(inner) || t.isOptionalMemberExpression(inner))
+          && t.isIdentifier(inner.object, { name: 'state' })
+          && t.isIdentifier(inner.property, { name: 'settleScheduled' })) {
+          guardReadsScheduled = true;
+        }
+      });
+    });
+    expect(guardReadsScheduled, 'settleScheduled 必须参与「提前返回」的判据，不能只是被赋值')
+      .toBe(true);
+
+    // ⚠️ 唯一性还依赖「会不会重复消费」：`response` 必须被读出后立刻置空，
+    // 且读出发生在任务体内（同步路径只看它、不清它）。
+    let clearsResponse = 0;
+    walkSourceAst(body, (node) => {
+      if (!t.isAssignmentExpression(node) || node.operator !== '=') return;
+      if (!t.isMemberExpression(node.left)) return;
+      if (!t.isIdentifier(node.left.object, { name: 'state' })) return;
+      if (!t.isIdentifier(node.left.property, { name: 'response' })) return;
+      if (t.isNullLiteral(node.right)) clearsResponse += 1;
+    });
+    expect(clearsResponse, '会合点必须消费后清空 response（防重复消费）').toBe(1);
+  });
+
+  it('settles on both wake-up sources: response arrival and execution landing', () => {
+    // ⚠️ **两个唤醒源缺一不可**：只有响应到达那个 → 执行先落地的轮次永远不推进；
+    // 只有执行落地那个 → 没有工具、或工具先跑完的轮次永远不推进（续跑就此停住）。
+    const program = readContentProgram();
+
+    // 唤醒源 ①：响应到达（`RESPONSE_COMPLETE` 分支）。
+    const caseBodies = collectMessageCaseBodies(program);
+    const completeBranch = caseBodies.get('RESPONSE_COMPLETE');
+    expect(completeBranch, '应当有 RESPONSE_COMPLETE 分支').toBeDefined();
+    let settlesFromResponse = 0;
+    for (const statement of completeBranch!) {
+      walkSourceAst(statement, (node) => {
+        if (t.isCallExpression(node) && t.isIdentifier(node.callee)
+          && node.callee.name === 'settleToolTurn') {
+          settlesFromResponse += 1;
+        }
+      });
+    }
+    expect(settlesFromResponse, 'RESPONSE_COMPLETE 分支必须触发一次会合').toBe(1);
+
+    // 唤醒源 ②：执行落地（`startDetectedToolCall` 的执行链末尾）。
+    const startBody = findFunctionBody(program, 'startDetectedToolCall');
+    let settlesFromExecution = 0;
+    walkSourceAst(startBody, (node) => {
+      if (t.isCallExpression(node) && t.isIdentifier(node.callee)
+        && node.callee.name === 'settleToolTurn') {
+        settlesFromExecution += 1;
+      }
+    });
+    expect(settlesFromExecution, '执行落地必须触发一次会合').toBe(1);
+
+    // ⚠️ 且必须**排在减计数之后** —— 反了会让会合点看到「还在飞」而拒绝推进，
+    // 而这时已经没有任何后续唤醒了（那条轮次永久卡住）。
+    const source = readFileSync(CONTENT_SOURCE, 'utf8').slice(startBody.start!, startBody.end!);
+    const decrementAt = source.indexOf('pendingExecutions -= 1');
+    const settleAt = source.indexOf('settleToolTurn(');
+    expect(decrementAt, '执行链末尾应当先减在飞计数').toBeGreaterThanOrEqual(0);
+    expect(settleAt, '执行链末尾应当触发会合').toBeGreaterThanOrEqual(0);
+    expect(decrementAt, '必须先减计数、再触发会合').toBeLessThan(settleAt);
+  });
+
+  it('creates one rendezvous entry before launching, even for tool-less requests', () => {
+    // ⚠️⚠️ **无工具的请求也必须建条目** —— 否则终态收尾会在「找不到状态」处直接返回，
+    // 收尾整块不执行（授权永不关、请求级状态永不释放），而**失败是静默的**。
+    const program = readContentProgram();
+
+    // ① 执行入口在建状态之后才写计数（顺序用偏移判）。
+    const startBody = findFunctionBody(program, 'startDetectedToolCall');
+    const startSource = readFileSync(CONTENT_SOURCE, 'utf8').slice(startBody.start!, startBody.end!);
+    const ensureAt = startSource.indexOf('ensureToolTurnState(');
+    const incrementAt = startSource.indexOf('pendingExecutions += 1');
+    expect(ensureAt, '执行入口必须先取/建会合状态').toBeGreaterThanOrEqual(0);
+    expect(incrementAt, '执行入口必须给计数 +1').toBeGreaterThanOrEqual(0);
+    expect(ensureAt, '先建状态、再加计数').toBeLessThan(incrementAt);
+
+    // ② 终态分支也建条目（那是「一条工具都没跑」的请求唯一的建条目时机）。
+    const caseBodies = collectMessageCaseBodies(program);
+    const terminal = caseBodies.get('REQUEST_TERMINAL');
+    expect(terminal, '应当有 REQUEST_TERMINAL 分支').toBeDefined();
+    let ensuredInTerminal = 0;
+    for (const statement of terminal!) {
+      walkSourceAst(statement, (node) => {
+        if (t.isCallExpression(node) && t.isIdentifier(node.callee)
+          && node.callee.name === 'ensureToolTurnState') {
+          ensuredInTerminal += 1;
+        }
+      });
+    }
+    expect(ensuredInTerminal, '终态分支必须建条目（无工具请求没有别的地方会建）').toBe(1);
+  });
+
+  it('keeps the request-scoped tool-turn state off the chatNew route', () => {
+    // ⚠️ **`toolTurnStates` 不归 `releaseRequestState` 管**（它由 `tryFinalizeRequest`
+    // 删），所以上面那条「从 releaseRequestState 反向枚举」的通则**覆盖不到它**。
+    // chatNew 请求收不到 `REQUEST_TERMINAL` ⇒ 写进去就是永不释放的孤儿。在这里单独钉一条。
+    const program = readContentProgram();
+    const body = findFunctionBody(program, 'handleAugmentRequestBody');
+    const branches: t.IfStatement[] = [];
+    walkSourceAst(body!, (node) => {
+      if (!t.isIfStatement(node)) return;
+      const test = node.test;
+      if (!t.isBinaryExpression(test) || test.operator !== '===') return;
+      if (!t.isIdentifier(test.left, { name: 'route' })) return;
+      if (!t.isStringLiteral(test.right, { value: 'chatNew' })) return;
+      branches.push(node);
+    });
+    expect(branches.length, '应当恰好有一个 `route === \'chatNew\'` 分支').toBe(1);
+
+    // ⚠️⚠️ **两条都要收** —— 直接写 `toolTurnStates.set(...)` 是一种，经
+    // `ensureToolTurnState(...)` 间接建条目是另一种（那才是实际会发生的写法）。
+    // 只收前者会让后者**静默漏过**（实测踩过）。
+    let writes = 0;
+    walkSourceAst(branches[0], (node) => {
+      if (!t.isCallExpression(node)) return;
+      if (t.isIdentifier(node.callee, { name: 'ensureToolTurnState' })) writes += 1;
+      if (t.isMemberExpression(node.callee)
+        && t.isIdentifier(node.callee.object, { name: 'toolTurnStates' })
+        && t.isIdentifier(node.callee.property, { name: 'set' })) writes += 1;
+    });
+    expect(writes, 'chatNew 分支不得写 toolTurnStates（收不到 REQUEST_TERMINAL，永不释放）').toBe(0);
+  });
+});
+
 describe('chatNew does not write request-scoped state it can never release', () => {
   /** `handleAugmentRequestBody` 里 `route === 'chatNew'` 那个 if 节点。 */
   function findChatNewBranch(): t.IfStatement {

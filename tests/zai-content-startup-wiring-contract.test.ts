@@ -31,7 +31,7 @@ import {
  * ① **孤儿检测** —— 它是**全局死代码检测**，没有对应的行为可测（「这段代码永不执行」
  *    本身就是负向事实）。行为化的替代品是覆盖率，而覆盖率不进 CI。
  * ② **工具面板的四个投递点** —— 它们在 `dispatchMainWorldMessageInner` /
- *    `handleDetectedToolCall` / `handleResponseComplete` 里，要行为化得把整个
+ *    `startDetectedToolCall` / `handleResponseComplete` 里，要行为化得把整个
  *    消息分发器与续跑状态机都做成可注入的，依赖面太大、收益不抵风险。
  * ③ **`REQUEST_TERMINAL` 分支里的收尾** —— 同上（`caseBodies`）。
  *
@@ -273,10 +273,11 @@ describe('tool panel: every delivery point is wired to its handler', () => {
   });
 
   it('draws the running row from the detected-tool-call path, with the raw attached', () => {
-    // ⚠️ **位置是契约的一部分**：它必须在 `handleDetectedToolCall` 里而不是
+    // ⚠️ **位置是契约的一部分**：它必须在「检测到工具调用」的那个入口里而不是
     // `executeDetected` 里 —— 后者也会从兜底路径被调，那条路刻意不画「执行中」。
+    // ⚠️ 那个入口同时承担「登记在飞执行计数」的职责，名字是 `startDetectedToolCall`。
     const program = readContentProgram();
-    const body = findFunctionBody(program, 'handleDetectedToolCall');
+    const body = findFunctionBody(program, 'startDetectedToolCall');
 
     expect(countReachableMethodCalls(body, 'toolPanel', 'beginToolCall'), '必须调一次 beginToolCall').toBe(1);
     expect(

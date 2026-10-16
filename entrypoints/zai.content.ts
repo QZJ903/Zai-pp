@@ -118,6 +118,7 @@ import {
 } from '../core/zai/contracts';
 import { rememberActiveZaiSite } from '../core/zai/active-site';
 import { sleep } from '../core/zai/async';
+import { createSerialOperationQueue } from '../core/persistence/serial-operation-queue';
 import { createToolInvocationCatalog } from '../core/tool/invocation';
 import { createLatestSyncGate } from '../core/tool/latest-sync';
 import { MCP_CAPABILITY_TOOL_PROVIDER_ID } from '../core/mcp/capability-contract';
@@ -219,12 +220,12 @@ const executionsByRequest = new Map<string, ToolExecutionRecord[]>();
 const requestToolDescriptorsByRequestId = new Map<string, ToolDescriptor[]>();
 
 /**
- * 释放某个请求的全部请求级状态。**在 `REQUEST_TERMINAL` 分支末尾调用一次**。
+ * 释放某个请求的全部请求级状态。**由终态收尾函数 `tryFinalizeRequest` 调用一次**。
  *
- * 选这个点的依据：`REQUEST_TERMINAL` 由 `notifyTerminal` 发出、带 `terminalSent` 幂等守卫，
- * **每条请求恰好一次**；而它天然排在 `RESPONSE_COMPLETE` 之后（fetch hook 先发后者），
- * 这几个容器的最后一个读者都在 `handleResponseComplete` 里 —— 即「读完才删」，
- * 不会让某次执行被判成重复而跳过。
+ * 选那个点的依据：收尾要等三条同时成立（终态已到 / 执行已齐 / 响应已消费），
+ * 而这几条恰好保证**它们各自的最后一个读者都已经跑完** —— 即「读完才删」，
+ * 不会让某次执行被判成重复而跳过。`tryFinalizeRequest` 由 `REQUEST_TERMINAL` 分支
+ * 与会合点两处共同触发、但自身幂等（收尾成功即删状态条目），所以仍**每条请求恰好释放一次**。
  *
  * ⚠️ **`respondedRequestIds` 刻意不在这里释放。** 它有一个**延迟读者**：
  * `armManualStopDetection` 会遍历在跑的任务，把「不在这个集合里」的 requestId 挂上
@@ -251,8 +252,139 @@ function releaseRequestState(requestId: string): void {
   localSkillDirByRequestId.delete(requestId);
   requestToolDescriptorsByRequestId.delete(requestId);
 }
-/** 主世界消息串行队列：保证 TOOL_CALL → RESPONSE_COMPLETE → REQUEST_TERMINAL 按顺序执行。 */
-let mainWorldMessageQueue: Promise<void> = Promise.resolve();
+/**
+ * 主世界消息串行队列：保证 TOOL_CALL → RESPONSE_COMPLETE → REQUEST_TERMINAL 按顺序执行。
+ *
+ * ⚠️ **它提供的是「串行化」，不是「纠正乱序」** —— 主世界 `postToContent` 全程是同步
+ * `window.postMessage`，同一 tick 内的多条消息本来就是 FIFO（fetch hook 的 done 分支里
+ * `TOOL_CALL` 与 `RESPONSE_COMPLETE` 之间没有 await）；队列的作用是防止并发处理交错。
+ *
+ * ⚠️ **「双条件会合点」（`settleToolTurn`）也走这条队列** —— 它必须回到同一条串行线上，
+ * 否则会与队列内正在跑的处理并发改 `continuationLoop` / `executionsByRequest` / 面板状态。
+ */
+const mainWorldQueue = createSerialOperationQueue();
+
+/**
+ * requestId → 本轮的「双条件会合」状态 —— 把「响应到达」与「工具执行完成」拆成两条
+ * 互不阻塞的推进，两者都就绪时才只触发一次续跑判定（`settleToolTurn`）。
+ *
+ * ⚠️ **它刻意不进 `releaseRequestState`** —— 本模块自己的收尾函数 `tryFinalizeRequest`
+ * 负责删除（同 `respondedRequestIds` 的「有延迟读者」理由：这里也有延迟消费）。
+ * ⚠️ **chatNew 分支不得写它** —— chatNew 请求没有终态事件（`fetch-hook` 只在 completion
+ * 路由发 `onRequestTerminal`），写进去就是永不释放的孤儿（见 `handleAugmentRequestBody`
+ * 里 chatNew 段的说明）。
+ */
+interface ToolTurnState {
+  /** 还有几个工具执行在飞（计数：一条回复可能有多个工具）。 */
+  pendingExecutions: number;
+  /** 响应已到达、但还没被 `handleResponseComplete` 消费。 */
+  response: ZaiResponseCompletePayload | null;
+  /** 会合任务已入队 —— 防重复消费（多工具的 finally 会各触发一次会合）。 */
+  settleScheduled: boolean;
+  /** `REQUEST_TERMINAL` 已到达。 */
+  terminalSeen: boolean;
+  /** 本请求的执行串行链 —— 保住「同一条回复里的多个工具**串行**执行」这一既有行为。 */
+  executionChain: Promise<void>;
+}
+const toolTurnStates = new Map<string, ToolTurnState>();
+
+/** 取/建某个 requestId 的会合状态。**终态收尾由 `tryFinalizeRequest` 删除**。 */
+function ensureToolTurnState(requestId: string): ToolTurnState {
+  let state = toolTurnStates.get(requestId);
+  if (!state) {
+    state = {
+      pendingExecutions: 0,
+      response: null,
+      settleScheduled: false,
+      terminalSeen: false,
+      executionChain: Promise.resolve(),
+    };
+    toolTurnStates.set(requestId, state);
+  }
+  return state;
+}
+
+/**
+ * **双条件会合点**：执行已齐 ⇒ 消费响应（若有）并尝试终态收尾。
+ *
+ * ⚠️ **它必须重新入队**（`mainWorldQueue.run`）—— 不入队就会与队列里正在跑的处理
+ * 并发改 `continuationLoop` / `executionsByRequest` / 面板状态。
+ * ⚠️ **唯一性靠 `settleScheduled`**：多工具的 `finally` 会各触发一次会合，
+ * 不去重会让 `handleResponseComplete` 被调两次（续跑会被注入两轮）。
+ * ⚠️ **「没有响应」也要继续往下走** —— 响应可能已被上一次会合消费掉，而这次触发的
+ * 是「执行刚落地」；直接 return 会让终态收尾失去这个唤醒源（状态永不释放）。
+ * ⚠️ **`state.response` 要到任务真正执行时才清** —— 在这里同步清会让终态收尾
+ * 把还没消费的响应当成「已消费」而提前释放状态。
+ * ⚠️ **无事可做时也会排一个空任务**（只调 `tryFinalizeRequest`）—— 它自身幂等
+ * （收尾成功即删条目，再来就找不到），换来的是「每个唤醒源都必然推进一步」。
+ */
+function settleToolTurn(requestId: string): void {
+  const state = toolTurnStates.get(requestId);
+  if (!state) return;
+  if (state.pendingExecutions > 0 || state.settleScheduled) return;
+  state.settleScheduled = true;
+  void mainWorldQueue.run(async () => {
+    state.settleScheduled = false;
+    const payload = state.response;
+    state.response = null;
+    if (payload) {
+      try {
+        await handleResponseComplete(payload);
+      } catch (error) {
+        // ⚠️ **这里的 catch 是队列外调用的替代品** —— 之前 `handleResponseComplete`
+        // 由 `dispatchMainWorldMessageInner` 调用，错误由那个函数的 catch 兜住；现在改由
+        // 会合任务调，得自己接。文案与分发器那句**刻意不同**：排查时要能一眼分出
+        // 「消息分发阶段炸的」还是「会合消费阶段炸的」。
+        if (isExtensionInvalidatedError(error)) invalidateExtensionContext();
+        else console.error('[GLM++] handleResponseComplete failed inside the tool-turn rendezvous', error);
+      }
+    }
+    await tryFinalizeRequest(requestId);
+  });
+}
+
+/**
+ * 请求的**终态收尾** —— 由 `REQUEST_TERMINAL` 分支与会合点两处共同触发，
+ * **最后满足条件的那个把它做完**（另一个进来时会提前返回）。
+ *
+ * 收尾条件三条同时成立：① 终态已到；② 执行已齐（`pendingExecutions === 0`）；
+ * ③ 响应要么没到、要么已消费完（`response === null` 且没有在排队的会合任务）。
+ *
+ * ⚠️⚠️ **②③ 是「关授权不能打断在飞执行」与「`releaseRequestState` 不能早于
+ * `handleResponseComplete` 读表」这两条不变式的全部依据**（`executionsByRequest` /
+ * `chatSessionIdByRequestId` 的最后一个读者都在 `handleResponseComplete` 里）。
+ * ⚠️ **`finalizePending` 必须排在 `sealTurn` 之前** —— 前者可能重发一次带 `live: true`
+ * 的记录把块画回展开，反过来收尾就被顶掉（与 `handleResponseComplete` 内部同一条理由）。
+ */
+async function tryFinalizeRequest(requestId: string): Promise<void> {
+  const state = toolTurnStates.get(requestId);
+  if (!state?.terminalSeen) return;
+  if (state.pendingExecutions > 0) return;
+  if (state.response || state.settleScheduled) return;
+  toolTurnStates.delete(requestId);
+  if (activeToolAuthorizations.has(requestId)) {
+    await closeToolAuthorization(requestId);
+  }
+  // 流终止但这一轮从未产出 RESPONSE_COMPLETE = 页面侧把读取流 abort 了
+  // （用户点 Stop，或读取中途出错）。这比「等 Stop 按钮消失」更直接，
+  // 这里立刻挂上手动停止宽限窗口，不必再等 180s 执行租约超时。
+  // 正常结束的轮次不走这里：`respondedRequestIds` 已在响应到达时登记。
+  if (!respondedRequestIds.has(requestId)) {
+    armManualStopDetection();
+  }
+  // 64：请求终态到了 —— 该请求下还标着「执行中」的行收成失败。
+  // ⚠️ **排在 `releaseRequestState` 之前**：那个函数会清掉本请求的所有请求级状态。
+  // ⚠️ **正常结束的轮次这里什么都不做** —— `RESPONSE_COMPLETE` 已经收过一遍了，
+  // `finalizePending` 在没有 pending 行时是 no-op。
+  toolPanel.finalizePending(
+    requestId,
+    translate(currentContentLocale, 'content.toolBlock.summaries.failed'),
+    translate(currentContentLocale, 'content.toolBlock.summaries.incomplete'),
+  );
+  toolPanel.sealTurn(requestId);
+  // 释放这一轮的请求级状态。放最后：上面的判定都读完了才清。
+  releaseRequestState(requestId);
+}
 /** 续跑请求观察计数：AUGMENT_REQUEST_BODY 收到续跑请求时 +1，用于检测 DOM 注入是否真的发出了请求。 */
 let continuationRequestSeq = 0;
 /** DOM 注入发送锁：注入进行中置 true，请求发出后置 false。防止双击/重试/弹窗自动重发并发触发。 */
@@ -1627,14 +1759,43 @@ async function dispatchMainWorldMessage(data: Record<string, unknown>): Promise<
       /* ignore peek errors */
     }
   }
-  // 串行队列：主世界消息可能乱序到达（TOOL_CALL/RESPONSE_COMPLETE/REQUEST_TERMINAL），
-  // 串行执行能消除「响应先完成、授权后被关」的竞态。
-  const run = mainWorldMessageQueue.then(() => dispatchMainWorldMessageInner(data));
-  mainWorldMessageQueue = run.catch(() => undefined);
-  await run;
+  // 「响应已到达」的登记同样必须在串行队列**之外**、消息抵达瞬间完成。
+  // ⚠️ **它是「是否用户手动停止」的判据**（`armManualStopDetection` 挂窗口时与窗口到期时各读一次
+  // `respondedRequestIds`），而那个判定只有 4 秒宽限窗口；`RESPONSE_COMPLETE` 却常常排在一段
+  // 十几秒的工具执行之后（`TOOL_CALL` 分支要 await 整条执行链，web_fetch 上界 15 秒）⇒ 在队列内
+  // 登记会让慢工具被误判成「用户手动停止」，并连带摘掉 taskId、回收续跑循环。
+  // 与上面那段同一个坑、同一处落点：判据的源头必须在队列外。
+  // ⚠️ **解码一并前置**：主世界发的 `RESPONSE_COMPLETE` 载荷本就只有一个信封层
+  // （`data.payload`），一次解码即可；解出的结果经参数传进队列内的分发器，
+  // 队列内**不再解第二遍** —— 否则同一个类型会有两个接收块，与桥契约里
+  // 「每个类型恰好一个接收块」的判据冲突（那种形状下契约守卫会把两处都收进去）。
+  let decodedResponseComplete: ZaiResponseCompletePayload | null = null;
+  if (data.type === 'RESPONSE_COMPLETE') {
+    const complete = decodeZaiResponseCompleteMessage(data.payload);
+    decodedResponseComplete = complete;
+    if (complete) {
+      respondedRequestIds.add(complete.requestId);
+      const timer = manualStopTimers.get(complete.requestId);
+      if (timer) {
+        clearTimeout(timer);
+        manualStopTimers.delete(complete.requestId);
+      }
+    }
+  }
+  // 串行队列：`TOOL_CALL` / `RESPONSE_COMPLETE` / `REQUEST_TERMINAL` 之间要串行，
+  // 消除「响应先完成、授权后被关」这类交错。队列本体见 `mainWorldQueue` 的说明。
+  await mainWorldQueue.run(() => dispatchMainWorldMessageInner(data, decodedResponseComplete));
 }
 
-async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Promise<void> {
+/**
+ * ⚠️ **`decodedResponseComplete` 由调用方在队列之外解好传进来**（见 `dispatchMainWorldMessage`）——
+ * 「响应已到达」的登记（`respondedRequestIds` / 清 timer）必须在队列外完成，判据才有意义；
+ * 解码跟着一起来是为了**同一个类型只留一个接收块**，不是解码必须在队列外。
+ */
+async function dispatchMainWorldMessageInner(
+  data: Record<string, unknown>,
+  decodedResponseComplete: ZaiResponseCompletePayload | null = null,
+): Promise<void> {
   try {
     switch (data.type) {
       case 'AUGMENT_REQUEST_BODY': {
@@ -1665,18 +1826,25 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
           console.error('[GLM++] rejected a malformed TOOL_CALL payload');
           return;
         }
-        await handleDetectedToolCall(call);
+        // ⚠️ **不 await** —— 执行会跑十几秒（web_fetch 上界 15 秒），await 会把它后面
+        // 的 `RESPONSE_COMPLETE` / `REQUEST_TERMINAL` 全堵在这条串行队列里
+        // ⇒ 慢工具被误判成「用户手动停止」、8 秒的增广超时也会连带触发。
+        // 执行改由 `startDetectedToolCall` 挂到本请求的执行串行链上，队列只做记账。
+        startDetectedToolCall(call);
         return;
       }
       case 'RESPONSE_COMPLETE': {
         // ⚠️ 这条**同样有执行语义** —— handleResponseComplete 会在
         // executionsByRequest 为空时拿 assistantText 跑 parseToolXml 兜底执行工具。
-        const complete = decodeZaiResponseCompleteMessage(data.payload);
-        if (!complete) {
+        // 载荷由调用方在队列之外解好传进来（见 `dispatchMainWorldMessage`），这里不再解第二遍。
+        if (!decodedResponseComplete) {
           console.error('[GLM++] rejected a malformed RESPONSE_COMPLETE payload');
           return;
         }
-        await handleResponseComplete(complete);
+        // 响应到达**不是**在这里消费 —— 先存进会合状态，等工具执行也齐了再一次性消费
+        // （见 `settleToolTurn`）。执行已在 TOOL_CALL 通道跑完时，会合点会立刻消费。
+        ensureToolTurnState(decodedResponseComplete.requestId).response = decodedResponseComplete;
+        settleToolTurn(decodedResponseComplete.requestId);
         return;
       }
       case 'HISTORY_TOOL_RECORDS': {
@@ -1708,41 +1876,13 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
           return;
         }
         const requestId = terminal.requestId;
-        // 这里不需要「等在飞的工具执行跑完」：`executeDetected` 的每个调用点都在
-        // `mainWorldMessageQueue` 内被 await，而本分支排在同一条队列的 TOOL_CALL /
-        // RESPONSE_COMPLETE 之后，所以走到这里不可能还有在飞的执行。
-        // ⚠️ **这条顺序保证是「不用等」的全部依据** —— 若把某个 `executeDetected`
-        // 调用点改成不 await 的并发派发，就得把等待加回来（见
-        // `tests/zai-content-tool-execution-contract.test.ts`）。
-        // ⚠️ decoder 已保证 requestId 是非空字符串，下面的判定不必再判空。
-        if (activeToolAuthorizations.has(requestId)) {
-          await closeToolAuthorization(requestId);
-        }
-        // 流终止但这一轮从未产出 RESPONSE_COMPLETE = 页面侧把读取流 abort 了
-        // （用户点 Stop，或读取中途出错）。这比「等 Stop 按钮消失」更直接，
-        // 这里立刻挂上手动停止宽限窗口，不必再等 180s 执行租约超时。
-        // 正常结束的轮次不走这里：fetch hook 先发 RESPONSE_COMPLETE 再发 REQUEST_TERMINAL。
-        if (!respondedRequestIds.has(requestId)) {
-          armManualStopDetection();
-        }
-        // 64：请求终态到了 —— 该请求下还标着「执行中」的行收成失败。
-        // ⚠️ **排在 `releaseRequestState` 之前**：那个函数会清掉本请求的所有请求级
-        // 状态，而面板的收尾要读「这一轮有哪些 pending」（它读的是自己的会话表，
-        // 但顺序上仍应与其它终态消费者一致：先消费、后释放）。
-        // ⚠️ **正常结束的轮次这里什么都不做** —— `RESPONSE_COMPLETE` 已经收过一遍了，
-        // `finalizePending` 在没有 pending 行时是 no-op。
-        toolPanel.finalizePending(
-          requestId,
-          translate(currentContentLocale, 'content.toolBlock.summaries.failed'),
-          translate(currentContentLocale, 'content.toolBlock.summaries.incomplete'),
-        );
-        // ⚠️ **顺序：先 `finalizePending` 再 `sealTurn`** —— 前者可能重发一次记录
-        // （把「执行中」换成失败），那次重发会带着 `live: true` 把块重新画成展开；
-        // 反过来收尾就被顶掉了。这条路径（流被 abort）尤其要收 —— 否则那一大块
-        // 会一直摊在页面上。
-        toolPanel.sealTurn(requestId);
-        // 释放这一轮的请求级状态。放最后：上面的判定都读完了才清。
-        releaseRequestState(requestId);
+        // ⚠️ **收尾不在这里直接做** —— 先标记「终态已到」，再由 `tryFinalizeRequest`
+        // 判断此刻能不能收（它还要求执行已齐、响应已消费）。
+        // ⚠️ **即使本请求一个工具都没跑过也要建条目** —— 否则 `tryFinalizeRequest`
+        // 会在第一行直接返回，收尾整块不执行（授权永不关、请求级状态永不释放）。
+        // decoder 已保证 requestId 是非空字符串，下面的判定不必再判空。
+        ensureToolTurnState(requestId).terminalSeen = true;
+        await tryFinalizeRequest(requestId);
         return;
       }
       case 'HTML_CHALLENGE': {
@@ -1776,16 +1916,30 @@ async function dispatchMainWorldMessageInner(data: Record<string, unknown>): Pro
 // 工具执行 + 续跑状态机
 // ---------------------------------------------------------------------------
 
-async function handleDetectedToolCall(
-  detected: ZaiDetectedToolCall,
-): Promise<void> {
+/**
+ * 登记一条工具调用，并**在串行队列之外**执行它。
+ *
+ * ⚠️⚠️ **`pendingExecutions += 1` 必须是同步的、且在启动执行之前** ——
+ * `RESPONSE_COMPLETE` 排在队列里、紧随这条消息之后；若计数还没加，
+ * 会合点会以为「执行已齐」而**提前消费响应** ⇒ `handleResponseComplete` 读到空的
+ * `executionsByRequest` ⇒ 走兜底解析再执行一遍（被签名去重挡掉）⇒ 续跑判定当场收尾。
+ *
+ * ⚠️ **执行挂在本请求的执行串行链上**，而不是各自起跑 —— 现状里同一回复的多个工具
+ * 由串行队列**逐条 await**、天然串行；踢出队列后若并发起跑，会改变这一既有行为
+ * （同文件两次写、两次 shell 命令这类组合）。
+ *
+ * ⚠️ **`-1` 放在链条末尾而不是 `executeDetected` 内部** —— 执行有两条调用路
+ * （这条通道、`handleResponseComplete` 的兜底），把计数放内部会让兜底路径重复计数。
+ * 兜底那条路全程在队列内被 await，此刻计数恒为 0、无人观察其中间态，因此不需要计数。
+ *
+ * 面板那行「执行中」也在这里落 —— ⚠️ **不能挪进 `executeDetected`**：它同样会被
+ * 兜底路径调到，而那条路是「补执行」，再塞一行会给用户一个稍纵即逝的闪烁。
+ */
+function startDetectedToolCall(detected: ZaiDetectedToolCall): void {
   // 载荷已过 `decodeZaiToolCallMessage`（name / raw / requestId 都是字符串、name 非空），
   // 这里的判空只作为防御性兜底保留。
   if (!detected?.name) return;
   // 面板：先落一行「执行中」（64 要收尾的就是它）。
-  // ⚠️ **在这里而不是 `executeDetected` 内**：`executeDetected` 也会从
-  // `handleResponseComplete` 的兜底路径被调，而那条路是「补执行」——
-  // 那时这一轮已经快结束了，再塞一行「执行中」会给用户一个稍纵即逝的闪烁。
   // ⚠️ **callId 用 `detected.raw` 的哈希** —— 与 `executeDetected` 里算 `stableCallId`
   // 的输入一致（同一条 raw 两个通道拿到的 id 相同），否则替换那一步会找不到行。
   toolPanel.beginToolCall(detected.requestId, {
@@ -1796,15 +1950,28 @@ async function handleDetectedToolCall(
     // ⇒ 一旦消息 uuid 读不到（id 退化成 `live:<requestId>`），同一轮会画两块面板。
     raw: detected.raw,
   });
-  try {
-    await executeDetectedFromDetected(detected);
-  } catch (error) {
-    console.error('[GLM++] executing a detected tool call failed', {
-      name: detected.name,
-      requestId: detected.requestId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  const state = ensureToolTurnState(detected.requestId);
+  state.pendingExecutions += 1;
+  state.executionChain = state.executionChain
+    .then(() => executeDetectedFromDetected(detected))
+    .catch((error) => {
+      console.error('[GLM++] executing a detected tool call failed', {
+        name: detected.name,
+        requestId: detected.requestId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    })
+    .finally(() => {
+      // ⚠️ **减计数必须在 `finally`** —— 只在成功分支减的话，一次执行抛错就会让计数
+      // 永久 > 0 ⇒ 终态收尾永不执行 ⇒ 授权与请求级状态一起泄漏，而**表现是静默的**
+      // （不报错，只是后台 grant 名额被慢慢占满）。
+      state.pendingExecutions -= 1;
+      // 执行落地 = 会合点的第二个唤醒源（第一个是 `RESPONSE_COMPLETE` 到达）。
+      settleToolTurn(detected.requestId);
+    })
+    // ⚠️ **链条自身必须永不 reject** —— 否则一次异常会毒化后续所有工具的执行
+    // （下一条接的是只带 onFulfilled 的 `.then`，rejection 会直接穿透过去、跳过执行）。
+    .catch(() => undefined);
 }
 
 async function executeDetectedFromDetected(
@@ -1886,9 +2053,9 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
   // `ok:false` → 原样放行请求）。这些情况下请求带着**未经增广的 body** 发出，模型没有
   // 我们的工具目录，但仍可能照会话历史里的标签名吐出 XML。
   //
-  // ⚠️ 不能拿「续跑轮的 grant 被 requestTerminal 提前关掉」解释这条路径：`RESPONSE_COMPLETE`
-  // 与 `REQUEST_TERMINAL` 在 fetch hook 的同一次 pull 里先后发出（done 分支），隔离世界按
-  // 到达顺序处理，所以 `handleResponseComplete` 里的兜底解析跑完之前 grant 一定还在。
+  // ⚠️ 不能拿「续跑轮的 grant 被 requestTerminal 提前关掉」解释这条路径：
+  // 关授权现在由 `tryFinalizeRequest` 做，而它要先看到「执行已齐」——
+  // 本函数本身就跑在那条执行链上，所以走到这里时 grant 必然还在。
   //
   // ⚠️ 这条懒建等价于**在内容脚本里给自己发许可**；上游没有它（上游查不到 grant 时把空的
   // authorizationId 交给后台，由后台拒绝）。它同时是「伪造一条桥消息即可执行任意工具」的放大器。
@@ -2078,15 +2245,13 @@ async function importMemoryDraftsFromCard(
 
 async function handleResponseComplete(complete: ZaiResponseCompletePayload): Promise<void> {
   if (!complete?.requestId) return;
-  respondedRequestIds.add(complete.requestId);
+  // ⚠️ **「响应已到达」的两件事不在这里做** —— `respondedRequestIds.add` 与清手动停止 timer
+  // 由调用方在**串行队列之外**完成（见 `dispatchMainWorldMessage` 的同步探测区）。
+  // 挪进来的话，它们会被排在这个分支前面的慢工具执行堵住，而 `armManualStopDetection`
+  // 只有 4 秒宽限窗口 ⇒ 慢工具被误判成「用户手动停止」。
   // 会话名要等**首答完成**才定下来（之前侧边栏那行是「新会话」这类临时名）。
   // 这里再给项目面板一次补名机会 —— 它自己没法知道「回答结束了」这件事。
   projectPanelController?.backfillNow();
-  const pendingStop = manualStopTimers.get(complete.requestId);
-  if (pendingStop) {
-    clearTimeout(pendingStop);
-    manualStopTimers.delete(complete.requestId);
-  }
 
   // 首条请求发出后，页面 SPA 可能已经从首页跳到 /c/<id>（新建会话场景）。
   // 把任务的最新会话 id 同步下来，这样回传 backend 的才是真实 id，而非首条注入时的 null。
@@ -3777,6 +3942,15 @@ export default defineContentScript({
               clearTimeout(timer);
               manualStopTimers.delete(requestId);
             }
+            // ⚠️ **取消本身不 abort 页面的读取流**（这条消息由协调器在 `signal` abort 时发，
+            // 见 `dom-task-coordinator.ts`），所以该请求的 `REQUEST_TERMINAL` 仍会照常到达、
+            // 收尾不会漏。这里补一次会合只是为了**给「取消」也留一个唤醒源** ——
+            // 防的是将来某条错误路径不再发终态（那一刻会合状态就永远没人推进）。
+            // ⚠️ **不能在这里直接置 `terminalSeen = true` 再收尾** —— 那会立刻关授权、立刻释放
+            // 请求级状态，而在飞的工具（web_fetch 上界十几秒）落地后会查不到 grant、落到
+            // `executeDetected` 的懒建授权路径。会合点自己会因 `pendingExecutions > 0` 提前返回，
+            // 真正收尾仍等执行落地。
+            settleToolTurn(requestId);
           }
           // 若该任务已演化成运行中的续跑循环，先摘掉 taskId 让收尾不再回 COMPLETE。
           if (continuationLoop?.status === 'running' && continuationLoop.taskId === taskId) {
