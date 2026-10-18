@@ -6,8 +6,8 @@
  * zai.content.ts 的 DOM 注入 + 续跑循环让页面自己发请求」。本模块负责：
  *
  *   1. resolveTab：找/开 z.ai 标签页（优先复用空闲后台 tab，busy 一 tab 一任务；
- *      **两个站点都查**，站点归属按「显式指定 → 已开着的标签页 → 最近活跃站」定下，
- *      见 `resolveDomTab`）；
+ *      **两个站点都查**，站点归属按「显式指定 → 当前活动标签页 → 已开着的标签页
+ *      → 最近活跃站 → 默认站」定下，见 `resolveDomTab`）；
  *   2. startTask：握手（RUN_DOM_TASK，退避重试）→ 登记 pending → 等终态事件；
  *   3. on*Event：消费 content 回传的 DOM_TASK_STARTED/COMPLETE/FAILED。
  *
@@ -62,7 +62,7 @@ export interface DomTaskFailedEvent {
 /**
  * 一次 DOM 任务落在**哪个站点**（origin，不含尾斜杠）。
  *
- * ⚠️⚠️ **它是「B 为主」那一半的载体** —— 后台没有页面上下文，而会话链接必须有
+ * ⚠️⚠️ **它是「本次运行实际落在哪」的载体** —— 后台没有页面上下文，而会话链接必须有
  * 正确的 origin。协调器在 `resolveDomTab` 那一刻就知道这个任务用的是哪个站的标签页
  * （那是它自己挑的/自己开的），所以把结论**随结果带回来**，而不是让下游去猜
  * 「当前站是哪个」。
@@ -109,7 +109,7 @@ export type DomTaskOutcome =
       /**
        * 失败前已经落定的站点。⚠️ **`'tab'` 阶段失败时它可能是 `null`** ——
        * 那一刻还没挑中任何标签页（如 `zai_tab_create_failed`），无从知道站点。
-       * 下游要按「null = 不知道」处理，退回记录里已有的站点或默认站，
+       * 下游要按「null = 不知道」处理，退回记录里已有的站点，
        * **不能当成「不属于任何站」**。
        */
       siteOrigin?: DomTaskSiteOrigin | null;
@@ -121,11 +121,13 @@ export interface DomTaskStartInput {
   prompt: string;
   chatSessionId: string | null;
   /**
-   * 这条任务**上次跑在哪个站**（origin）。`null` / 缺省 = 没有归属信息。
+   * **本次运行指定去哪个站**（origin）。`null` / 缺省 = 不指定，由协调器就地判定。
    *
-   * ⚠️ **固定会话任务必须带上它** —— 会话 id 在两站之间不通用（token 也互不认），
-   * 拿错站去拼 `/c/<id>` 会打开一个 401 或「会话不存在」的页面。
-   * 这是「B 为主」那一半的**输入侧**（输出侧是 `DomTaskOutcome.siteOrigin`）。
+   * ⚠️ **只有「复用已有会话」的任务才带它** —— 会话 id 在两站之间不通用
+   * （token 也互不认），拿错站去拼 `/c/<id>` 会打开一个 401 或「会话不存在」的页面。
+   * 其余情况传 null：协调器按「用户当前所在的标签页 → 已开着的标签页 →
+   * 最近活跃站 → 默认站」判定（见 `resolveDomTab`）。
+   * 输入侧是这里，输出侧是 `DomTaskOutcome.siteOrigin`。
    */
   siteOrigin?: string | null;
   /** 自动化任务是否开启 z.ai 联网搜索（任务归属请求体里置 features.web_search/auto_web_search）。 */
@@ -283,20 +285,45 @@ export function createDomTaskCoordinator(
   }
 
   /**
+   * 用户**此刻正在看的那个标签页**属于哪个站；不是站点集合里的页面就返回 `null`。
+   *
+   * ⚠️ **从 service worker 里查 `currentWindow` 拿到的是「最后聚焦的那个窗口」** ——
+   * 与 `background.ts` 的「读当前对话」「插入提示词」两处用的是同一个假设。
+   * ⚠️ 查失败**不抛**：这只是「更贴近用户意图」的一层偏好，失败后退回后面的
+   * 主页扫描 / 活跃站 / 默认站，不该让整次解析失败。
+   */
+  async function readActiveTabSiteOrigin(): Promise<string | null> {
+    try {
+      const tabs = await queryTabs({ active: true, currentWindow: true });
+      for (const tab of tabs) {
+        const origin = resolveZaiSiteOrigin(tab.url);
+        if (origin) return origin;
+      }
+    } catch (error) {
+      reportError('dom_task_active_tab_query_failed', error);
+    }
+    return null;
+  }
+
+  /**
    * 解析要用的 z.ai 标签页，并返回「实际生效的会话 id」与**该标签页所属站点**。
    *
-   * 站点的**判定顺序**（B 为主 + A 兜底 + 默认站收口）：
+   * 站点的**判定顺序**：
    *
-   * 1. **调用方显式给的 `input.siteOrigin`** —— 自动化记录的固定会话场景：那条记录
-   *    上次跑在哪个站，这次就去哪个站（它是这条任务自己的属性，与用户此刻在看哪个站无关）。
-   * 2. **已有的空闲标签页**：续用会话时按精确 URL 在两站里找；新对话时按两站的主页找。
+   * 1. **调用方显式给的 `input.siteOrigin`** —— 只用于**固定会话**：那条会话属于
+   *    哪个站是确定的，会话 id 在两站之间不通用（非固定会话传 `null`，见
+   *    `AutomationRunnerRequest.siteOrigin`）。
+   * 2. **用户当前正在看的那个标签页**（新对话）：它在哪个站，新对话就开在哪个站。
+   *    ⚠️ 这一层必须排在「按站点表顺序扫主页」之前 —— `ZAI_SITES` 的键顺序是
+   *    `cn` 在前，两个站的主页都开着时会**永远选国区站**，与用户此刻所在的站无关。
+   * 3. **已有的空闲标签页**：续用会话时按精确 URL 在两站里找；新对话时按两站的主页找。
    *    命中哪个站就用哪个站 —— 复用用户已经开着的页面，比新开一个更少打扰。
-   * 3. **「最近活跃站」**（`deps.readActiveSiteOrigin`，跨上下文记录）：前两条都没结论时，
+   * 4. **「最近活跃站」**（`deps.readActiveSiteOrigin`，跨上下文记录）：前几条都没结论时，
    *    用户眼下在用哪个站就去哪个站。
-   * 4. **默认站**（国区站）收口。
+   * 5. **默认站**（国区站）收口。
    *
-   * ⚠️ **顺序不可颠倒**：把 3 提到 1 前面会让固定会话任务跟着用户切站乱跑；
-   * 把 2 提到 1 前面会让「记录说 A 站」被「B 站恰好开着个主页」顶掉。
+   * ⚠️ **顺序不可颠倒**：把 4 提到 1 前面会让固定会话任务跟着用户切站乱跑；
+   * 把 3 提到 1 前面会让「记录说 A 站」被「B 站恰好开着个主页」顶掉。
    *
    * 返回的 chatSessionId 与输入可能不同：续用会话时找不到精确 /c/<id> tab，
    * 就降级为「新会话」语义（chatSessionId 置 null、走新对话的标签页解析），
@@ -360,6 +387,33 @@ export function createDomTaskCoordinator(
     // 新对话：优先精确 home 页（两站任一）；**绝不复用任何已有 /c/<id> 对话 tab**——
     // 否则会把 prompt 塞进用户当前停留的、不属于该任务的会话里。
     if (!requestedSiteOrigin) {
+      // 先看用户当前正在看的那个标签页：它在哪个站，新对话就开在哪个站。
+      // ⚠️ 这一层必须排在「按站点表顺序扫主页」之前 —— `ZAI_SITES` 的键顺序是
+      // `cn` 在前，两个站的主页都开着时会**永远选国区站**，与用户此刻所在的站无关。
+      const activeSiteOrigin = await readActiveTabSiteOrigin();
+      const activeSite = activeSiteOrigin
+        ? Object.values(ZAI_SITES).find((site) => site.origin === activeSiteOrigin)
+        : undefined;
+      if (activeSite) {
+        const exactHome = idleTabs.find((tab) => normalizeTabUrl(tab.url) === activeSite.homeUrl);
+        if (exactHome?.id != null) {
+          return {
+            tabId: exactHome.id,
+            chatSessionId: null,
+            siteOrigin: activeSite.origin,
+            isNewlyCreated: false,
+          };
+        }
+        // 当前标签页不是主页（比如正停在某个会话里）⇒ 在同一个站新开一个主页 tab。
+        const created = await createTab({ url: activeSite.homeUrl, active: false });
+        if (created.id == null) throw new Error('zai_tab_create_failed');
+        return {
+          tabId: created.id,
+          chatSessionId: null,
+          siteOrigin: activeSite.origin,
+          isNewlyCreated: true,
+        };
+      }
       for (const site of Object.values(ZAI_SITES)) {
         const exactHome = idleTabs.find((tab) => normalizeTabUrl(tab.url) === site.homeUrl);
         if (exactHome?.id != null) {

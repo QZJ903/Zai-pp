@@ -70,10 +70,10 @@ export interface AutomationGLMSession {
    * `sessionUrl` 只有在**页面上真的建出会话**之后才有值，而这个字段在「跑过、
    * 但没来得及建会话就失败」时也是有值的 —— 而那种情况恰恰是最需要它的：
    * 下一次运行该去哪个站，取决于上次落在哪，与「上次有没有建成会话」无关。
-   * （从 `sessionUrl` 反推得到的是 `''`，会让下一次退回默认站、跑到另一个站上去。）
+   * （从 `sessionUrl` 反推得到的是 `''`，会让下一次拿默认站兜底、跑到另一个站上去。）
    *
    * ⚠️ **`null` = 不知道**（旧记录、或 `'tab'` 阶段就失败、还没挑中标签页）——
-   * 消费方要退回默认站，**不能当成「不属于任何站」**。
+   * 消费方**不能当成「不属于任何站」**：没有证据时保持原值，不写默认站。
    */
   siteOrigin: string | null;
 }
@@ -121,10 +121,15 @@ export interface AutomationRunnerRequest {
   trigger: AutomationTrigger;
   chatSessionId: string | null;
   /**
-   * 这条任务**上次跑在哪个站**（origin）。`null` = 没有归属信息（旧记录）。
+   * **本次运行指定去哪个站**（origin）。`null` = 不指定，由协调器就地判定。
    *
-   * ⚠️ 它是「B 为主」的输入侧：协调器拿它决定去哪个站找/开标签页，
-   * 而不是去猜「用户此刻在看哪个站」。
+   * ⚠️ 只有**复用已有会话**时才给值（`createAutomationRunnerRequest` 按
+   * 「开了固定会话 **且** 记录里已有会话 id」决定）：那条会话属于哪一站是确定的，
+   * 会话 id 在两站之间也不通用。
+   * 其余情况（没开固定会话、或开了但还没建出会话）都是新对话、没有会话归属
+   * ⇒ 传 `null`，由协调器按「用户当前所在的标签页 → 已开着的标签页 → 最近活跃站
+   * → 默认站」判定（见 `resolveDomTab`）。**不能沿用记录里上一次跑过的站** ——
+   * 那会把任务永久钉在它第一次跑过的那个站上。
    */
   siteOrigin: string | null;
   promptOptions: AutomationPromptOptions;
@@ -149,7 +154,8 @@ export interface AutomationRunnerSuccess {
    *
    * ⚠️ **与 `sessionUrl` 并列、不从它推导** —— `sessionUrl` 可能因为「还没建出会话」
    * 而为 null，那时站点仍然是已知的（标签页已经挑好了），下次运行该去哪个站要靠它。
-   * ⚠️ `null` = 不知道（`'tab'` 阶段就失败）⇒ 消费方退回默认站。
+   * ⚠️ `null` = 本次运行没报站点（如 `'tab'` 阶段就失败）⇒ 收尾链退回记录里已有的
+   * 证据，**没有证据就保持原值**，不写默认站。
    */
   siteOrigin: string | null;
   assistantText: string;

@@ -129,10 +129,53 @@ describe('installZaiCapabilities: every install runs exactly once', () => {
     expect(harness.count('handleSessionChange'), '订阅回调必须调到面板的会话切换处理').toBe(1);
   });
 
-  it('returns the unsubscribe function', () => {
+  it('returns a cleanup function that unsubscribes the session watcher', () => {
     const harness = buildDeps();
-    const unsubscribe = installZaiCapabilities(harness.deps);
-    expect(unsubscribe).toBe(harness.unsubscribe);
+    const cleanup = installZaiCapabilities(harness.deps);
+    cleanup();
+    expect(harness.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes the active site when the page becomes visible again', () => {
+    // ⚠️ 只在加载时写的话，「最近活跃站」实际是「最近**加载过**的站」—— 一个后台
+    // 放着的国区站标签页刷新过一次，就能把活跃站长期钉在国区站。
+    const harness = buildDeps();
+    const cleanup = installZaiCapabilities(harness.deps);
+    const before = harness.count('rememberActiveSite');
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    try {
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(harness.count('rememberActiveSite')).toBe(before + 1);
+
+      // 卸载之后不再写（为将来的热卸载保留：清理函数必须把监听一起卸掉）。
+      cleanup();
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(harness.count('rememberActiveSite')).toBe(before + 1);
+    } finally {
+      Reflect.deleteProperty(document, 'visibilityState');
+    }
+  });
+
+  it('does not refresh the active site while the page is hidden', () => {
+    const harness = buildDeps();
+    const cleanup = installZaiCapabilities(harness.deps);
+    const before = harness.count('rememberActiveSite');
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    });
+    try {
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(harness.count('rememberActiveSite')).toBe(before);
+    } finally {
+      cleanup();
+      Reflect.deleteProperty(document, 'visibilityState');
+    }
   });
 
   it('forwards the hidden-bubble count to the caller-supplied reporter', () => {

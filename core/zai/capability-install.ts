@@ -89,8 +89,9 @@ export interface ZaiCapabilityTeardownDeps {
 /**
  * 装启动链上的全部能力。
  *
- * ⚠️⚠️ **返回的取消订阅函数必须由调用方持有** —— 现在没有消费者（内容脚本活到页面卸载），
- * 但把它丢掉会让「将来要做热卸载」时无从下手；测试也用它验「订阅确实登记了」。
+ * ⚠️⚠️ **返回的清理函数必须由调用方持有** —— 现在没有消费者（内容脚本活到页面卸载），
+ * 但把它丢掉会让「将来要做热卸载」时无从下手；测试也用它验「订阅与监听确实登记了」。
+ * ⚠️ 它现在清理**两样**：会话订阅 + 页面可见性监听（后者见 ⑧b）。
  */
 export function installZaiCapabilities(deps: ZaiCapabilityDeps): () => void {
   // ① 高峰弹窗与 Stop 观察器最先装 —— 它们要覆盖「页面刚起来就弹窗 / 就有 Stop」的窗口。
@@ -134,7 +135,22 @@ export function installZaiCapabilities(deps: ZaiCapabilityDeps): () => void {
   //    第一次打开该站页面」这个时点。
   void deps.rememberActiveSite();
 
-  return unsubscribe;
+  // ⑧b 页面**重新可见**时再记一次。
+  //    ⚠️ 只在加载时写的话，「最近活跃站」实际是「最近**加载过**的站」—— 一个后台
+  //    放着的国区站标签页刷新过一次，就能把活跃站长期钉在国区站，而用户此刻明明
+  //    在国际站。可见性变化是最接近「用户在用哪个站」的信号。
+  //    ⚠️ **不 await**，与 ⑧ 同口径：写不进去只是活跃站停在旧值。
+  //    ⚠️ 本函数只从内容脚本的 `main()` 调一次（每个页面一个新 document），
+  //    所以这里不另加幂等守卫。
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === 'visible') void deps.rememberActiveSite();
+  };
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+
+  return () => {
+    unsubscribe();
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+  };
 }
 
 /**

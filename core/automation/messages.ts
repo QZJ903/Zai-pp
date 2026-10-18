@@ -24,7 +24,7 @@ export function createAutomationRunnerFailure(
    *
    * ⚠️ **`undefined` 与 `null` 在这里同义**（都表示「不知道」）—— 失败现场往往
    * 还没来得及挑中标签页（`'tab'` 阶段失败）。消费方按「不知道 ⇒ 退回记录里已有的
-   * 站点、再退回默认站」处理。
+   * 站点，没有证据就保持原值」处理。
    */
   siteOriginOverride?: string | null,
 ): AutomationRunnerFailure {

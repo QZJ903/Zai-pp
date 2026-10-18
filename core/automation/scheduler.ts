@@ -10,7 +10,7 @@ import {
 } from './store';
 import { calculateNextRunAt } from './schedule';
 import { buildZaiChatSessionUrl } from '../zai/chat-session';
-import { ZAI_WEB_ORIGIN, resolveZaiSiteOrigin } from '../zai/contracts';
+import { resolveZaiSiteOrigin } from '../zai/contracts';
 import {
   AutomationExecutionStoppedError,
   createAutomationExecutionContext,
@@ -39,6 +39,58 @@ export type AutomationRunExecutor = (
   request: AutomationRunnerRequest,
   execution: AutomationExecutionContext,
 ) => Promise<AutomationRunnerResult>;
+
+/**
+ * 一次运行**可以沿用的会话 id** —— 只有「开了固定会话」且「记录里真的已经有会话」
+ * 时才成立。
+ *
+ * ⚠️ 两个条件缺一不可，**它是本文件里唯一的判定入口**：站点提示由它派生
+ * （见 `createAutomationRunnerRequest`）。分成两处各判一次会出现
+ * 「会话按新对话发、站点却按旧会话选」的组合 —— 表现是任务被送到记录里那一站
+ * 去开一个全新对话，与用户当前所在的站无关。
+ */
+export function resolveAutomationReusableSessionId(
+  automation: Pick<Automation, 'promptOptions' | 'glm'>,
+): string | null {
+  if (automation.promptOptions.fixedSession !== true) return null;
+  return automation.glm.chatSessionId;
+}
+
+export interface AutomationRunnerRequestContext {
+  runId: string;
+  trigger: AutomationTrigger;
+  deadlineAt: number;
+  requestedAt: number;
+}
+
+/**
+ * 由记录构造一次运行的请求。
+ *
+ * ⚠️ **生产与测试共用它** —— 测试里手抄一份请求构造，生产改判据时那边不会红。
+ * 两处都调这个函数，判定就只有一个出处。
+ */
+export function createAutomationRunnerRequest(
+  automation: Automation,
+  context: AutomationRunnerRequestContext,
+): AutomationRunnerRequest {
+  const reusableSessionId = resolveAutomationReusableSessionId(automation);
+  return {
+    runId: context.runId,
+    automationId: automation.id,
+    deadlineAt: context.deadlineAt,
+    prompt: automation.prompt,
+    trigger: context.trigger,
+    chatSessionId: automation.glm.chatSessionId,
+    // 站点提示只在**复用已有会话**时成立：那条会话属于哪一站是确定的，会话 id
+    // 在两站之间也不通用，所以必须去记录里那一站找它。
+    // 其余情况（没开固定会话、或开了但还没建出会话）都是新对话、没有会话归属
+    // ⇒ 站点交给协调器按「用户当前所在的标签页」判定（`resolveDomTab`），
+    // 不能沿用记录里上一次跑过的站，否则任务会被上一次运行永久钉在那一站。
+    siteOrigin: reusableSessionId !== null ? automation.glm.siteOrigin : null,
+    promptOptions: automation.promptOptions,
+    requestedAt: context.requestedAt,
+  };
+}
 
 export interface RunAutomationOptions {
   automationId: AutomationId;
@@ -179,16 +231,10 @@ export async function runAutomation(options: RunAutomationOptions): Promise<Auto
       trigger: options.trigger,
       scheduledFor: options.scheduledFor,
       startedAt: Date.now(),
-      createRequest: (automation) => ({
+      createRequest: (automation) => createAutomationRunnerRequest(automation, {
         runId,
-        automationId: automation.id,
-        deadlineAt: lease.deadlineAt,
-        prompt: automation.prompt,
         trigger: options.trigger,
-        chatSessionId: automation.glm.chatSessionId,
-        // B 为主的输入侧：把这条记录上次跑的站点带进请求，协调器据此决定去哪个站。
-        siteOrigin: automation.glm.siteOrigin,
-        promptOptions: automation.promptOptions,
+        deadlineAt: lease.deadlineAt,
         requestedAt: now,
       }),
     });
@@ -506,20 +552,25 @@ async function refreshAutomationFromExistingRun(
  *   ③ `automation.glm.sessionUrl` 的 origin —— 本字段之前落库的旧记录只有 url，
  *      而**那条 url 本身就是站点证据**（少了这一步，旧记录会被当成「默认站」，
  *      于是下一次运行把会话链接指向另一站）。
- *   ④ 默认站收口。
  *
+ * ⚠️⚠️ **没有证据时返回 `null`，不再收口到默认站**。收口的后果不是「保守」而是
+ * **把记录钉死**：一次在「还没挑中标签页」阶段就失败的运行（`'tab'` 阶段）、
+ * 或 service worker 中途死掉走的 reconcile，都拿不到 ①；若这里补一个默认站，
+ * 它会被当成「本次运行的结论」写回记录，从此这条任务每次都去默认站，
+ * 哪怕用户一直在另一站上跑它。
  * ⚠️ **两条收尾路径共用它是必需的**：service worker 在运行中途死掉时走 reconcile，
  * 而它拿不到 ① —— 若那条路径不写站点，「运行期间落库的错站值」会一直留到下一次
  * 运行成功收尾才被纠正（用户看到的是侧边栏「打开会话」长期指向另一站）。
+ * 「有证据就写」与「没证据不猜」是同一件事的两面。
  */
 function resolveAutomationSiteOrigin(
   automation: Automation,
   reportedSiteOrigin: string | null | undefined,
-): string {
+): string | null {
   return resolveZaiSiteOrigin(reportedSiteOrigin)
     ?? resolveZaiSiteOrigin(automation.glm.siteOrigin)
     ?? resolveZaiSiteOrigin(automation.glm.sessionUrl)
-    ?? ZAI_WEB_ORIGIN;
+    ?? null;
 }
 
 function createInterruptedRuntimePatch(
@@ -534,19 +585,22 @@ function createInterruptedRuntimePatch(
     Math.max(completedAt, automation.lastRunAt ?? completedAt),
   );
   // 站点收尾：reconcile 拿不到本次运行的结论（进程都死了），所以走回退链的
-  // ② / ③ —— **但必须写**，否则 record 里可能留着「运行期间落库的错站值」，
+  // ② / ③ —— **有证据就写**，否则 record 里可能留着「运行期间落库的错站值」，
   // 而下次运行要靠它决定去哪一站（见 `resolveAutomationSiteOrigin` 的说明）。
+  // ⚠️ **没有证据（null）就不写**：不能拿默认站冒充结论，那会把记录钉死。
   const siteOrigin = resolveAutomationSiteOrigin(automation, null);
-  const siteChanged = automation.glm.siteOrigin !== siteOrigin;
+  const sitePatch = siteOrigin !== null && automation.glm.siteOrigin !== siteOrigin
+    ? { glm: { ...automation.glm, siteOrigin } }
+    : {};
   if (automation.lastRunAt !== null && completedAt <= automation.lastRunAt) {
     return {
       // 早退分支也要带上站点 —— 否则「上一次运行更晚」的情况下站点永远修不回来。
-      ...(siteChanged ? { glm: { ...automation.glm, siteOrigin } } : {}),
+      ...sitePatch,
       nextRunAt,
     };
   }
   return {
-    ...(siteChanged ? { glm: { ...automation.glm, siteOrigin } } : {}),
+    ...sitePatch,
     lastRunAt: completedAt,
     nextRunAt,
     lastError: run.error,
@@ -582,10 +636,14 @@ function createAutomationRuntimePatch(
     : automation.nextRunAt;
 
   // 站点收尾：本次运行报了什么就用什么（那是**标签页实际所在**的站），没报就按
-  // 「记录里已有的证据」倒推，最后才吃默认站。
-  // ⚠️ **写回的值必须与 `sessionUrl` 同源** —— 下面拼 URL 用的是同一个 `siteOrigin`，
+  // 「记录里已有的证据」倒推。
+  // ⚠️⚠️ **没有证据时保持 `null`，不收口默认站** —— 默认站不是结论，写回去会把
+  // 这条任务永久钉在那一站（成因见 `resolveAutomationSiteOrigin` 的说明）。
+  // ⚠️ **写回的值必须与 `sessionUrl` 同源** —— 下面拼 URL 用的是同一个站，
   // 否则会出现「url 指向 A 站、记录的站点写着 B 站」的自相矛盾记录。
   const siteOrigin = resolveAutomationSiteOrigin(automation, result.siteOrigin);
+  // 写回记录用「有证据的站点，否则保留旧值」。
+  const nextSiteOrigin = siteOrigin ?? automation.glm.siteOrigin;
 
   if (result.ok) {
     return {
@@ -593,7 +651,8 @@ function createAutomationRuntimePatch(
         ...automation.glm,
         chatSessionId: result.chatSessionId,
         sessionUrl: result.sessionUrl,
-        siteOrigin,
+        // 成功收尾时协调器一定给得出站点；万一没有，保留旧值，不拿 null 覆盖已知站点。
+        siteOrigin: nextSiteOrigin,
       },
       lastRunAt: completedAt,
       nextRunAt,
@@ -610,20 +669,30 @@ function createAutomationRuntimePatch(
   // - **站点也要一起写**：即使这次没拿到会话 id，本次跑在哪个站仍是已知事实，
   //   下一次运行要靠它决定去哪一站。
   const nextSessionId = result.chatSessionId ?? automation.glm.chatSessionId;
-  const siteChanged = automation.glm.siteOrigin !== siteOrigin;
+  // 拼 URL 的 base 只认证据（本次 / 记录站点 / 记录里那条 url 的 origin）。
+  // ⚠️ **不再吃默认站**：那会造出一条「站点写着 null、url 却指向默认站」的记录，
+  // 而下一次运行又会把那条 url 当成站点证据（第三级）⇒ 绕一圈仍然钉死在默认站。
+  // 拿不到站就不拼 URL ——「打开会话」宁可暂时没有链接，也不能指错站。
+  const urlSiteOrigin = nextSiteOrigin
+    ?? resolveZaiSiteOrigin(automation.glm.sessionUrl);
+  const nextSessionUrl = nextSessionId && urlSiteOrigin
+    ? buildZaiChatSessionUrl(nextSessionId, urlSiteOrigin)
+    : null;
   const sessionPatch = nextSessionId && (
     nextSessionId !== automation.glm.chatSessionId ||
-    automation.glm.sessionUrl !== buildZaiChatSessionUrl(nextSessionId, siteOrigin)
+    automation.glm.sessionUrl !== nextSessionUrl
   )
     ? {
         glm: {
           ...automation.glm,
           chatSessionId: nextSessionId,
-          sessionUrl: buildZaiChatSessionUrl(nextSessionId, siteOrigin),
-          siteOrigin,
+          sessionUrl: nextSessionUrl,
+          siteOrigin: nextSiteOrigin,
         },
       }
-    : (siteChanged ? { glm: { ...automation.glm, siteOrigin } } : {});
+    : (nextSiteOrigin !== automation.glm.siteOrigin
+        ? { glm: { ...automation.glm, siteOrigin: nextSiteOrigin } }
+        : {});
 
   return {
     // Persist a session created during a failed run so the retry reuses it

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AUTOMATION_RUN_TIMEOUT_MS,
+  createAutomationRunnerRequest,
   scanDueAutomations,
 } from '../core/automation/scheduler';
 import {
@@ -278,6 +279,30 @@ describe('automation durable lease and restart recovery', () => {
       .toBe('https://zchat.z.ai');
   });
 
+  it('leaves the site unknown when reconciling a run with no site evidence', async () => {
+    // ⚠️ **旧行为会把默认站（国区站）写进记录** —— 而那个值不是「本次运行的结论」，
+    // 只是回退链的收口。写进去之后这条任务每次都去国区站，哪怕用户一直在国际站跑它。
+    vi.stubGlobal('chrome', createChromeStub());
+    const now = Date.parse('2026-07-13T08:00:00Z');
+    const automation = await createScheduledAutomation();
+    await updateAutomationRuntime(automation.id, {
+      nextRunAt: now,
+      glm: { chatSessionId: null, sessionUrl: null, siteOrigin: null },
+    });
+    await seedPersistedRun(makePersistedRun({
+      id: 'orphan-no-site',
+      automationId: automation.id,
+      status: 'running',
+      scheduledFor: now,
+      createdAt: now - AUTOMATION_RUN_TIMEOUT_MS - 1,
+      startedAt: null,
+    }));
+
+    await scanDueAutomations(vi.fn(), now);
+
+    expect((await getAutomationById(automation.id))?.glm.siteOrigin).toBeNull();
+  });
+
   it('normalizes historical runner requests that predate persisted deadlines', async () => {
     vi.stubGlobal('chrome', createChromeStub());
     const requestedAt = 8_000_000;
@@ -363,16 +388,12 @@ function claimInput(
     trigger,
     scheduledFor,
     startedAt,
-    createRequest: (current: Automation): AutomationRunnerRequest => ({
+    // ⚠️ **直接调生产那个构造函数**，不要在这里手抄一份 —— 手抄的那份在生产
+    // 改判据时不会红（判据就变成两份了）。
+    createRequest: (current: Automation) => createAutomationRunnerRequest(current, {
       runId,
-      automationId: current.id,
-      deadlineAt: startedAt + AUTOMATION_RUN_TIMEOUT_MS,
-      prompt: current.prompt,
       trigger,
-      chatSessionId: current.glm.chatSessionId,
-      // 与生产同形：请求带上「这条记录上次跑的站点」。
-      siteOrigin: current.glm.siteOrigin,
-      promptOptions: current.promptOptions,
+      deadlineAt: startedAt + AUTOMATION_RUN_TIMEOUT_MS,
       requestedAt: startedAt,
     }),
   };

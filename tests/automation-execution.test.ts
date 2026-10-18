@@ -13,6 +13,7 @@ import {
   getAutomationRunById,
   setAutomationStatus,
   updateAutomation,
+  updateAutomationRuntime,
 } from '../core/automation/store';
 import type {
   Automation,
@@ -398,3 +399,141 @@ function failureResult(
     },
   };
 }
+
+/**
+ * 站点提示与收尾写回。
+ *
+ * 两条不变量：
+ * ① **只有复用已有会话**才把记录里的站点带进请求 —— 没开固定会话、或开了但还没
+ *    建出会话，都是新对话，站点应由「用户当前所在的标签页」决定；
+ *    沿用上一次的站会把任务永久钉在那一站。
+ * ② **没有证据就不写站点** —— 收尾链的默认站兜底曾把「不知道」写成「国区站」，
+ *    而那个值会被下一次运行当成结论。
+ */
+describe('automation site hint and write-back', () => {
+  beforeEach(() => {
+    vi.stubGlobal('chrome', createChromeStub().chromeStub);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('does not pass the remembered site for a non-fixed session', async () => {
+    const automation = await createTestAutomation();
+    await updateAutomationRuntime(automation.id, {
+      glm: {
+        chatSessionId: null,
+        sessionUrl: null,
+        siteOrigin: 'https://zchat.z.ai',
+      },
+    });
+
+    const observed: AutomationRunnerRequest[] = [];
+    await runAutomation({
+      automationId: automation.id,
+      trigger: 'manual',
+      scheduledFor: null,
+      executor: async (request) => {
+        observed.push(request);
+        return successResult(request, Date.now());
+      },
+    });
+
+    expect(observed[0]?.siteOrigin).toBeNull();
+  });
+
+  it('passes the remembered site for a fixed session', async () => {
+    const automation = await createTestAutomation();
+    await updateAutomation(automation.id, {
+      promptOptions: { model: null, searchEnabled: false, fixedSession: true },
+    });
+    await updateAutomationRuntime(automation.id, {
+      glm: {
+        chatSessionId: 'cn-session',
+        sessionUrl: 'https://zchat.z.ai/c/cn-session',
+        siteOrigin: 'https://zchat.z.ai',
+      },
+    });
+
+    const observed: AutomationRunnerRequest[] = [];
+    await runAutomation({
+      automationId: automation.id,
+      trigger: 'manual',
+      scheduledFor: null,
+      executor: async (request) => {
+        observed.push(request);
+        return successResult(request, Date.now());
+      },
+    });
+
+    expect(observed[0]?.siteOrigin).toBe('https://zchat.z.ai');
+  });
+
+  it('does not pass the remembered site when a fixed session has no session yet', async () => {
+    // ⚠️ 这一格最容易漏：开了固定会话、但记录里还没有会话 id（首跑，或上次在
+    // 「已挑中标签页、没建出会话」阶段失败）⇒ 本次走的是**新对话**。
+    // 若仍把记录站点带下去，协调器会跳过「跟当前标签页」的判定，直接把新对话
+    // 开在记录里那一站。
+    const automation = await createTestAutomation();
+    await updateAutomation(automation.id, {
+      promptOptions: { model: null, searchEnabled: false, fixedSession: true },
+    });
+    await updateAutomationRuntime(automation.id, {
+      glm: {
+        chatSessionId: null,
+        sessionUrl: null,
+        siteOrigin: 'https://zchat.z.ai',
+      },
+    });
+
+    const observed: AutomationRunnerRequest[] = [];
+    await runAutomation({
+      automationId: automation.id,
+      trigger: 'manual',
+      scheduledFor: null,
+      executor: async (request) => {
+        observed.push(request);
+        return successResult(request, Date.now());
+      },
+    });
+
+    expect(observed[0]?.siteOrigin).toBeNull();
+  });
+
+  it('does not pin a record to the default site when a failure reports no site', async () => {
+    const automation = await createTestAutomation();
+
+    await runAutomation({
+      automationId: automation.id,
+      trigger: 'manual',
+      scheduledFor: null,
+      executor: async (request) => failureResult(request, 'dom_automation_failed', false, {}),
+    });
+
+    // 旧行为：回退链收口到默认站（国区站）⇒ 下一次运行被钉死在那一站。
+    expect((await getAutomationById(automation.id))?.glm.siteOrigin).toBeNull();
+  });
+
+  it('does not build a session URL from the default site when no site evidence exists', async () => {
+    // ⚠️ C 的核心新行为：失败时若拿到了会话 id、却没有任何站点证据，
+    // **不能**拿默认站拼一条 url —— 那会造出「站点是 null、url 指向国区站」的记录，
+    // 而下一次运行又把那条 url 当成站点证据（第三级）⇒ 绕一圈仍钉死在国区站。
+    const automation = await createTestAutomation();
+
+    await runAutomation({
+      automationId: automation.id,
+      trigger: 'manual',
+      scheduledFor: null,
+      executor: async (request) => ({
+        ...failureResult(request, 'dom_automation_failed', false, {}),
+        chatSessionId: 'session-without-site',
+      }),
+    });
+
+    const stored = await getAutomationById(automation.id);
+    expect(stored?.glm.chatSessionId).toBe('session-without-site');
+    expect(stored?.glm.siteOrigin).toBeNull();
+    expect(stored?.glm.sessionUrl).toBeNull();
+  });
+});

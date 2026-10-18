@@ -146,6 +146,7 @@ import {
   AUTOMATION_WAKE_INTERVAL_MINUTES,
   cancelActiveAutomationRun,
   refreshAutomationNextRunAt,
+  resolveAutomationReusableSessionId,
   runAutomation,
   scanDueAutomations,
 } from '../core/automation/scheduler';
@@ -941,16 +942,21 @@ async function executeAutomationWithContext(
   execution.assertActive();
   const taskId = crypto.randomUUID();
   const prompt = request.prompt;
-  // 固定会话：仅当该任务开启了 fixedSession 才沿用上次的 chatSessionId；
-  // 否则传 null，强制每次新开对话（关闭开关 = 重新开一个窗口）。
+  // 固定会话：沿用上次的 chatSessionId，否则传 null、强制每次新开对话
+  // （关闭开关 = 重新开一个窗口）。
+  // ⚠️ **判据与站点提示共用 `resolveAutomationReusableSessionId`** —— 两处各判一次
+  // 会造出「会话按新对话发、站点却按旧会话选」的组合（请求侧判据见
+  // `createAutomationRunnerRequest`）。这个函数只是从请求里的记录快照重新算，
+  // 不读存储。
   // 联网与固定会话互不影响：联网走扩展自带的 web_search / web_fetch，由内容脚本
   // 每轮注入目录，复用会话续写时同样可用。
   const searchEnabled = request.promptOptions?.searchEnabled === true;
   // 任务选定的模型（null = 跟随页面默认）。只在 chat 模式生效，判定在内容脚本。
   const model = request.promptOptions?.model ?? null;
-  const chatSessionId = request.promptOptions?.fixedSession === true
-    ? request.chatSessionId
-    : null;
+  const chatSessionId = resolveAutomationReusableSessionId({
+    promptOptions: request.promptOptions,
+    glm: { chatSessionId: request.chatSessionId, sessionUrl: null, siteOrigin: request.siteOrigin },
+  });
 
   let outcome;
   try {
@@ -960,7 +966,8 @@ async function executeAutomationWithContext(
         kind: 'automation',
         prompt,
         chatSessionId,
-        // B 为主的输入侧：这条记录上次跑在哪个站，这次就去哪个站找/开标签页。
+        // 站点提示：**只有复用已有会话时**才有值（那条会话属于哪一站是确定的）。
+        // 新对话恒为 null ⇒ 协调器按「用户当前所在的标签页」判定，见 `resolveDomTab`。
         siteOrigin: request.siteOrigin ?? null,
         searchEnabled,
         model,
