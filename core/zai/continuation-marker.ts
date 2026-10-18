@@ -62,3 +62,20 @@ export function isZaiContinuationPrompt(content: string): boolean {
 export function isZaiContinuationPlaceholder(content: string): boolean {
   return content.trim() === ZAI_CONTINUATION_PLACEHOLDER;
 }
+
+/**
+ * **气泡侧**判据：这段 DOM 文本里**含**占位符（不要求整段等于它）。
+ *
+ * ⚠️⚠️ **为什么气泡侧不能复用上面那条严格判据** —— 严格判据拿到的可能是**消息原文**
+ * （历史清洗那边就是），也可能是一整条气泡的 `textContent`，而后者**带页面自己的 chrome**：
+ * 实测一只占位符气泡的文本是「占位符 3 字符 + 14 个空白字符」。那些 chrome **当前恰好
+ * 全是空白**，所以严格判据眼下也命中 —— 但只要它哪天变成任何可见文字（操作按钮的标签、
+ * 时间戳、辅助文本节点），严格判据就会**静默漏判**，表现是页面上留一只空白气泡、
+ * 而没有任何东西会报错。
+ *
+ * ⚠️ **反过来不担心误判**：占位符是三个不可见格式字符（Cf），普通消息里出现的概率
+ * 约等于零。两种失败方向的代价不对称 —— 漏判只是维持原状，误判会把用户的真实消息藏掉。
+ */
+export function containsZaiContinuationPlaceholder(content: string): boolean {
+  return content.includes(ZAI_CONTINUATION_PLACEHOLDER);
+}

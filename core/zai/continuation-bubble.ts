@@ -14,7 +14,7 @@
  * 所以它是「可观测但无害」的失效，而不是会连累主流程的那种。
  */
 
-import { isZaiContinuationPrompt } from './continuation-marker';
+import { containsZaiContinuationPlaceholder, isZaiContinuationPrompt } from './continuation-marker';
 
 /**
  * 用户消息容器。
@@ -87,7 +87,14 @@ export function hideContinuationBubbles(
     if (!element || element.getAttribute(HIDDEN_ATTR) === 'true') continue;
     const text = element.textContent ?? '';
     if (!text) continue;
-    if (!isZaiContinuationPrompt(text)) continue;
+    // ⚠️⚠️ **两种形态都要认** —— 它们对应两个不同的时刻：
+    // ① **当场**：气泡里是完整的续跑模板（判结构标签）；
+    // ② **重取历史之后**：那条消息的正文已经被历史清洗换成了**不可见占位符**
+    //    （页面从 `messages/batch` 重渲染会话时就会走到这一步 —— 不必刷新，
+    //    切走会话再切回来就是）。
+    // 只认 ① 会在 ② 上漏判，页面上留下一只**空白气泡**：实测它与正常消息一样占 80px 高，
+    // 而 `textContent` 里只剩「占位符 + 页面自己的 chrome」，没有任何东西会报错。
+    if (!isZaiContinuationPrompt(text) && !containsZaiContinuationPlaceholder(text)) continue;
     element.setAttribute(HIDDEN_ATTR, 'true');
     element.style.setProperty('display', 'none', 'important');
     hidden += 1;

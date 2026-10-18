@@ -60,6 +60,7 @@ import {
   rewriteZaiChatNewUserMessages,
   rewriteZaiLastUserMessage,
 } from '../core/zai/request-codec';
+import { isZaiContinuationRequestBody } from '../core/zai/continuation-request';
 import {
   buildZaiContinuationPrompt,
   buildZaiNudgePrompt,
@@ -401,8 +402,6 @@ const RETRYABLE_PRE_SEND_ERRORS: ReadonlySet<string> = new Set([
 ]);
 /** 注入期间保存的用户输入文字（注入前复制，注入完成后恢复）。 */
 let pendingUserComposerRestore: string | null = null;
-/** 输入框输入调度回调（用于清空注入后可能残留的草稿）。 */
-let pendingComposerDismiss: (() => void) | null = null;
 
 /**
  * 后台发起的 DOM 任务登记（方案 §4.1 Step 1）：
@@ -1746,17 +1745,11 @@ async function handleAugmentRequestBody(
 // ---------------------------------------------------------------------------
 
 async function dispatchMainWorldMessage(data: Record<string, unknown>): Promise<void> {
-  // 同步探测续跑请求：必须在串行队列外、消息抵达瞬间就标记，否则 waitForRequestObserved
-  // 因串行队列阻塞而永远看不到 AUGMENT_REQUEST_BODY（自锁）。这里只看一眼 body 是否续跑模板。
+  // 同步探测续跑请求：必须在串行队列外、消息抵达瞬间就标记，否则 `waitForSendEvidence`
+  // 因串行队列阻塞而永远看不到 `AUGMENT_REQUEST_BODY`（自锁）。这里只看一眼 body 是否续跑模板。
   if (data.type === 'AUGMENT_REQUEST_BODY' && typeof data.body === 'string') {
-    try {
-      const peekBody = parseZaiBody(data.body);
-      const peekPrompt = peekBody ? readZaiLastUserMessageText(peekBody) : '';
-      if (isContinuationRequest(peekPrompt)) {
-        continuationRequestSeq += 1;
-      }
-    } catch {
-      /* ignore peek errors */
+    if (isZaiContinuationRequestBody(data.body)) {
+      continuationRequestSeq += 1;
     }
   }
   // 「响应已到达」的登记同样必须在串行队列**之外**、消息抵达瞬间完成。
@@ -2618,6 +2611,12 @@ async function advanceContinuationLoop(): Promise<void> {
 async function submitContinuationViaPage(prompt: string): Promise<boolean> {
   const sentViaForm = await trySubmitViaFormRequestSubmit(prompt);
   if (sentViaForm) return true;
+
+  // ⚠️⚠️ **这一层刻意不再看一次 Stop 按钮** —— 它拿不到「提交已经触发过」这个前提：
+  // `trySubmitViaFormRequestSubmit` 的提前返回里有一档是「上一轮没答完」
+  // （`waitForAgentIdle` 超时），那种情况下页面**正在生成、而我们根本没注入**，
+  // 看 Stop 会把它误判成「已经发出去了」⇒ 续跑等一个不会来的响应 ⇒ 只能等 180s 租约。
+  // 「页面在生成」这条证据只在 `waitForSendEvidence` 里采 —— 那里已经在提交之后。
   return sendPromptViaDom(prompt);
 }
 
@@ -2980,6 +2979,8 @@ async function runDomTask(input: {
 async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
   if (domSendInFlight) return false;
   domSendInFlight = true;
+  /** 注入期间对输入框做的那层「看不见」的撤销函数（任何出口都要走 finally 还原）。 */
+  let restoreComposerAppearance: (() => void) | null = null;
   try {
     await waitForComposerReady();
     const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
@@ -2994,6 +2995,11 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
     const wasDisabled = textarea.disabled;
     textarea.disabled = true;
 
+    // ⚠️ 注入这段文本期间让它「看起来空着」（文字透明 + 高度冻住）—— 见
+    // `maskComposerForInjection`：那段文本**必须**存在于 DOM 里（页面读的状态就是从它来的），
+    // 但用户不需要看见它。撤销走本函数的 `finally`。
+    restoreComposerAppearance = maskComposerForInjection(textarea);
+
     setTextareaValue(textarea, '');
     setTextareaValue(textarea, prompt);
 
@@ -3002,6 +3008,7 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
     // 不跳 /c/<id>（自动化卡在首页的根因，与页面的 60ms 提交延迟窗口同义）。
     const sendButton = await waitForSendButtonEnabled();
     if (!sendButton) {
+      clearInjectedComposerText();
       textarea.disabled = wasDisabled;
       return false;
     }
@@ -3009,17 +3016,26 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
     // 异常已在 `submitFormViaRequestSubmit` 内部吞掉并转成 `'threw'`，这里只判结果。
     const outcome = submitFormViaRequestSubmit(textarea);
     if (outcome !== 'ok') {
+      clearInjectedComposerText();
       textarea.disabled = wasDisabled;
       return false;
     }
 
-    // 成功判定：Svelte 提交后 input 会被清空。
-    const sentOk = await waitForComposerCleared();
+    // 提交已触发 ⇒ 页面已经读过值（见 `clearInjectedComposerText` 的说明）⇒ 立刻清掉，
+    // 不必等页面自己清（它在约 180ms 后才清，那一段里注入的 prompt 一直挂在输入框上）。
+    clearInjectedComposerText();
+    // ⚠️⚠️ **遮罩必须在这一刻撤，不能等到函数末尾** —— 下一行一执行，输入框就归用户了，
+    // 而后面还有一段最长 5 秒的证据等待（链路异常时）。遮罩留着的话，用户在这段里打的字
+    // 是**透明的、还被 `max-height` 裁着**：字不会丢，但敲键盘看不到任何东西。
+    // （点按钮那条路不需要这一手：它整段等待期间输入框一直是 `disabled` 的。）
+    restoreComposerAppearance?.();
     textarea.disabled = wasDisabled;
-    if (sentOk) return true;
-    // input 没清空，但请求计数涨了也算发出去了（跟 DOM 路同一兜底判定）。
-    return waitForRequestObserved(Date.now());
+
+    // 成功判据见 `waitForSendEvidence` —— 不能用「输入框被清空」（上面那行替页面满足了它）。
+    return waitForSendEvidence();
   } finally {
+    // ⚠️ **任何出口都要撤销那层「看不见」** —— 漏一次，用户的输入框会一直是透明的。
+    restoreComposerAppearance?.();
     domSendInFlight = false;
   }
 }
@@ -3611,11 +3627,12 @@ async function waitForAgentIdle(timeoutMs = 8_000): Promise<boolean> {
 }
 
 /**
- * 共享的「发送原语」：把一段 prompt 注入输入框并让页面自己发出。
+ * 续跑链的「点按钮」发送原语：把一段 prompt 注入输入框并让页面自己发出。
  *
- * 这是续跑与自动化都复用的唯一发送函数（sendPromptViaDom / trySubmitViaFormRequestSubmit
- * 都收敛到这里），它负责：等输入框就绪 → 等上一轮生成结束 → 写 value → 派发 input
- * → 点 send 按钮（不做 requestSubmit，避免首页双提交）→ 判定「已发出」（输入框被清空）。
+ * ⚠️ **只有续跑链用它**（`sendPromptViaDom` ← `submitContinuationViaPage` 的兜底）；
+ * 自动化的首条注入走另一条 `submitAutomationPromptViaPage`，不经过这里。
+ * 它负责：等输入框就绪 → 等上一轮生成结束 → 写 value → 派发 input → 点 send 按钮
+ * → 判定「已发出」（见 `waitForSendEvidence`：请求计数为主、等待期间看到过 Stop 为副）。
  *
  * 注意：这里只管「发送动作是否成功发出」，**不管**后续的请求归属/续跑/收尾，
  * 那些是调用方（续跑状态机 / 自动化任务状态机）各自的职责。续跑机制不被本函数改动。
@@ -3623,6 +3640,8 @@ async function waitForAgentIdle(timeoutMs = 8_000): Promise<boolean> {
 async function sendPromptPrimitive(prompt: string): Promise<boolean> {
   if (domSendInFlight) return false;
   domSendInFlight = true;
+  /** 注入期间对输入框做的那层「看不见」的撤销函数（任何出口都要走 finally 还原）。 */
+  let restoreComposerAppearance: (() => void) | null = null;
   try {
     await waitForComposerReady();
     const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
@@ -3636,26 +3655,34 @@ async function sendPromptPrimitive(prompt: string): Promise<boolean> {
     const wasDisabled = textarea.disabled;
     textarea.disabled = true;
 
+    // 与表单主路同一层「看不见」（见 `maskComposerForInjection`）—— 它只动外观，
+    // 不碰任何读写语义，所以这条路也照用；撤销走本函数的 `finally`。
+    restoreComposerAppearance = maskComposerForInjection(textarea);
+
     setTextareaValue(textarea, '');
     setTextareaValue(textarea, prompt);
 
     const sendButton = await waitForSendButtonEnabled();
     if (!sendButton) {
+      clearInjectedComposerText();
       textarea.disabled = wasDisabled;
       return false;
     }
 
     sendButton.click();
 
-    // 成功判定：输入框被页面清空即视为已发出。
-    const sentOk = await waitForComposerCleared();
+    // 成功判据见 `waitForSendEvidence`（同样不能再用「输入框被清空」）。
+    const observed = await waitForSendEvidence();
+    // ⚠️ **成功时不在这里清空** —— 这一路是「点按钮」的兜底，
+    // 页面从点击到读完值之间的时序没有实测过（`requestSubmit` 那条实测过）。
+    // 在它读完之前清空会把这次发送打空，且失败方向是静默的。
+    // 失败时才清：那时值已不会再被读到，留着只会让注入的 prompt 一直挂在输入框上。
+    if (!observed) clearInjectedComposerText();
     textarea.disabled = wasDisabled;
-    if (sentOk) {
-      return true;
-    }
-    // 兜底：请求计数涨了也算发出去了（续跑模板请求会被 peek 计数）。
-    return waitForRequestObserved(Date.now());
+    return observed;
   } finally {
+    // ⚠️ **任何出口都要撤销那层「看不见」** —— 漏一次，用户的输入框会一直是透明的。
+    restoreComposerAppearance?.();
     domSendInFlight = false;
   }
 }
@@ -3663,17 +3690,6 @@ async function sendPromptPrimitive(prompt: string): Promise<boolean> {
 async function sendPromptViaDom(prompt: string): Promise<boolean> {
   // 收敛到共享发送原语：等上一轮生成结束 → 写 value → 点 send → 判定已发出。
   return sendPromptPrimitive(prompt);
-}
-
-/** 等输入框被页面清空（提交成功的信号），最多等 6 秒。 */
-async function waitForComposerCleared(): Promise<boolean> {
-  const endAt = Date.now() + 6_000;
-  while (Date.now() < endAt) {
-    const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
-    if (textarea && textarea.value.trim() === '') return true;
-    await sleep(200);
-  }
-  return false;
 }
 
 /**
@@ -3694,6 +3710,107 @@ function setTextareaValue(textarea: HTMLTextAreaElement, text: string): void {
   if (setter) setter.call(textarea, text);
   else textarea.value = text;
   textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'x' }));
+}
+
+/**
+ * 把**注入进输入框的那份文本**清掉。
+ *
+ * ⚠️⚠️ **只能在「提交已经触发」之后调** —— 页面是在提交事件里**同步**读走值的
+ * （实测：在 `requestSubmit()` 返回后的同一个同步块里改写 value，都进不了它发出去的
+ * 那条 body）。**在提交之前清空会把这一次发送打空**，而且失败方向是静默的：
+ * 请求照发、请求计数照涨，自检全绿，只有正文内容是错的。
+ *
+ * ⚠️ **走 `setTextareaValue` 而不是直接赋 value** —— 与写入侧同一原语，
+ * 让页面的 bound-value 一起同步成空，免得留下「DOM 空了、页面状态里还有值」的错配。
+ *
+ * ⚠️ **已经空就不要走** —— 页面自己清完（约 180ms 后）再调到这个函数是常态，
+ * 多派发一次 `input` 只是让页面白跑一遍响应式。
+ *
+ * ⚠️ **注入期间想「让用户看不见」要用的是 `maskComposerForInjection`** ——
+ * 这里是把值真的清掉（连页面那份状态一起），在提交之前调用会把这一发打空。
+ */
+function clearInjectedComposerText(): void {
+  const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
+  if (!textarea || textarea.value === '') return;
+  setTextareaValue(textarea, '');
+}
+
+/**
+ * 注入期间让输入框**看起来是空的**：文字透明 + 高度冻住。返回**撤销函数**。
+ *
+ * ⚠️⚠️ **为什么不干脆把那段值清掉** —— 页面的 `bind:value` 有一条**反向同步**（状态 → DOM）。
+ * 实测（探针 `domWriteBackTest`）：与写值同一条同步块里把 DOM 静默清掉之后，
+ * 页面在下一次刷新里**又把那段文本原样写了回来**。也就是说「状态里有、DOM 里没有」
+ * 这个状态**维持不住** —— 那段文本必须存在于 DOM 里（页面提交时读的状态就是从它来的），
+ * 所以只能让它**看不见**，不能让它**不存在**。
+ *
+ * ⚠️ **高度也要一起冻住** —— 注入的是几 KB 的工具结果，textarea 会自增高；
+ * 只把文字变透明的话，「撑高再缩回」那一下照样看得见。（拿不到高度时跳过这一项，
+ * 只做透明 —— 失败方向是「看得见撑高」，不是「藏不住文字」。）
+ *
+ * ⚠️⚠️ **撤销必须走 `finally`** —— 漏掉一次还原，用户的输入框会一直是透明的。
+ * 另外**把输入框交还给用户之前要再撤一次**：那之后还挂着证据等待，遮罩留着会让用户
+ * 打的字看不见（`finally` 那次只是兜底，两次调用是安全的）。
+ *
+ * ⚠️ **自动化的首条注入刻意不加这层遮罩** —— 那条注入的是**用户自己的任务文本**，
+ * 不是工具结果，闪一下没有影响。
+ */
+function maskComposerForInjection(textarea: HTMLTextAreaElement): () => void {
+  const height = Math.round(textarea.getBoundingClientRect().height);
+  const saved = [
+    'color',
+    'caret-color',
+    '-webkit-text-fill-color',
+    'max-height',
+    'overflow',
+  ].map((name) => ({
+    name,
+    value: textarea.style.getPropertyValue(name),
+    priority: textarea.style.getPropertyPriority(name),
+  }));
+  /** 这次真正写进去的那几项（还原时用来判断「当前值还是不是我们那份」）。 */
+  const written: Array<{ name: string; value: string }> = [];
+  let released = false;
+
+  const restore = (): void => {
+    // ⚠️ **可重复调用**：释放点在两处（清空之后 / 函数 finally），后者是兜底。
+    if (released) return;
+    released = true;
+    for (const item of saved) {
+      // ⚠️⚠️ **只撤「当前值仍是我们写进去的那一份」** —— 遮罩窗口里页面自己可能改过其中某项
+      // （切主题改 `color`、自动增高改 `max-height`）；无条件写回会把它的改动覆回我们保存的旧值。
+      const mine = written.find((entry) => entry.name === item.name);
+      if (mine && textarea.style.getPropertyValue(item.name) !== mine.value) continue;
+      if (item.value) textarea.style.setProperty(item.name, item.value, item.priority);
+      else textarea.style.removeProperty(item.name);
+    }
+  };
+
+  // ⚠️⚠️ **先把 `restore` 建好，再写样式**：写样式的中间某一步若抛错，调用方就拿不到撤销函数，
+  // 输入框会**永久透明**。这里失败就先自己还原。
+  // ⚠️ 但这层是纯外观 ⇒ **失败不能连累发送**：还原之后吞掉错误（打一条 warn），
+  // 让注入照常进行（退化成「看得见」，即改动前的样子）。
+  try {
+    // 每一项都「写进去 + 记账」—— 还原时靠 `written` 判断「当前值还是不是我们那一份」。
+    textarea.style.setProperty('color', 'transparent', 'important');
+    written.push({ name: 'color', value: 'transparent' });
+    textarea.style.setProperty('-webkit-text-fill-color', 'transparent', 'important');
+    written.push({ name: '-webkit-text-fill-color', value: 'transparent' });
+    textarea.style.setProperty('caret-color', 'transparent', 'important');
+    written.push({ name: 'caret-color', value: 'transparent' });
+    if (height > 0) {
+      const heightValue = `${height}px`;
+      textarea.style.setProperty('max-height', heightValue, 'important');
+      written.push({ name: 'max-height', value: heightValue });
+      textarea.style.setProperty('overflow', 'hidden', 'important');
+      written.push({ name: 'overflow', value: 'hidden' });
+    }
+  } catch (error) {
+    restore();
+    console.warn('[Zai++] composer mask failed, injecting without it', error);
+  }
+
+  return restore;
 }
 
 /**
@@ -3771,17 +3888,36 @@ async function waitForAutomationComposer(timeoutMs = 60_000): Promise<boolean> {
   return document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR) !== null;
 }
 
-async function waitForRequestObserved(sinceTs: number): Promise<boolean> {
-  // 判定「注入的续跑 prompt 真的发出去」：看 AUGMENT_REQUEST_BODY 是否观察到一条续跑请求。
-  // 不能用 continuationLoop.status 判定（会自锁：RESPONSE_COMPLETE 在串行队列里被本函数阻塞，
-  // 而本函数又在等 status 变化），只能改用独立的 request 计数。
+/**
+ * 等「这一发确实发出去了」的证据，最多 5 秒。
+ *
+ * 判据有两条，**优先级不同**：
+ *
+ * ① **请求计数**（`continuationRequestSeq`）—— 主判据。它在桥上那条 `AUGMENT_REQUEST_BODY`
+ *    抵达时 +1，而那份探测跑在**串行队列之外**（我们此刻正占着队列，队列内的计数读不到）。
+ *    ⚠️ 不能用 `continuationLoop.status` 判定：那会自锁 ——
+ *    `RESPONSE_COMPLETE` 在串行队列里被本函数阻塞，而本函数又在等 status 变化。
+ *
+ * ② **等待期间看到过 Stop 按钮** —— 副判据。它读 DOM，不经桥也不经队列。
+ *    ⚠️⚠️ **它只被记录、不参与等待**（看到了也不提前返回），只在①始终没涨时
+ *    用来区分「其实已经发出去了」与「真没发出去」。**这是刻意的**：Stop 出现的时刻
+ *    没有实测过，若它早于页面自己清空输入框，提前返回会让调用方把用户草稿恢复得过早、
+ *    随后被页面那次清空抹掉。
+ *
+ * ⚠️ **调用点必须在「提交已经触发」之后** —— ②的语义是「页面在生成」，
+ * 而页面在生成也可能是上一轮还没答完（例如 `waitForAgentIdle` 超时那条提前返回），
+ * 在提交之前观测会把它误记成「这一发发出去了」。
+ */
+async function waitForSendEvidence(): Promise<boolean> {
   const startSeq = continuationRequestSeq;
   const endAt = Date.now() + 5_000;
+  let sawStop = false;
   while (Date.now() < endAt) {
     if (continuationRequestSeq > startSeq) return true;
+    if (!sawStop && isAgentCurrentlyRunning()) sawStop = true;
     await sleep(150);
   }
-  return false;
+  return sawStop;
 }
 
 // ---------------------------------------------------------------------------

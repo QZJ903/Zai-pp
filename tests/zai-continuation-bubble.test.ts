@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ZAI_CONTINUATION_PLACEHOLDER,
+  containsZaiContinuationPlaceholder,
   isZaiContinuationPlaceholder,
   isZaiContinuationPrompt,
 } from '../core/zai/continuation-marker';
@@ -158,6 +159,46 @@ describe('zai continuation bubble hider', () => {
     const { root, elements } = fakeRoot([{ text: huge }]);
     expect(hideContinuationBubbles({ root })).toBe(1);
     expect(elements[0]!.attrs.get('data-dpp-hidden-continuation')).toBe('true');
+  });
+
+  it('hides the placeholder bubble left behind by a history refetch', () => {
+    // ⚠️⚠️ **这是另一个时刻的同一件事**：页面从 `messages/batch` 重渲染会话时
+    // （切走再切回来就会发生，不必刷新），那条消息的正文已经被历史清洗换成了占位符。
+    // 只认模板标签的判据在这时会漏判 —— 页面上留下一只空白气泡，
+    // 实测它与正常消息一样占 80px 高，且没有任何东西会报错。
+    //
+    // ⚠️ 文本形状按**真机读数**写：占位符 3 字符 + 页面自己的 14 个空白字符。
+    const refetched = `${ZAI_CONTINUATION_PLACEHOLDER}${' '.repeat(14)}`;
+    const { root, elements } = fakeRoot([{ text: '普通用户消息' }, { text: refetched }]);
+    expect(hideContinuationBubbles({ root })).toBe(1);
+    expect(elements[1]!.attrs.get('data-dpp-hidden-continuation')).toBe('true');
+    expect(elements[0]!.attrs.get('data-dpp-hidden-continuation')).toBeUndefined();
+  });
+
+  it('still hides the placeholder bubble when the page chrome is not plain whitespace', () => {
+    // ⚠️⚠️ **这条钉的是「不许用严格判据」** —— 真机上那 14 个 chrome 字符**恰好全是空白**，
+    // 所以 `isZaiContinuationPlaceholder`（`trim()` 后整段相等）眼下也能命中。
+    // 但只要页面把 chrome 换成任何可见文字，严格判据就**静默漏判**。
+    // ⇒ 判据必须收窄到「含这三个字符」，不能收窄到「整段等于它」。
+    const withVisibleChrome = `编辑${ZAI_CONTINUATION_PLACEHOLDER}复制`;
+    // 前提：严格判据认不出它（认得出的话这条用例证明不了任何事）。
+    expect(isZaiContinuationPlaceholder(withVisibleChrome)).toBe(false);
+    expect(containsZaiContinuationPlaceholder(withVisibleChrome)).toBe(true);
+
+    const { root, elements } = fakeRoot([{ text: withVisibleChrome }]);
+    expect(hideContinuationBubbles({ root })).toBe(1);
+    expect(elements[0]!.attrs.get('data-dpp-hidden-continuation')).toBe('true');
+  });
+
+  it('does not hide an ordinary short message', () => {
+    // 反面：判据放宽到「含占位符」之后，普通消息一条都不许被误藏。
+    const { root, elements } = fakeRoot([
+      { text: '好的，我知道了' },
+      { text: '   ' },
+      { text: '在沙箱写一个简单html文件，再放到桌面上' },
+    ]);
+    expect(hideContinuationBubbles({ root })).toBe(0);
+    expect(elements.every((el) => el.attrs.get('data-dpp-hidden-continuation') === undefined)).toBe(true);
   });
 
   it('is idempotent (a second scan hides nothing)', () => {
