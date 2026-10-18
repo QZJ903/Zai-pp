@@ -472,9 +472,19 @@ describe('zai model override', () => {
 });
 
 describe('zai chatNew model override', () => {
-  /** 真机抓包的精简版建会话 body：模型在 chat.models，首条 user 消息自己也带一份。 */
+  /**
+   * 真机抓包的精简版建会话 body：模型在**三个落点**同值 ——
+   * `chat.models`、首条 user 消息的 `models`、`features.models`。
+   * ⚠️ 三处必须一起改：页面自己始终让它们同值，少改一处就是**亲手制造不一致**。
+   */
   function chatNewBody(models: string[] = ['x-preview-l']): Record<string, unknown> {
     return {
+      features: {
+        auto_web_search: false,
+        flags: ['general_agent'],
+        mcp_servers: [],
+        models: [...models],
+      },
       chat: {
         id: '',
         title: '新聊天',
@@ -502,14 +512,30 @@ describe('zai chatNew model override', () => {
     };
   }
 
-  it('rewrites both the session models and the first message models', () => {
+  it('rewrites all three model carriers: chat.models, the first message, and features.models', () => {
     const body = chatNewBody();
     expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(true);
     const chat = body.chat as Record<string, unknown>;
     expect(chat.models).toEqual(['glm-5.2']);
     const messages = (chat.history as { messages: Record<string, { models: string[] }> }).messages;
     expect(messages['msg-1']!.models).toEqual(['glm-5.2']);
+    // ⚠️ 第三个落点：漏掉它就会留下「前两处是用户选的、features 还是页面默认」的不一致。
+    expect((body.features as Record<string, unknown>).models).toEqual(['glm-5.2']);
     expect(readZaiChatNewModel(body)).toEqual(['glm-5.2']);
+  });
+
+  it('leaves features untouched when it carries no models array', () => {
+    const body = chatNewBody();
+    delete (body.features as Record<string, unknown>).models;
+    expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(true);
+    expect(Object.hasOwn(body.features as object, 'models')).toBe(false);
+  });
+
+  it('leaves the body without a features object alone', () => {
+    const body = chatNewBody();
+    delete body.features;
+    expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(true);
+    expect(Object.hasOwn(body, 'features')).toBe(false);
   });
 
   it('trims the requested id and skips no-op writes', () => {
@@ -522,6 +548,7 @@ describe('zai chatNew model override', () => {
     const body: Record<string, unknown> = { chat: { id: '', history: { messages: {} } } };
     expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(false);
     expect(Object.hasOwn(body.chat as object, 'models')).toBe(false);
+    expect(Object.hasOwn(body, 'features')).toBe(false);
   });
 
   it('leaves a message without its own models untouched', () => {

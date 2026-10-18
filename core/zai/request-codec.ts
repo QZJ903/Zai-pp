@@ -328,13 +328,12 @@ export function disableZaiNativeWebSearch(body: Record<string, unknown>): boolea
 
 // ---------------------------------------------------------------------------
 // 自动化任务的模型选择：把任务选定的模型写进请求体。
-// 自动化只在 chat 模式生效，agent 模式的模型由服务端按 `general_agent` 装配，
-// 覆写会与页面自己的取值打架 —— 所以这里不带 agent 判定，判定留在调用方
-// （只有非 agent 轮才调用这些函数）。
+// ⚠️ **chat 与 agent 两种模式都适用** —— 真机实测 agent 的请求体里模型字段是活的
+// （同一会话不同轮次会带不同 id），不存在「agent 由服务端装配、覆写无效」这回事。
 //
 // 两个路由的模型**落点不同**，是两个函数而不是一个：
 //   - completion：顶层 `model`（字符串）
-//   - chats/new：`chat.models`（数组）+ 首条 user 消息的 `models`（数组）
+//   - chats/new：`chat.models` + 首条 user 消息的 `models` + `features.models`（三个数组）
 // ---------------------------------------------------------------------------
 
 /**
@@ -359,13 +358,18 @@ export function applyZaiModelOverride(
 /**
  * 覆写 `/api/v1/chats/new` body 的模型（原地写，返回是否写入）。
  *
- * **建会话的模型不在顶层** —— 它在 `chat.models`（数组），且首条 user 消息自己也带
- * 一份 `models`；真机抓包两者始终同值，这里一起写，与页面自身行为保持一致。
+ * **建会话的模型不在顶层**，而是**同一个值出现在三个落点**（真机抓包确认三者始终同值）：
+ *   - `chat.models`（数组）
+ *   - 首条 user 消息自己的 `models`（数组）
+ *   - `features.models`（数组）
+ *
+ * ⇒ **三处一起写**。少写任何一处都会**亲手制造不一致**（页面自己始终让它们同值），
+ * 而服务端读哪一个没有公开依据。
  *
  * ⚠️ **这一步不能省。** 会话模型是**建会话那一刻**定下的：只在 completion 阶段写
  * `model` 改不动已有会话，页面仍显示默认模型。
  *
- * 同样只在字段已存在时覆写 —— 页面没发过的字段不凭空造。
+ * 三处都只在字段已存在时覆写 —— 页面没发过的字段不凭空造。
  */
 export function applyZaiChatNewModelOverride(
   body: Record<string, unknown>,
@@ -393,6 +397,12 @@ export function applyZaiChatNewModelOverride(
       message.models = [next];
       changed = true;
     }
+  }
+  // 第三个落点：`features.models`。页面把它与上面两处写成同值，漏掉就是不一致。
+  const features = readRecord(body.features);
+  if (features && Array.isArray(features.models) && !isSingleModel(features.models, next)) {
+    features.models = [next];
+    changed = true;
   }
   return changed;
 }

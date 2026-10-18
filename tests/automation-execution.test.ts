@@ -537,3 +537,45 @@ describe('automation site hint and write-back', () => {
     expect(stored?.glm.sessionUrl).toBeNull();
   });
 });
+
+/**
+ * 模型覆写**不看模式**。
+ *
+ * ⚠️ 这条守的是一个被真机推翻的假设：代码里曾有「agent 模式的模型由服务端按
+ * `general_agent` 装配、覆写无效」的门，三处（chatNew / 原生轮 / 续跑轮）都把
+ * agent 轮跳过。真机实测 agent 的 completion body 带顶层 `model`，且同一会话
+ * 不同轮次带不同 id ⇒ 模型字段是活的，门是多余的。
+ *
+ * 这里的断言只能覆盖「请求带上了模型」，**不能**覆盖「内容脚本真的写了 body」——
+ * 那一步在 `zai.content.ts`（不可 import）。所以另有一条源码级守卫盯着三处调用点
+ * 不带 `isAgentTurn` 门（见 `zai-content-model-override-contract.test.ts`）。
+ */
+describe('automation model is carried into the run request', () => {
+  beforeEach(() => {
+    vi.stubGlobal('chrome', createChromeStub().chromeStub);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('passes the selected model through regardless of mode', async () => {
+    const automation = await createTestAutomation();
+    await updateAutomation(automation.id, {
+      promptOptions: { model: 'glm-5.3', searchEnabled: false, fixedSession: false },
+    });
+
+    const observed: AutomationRunnerRequest[] = [];
+    await runAutomation({
+      automationId: automation.id,
+      trigger: 'manual',
+      scheduledFor: null,
+      executor: async (request) => {
+        observed.push(request);
+        return successResult(request, Date.now());
+      },
+    });
+
+    expect(observed[0]?.promptOptions.model).toBe('glm-5.3');
+  });
+});

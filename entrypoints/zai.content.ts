@@ -414,7 +414,7 @@ interface ActiveDomTask {
   chatSessionId: string | null;
   /** 该任务是否开启 z.ai 联网搜索（命中归属后置请求体 features.web_search/auto_web_search）。 */
   searchEnabled: boolean;
-  /** 该任务选定的模型 id（chat 模式下覆写请求体的 model）；null = 跟随页面默认。 */
+  /** 该任务选定的模型 id（两种模式下都覆写请求体的 model）；null = 跟随页面默认。 */
   model: string | null;
   status: 'pending' | 'injected' | 'running' | 'done' | 'failed' | 'cancelled';
 }
@@ -1483,10 +1483,12 @@ async function handleAugmentRequestBody(
       // 模型覆写（chatNew 阶段）：会话模型在**建会话那一刻**定下 —— 落点是
       // `chat.models`（与首条 user 消息的 `models` 同值），由路由决定，见
       // `applyZaiModelOverrideForRoute`。这一步不能省：只在 completion 阶段写
-      // 改不动已有会话。agent 模式不碰（服务端按 general_agent 装配自己的模型）。
-      if (!isAgentTurn) {
-        applyZaiModelOverrideForRoute(nextBody, 'chatNew', searchTask?.model ?? null);
-      }
+      // 改不动已有会话。
+      // ⚠️ **agent 轮同样覆写** —— 真机实测 agent 的请求体里模型字段是活的
+      // （同一会话不同轮次会带不同 id），用户选的模型能进 body；挡着它的只有
+      // 「服务端按 general_agent 装配」这个从未验证过的假设。
+      // 写函数自带「只在字段已存在时覆写」的守卫 ⇒ 页面发哪个字段就改哪个。
+      applyZaiModelOverrideForRoute(nextBody, 'chatNew', searchTask?.model ?? null);
       postToMainWorld({
         type: 'AUGMENT_REQUEST_BODY_RESULT',
         id,
@@ -1595,22 +1597,21 @@ async function handleAugmentRequestBody(
       });
       requestToolDescriptorsByRequestId.set(requestId, modelFacing);
       // 续跑轮同样把任务选定的模型写回请求体：页面每轮都会重新带 model，
-      // 只在首条写会退回到页面默认。agent 轮不碰（与首条同口径）。
+      // 只在首条写会退回到页面默认。
+      // ⚠️ **agent 轮同样写** —— 真机实测 agent 的 completion body 带顶层 `model`，
+      // 且不同轮次是不同的 id ⇒ 模型字段是活的，不是「服务端自己装配」。
       const loopTask = continuationLoop?.taskId != null
         ? activeDomTasks.get(continuationLoop.taskId)
         : undefined;
       const continuationModel: string | null =
         matchedTask?.model ?? loopTask?.model ?? continuationLoop?.model ?? null;
-      const modelOverrideEnabled = continuationLoop?.isAgentTurn !== true;
       let nextBodyStr = bodyStr;
-      if (nativeSearchOn || (modelOverrideEnabled && continuationModel)) {
+      if (nativeSearchOn || continuationModel) {
         const parsedBody = parseZaiBody(bodyStr);
         if (parsedBody) {
           if (nativeSearchOn) disableZaiNativeWebSearch(parsedBody);
           // 续跑轮走 completion 端点 → 落点是顶层 `model`，由路由决定。
-          if (modelOverrideEnabled) {
-            applyZaiModelOverrideForRoute(parsedBody, 'completion', continuationModel);
-          }
+          applyZaiModelOverrideForRoute(parsedBody, 'completion', continuationModel);
           nextBodyStr = JSON.stringify(parsedBody);
         }
       }
@@ -1708,11 +1709,10 @@ async function handleAugmentRequestBody(
     if (nativeSearchOn) {
       disableZaiNativeWebSearch(nextBody);
     }
-    // 模型覆写：请求归属到自动化任务时，在 chat 模式下覆写 body 的 model。
-    // agent 轮不碰 —— 那由服务端按 general_agent 装配。
-    if (!isAgentTurn) {
-      applyZaiModelOverrideForRoute(nextBody, 'completion', matchedTask?.model ?? null);
-    }
+    // 模型覆写：请求归属到自动化任务时覆写 body 的 model。
+    // ⚠️ **agent 轮同样覆写** —— 真机实测 agent 的 completion body 带顶层 `model`，
+    // 且不同轮次是不同的 id ⇒ 模型字段是活的，不是「服务端自己装配」。
+    applyZaiModelOverrideForRoute(nextBody, 'completion', matchedTask?.model ?? null);
 
     // 记忆命中 → 后台 touch。
     await sendRuntimeMessage({ type: 'TOUCH_MEMORIES', payload: { ids: [] } }).catch(() => undefined);

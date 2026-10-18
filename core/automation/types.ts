@@ -52,7 +52,8 @@ export interface AutomationSchedule {
 export interface AutomationPromptOptions {
   /**
    * 本次运行使用的模型 id（`/api/models` 里的一项），null = 跟随页面默认。
-   * 只在 chat 模式生效；agent 模式的模型由服务端按 `general_agent` 装配。
+   * ⚠️ **chat 与 agent 两种模式都生效** —— 真机实测 agent 的请求体里模型字段是活的
+   * （不同轮次会带不同 id），不存在「agent 由服务端装配、覆写无效」这回事。
    */
   model: string | null;
   searchEnabled: boolean;

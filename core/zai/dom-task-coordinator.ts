@@ -132,7 +132,7 @@ export interface DomTaskStartInput {
   siteOrigin?: string | null;
   /** 自动化任务是否开启 z.ai 联网搜索（任务归属请求体里置 features.web_search/auto_web_search）。 */
   searchEnabled?: boolean;
-  /** 自动化任务选定的模型 id（chat 模式下覆写请求体的 model）；null = 跟随页面默认。 */
+  /** 自动化任务选定的模型 id（两种模式下都覆写请求体的 model）；null = 跟随页面默认。 */
   model?: string | null;
 }
 
