@@ -5,16 +5,13 @@
  * 续跑是 DOM 注入让页面自己发的（captcha 墙），工具目录只需要在首条消息注入一次，
  * 续跑 prompt 保持紧凑：original_task + tool_results + 一行工具名提醒。
  *
- * ⚠️ **沙箱措辞必须分模式** —— chat 模式没有服务端沙箱，说「别用沙箱工具」是防
- * 模型凭空造出沙箱工具名；而 **agent 模式的服务端沙箱是原生通路**
- * （首条消息的 `prompt.sandboxHostSection` 明确要求中间处理用沙箱工具、只有涉及
- * 用户本机时才输出本地工具 XML）。在 agent 模式继续喊「别用沙箱工具」会与那段
- * 直接冲突，模型要么困惑、要么把本该走沙箱的活全推给本地 shell。
+ * ⚠️ **措辞按 agent 模式写死** —— 站点只剩 agent 模式（chat 已从页面移除），
+ * 服务端沙箱是原生通路（首条消息的 `prompt.sandboxHostSection` 明确要求中间处理
+ * 用沙箱工具、只有涉及用户本机时才输出本地工具 XML）。
  *
- * ⚠️⚠️ **真正的判据是「排他措辞」，不止「别用沙箱」那一句** —— 凡是把 XML 工具标签
- * 说成全称唯一通道的句子（「**只**输出可执行 XML 工具标签」「必须**直接**输出工具 XML」），
- * 在 agent 模式都会把沙箱通道一起否掉。所以这里按模式分叉的不是某一个词，而是**整类
- * 断言**：chat 可以排他（那里 XML 确实是唯一通道），agent 必须收窄成「本地工具如何表达」。
+ * ⚠️⚠️ **真正的判据是「排他措辞」** —— 凡是把 XML 工具标签说成全称唯一通道的句子
+ * （「**只**输出可执行 XML 工具标签」「必须**直接**输出工具 XML」），都会把沙箱通道
+ * 一起否掉。所以这里的措辞必须收窄成「**本地**工具如何表达」，不能排他。
  *
  * ⚠️ **本文件不重复交代两套工具的分工** —— 「中间处理走沙箱、涉及本机才用本地工具」
  * 那条规则在 `prompt.sandboxHostSection` 里、且每轮都注入。这里再讲一遍就是两处定义
@@ -51,28 +48,18 @@ const TOOL_OUTPUT_MAX_CHARS = 8_000;
 const COMPRESSED_SUMMARY_MAX_CHARS = 400;
 const TOOL_ERROR_MESSAGE_MAX_CHARS = 400;
 
-export interface ZaiContinuationPromptOptions {
-  /**
-   * 本轮是不是 agent 模式。决定沙箱措辞（见文件头说明）。
-   * 缺省按 chat 处理 —— 与 `core/zai/mode.ts` 的失败方向一致（读不到就按 chat）。
-   */
-  isAgent?: boolean;
-}
-
 export function buildZaiContinuationPrompt(
   originalTask: string,
   executions: readonly ToolExecutionRecord[],
   toolNames: readonly string[],
-  options?: ZaiContinuationPromptOptions,
 ): string {
   const hasFailures = executions.some((execution) => !execution.result.ok);
-  const isAgent = options?.isAgent === true;
 
   return [
     '以下是工具续跑任务刚刚执行的工具结果。请像真正的 Agent 一样，基于原始任务和这些工具结果继续推进。',
     '如果结果已经足够，请输出最终结论；只有确实需要更多信息、验证或文件修改时才继续调用工具。',
-    renderContinueInstruction(isAgent),
-    renderToolReminder(toolNames, isAgent),
+    renderContinueInstruction(),
+    renderToolReminder(toolNames),
     '',
     '<original_task>',
     clamp(originalTask, ORIGINAL_TASK_MAX_CHARS),
@@ -87,33 +74,27 @@ export function buildZaiContinuationPrompt(
 }
 
 /**
- * 「怎么继续」那一条。**排他措辞按模式分叉**（见文件头说明）。
+ * 「怎么继续」那一条。
  *
- * chat 模式 XML 是唯一通道，可以说「只输出」；agent 模式还有服务端沙箱这条原生通路，
- * 同一个「只」会把沙箱一并否掉，所以收窄成「**本地**工具调用必须输出 XML」——
- * 对沙箱保持沉默，既不声称它存在、也不声称它不存在。
+ * ⚠️ **措辞必须收窄到「本地工具」** —— agent 模式还有服务端沙箱这条原生通路，
+ * 排他措辞（「只输出可执行 XML 工具标签」）会把沙箱一并否掉。所以只说
+ * 「**本地**工具调用必须输出 XML」，对沙箱保持沉默 —— 既不声称它存在、也不声称它不存在。
  */
-function renderContinueInstruction(isAgent: boolean): string {
+function renderContinueInstruction(): string {
   const deliverables = '文件、HTML 页面与图表等交付物请直接用 Markdown 围栏代码块输出（如 ```html、```mermaid）。';
-  return isAgent
-    ? `不要要求用户点击继续，也不要输出伪工具调用 JSON；本地工具调用必须输出可执行 XML 工具标签。${deliverables}`
-    : `不要要求用户点击继续，也不要输出伪工具调用 JSON；需要继续操作时只输出可执行 XML 工具标签。${deliverables}`;
+  return `不要要求用户点击继续，也不要输出伪工具调用 JSON；本地工具调用必须输出可执行 XML 工具标签。${deliverables}`;
 }
 
 /**
- * 工具名提醒。**措辞随模式变**（见文件头说明）。
+ * 工具名提醒。
  *
- * chat 模式要压住「沙箱工具」—— 那条通路在 chat 模式不存在，模型提它只会浪费轮次，
- * 所以说「只输出这些，别用沙箱工具」。
- *
- * agent 模式只列名字：两套通道的分工由 `prompt.sandboxHostSection` 负责，这里再交代一遍
- * 既是重复、又只能用排他措辞表达（「只输出这些」），反而与沙箱冲突。
+ * ⚠️ **只列名字，不重复交代两套通道的分工** —— 那条规则由每轮注入的
+ * `prompt.sandboxHostSection` 负责。这里再讲一遍既是重复、又只能用排他措辞表达
+ * （「只输出这些」），反而与沙箱冲突。
  */
-function renderToolReminder(toolNames: readonly string[], isAgent: boolean): string {
+function renderToolReminder(toolNames: readonly string[]): string {
   if (toolNames.length === 0) return '';
-  return isAgent
-    ? `本轮可输出的本地工具标签：${toolNames.join(', ')}`
-    : `本轮可用的本地工具标签（只输出这些，别用沙箱工具）：${toolNames.join(', ')}`;
+  return `本轮可输出的本地工具标签：${toolNames.join(', ')}`;
 }
 
 function renderFailureRecovery(): string {
@@ -186,15 +167,108 @@ function clamp(value: string | undefined, maxLength: number): string | undefined
 }
 
 /**
- * shouldNudge：判断模型是否「还有待办」。与 ds++ 的 shouldNudge 同源，
- * 这里是 z.ai 独立实现（自带中文话术正则，不依赖外部 locale 翻译上下文）。
+ * shouldNudge：判断模型是否「还有待办」。
  *
  * 判定模型回复末尾是否还有「接下来我要做 X」这类未完成的动作承诺：
  *  - 有 `<task_complete>` 信号 → 明确结束，不 nudge。
  *  - 文本为空 → 需要 nudge。
  *  - 末尾有「待办话术」且后面没有跟渲染产物 → 需要 nudge。
+ *
+ * ## 为什么按「主语」分三级（2026-10-19 重写）
+ *
+ * 原实现只有一条正则，把「接下来」这类**无主语引导词**与「我将…」一视同仁。
+ * 真机反馈：任务完成时模型写「报告已生成。**接下来你可以**打开它查看。」——
+ * 主语是**用户**、是建议、不是待办，却照样命中 ⇒ 弹 nudge。
+ *
+ * ⇒ 拆成三级，**方向是「宁可多 nudge，不可漏 nudge」**（漏判 = 任务提前收尾，
+ * 代价远高于多跑一轮）：
+ *
+ * | 级别 | 形态 | 处理 |
+ * |---|---|---|
+ * | 强（有主语） | `我 + 情态词 + 动词` | **无条件 nudge** |
+ * | 强（无主语） | `马上 / 再试一次 / 还需要 + 动词` | **无条件 nudge**，排除被动与已发生 |
+ * | 弱 | `接下来 / 下一步 / 然后 + 动词` | 命中处附近有「给用户的建议」语气才放过 |
+ *
+ * ⚠️ **强信号不给任何附加条件** —— 它们是漏判风险最高的形态，加条件就是把
+ * 「提前收尾」的风险换回来。
  */
-const ZAI_PENDING_ACTION_RE = /(?:我(?:将|会|想|要|先|让|再|直接|现在|继续|尝试|开始|需要|还需要|仍需|打算|计划|马上|随后|稍后|先去|先来|接下来).{0,48}(?:调用|创建|编辑|检查|验证|生成|保存|尝试|搜索|获取|打开|执行|查看|访问|读取|抓取|下载|上传|修改|更新|删除|写入|分析|比对|比较|监控|查询|发送|提交|安装|启动|停止|清理|转换|解析|提取|汇总|整理|核对|核实|扫描|截屏|渲染)|(?:接下来|下一步|然后|让我|先让我).{0,48}(?:调用|创建|编辑|检查|验证|生成|保存|尝试|搜索|获取|打开|执行|查看|访问|读取|抓取|下载|上传|修改|更新|删除|写入|分析|比对|比较|监控|查询|发送|提交|安装|启动|停止|清理|转换|解析|提取|汇总|整理|核对|核实|扫描|截屏|渲染)|(?:(?:现在|这就|马上|随后|稍后|立即|立刻|先|直接))?(?:为|帮)(?:你|您)(?:创建|生成|制作|输出|编写|绘制|渲染)(?!了|好|完|成|过|的)|(?:i(?:'ll| will|'m| am|'d| would| want to| should| have to| (?:still\s+)?need to|'m going to| am going to|'m about to| am about to|'ve got to| have got to)|let me|let's|next,? (?:i|we)|we(?:'ll| will| need to| can)|(?:my|the) next step is to).{0,64}(?:call|create|edit|inspect|validate|generate|save|try|search|fetch|open|run|browse|read|check|look|use|verify|test|download|write|update|review|analyze|extract|query|send|post|investigate|monitor|compare|install|start|stop|convert|parse|list|collect|request|retry|scroll|click|type|navigate))/gi;
+const ZAI_ACTION_VERBS = '调用|创建|编辑|检查|验证|生成|保存|尝试|搜索|获取|打开|执行|查看|访问|读取|抓取|下载|上传|修改|更新|删除|写入|分析|比对|比较|监控|查询|发送|提交|安装|启动|停止|清理|转换|解析|提取|汇总|整理|核对|核实|扫描|截屏|渲染|处理|运行|部署|构建|测试|编译|打包';
+
+/** 英文动词表 —— 与中文表**分开**：两者的分词形态完全不同，合并只会更难读。 */
+const ZAI_ACTION_VERBS_EN = 'call|create|edit|inspect|validate|generate|save|try|search|fetch|open|run|browse|read|check|look|use|verify|test|download|write|update|review|analyze|extract|query|send|post|investigate|monitor|compare|install|start|stop|convert|parse|list|collect|request|retry|scroll|click|type|navigate';
+
+/**
+ * 「已经发生」的动词后缀 —— 动词后紧跟这些字就不是待办，是汇报。
+ *
+ * ⚠️ 只看**紧跟**（中间不能插字）：「我读取了文件」是汇报，「我将读取文件」是待办。
+ *
+ * ⚠️⚠️ **`到` / `后` 刻意不在名单里** —— 它们是**目的补语**与**顺序连接词**，
+ * 大量出现在尚未发生的句子里：「我将把报告保存**到**桌面」「我会下载**到**本地」
+ * 「我将修改**后**通知你」。把它们当过去时标记会让这些真待办全部漏判（方向与本模块
+ * 「宁可多 nudge」的原则相反）。
+ *
+ * ⚠️ **`完` / `好` / `成` / `毕` 只在句末才算完成态** —— 它们既可能是「我创建好了」（汇报），
+ * 也可能是「我将整理**好**数据」（待办，后面还有宾语）。判据是紧跟其后的字符：
+ * 只有紧跟标点或文本结束时才算过去时。
+ *
+ * ⚠️ **`后` 单独出现不算过去时，但「…后…了」是** —— 「我将修改**后**通知你」是待办
+ * （「后」是顺序连接词），而「我继续分析**后**得出了结论」是汇报（后面紧跟「了」）。
+ * ⇒ 判据是「`后` 之后 20 字内出现 `了`」——把「顺序 + 完成」这一对形态一起认掉。
+ */
+const ZAI_PAST_MARKER = '(?!了|过|(?:完|好|成|毕)(?=[，。；！？、\\s]|$)|后(?=[^。！？]{0,20}了))';
+
+/** 情态 / 意图词：出现在「我」之后，表明这是一个**尚未发生**的打算。 */
+const ZAI_INTENT_MODALS = '将|会|想|要|先|让|再|直接|现在|这就|马上|立刻|立即|继续|尝试|开始|需要|还需要|仍需|还要|打算|计划|准备|随后|稍后|先去|先来|接下来';
+
+/** 强信号（有主语）：`我 + 情态词 + … + 动词`。主语必然是模型 ⇒ 无条件 nudge。 */
+const ZAI_PENDING_STRONG_RE = new RegExp(
+  // 中文第一人称承诺。
+  `我(?:${ZAI_INTENT_MODALS}).{0,48}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`
+  // 「让我 / 先让我」：主语同样只能是模型。
+  + `|(?:让我|先让我).{0,48}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`
+  // 「为 / 帮你做 X」：动作是模型做的，第二人称只是受益者。
+  + `|(?:(?:现在|这就|马上|随后|稍后|立即|立刻|先|直接))?(?:为|帮)(?:你|您)(?:创建|生成|制作|输出|编写|绘制|渲染)(?!了|好|完|成|过|的)`
+  // 英文第一人称承诺（与中文同义，不合并成一条正则 —— 动词表完全不同）。
+  + `|(?:i(?:'ll| will|'m| am|'d| would| want to| should| have to| (?:still\\s+)?need to|'m going to| am going to|'m about to| am about to|'ve got to| have got to)|let me|let's|next,? (?:i|we)|we(?:'ll| will| need to| can)|(?:my|the) next step is to).{0,64}(?:${ZAI_ACTION_VERBS_EN})`,
+  'gi',
+);
+
+/**
+ * 强信号（无主语但语气明确）：`马上 / 再试一次 / 还需要 + 动词`。
+ *
+ * ⚠️⚠️ **`接下来` / `下一步` / `然后` / `现在` / `随后` / `稍后` 刻意不在这一支里** ——
+ * 它们同样大量出现在**给用户的建议**中（「接下来**你**可以打开它查看」「现在**你**可以下载」）。
+ * 它们归 `ZAI_PENDING_WEAK_RE` 管，由那里按上下文（±12 字内有没有「你/您/可以/建议」）判断。
+ * ⇒ **本支只留「语气明确指向模型自己」的引导词**：马上 / 立刻 / 立即 / 这就 / 再试 / 还需要 / 仍需 / 还要 / 继续。
+ * ⚠️ 早前把这些词放在本支（strong）里，靠的是「同 index 时 `WEAK` 后插入、稳定排序排在最后」
+ * 这个**巧合**才判对；一旦重排 `collect` 或换排序实现就会静默翻转。
+ */
+const ZAI_PENDING_IMPERSONAL_RE = new RegExp(
+  `(?:马上|立刻|立即|这就|再试(?:一次)?|还需要|仍需|还要|继续).{0,24}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`,
+  'gi',
+);
+
+/** 弱信号：`接下来 / 下一步 / 然后 / 现在 / 随后 / 稍后 + 动词`，可能只是在给用户建议。 */
+const ZAI_PENDING_WEAK_RE = new RegExp(
+  `(?:接下来|下一步|然后|现在|随后|稍后).{0,48}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`,
+  'gi',
+);
+
+/**
+ * 「这是在给用户建议」的判据 —— **看引导词后面紧跟什么**，不是看窗口里有没有「你」。
+ *
+ * ⚠️⚠️ **为什么不能用「窗口里有 你/您/可以 就算建议」**：那些字大量出现在**宾语/定语**位置
+ * ——「接下来读取**你给的**链接」「接下来把结果推送到**你可以访问的**地址」「然后检查**你提供的**那几个文件」。
+ * 这些都是**模型自己要做的事**，按窗口判会被整体放过（真机方向是「该 nudge 却判不 nudge」）。
+ *
+ * ⇒ 判据改成：**引导词（接下来/下一步/然后/现在/随后/稍后）之后紧跟「你 / 您 / 请」** 才算建议 ——
+ * 那才是「主语是用户」的直接形态（「接下来**你**可以打开」「接下来**请**查看」）。
+ * 引导词后面紧跟动词或「把/再/将」时，主语是模型自己 ⇒ 待办。
+ */
+const ZAI_ADVICE_LEAD_RE = /(?:接下来|下一步|然后|现在|随后|稍后)[，,、\s]*[你您请]/;
+
+/** 弱信号判断的上下文窗口：命中片段前后各取这么多字。 */
+const ZAI_ADVICE_WINDOW_CHARS = 12;
 
 // ⚠️ **捕获组两侧不能加 `\s*`** —— `<task_complete>\s*([\s\S]*?)\s*<\/task_complete>`
 // 会在「开标签后跟连续空白、且无配对闭合标签」时灾难性回溯（`\s*` 与 `[\s\S]*?\s*`
@@ -226,40 +300,99 @@ function getNudgeDecisionText(text: string): string {
     : trimmed;
 }
 
-function hasPendingActionAtTail(text: string): boolean {
-  const matches = [...text.matchAll(ZAI_PENDING_ACTION_RE)];
-  const lastMatch = matches[matches.length - 1];
-  if (!lastMatch || lastMatch.index === undefined) return false;
-  const afterPendingAction = text.slice(lastMatch.index + lastMatch[0].length).trim();
+interface ZaiPendingHit {
+  index: number;
+  length: number;
+  /** 强信号 = 主语明确是模型，不看上下文直接判待办。 */
+  strong: boolean;
+}
+
+function collectPendingHits(text: string): ZaiPendingHit[] {
+  const hits: ZaiPendingHit[] = [];
+  const collect = (pattern: RegExp, strong: boolean, skip?: (matched: string) => boolean) => {
+    for (const match of text.matchAll(pattern)) {
+      if (match.index === undefined) continue;
+      if (skip?.(match[0])) continue;
+      hits.push({ index: match.index, length: match[0].length, strong });
+    }
+  };
+  collect(ZAI_PENDING_STRONG_RE, true);
+  // 无主语强信号：排除被动 / 已发生（「随后数据被写入文件」「现在已经拿到了结果」）。
+  collect(ZAI_PENDING_IMPERSONAL_RE, true, (matched) => /被|已经/.test(matched));
+  // 弱信号：被动式同样不是模型的待办（「随后数据被写入文件」）。
+  collect(ZAI_PENDING_WEAK_RE, false, (matched) => /被/.test(matched));
+  return hits.sort((a, b) => a.index - b.index);
+}
+
+/** 命中之后还有大段内容（或渲染产物）⇒ 不像「空承诺」，不 nudge（原有语义）。 */
+function passesTailGate(text: string, hit: ZaiPendingHit): boolean {
+  const afterPendingAction = text.slice(hit.index + hit.length).trim();
   if (afterPendingAction.length > ZAI_PENDING_ACTION_AFTER_MAX_CHARS) return false;
   if (afterPendingAction.includes('```')) return false;
   return true;
 }
 
-/** 构建 nudge prompt：上一轮没输出可执行工具 XML，提醒模型「要么继续调工具、要么 task_complete 结束」。 */
+function isAdviceAt(text: string, hit: ZaiPendingHit): boolean {
+  const windowStart = Math.max(0, hit.index - ZAI_ADVICE_WINDOW_CHARS);
+  const windowEnd = Math.min(text.length, hit.index + hit.length + ZAI_ADVICE_WINDOW_CHARS);
+  return ZAI_ADVICE_LEAD_RE.test(text.slice(windowStart, windowEnd));
+}
+
+/**
+ * 末尾是否还有「待办话术」。
+ *
+ * ⚠️⚠️ **强信号优先，不是「只看最后一条命中」** —— 早前取 `hits[hits.length - 1]` 直接判定，
+ * 于是「我将生成报告。**接下来你可以**下载它。」这种「强在前、弱建议在后」的句子会被
+ * 最后那条弱信号（带建议标记）整体否掉 ⇒ **前面的强信号被丢弃**，与「强信号无条件 nudge」矛盾。
+ * ⇒ 先在强信号里找一条通过尾部闸门的，有就 `true`；只有全部强信号都不通过时，
+ * 才退回「最后一条弱信号 + 建议窗口」。
+ *
+ * ⚠️ 方向是**宁可多 nudge**：强信号只要通过尾部闸门就判待办，不看上下文。
+ */
+function hasPendingActionAtTail(text: string): boolean {
+  const hits = collectPendingHits(text);
+  if (hits.length === 0) return false;
+
+  // ① 强信号优先：任意一条通过尾部闸门 ⇒ 判待办。
+  //    取**最后一条**通过的（与旧实现「以最后一次承诺为准」的口径一致）。
+  for (let i = hits.length - 1; i >= 0; i -= 1) {
+    const hit = hits[i]!;
+    if (hit.strong && passesTailGate(text, hit)) return true;
+  }
+
+  // ② 没有可用的强信号 ⇒ 退回最后一条命中，按建议窗口判断。
+  const last = hits[hits.length - 1]!;
+  if (!passesTailGate(text, last)) return false;
+  // 弱信号：命中处附近若在给用户建议（「接下来**你**可以打开它查看」），不算待办。
+  return !isAdviceAt(text, last);
+}
+
+/**
+ * 构建 nudge prompt：上一轮没输出可执行工具 XML，提醒模型「任务没完成就继续给调用」。
+ *
+ * ⚠️ **不声称「观察到服务端沙箱工具调用」** —— 我们从来不观察它（`shouldNudgeZai`
+ * 里 `executions` 是 `void` 的，`assistantText` 也只含答案相位）。旧文案写
+ * 「也没有观察到服务端沙箱工具的调用」是**与事实相反**的断言，模型刚调过沙箱工具时
+ * 会读到一句假话。现在只陈述能确认的那一半：**没有输出本地工具 XML**。
+ *
+ * ⚠️ **不给「任务已完成」指定信号** —— 旧文案要求输出 `<task_complete>`，
+ * 但提示词从没教过模型这个约定（i18n 资源里零命中），而且与「忽略这条提示」冲突。
+ * 现在只让模型**忽略**：完成与否由它自己判断，不引入第二套完成语义。
+ */
 export function buildZaiNudgePrompt(
   originalTask: string,
   previousText: string,
   executions: readonly ToolExecutionRecord[],
   nudgeCount: number,
   toolNames: readonly string[] = [],
-  options?: ZaiContinuationPromptOptions,
 ): string {
-  const isAgent = options?.isAgent === true;
-
   return [
-    // ⚠️ chat 的「没输出 XML 就等于续跑无法继续」在 agent 模式**是事实错误** ——
-    // 那里沙箱调用本来就不产生 XML，所以要并列「两条通道都没观察到」。
-    isAgent
-      ? '上一轮回复没有包含可执行的本地工具 XML，也没有观察到服务端沙箱工具的调用，因此续跑无法继续执行。'
-      : '上一轮回复没有包含任何可执行工具 XML，因此自动化续跑无法继续执行。',
+    '上一轮回复没有输出可执行的本地工具 XML。如果任务尚未完成，请给出下一步可执行调用；如果任务已经完成，忽略这条提示。',
     '请根据原始任务和工具结果二选一：',
-    isAgent
-      ? '1. 如果任务仍未完成，本轮必须给出下一步的可执行调用：本地工具输出可执行 XML 工具标签，服务端沙箱工具直接调用（无需 XML）。'
-      : '1. 如果任务仍未完成，本轮必须直接输出下一步可执行工具 XML。',
-    '2. 如果任务已经完成，输出 <task_complete>{"summary":"..."}</task_complete>。文件、HTML 页面与图表等交付物用 Markdown 围栏代码块输出（如 ```html、```mermaid）。',
+    '1. 如果任务仍未完成，本轮必须给出下一步的可执行调用：本地工具输出可执行 XML 工具标签，服务端沙箱工具直接调用（无需 XML）。',
+    '2. 如果任务已经完成，直接给出最终结论；文件、HTML 页面与图表等交付物用 Markdown 围栏代码块输出（如 ```html、```mermaid）。',
     `这是第 ${nudgeCount} 次无工具调用纠偏。`,
-    renderToolReminder(toolNames, isAgent),
+    renderToolReminder(toolNames),
     '',
     '<original_task>',
     clamp(originalTask, ORIGINAL_TASK_MAX_CHARS),

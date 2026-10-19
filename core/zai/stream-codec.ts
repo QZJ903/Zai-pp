@@ -31,7 +31,8 @@ export interface ZaiSseParseResult {
 
 /**
  * 一个可累积 assistant 文本的解析器。`consumeZaiSseData` 推进状态，
- * `assistantText` 是当前累积的**答案正文**（三语义合并 + 按相位切掉思考）。
+ * `assistantText` 是当前累积的**答案正文**（三语义合并 + **按相位挖掉非答案区间** ——
+ * `thinking` / `tool_call` / `tool_response`；`search` 与未知相位仍算答案）。
  */
 export interface ZaiStreamAccumulator {
   assistantText: string;
@@ -86,41 +87,75 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
   // SSE 的 `data:` 行可能跨 TextDecoder 分片被截断，必须把未完结的行缓存到下一次 push。
   let pending = '';
   /**
-   * 答案正文在 `text` 里的起点（UTF-16 偏移）；`null` = 到目前为止全是思考。
+   * 累积文本里**不属于答案**的区间（左闭右开，UTF-16 偏移，按 start 递增且互不重叠）。
    *
-   * ⚠️⚠️ **思考必须靠 phase 分，不能靠 `<details>` 标签** —— 真机实测（2026-10）
-   * `phase:"thinking"` 帧的 `delta_content` 是**裸文本**，整段累积里 `<details` 出现 0 次。
-   * 而旧版站点（2025-12）把思考内联在 `answer` 相位里、包在 `<details>` 中 ⇒
-   * `stripZaiThinkingBlocks` 当时够用。**那个前提已经消失**，所以出口那个函数
-   * 现在只是「内联 details」那一路的兜底，真正分流在这里。
-   * 漏掉这一步的后果不是「多显示一段思考」：`assistantText` 同时是
+   * ## 为什么是区间而不是一个起点
+   *
+   * 旧实现用一个 `answerStart` 指针表达「起点之前不要、之后全要」。那个模型**表达不了
+   * 中间夹一段**，而 agent 模式恰好会这样发：
+   *
+   * ```
+   * answer「我查一下。」→ tool_call → tool_response（带技能说明正文）→ answer「查到了…」
+   * ```
+   *
+   * 真机实测（2026-10）：`tool_response` 帧带 `delta_content`，内容是服务端工具的技能
+   * 说明。单指针模型会把它拼进两段答案**中间**，污染自动化回传正文、工具面板的
+   * `session.content` 与用量估算。⇒ 改成「按区间挖洞」。
+   *
+   * ## 哪些相位不算答案
+   *
+   * 只排**已知的服务端工具相位**：`thinking` / `tool_call` / `tool_response`。
+   * ⚠️ **`search` 与未知相位一律按答案算** —— 没有真机样本证明它们带正文，
+   * 而「未知一律按答案」的失败方向是安全的（最多多一段文本，不会把答案丢掉）。
+   *
+   * ⚠️ **思考必须靠 phase 分，不能靠 `<details>` 标签** —— `phase:"thinking"` 帧的
+   * `delta_content` 是**裸文本**，整段累积里 `<details` 出现 0 次。旧版站点
+   * （2025-12）把思考内联在 `answer` 里包在 `<details>` 中 ⇒ `stripZaiThinkingBlocks`
+   * 当时够用；**那个前提已经消失**，出口那个函数现在只是「内联 details」那一路的兜底。
+   * 漏掉 phase 分流的后果不是「多显示一段思考」：`assistantText` 同时是
    * `extractAndNotifyToolCalls` 与兜底 `parseToolXml` 的输入 ⇒
    * **模型写在思考里的完整工具 XML 会被真的执行**。
    *
-   * ⚠️ **不能改成「内部累积时就丢掉思考」** —— `edit_content` 的 `edit_index` 是
+   * ⚠️ **不能改成「内部累积时就丢掉」** —— `edit_content` 的 `edit_index` 是
    * 相对**完整文本**的绝对偏移，内部丢字符会让之后所有偏移错位、正文碎裂。
    * 所以分流只发生在出口（见 `assistantText` getter）。
    */
-  let answerStart: number | null = null;
+  const excludedRanges: Array<{ start: number; end: number }> = [];
 
-  /** `thinking` 是唯一的「非答案」相位；未知相位一律按答案算（失败方向安全）。 */
-  const isThinkingPhase = (phase: ZaiSsePhase): boolean => phase === 'thinking';
+  /** 已知的「非答案」相位。见 `excludedRanges` 的说明（`search` 刻意不在列）。 */
+  const NON_ANSWER_PHASES: ReadonlySet<string> = new Set(['thinking', 'tool_call', 'tool_response']);
+
+  const isNonAnswerPhase = (phase: ZaiSsePhase): boolean => NON_ANSWER_PHASES.has(phase);
+
+  /** 把 [start, end) 记成一个排除区间；与已有区间相邻/重叠时合并。 */
+  const pushExcludedRange = (start: number, end: number): void => {
+    if (end <= start) return;
+    const last = excludedRanges[excludedRanges.length - 1];
+    if (last && start <= last.end) {
+      last.end = Math.max(last.end, end);
+      return;
+    }
+    excludedRanges.push({ start, end });
+  };
 
   const applyPhase = (event: ZaiSseEvent): string => {
     const d = event.parsed;
-    const thinking = isThinkingPhase(event.phase);
+    const nonAnswer = isNonAnswerPhase(event.phase);
     const dc = readString(d.delta_content);
     if (dc) {
-      // 首个「非思考相位且带文本」的帧定下答案起点 —— 记的是**追加前**的长度。
-      if (answerStart === null && !thinking) answerStart = text.length;
+      // 追加：非答案相位把「追加前的末尾 → 追加后」整段记为排除区间。
+      const start = text.length;
       text += dc;
+      if (nonAnswer) pushExcludedRange(start, text.length);
       return dc;
     }
     const content = readString(d.content);
     if (content) {
-      // 整体替换：这段文本的归属由**本帧自己的相位**决定，不继承上一帧。
-      answerStart = thinking ? null : 0;
+      // 整体替换：`text` 被整段换掉，所有旧偏移作废 ⇒ 先清空区间。
+      // 这段文本的归属由**本帧自己的相位**决定，不继承上一帧。
+      excludedRanges.length = 0;
       text = content;
+      if (nonAnswer) pushExcludedRange(0, text.length);
       return content;
     }
     const ec = readString(d.edit_content);
@@ -128,13 +163,22 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
       // edit_index 是 UTF-16 code-unit 偏移（浏览器字符串索引语义）。
       const editIndex = readFiniteNumber(d.edit_index) ?? 0;
       const prefix = utf16SafeSlice(text, 0, editIndex);
-      // ⚠️ 落点若在答案起点**之前**（含「答案还没开始」），这次改写就覆盖了分流点 ⇒
-      // 重定到 edit 之后。落点在答案之内则起点不动（前缀没被碰）。
-      // 这是**近似**：认为「edit 之后的内容都算答案」。
-      if (editIndex <= (answerStart ?? Number.POSITIVE_INFINITY)) {
-        answerStart = thinking ? null : editIndex;
+      // 被改写的只是 `[editIndex, 原长)` 那一段，**它前面的字符原样保留**。
+      // ⇒ 区间要分成两类处理（顺序不能反）：
+      //   ① `start >= editIndex`：整段落在被替换区里 ⇒ **直接弹掉**（它们指向的字符没了）；
+      //   ② `start < editIndex < end`（**跨落点**）：区间**截到落点为止** ——
+      //      `[start, editIndex)` 那段前缀仍然是被排除的旧文本，必须继续排除；
+      //      但 `[editIndex, end)` 已经是**新写入的内容**，不能再被排除（否则新答案被一起挖掉）。
+      // ⚠️ **不能把 `start` 往后推** —— 那会让「落点之前那段本该排除的前缀」漏进答案。
+      // ⚠️ **也不能整段作废** —— 那会把新写入的答案一起挖掉（真机上 `edit_content` 零命中，
+      // 但语义必须是这个）。
+      while (excludedRanges.length > 0 && excludedRanges[excludedRanges.length - 1]!.start >= editIndex) {
+        excludedRanges.pop();
       }
+      const straddling = excludedRanges[excludedRanges.length - 1];
+      if (straddling && straddling.end > editIndex) straddling.end = editIndex;
       text = prefix + ec;
+      if (nonAnswer) pushExcludedRange(editIndex, text.length);
       return ec;
     }
     return '';
@@ -150,10 +194,16 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
 
   return {
     get assistantText() {
-      // 先按相位切掉思考（真机：思考是独立的 `thinking` 相位、裸文本），
+      // 先按相位把非答案区间挖掉（thinking / tool_call / tool_response），
       // 再过一遍 details 剥离（旧版站点把思考内联在 `answer` 里的那一档兜底）。
       // 两步都只在出口做，内部 `text` 始终是完整的服务端原文。
-      const answer = answerStart === null ? '' : utf16SafeSlice(text, answerStart, text.length);
+      let answer = '';
+      let cursor = 0;
+      for (const range of excludedRanges) {
+        if (range.start > cursor) answer += utf16SafeSlice(text, cursor, range.start);
+        cursor = Math.max(cursor, range.end);
+      }
+      if (cursor < text.length) answer += utf16SafeSlice(text, cursor, text.length);
       return stripZaiThinkingBlocks(answer);
     },
     push(chunk: string): ZaiSseParseResult {
@@ -189,8 +239,8 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
 /**
  * 剥掉内联在正文里的思考块，只取最终答案正文。
  *
- * ⚠️⚠️ **这不是思考分流的主路径** —— 主路径是 `assistantText` getter 里的
- * `answerStart` 按 **phase** 切分。本函数处理的是**另一种站点形态**：思考内联在
+ * ⚠️⚠️ **这不是思考分流的主路径** —— 主路径是 `assistantText` getter 里按 **phase**
+ * 挖掉非答案区间。本函数处理的是**另一种站点形态**：思考内联在
  * `answer` 相位的 `delta_content` 里、包在 `<details>…</details>` 中。
  *
  * ⚠️ **成立前提已变（2026-10 真机实测）**：`phase:"thinking"` 现在是**独立相位**、

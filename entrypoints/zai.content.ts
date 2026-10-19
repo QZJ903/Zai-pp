@@ -101,7 +101,7 @@ import { buildZaiChatSessionUrl, readZaiChatSessionId } from '../core/zai/chat-s
 import { navigateToZaiConversation } from '../core/zai/project-nav';
 import { findZaiToolXmlBlocks } from '../core/zai/tool-xml';
 import { createZaiConversationTitleResolver } from '../core/zai/conversation-title';
-import { readZaiSidebarAgentMode, zaiNewConversationPath } from '../core/zai/mode';
+import { ZAI_AGENT_HOME_PATH } from '../core/zai/mode';
 import { isRuntimeFailure, RuntimeCommandError } from '../core/messaging/runtime-response';
 import {
   BACKGROUND_RUNTIME_PATHNAMES,
@@ -111,7 +111,6 @@ import {
   type RuntimeMessageSenderLike,
 } from '../core/messaging/runtime-boundary';
 import {
-  ZAI_AGENT_FLAG,
   ZAI_CHAT_INPUT_SELECTOR as CHAT_INPUT_SELECTOR,
   ZAI_DOM_TASK_CANCELLED_CODE,
   ZAI_WEB_ORIGIN,
@@ -194,17 +193,15 @@ let projectPanelController: ProjectPanelController | null = null;
 const executedToolCallSignatures = new Map<string, Set<string>>();
 /** requestId → chatSessionId 映射：执行时补全 source.chatSessionId 用。 */
 const chatSessionIdByRequestId = new Map<string, string | null>();
-/** requestId → 是否 agent 轮：启动续跑循环时记下，循环内复用同一套裁剪口径。 */
-const isAgentTurnByRequestId = new Map<string, boolean>();
-/** requestId → 本轮是否开着原生联网：与上面同理，供 handleResponseComplete 建续跑循环时取用。 */
+/** requestId → 本轮是否开着原生联网：供 handleResponseComplete 建续跑循环时取用。 */
 const nativeSearchOnByRequestId = new Map<string, boolean>();
 /**
  * requestId → 本轮激活的本地 Skill 目录（只在真有激活时写入）。
  *
  * ⚠️ **建授权时已经用了它，这里再记一份是给续跑循环用的** —— 续跑轮会**重新建授权**
  * （防上一轮 grant 被关掉），而续跑 prompt 是模板、不是用户输入，重新跑一遍 Skill 激活
- * 只会得到 null。所以要把「启动该循环的那一轮」的目录带到循环上（与 `isAgentTurn` /
- * `nativeSearchOn` / `model` 同一类状态）。少了它，续跑轮里 `shell_exec` 的初始 cwd
+ * 只会得到 null。所以要把「启动该循环的那一轮」的目录带到循环上（与 `nativeSearchOn` /
+ * `model` 同一类状态）。少了它，续跑轮里 `shell_exec` 的初始 cwd
  * 就不再被归一到 Skill 目录，而**提示词里那句软约束照样在** ⇒ 静默退化。
  */
 const localSkillDirByRequestId = new Map<string, string>();
@@ -238,8 +235,8 @@ const requestToolDescriptorsByRequestId = new Map<string, ToolDescriptor[]>();
  * ⚠️ **没有 `REQUEST_TERMINAL` 的两条路径会留下残余**：HTML 挑战页与响应直接 reject
  * （fetch hook 在这两条路上只发各自的回调）。但这两条路都没有流、也就没有工具执行，
  * 所以 `executedToolCallSignatures` / `executionsByRequest` 两个大容器根本不会被写；
- * 残留的是 `chatSessionIdByRequestId` / `isAgentTurnByRequestId` / `nativeSearchOnByRequestId` /
- * `localSkillDirByRequestId` 四个 UUID / 短串级小条目，**外加 `requestToolDescriptorsByRequestId`**
+ * 残留的是 `chatSessionIdByRequestId` / `nativeSearchOnByRequestId` /
+ * `localSkillDirByRequestId` 三个 UUID / 短串级小条目，**外加 `requestToolDescriptorsByRequestId`**
  * （增广已成功、已写入，但它不是小条目 —— 是整份 `descriptors` 数组）。**这是有意接受的**：
  * 让 terminal 在这两条路上也发出会连带触发 `armManualStopDetection`，可能给高峰挑战
  * 误报一次 `DOM_TASK_FAILED` —— 那是行为改动，不该混在内存清理里。
@@ -248,7 +245,6 @@ function releaseRequestState(requestId: string): void {
   executedToolCallSignatures.delete(requestId);
   executionsByRequest.delete(requestId);
   chatSessionIdByRequestId.delete(requestId);
-  isAgentTurnByRequestId.delete(requestId);
   nativeSearchOnByRequestId.delete(requestId);
   localSkillDirByRequestId.delete(requestId);
   requestToolDescriptorsByRequestId.delete(requestId);
@@ -442,8 +438,6 @@ interface ContinuationLoop {
   taskId: string | null;
   /** 续跑收尾时回传给后台的最终回复正文。 */
   finalAssistantText: string;
-  /** 启动该循环的那轮是否为 agent 轮：续跑/nudge 轮复用同一套模型侧裁剪口径。 */
-  isAgentTurn: boolean;
   /** 启动该循环的那轮是否开着原生联网：续跑/nudge 轮同样要据此放行 web 工具。 */
   nativeSearchOn: boolean;
   /** 归属任务选定的模型 id：续跑轮也要把同一模型写回请求体。 */
@@ -535,14 +529,6 @@ function readChatNewNativeSearchEnabled(body: Record<string, unknown>): boolean 
   const chat = body.chat;
   if (!chat || typeof chat !== 'object' || Array.isArray(chat)) return false;
   return (chat as Record<string, unknown>).auto_web_search === true;
-}
-
-/** 读 completion body 的 agent 标志：features.flags 含 general_agent 即 agent 模式。 */
-function readZaiAgentFlag(body: Record<string, unknown>): boolean {
-  const features = body.features;
-  if (!features || typeof features !== 'object' || Array.isArray(features)) return false;
-  const flags = (features as Record<string, unknown>).flags;
-  return Array.isArray(flags) && flags.includes(ZAI_AGENT_FLAG);
 }
 
 /** 读 completion body 是否已开原生联网：features 的 auto_web_search / web_search 任一为 true 视为开。 */
@@ -700,17 +686,15 @@ function catalogNamesFor(descriptors: readonly ToolDescriptor[]): string[] {
  * 首条注入的示例**照样吐 `<web_search>` 标签 —— 而识别名单里有它、执行侧无人拦，
  * **于是真的搜了**。用户看到的是「关了搜索它还在搜」。
  *
- * ⚠️ **白名单就是判据里的那个 OR**（`webToolsEnabled || nativeSearchOn`）：
- * 自动化任务的 `searchEnabled`、或页面原生联网开着时，`nativeSearchOn` 为真 ⇒
- * **即使扩展搜索开关是关的也放行**。所以这一处判据同时决定「关掉就不识别」与
- * 「白名单照常放行」两件事，**别再在别处写第二份**。
+ * ⚠️ **站点只剩 agent 模式后，web 工具恒裁**（`core/zai/model-facing.ts`）——
+ * `nativeSearchOn` / `webToolsEnabled` 已不再影响结果。保留这两个形参是为了
+ * 不动调用点形状（chat 回归时判据在那里恢复）。
  */
 function modelFacingDescriptorsFor(
   descriptors: readonly ToolDescriptor[],
-  options: { isAgent: boolean; nativeSearchOn: boolean; webToolsEnabled?: boolean },
+  options: { nativeSearchOn: boolean; webToolsEnabled?: boolean },
 ): ToolDescriptor[] {
   return filterZaiModelFacingToolDescriptors(descriptors, {
-    isAgent: options.isAgent,
     nativeSearchOn: options.nativeSearchOn,
     webToolsEnabled: options.webToolsEnabled ?? currentWebToolsEnabled,
   });
@@ -719,24 +703,17 @@ function modelFacingDescriptorsFor(
 /**
  * 按 requestId 取本请求的模型可见目录 —— 供**执行期**的读点用（那时只有 requestId）。
  *
- * ⚠️ 两个 per-request 标记都从请求级 Map 取（`isAgentTurnByRequestId` /
- * `nativeSearchOnByRequestId`），**不是**从当前 body 重算 —— 执行发生在流式回答期间，
- * 那时已经拿不到 body 了。这两个 Map 由增广阶段写入、由 `releaseRequestState` 释放。
+ * ⚠️ 请求级标记从 `nativeSearchOnByRequestId` 取，**不是**从当前 body 重算 ——
+ * 执行发生在流式回答期间，那时已经拿不到 body 了。这个 Map 由增广阶段写入、
+ * 由 `releaseRequestState` 释放。
  *
- * ⚠️⚠️ **两个标记取不到时回落 `false`，但 `webToolsEnabled` 不回落** ——
- * 它取的是模块状态 `currentWebToolsEnabled`（见 `modelFacingDescriptorsFor`）。
- * 所以「更严」这个说法**只对 `nativeSearchOn=false` 成立**（少放行）。
- * `isAgent=false` 那一半会把「agent 轮恒裁」这条规则**暂时关掉**：增广没跑完 +
- * 侧边栏联网开关开着时，web 工具不会被裁。那条路（下文的懒建授权）**模型本来就没拿到
- * 我们的工具清单** —— 它能吐出的 `<web_search>` 只可能来自会话历史里的旧示例，
- * 而那正是「过滤而非删除」有意保留的能力（老会话的 XML 仍要能执行）。
- * ⇒ **行为保持不变，但别把这里读成「一定会更严」。**
+ * ⚠️ **站点只剩 agent 模式后，web 工具恒裁**，这个标记已不影响结果；
+ * 保留它是为了 chat 回归时判据能原样恢复。
  */
 function modelFacingForRequest(requestId: string): ToolDescriptor[] {
   return modelFacingDescriptorsFor(
     requestToolDescriptorsByRequestId.get(requestId) ?? currentToolDescriptors,
     {
-      isAgent: isAgentTurnByRequestId.get(requestId) ?? false,
       nativeSearchOn: nativeSearchOnByRequestId.get(requestId) ?? false,
     },
   );
@@ -1231,14 +1208,11 @@ function augmentPrompt(
     isFirstMessage?: boolean;
     projectContext?: string | null;
     projectId?: string | null;
-    /** agent 模式：只用于「要不要注入沙箱段」这一处（web 工具的裁剪已在调用点做完）。 */
-    isAgent?: boolean;
     /** 本轮的 Skill 激活结果，由调用方经 `resolveActiveLocalSkill` 算出（见其说明）。 */
     skillActivation: ActiveLocalSkill;
   },
 ): string {
   const isFirstMessage = options?.isFirstMessage ?? true;
-  const isAgent = options?.isAgent ?? false;
   const modelFacing = options.toolDescriptors;
   const locale = currentContentLocale ?? DEFAULT_LOCALE;
   // 项目上下文**只由调用方显式传入**，没有模块级兜底：两个调用点（首条建会话读待绑项目、
@@ -1286,7 +1260,6 @@ function augmentPrompt(
         memoryEnabled,
         systemPromptEnabled,
         forceResponseLanguage,
-        isAgent,
       });
       return result.augmented;
     }
@@ -1301,7 +1274,6 @@ function augmentPrompt(
       memoryEnabled,
       systemPromptEnabled,
       forceResponseLanguage,
-      isAgent,
     });
     return result.augmented;
   }
@@ -1315,7 +1287,6 @@ function augmentPrompt(
     memoryEnabled,
     systemPromptEnabled,
     forceResponseLanguage,
-    isAgent,
   });
   return result.augmented;
 }
@@ -1392,7 +1363,6 @@ async function handleAugmentRequestBody(
       // 先建授权（走 toolIntent → 后台 projectMcpCapabilityDescriptors 做 MCP capability 投影），
       // 再拿授权返回的 descriptors 做增广。首条消息 isFirstMessage=true。
       const firstText = parsed.userMessageTexts[0] ?? '';
-      const isAgentTurn = parsed.isAgent === true;
 
       // 任务归属提前：在任何 await（尤其 createToolAuthorization）之前就按
       // 原文认领 task 并置 running。授权失败/抛错时认领依然生效，避免自动化发送回调
@@ -1450,7 +1420,6 @@ async function handleAugmentRequestBody(
       // 本请求的模型可见目录：**提示词、标签识别、兜底解析共用这一份**（见
       // `modelFacingDescriptorsFor`）。这里由授权返回的完整目录过滤而来。
       const modelFacing = modelFacingDescriptorsFor(authorization.descriptors, {
-        isAgent: isAgentTurn,
         nativeSearchOn,
       });
       // 首条（chats/new）始终增强：把工具目录 + 记忆 + 联网引导注入，让模型在建会话
@@ -1460,7 +1429,6 @@ async function handleAugmentRequestBody(
         augmentPrompt(text, {
           toolDescriptors: modelFacing,
           isFirstMessage: true,
-          isAgent: isAgentTurn,
           projectContext: pendingProject?.context ?? null,
           projectId: pendingProject?.projectId ?? null,
           skillActivation,
@@ -1566,17 +1534,12 @@ async function handleAugmentRequestBody(
       });
       activeToolAuthorizations.set(requestId, auth);
       // 本请求的联网标记 —— **一个变量，两处用途**：
-      // ① 决定「模型可见目录列不列 web 工具」（与提示词同源）；
-      // ② 决定「要不要在这个 body 上写 disableZaiNativeWebSearch」。
+      // ① 决定「模型可见目录列不列 web 工具」—— ⚠️ **2026-10-19 起这一支已失效**：
+      //    web 工具在 `core/zai/model-facing.ts` 里**恒裁**（站点只剩 agent 模式），
+      //    `nativeSearchOn` 不再影响可见性；保留这个语义是为了 chat 回归时判据能恢复。
+      // ② 决定「要不要在这个 body 上写 disableZaiNativeWebSearch」。**这一支仍然承重。**
       //
-      // ⚠️⚠️ **这两件事必须用同一个值** —— 两个来源不同的变量会让它们分叉：
-      // `searchEnabled`（只看归属任务的快照）决定 ②，`loop.nativeSearchOn` 决定 ①。
-      // 两者只在自动化下相等；**非自动化 + 用户点了地球**时 `loop.nativeSearchOn=true`
-      // 而 `searchEnabled=false` ⇒ 放行了扩展 web 工具、却**没关原生通道**，两套并存。
-      // 真机实测：地球开着时**页面每轮都重新带 `features.auto_web_search=true`**，
-      // 所以「首条写过 false」不会延续到续跑轮 —— 那两条续跑轮的原生通道确实是开着的。
-      //
-      // ⚠️ **口径取「循环上记的那一份」**（`ContinuationLoop.nativeSearchOn`）—— 这是
+      // ⚠️⚠️ **②必须取循环上记的那一份**（`ContinuationLoop.nativeSearchOn`）—— 这是
       // **时序约束**不是偏好：续跑轮的提示词**在提交之前就建好了**（`advanceContinuationLoop`
       // 用 `loop.nativeSearchOn` 过滤出 toolNames 喂给 `buildZaiContinuationPrompt`，
       // nudge 轮同理），建提示词那一刻这个请求的 body 还不存在。识别与解析必须与提示词
@@ -1592,7 +1555,6 @@ async function handleAugmentRequestBody(
       const nativeSearchOn = continuationLoop?.nativeSearchOn ?? readCompletionNativeSearchEnabled(body);
       // 本请求的模型可见目录（续跑轮）：**与提示词、识别、解析共用同一份**。
       const modelFacing = modelFacingDescriptorsFor(auth.descriptors, {
-        isAgent: continuationLoop?.isAgentTurn ?? readZaiAgentFlag(body),
         nativeSearchOn,
       });
       requestToolDescriptorsByRequestId.set(requestId, modelFacing);
@@ -1630,13 +1592,11 @@ async function handleAugmentRequestBody(
       return;
     }
 
-    // 首条判定与 agent 判定都只读 body（纯函数、无 await），提前到这里 ——
+    // 首条判定只读 body（纯函数、无 await），提前到这里 ——
     // 因为 **Skill 激活要用 `isFirstMessage`**（隐式激活的 `firstMessage` 门控依赖它），
     // 而 Skill 激活必须早于建授权（见下）。
     const parentId = readZaiCurrentUserMessageParentId(body);
     const isFirstMessage = parentId === null || parentId === undefined;
-    // completion 路由的 agent 判定：features.flags 里含 general_agent。
-    const isAgentTurn = readZaiAgentFlag(body);
 
     // ⚠️ **Skill 激活必须早于建授权** —— `activeLocalSkillDir` 要随授权上报给后台，
     // 后台才可能把 `shell_exec` / `shell_session_begin` 的初始 cwd 归一到 Skill 目录。
@@ -1655,8 +1615,6 @@ async function handleAugmentRequestBody(
     if (skillActivation.activeLocalSkillDir !== undefined) {
       localSkillDirByRequestId.set(requestId, skillActivation.activeLocalSkillDir);
     }
-    // 记下 requestId → agent 标记：续跑/nudge 轮要用同一套模型侧裁剪口径。
-    isAgentTurnByRequestId.set(requestId, isAgentTurn);
     // 联网判定：自动化任务自身的 searchEnabled，或 body 已带原生联网标记
     // （features.auto_web_search / features.web_search）。检测到即为「本轮要用联网」——
     // 一律关掉原生通道，走扩展自带的 web_search / web_fetch。
@@ -1677,7 +1635,6 @@ async function handleAugmentRequestBody(
     // 它同时是「主世界认不认这个标签」与「兜底解析认不认这个块」的判据。
     // 存未过滤目录会让「用户在侧边栏关掉的工具」仍被识别并执行（见该函数的说明）。
     const modelFacing = modelFacingDescriptorsFor(auth.descriptors, {
-      isAgent: isAgentTurn,
       nativeSearchOn,
     });
     requestToolDescriptorsByRequestId.set(requestId, modelFacing);
@@ -1694,7 +1651,6 @@ async function handleAugmentRequestBody(
       isFirstMessage,
       projectContext: project?.context ?? null,
       projectId: project?.projectId ?? null,
-      isAgent: isAgentTurn,
       skillActivation,
     });
     currentRequestMessageCount = isFirstMessage ? 1 : currentRequestMessageCount + 1;
@@ -2063,14 +2019,11 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
       // 懒建路径也记一份（走的是 `currentToolDescriptors`，那是此刻唯一可得的目录）。
       //
       // ⚠️⚠️ **这里刻意存「未过滤」的 `authorization.descriptors`，与另外两处不同。**
-      // 理由：这条路的两个请求级标记（`isAgentTurnByRequestId` / `nativeSearchOnByRequestId`）
-      // **都没被写过** —— 增广压根没跑完（id / body 缺失、body 解析失败、或外层 catch），
+      // 理由：这条路的请求级标记 `nativeSearchOnByRequestId` **没被写过** ——
+      // 增广压根没跑完（id / body 缺失、body 解析失败、或外层 catch），
       // 所以「本轮该不该放行 web 工具」这个语义**根本不存在**。
-      // 硬要在这里过滤，只能拿模块级 `currentWebToolsEnabled` 配两个默认 `false`，
-      // 而 `isAgent=false` 会让**agent 轮不再恒裁** —— 方向是错的（该裁的没裁）。
       // ⇒ 存原样，把过滤留给读侧：`modelFacingForRequest` 统一过一次判据。
-      // ⚠️ **注意读侧并不保证「更严」** —— `webToolsEnabled` 那里取的是模块状态，
-      // 所以「增广没跑完 + 联网开关开着 + agent 轮」这一格会**少裁一次** web 工具。
+      // ⚠️ 站点只剩 agent 模式后 web 工具恒裁，这条路的差异已经不影响结果。
       // 可接受：模型没有拿到我们的目录，能吐出的标签只可能来自会话历史里的旧示例，
       // 而那正是「过滤而非删除」有意保留的能力（见 `modelFacingForRequest` 的说明）。
       requestToolDescriptorsByRequestId.set(requestId, authorization.descriptors);
@@ -2377,7 +2330,6 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       const nudgeToolNames = catalogNamesFor(modelFacingDescriptorsFor(
         nudgeState.descriptors,
         {
-          isAgent: continuationLoop.isAgentTurn,
           webToolsEnabled: nudgeState.webToolsEnabled,
           nativeSearchOn: continuationLoop.nativeSearchOn,
         },
@@ -2388,8 +2340,6 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
         continuationLoop.toolExecutions,
         continuationLoop.nudgeCount,
         nudgeToolNames,
-        // 沙箱措辞分模式 —— agent 模式下服务端沙箱是原生通路，不能喊「别用沙箱工具」。
-        { isAgent: continuationLoop.isAgentTurn },
       );
       const submitted = await submitContinuationViaPage(nudgePrompt);
       if (!submitted) {
@@ -2525,12 +2475,11 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     lastVisibleText: complete.assistantText,
     taskId: taskIdByRequestId.get(complete.requestId) ?? null,
     finalAssistantText: complete.assistantText,
-    isAgentTurn: isAgentTurnByRequestId.get(complete.requestId) ?? false,
     nativeSearchOn: nativeSearchOnByRequestId.get(complete.requestId) ?? false,
     model: resolveLoopModel(complete.requestId),
     localSkillDir: localSkillDirByRequestId.get(complete.requestId) ?? null,
   };
-  // 这里不再单独清 `isAgentTurnByRequestId` / `nativeSearchOnByRequestId` ——
+  // 这里不再单独清 `nativeSearchOnByRequestId` ——
   // 释放统一由 `releaseRequestState` 在 `REQUEST_TERMINAL` 做。原先只在这个分支里清，
   // 而原生轮的三条提前 return 都漏掉了（那才是真正的残留来源）。
   await advanceContinuationLoop();
@@ -2559,11 +2508,10 @@ async function advanceContinuationLoop(): Promise<void> {
   const loopState = await loadAndSyncRuntimeState();
   // ⚠️ `webToolsEnabled` 传的是**本次同步的返回值**，不是模块状态 —— 同理。
   // ⚠️⚠️ **这份 `toolNames` 与续跑分支的 `modelFacing` 必须同源** —— 前者写进提示词、
-  // 后者决定识别与解析；两边都取 `loop.isAgentTurn` / `loop.nativeSearchOn`，口径一致。
+  // 后者决定识别与解析；两边都取 `loop.nativeSearchOn`，口径一致。
   const toolNames = catalogNamesFor(modelFacingDescriptorsFor(
     loopState.descriptors,
     {
-      isAgent: loop.isAgentTurn,
       webToolsEnabled: loopState.webToolsEnabled,
       nativeSearchOn: loop.nativeSearchOn,
     },
@@ -2572,8 +2520,6 @@ async function advanceContinuationLoop(): Promise<void> {
     loop.originalTask,
     loop.toolExecutions,
     toolNames,
-    // 与 nudge 那条同源：沙箱措辞必须跟着模式走。
-    { isAgent: loop.isAgentTurn },
   );
   loop.pendingPrompt = prompt;
   loop.stepCount += 1;
@@ -3406,11 +3352,11 @@ function installProjectPanel(): void {
       });
     },
     startNewConversation() {
-      // 待绑已经在调用方置好；开新会话时**沿用页面当前的模式**（chat / agent），
-      // 否则在 agent 模式下会静默掉回 chat —— 模式真源与判定见 `core/zai/mode.ts`。
-      // 走 `/?mode=agent` 是页面自己的入口：它读到 query 后设置场景并删除该参数，
-      // 与用户点侧边栏那个模式 tab 是同一条路。
-      window.location.assign(zaiNewConversationPath(readZaiSidebarAgentMode(document)));
+      // 待绑已经在调用方置好；这里**固定去 agent 首页** —— 站点只剩 agent 模式，
+      // 不再做模式判定（判定依据 `#sidebar` 的 `data-active` 已被真机推翻，
+      // 见 `core/zai/mode.ts` 的说明）。
+      // 走 `/?mode=agent` 是页面自己的入口：它读到 query 后设置场景并删除该参数。
+      window.location.assign(ZAI_AGENT_HOME_PATH);
     },
     getLabels: labels,
     onError(error) {

@@ -95,7 +95,6 @@ import {
 import {
   deleteSavedItem,
   getAllSavedItems,
-  getSavedItemsState,
   saveSavedItem,
 } from '../core/saved-items';
 import {
@@ -951,7 +950,7 @@ async function executeAutomationWithContext(
   // 联网与固定会话互不影响：联网走扩展自带的 web_search / web_fetch，由内容脚本
   // 每轮注入目录，复用会话续写时同样可用。
   const searchEnabled = request.promptOptions?.searchEnabled === true;
-  // 任务选定的模型（null = 跟随页面默认）。只在 chat 模式生效，判定在内容脚本。
+  // 任务选定的模型（null = 跟随页面默认）。chat / agent 两种模式都生效，判定在内容脚本。
   const model = request.promptOptions?.model ?? null;
   const chatSessionId = resolveAutomationReusableSessionId({
     promptOptions: request.promptOptions,

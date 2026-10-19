@@ -199,10 +199,11 @@ export const ZAI_MSG_SOURCE = 'zai-pp';
 /**
  * 侧边栏「项目」面板的标记属性（面板根节点与项目 section 都带）。
  *
- * ⚠️ **放这里是为了让模式判定能排除面板子树**：面板的图标按钮激活时也写
- * `data-active`，而 `readZaiSidebarAgentMode` 取的是「`#sidebar` 里带 `data-active`
- * 的第 2 个按钮」——不排除就会读到面板自己的按钮（见 `core/zai/mode.ts`）。
- * 两处各写一遍属性名就是「生产端与判定端各写一遍」。
+ * ⚠️ **面板自己的 DOM 靠它被认出来**（`core/zai/project-panel.ts` 把它绑成
+ * `PANEL_BOUND_ATTR`，用于重挂时先卸旧的）。
+ * ⚠️ 它**曾经还有一个用途**：让模式判定能把面板子树排除掉（面板的图标按钮激活时
+ * 也写 `data-active`）。**那个用途已随模式判定一起删掉**（站点只剩 agent，
+ * 见 `core/zai/mode.ts`）—— 但属性本身仍承重，**不能删**。
  */
 export const ZAI_PROJECT_PANEL_ATTR = 'data-dpp-project-panel';
 

@@ -79,17 +79,17 @@ describe('zai continuation prompt recognition', () => {
  * 全称唯一通道的句子，在 agent 模式都会把沙箱一起否掉。所以下面既查正面措辞，
  * 也查**负面**（agent 里不许出现排他句）。
  */
-describe('zai continuation prompt sandbox wording follows the mode', () => {
+/**
+ * 沙箱措辞**只有一套**（站点只剩 agent 模式，2026-10-19 删掉按模式分叉）。
+ *
+ * 判据是「措辞不能排他」—— 排他句（「只输出可执行 XML 工具标签」）会把服务端沙箱
+ * 这条原生通路一并否掉。下面既查**正面**（必须收窄到本地工具），也查**负面**。
+ */
+describe('zai continuation prompt sandbox wording', () => {
   const toolNames = ['shell_exec', 'local_file_read'];
 
-  it('tells chat mode not to use sandbox tools', () => {
-    const prompt = buildZaiContinuationPrompt('task', NO_EXECUTIONS, toolNames, { isAgent: false });
-    expect(prompt).toContain('别用沙箱工具');
-    expect(prompt).toContain('需要继续操作时只输出可执行 XML 工具标签');
-  });
-
-  it('narrows the continue instruction to local tools in agent mode', () => {
-    const prompt = buildZaiContinuationPrompt('task', NO_EXECUTIONS, toolNames, { isAgent: true });
+  it('narrows the continue instruction to local tools', () => {
+    const prompt = buildZaiContinuationPrompt('task', NO_EXECUTIONS, toolNames);
     expect(prompt).not.toContain('别用沙箱工具');
     expect(prompt).toContain('本地工具调用必须输出可执行 XML 工具标签');
     // ⚠️ 「只输出可执行 XML 工具标签」是对「需要继续操作」的全称排他断言 ——
@@ -97,38 +97,33 @@ describe('zai continuation prompt sandbox wording follows the mode', () => {
     expect(prompt).not.toContain('只输出可执行 XML 工具标签');
   });
 
-  it('lists only the local tool tags in agent mode without re-explaining the sandbox', () => {
-    const prompt = buildZaiContinuationPrompt('task', NO_EXECUTIONS, toolNames, { isAgent: true });
+  it('lists only the local tool tags without re-explaining the sandbox', () => {
+    const prompt = buildZaiContinuationPrompt('task', NO_EXECUTIONS, toolNames);
     // 两套通道的分工由每轮注入的 sandboxHostSection 负责，这里不重复交代
     // （重复就是两处定义同一条规则，必然漂移），所以只列名字。
     expect(prompt).toContain('本轮可输出的本地工具标签：shell_exec, local_file_read');
   });
 
-  it('defaults to chat wording when the mode is unknown', () => {
-    // 与 core/zai/mode.ts 的失败方向一致：读不到就按 chat。
-    const prompt = buildZaiContinuationPrompt('task', NO_EXECUTIONS, toolNames);
-    expect(prompt).toContain('别用沙箱工具');
+  it('uses the same wording for the nudge prompt', () => {
+    const nudge = buildZaiNudgePrompt('task', 'text', NO_EXECUTIONS, 1, toolNames);
+    expect(nudge).not.toContain('别用沙箱工具');
+    expect(nudge).toContain('服务端沙箱工具直接调用（无需 XML）');
   });
 
-  it('applies the same mode wording to the nudge prompt', () => {
-    const agent = buildZaiNudgePrompt('task', 'text', NO_EXECUTIONS, 1, toolNames, { isAgent: true });
-    const chat = buildZaiNudgePrompt('task', 'text', NO_EXECUTIONS, 1, toolNames, { isAgent: false });
-    expect(agent).not.toContain('别用沙箱工具');
-    expect(chat).toContain('别用沙箱工具');
+  it('does not claim to have observed server-side sandbox tool calls', () => {
+    // ⚠️ 我们**从来不观察**沙箱工具调用（`shouldNudgeZai` 里 executions 是 void 的，
+    // assistantText 也只含答案相位）⇒ 声称「没有观察到」是一句与事实相反的话，
+    // 模型刚调过沙箱工具时会读到它。
+    const nudge = buildZaiNudgePrompt('task', 'text', NO_EXECUTIONS, 1, toolNames);
+    expect(nudge).not.toContain('也没有观察到服务端沙箱工具的调用');
+    expect(nudge).toContain('上一轮回复没有输出可执行的本地工具 XML');
+    expect(nudge).toContain('如果任务已经完成，忽略这条提示');
   });
 
-  it('does not equate "no XML" with "cannot continue" in agent mode', () => {
-    // ⚠️ agent 模式下沙箱调用本来就不产生 XML —— 只说「没输出 XML」是事实错误，
-    // 必须并列「两条通道都没观察到」。
-    const agent = buildZaiNudgePrompt('task', 'text', NO_EXECUTIONS, 1, toolNames, { isAgent: true });
-    const chat = buildZaiNudgePrompt('task', 'text', NO_EXECUTIONS, 1, toolNames, { isAgent: false });
-
-    expect(agent).toContain('也没有观察到服务端沙箱工具的调用');
-    expect(agent).not.toContain('必须直接输出下一步可执行工具 XML');
-    expect(agent).toContain('服务端沙箱工具直接调用（无需 XML）');
-    // chat 保持原口径（那里 XML 确实是唯一通道）。
-    expect(chat).toContain('必须直接输出下一步可执行工具 XML');
-    expect(chat).not.toContain('也没有观察到服务端沙箱工具的调用');
+  it('does not ask for a task_complete signal', () => {
+    // ⚠️ 提示词从没教过模型这个约定（i18n 资源零命中），而且与「忽略这条提示」冲突。
+    const nudge = buildZaiNudgePrompt('task', 'text', NO_EXECUTIONS, 1, toolNames);
+    expect(nudge).not.toContain('task_complete');
   });
 });
 

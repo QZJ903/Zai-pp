@@ -5,12 +5,13 @@
  * （老会话里的 XML 仍要能解析执行）。分两类：
  *
  * 1. **永远裁掉**：本地 Skill 预览 —— 见下面那份名单的说明。
- * 2. **按条件裁掉 web 工具**（web_search / web_fetch）：
- *    - agent 模式恒裁 —— 其联网由服务端沙箱原生承担。
- *    - chat 模式：侧边栏的联网开关关着、且本轮也没开页面原生联网时裁掉；
- *      只要有一个开着就放行。**页面原生联网开着也放行**，是为了让「用户想搜」
- *      这件事永远落到扩展自己的搜索上 —— 原生通道那侧会被
- *      zai.content.ts 的 disableZaiNativeWebSearch 关掉。
+ * 2. **永远裁掉 web 工具**（`web_search` / `web_fetch`）—— 站点只剩 agent 模式，
+ *    其联网由服务端沙箱原生承担，扩展自带的那两个没有任何用武之地。
+ *
+ * ⚠️ **「永远裁掉 web 工具」是 2026-10 起的状态**（站点只剩 agent）。
+ * 在此之前它按「chat 模式开关 / 页面原生联网」放行；chat 若回归，判据在
+ * `isFilteredZaiModelFacingTool` 里恢复（那里保留了 `webToolsEnabled` / `nativeSearchOn`
+ * 两个选项的形参）。
  */
 
 import { isExtensionWebToolDescriptor } from '../tool/web-search';
@@ -33,14 +34,15 @@ const ALWAYS_FILTERED_TOOL_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 export interface ZaiModelFacingFilterOptions {
-  /** agent 模式（服务端沙箱语境）时为 true。 */
-  isAgent?: boolean;
   /**
    * 侧边栏「联网搜索」开关是否开着（存储值）。
-   * 与 `nativeSearchOn` 取或：任一为真就放行 web 工具。
+   *
+   * ⚠️ **站点只剩 agent 模式后，这两个字段已不再影响 web 工具的取舍** ——
+   * agent 的联网由服务端沙箱承担，`web_search` / `web_fetch` **恒裁**（见下）。
+   * 字段保留是为了不动调用点的形状；将来若 chat 回归，判据就在这里恢复。
    */
   webToolsEnabled?: boolean;
-  /** 本轮是否开着页面原生联网（等同「用户想搜」）。 */
+  /** 本轮是否开着页面原生联网（等同「用户想搜」）。同上，agent 下不再影响结果。 */
   nativeSearchOn?: boolean;
 }
 
@@ -64,10 +66,11 @@ export function isFilteredZaiModelFacingTool(
   // ⚠️ 与「按 `descriptor.name` 判工具身份」那条通则同族：`name` 不保证唯一，
   // 要判「属于哪一类」时得连 provider 一起看；要按 id 定位时用 `descriptorId`。
   if (!isExtensionWebToolDescriptor(descriptor)) return false;
-  // agent 模式：联网走服务端沙箱，恒裁。
-  if (options?.isAgent) return true;
-  // chat 模式：开关关着、本轮也没开原生联网 → 裁掉；否则放行。
-  return options?.webToolsEnabled !== true && options?.nativeSearchOn !== true;
+  // ⚠️ **恒裁**：站点只剩 agent 模式，联网由服务端沙箱承担，扩展自带的 web 工具
+  // 没有任何用武之地。⚠️ `webToolsEnabled` / `nativeSearchOn` 两个选项**不再参与判定** ——
+  // 保留它们是为了不动调用点形状（chat 回归时判据在这里恢复）。
+  void options;
+  return true;
 }
 
 /** 过滤 model-facing 工具目录（保留执行 catalog 与 provider 注册表）。 */

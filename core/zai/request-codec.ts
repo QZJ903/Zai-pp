@@ -224,7 +224,13 @@ export interface ZaiChatNewBody {
   userId?: string | null;
   /** 首条 user 消息文本挂在 chat.history.messages.<id>.content 下。 */
   userMessageTexts: string[];
-  /** agent 模式的标志（type/general_agent、flags）。 */
+  /**
+   * 这条建会话 body 是否带 agent 标志（`chat.type` / `chat.flags` 含 `general_agent`）。
+   *
+   * ⚠️ **生产代码已无消费者**（站点只剩 agent 模式，2026-10-19 删掉了按模式分叉的接线）。
+   * 保留它是**协议事实的记录** —— 它描述的是服务端 body 的形状，不是我们的策略；
+   * 且只有一个测试在读它。**别把它当成「模式判据」**，我们不再按模式分流。
+   */
   isAgent: boolean;
 }
 

@@ -27,8 +27,8 @@ const PANEL_ID = 'dpp-project-panel';
 const PANEL_STYLE_ID = 'dpp-project-panel-css';
 const MENU_ID = 'dpp-project-panel-menu';
 /**
- * 面板根节点与项目 section 的标记属性。真源在 `contracts.ts` —— 模式判定
- * （`core/zai/mode.ts`）也要用它排除面板子树，见那里的说明。
+ * 面板根节点与项目 section 的标记属性。真源在 `contracts.ts`。
+ * 用途：重挂时先认出并卸掉旧面板，避免叠出两份。
  */
 const PANEL_BOUND_ATTR = ZAI_PROJECT_PANEL_ATTR;
 

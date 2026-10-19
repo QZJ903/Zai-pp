@@ -906,6 +906,111 @@ describe('zai stream codec: thinking phase split', () => {
   });
 });
 
+/**
+ * **服务端工具相位（`tool_response`）带正文，且可能夹在两段答案中间。**
+ *
+ * 真机实测（2026-10，agent 模式一轮带服务端搜索的回答）：`tool_response` 相位
+ * 5 帧带 `delta_content`，内容是 `# Web Search Skill…` 这类**技能说明文本**。
+ *
+ * ⚠️ 旧实现用单个 `answerStart` 指针（「起点之前不要、之后全要」），只能表达
+ * 「前面有一段非答案」；agent 多步执行时形态是
+ * `answer → tool_call → tool_response → answer`，那一段会被拼进两段答案**中间**。
+ * ⇒ 改成按区间挖洞，这一组就是那个模型的守卫。
+ *
+ * `assistantText` 的三个消费者都受影响：自动化回传正文、工具面板的
+ * `session.content`、用量估算。
+ */
+describe('zai stream codec: server tool phases are not answer text', () => {
+  const line = (phase: string, key: string, value: unknown): string =>
+    `data: ${JSON.stringify({ type: 'chat:completion', data: { phase, [key]: value } })}\n`;
+
+  it('drops tool_response text that arrives before the answer', () => {
+    // 真机那条样本的顺序：thinking → tool_call（无正文）→ tool_response（带正文）→ answer
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '用户想搜新闻。'));
+    acc.push('data: {"type":"chat:completion","data":{"phase":"tool_call","delta_name":"web_search"}}\n');
+    acc.push(line('tool_response', 'delta_content', '# Web Search Skill\n技能说明'));
+    acc.push(line('answer', 'delta_content', '今天的新闻是……'));
+    expect(acc.assistantText).toBe('今天的新闻是……');
+  });
+
+  it('drops tool_response text wedged between two answer segments', () => {
+    // ⚠️ 这条是单指针模型**修不了**的那一格：答案已经开始了，后面又插进一段工具正文。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('answer', 'delta_content', '我查一下。'));
+    acc.push(line('tool_response', 'delta_content', '【技能说明】'));
+    acc.push(line('answer', 'delta_content', '查到了：今天晴天。'));
+    expect(acc.assistantText).toBe('我查一下。查到了：今天晴天。');
+  });
+
+  it('drops the whole reply when it is only tool_response', () => {
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('thinking', 'delta_content', '思考。'));
+    acc.push(line('tool_response', 'delta_content', '技能说明正文'));
+    acc.finish();
+    expect(acc.assistantText).toBe('');
+  });
+
+  it('treats a tool_response content frame as a replacement owned by that phase', () => {
+    // `content` 是整体替换：旧文本被换掉，这段的归属由本帧自己的相位决定。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('answer', 'delta_content', '已经写好的答案。'));
+    acc.push(line('tool_response', 'content', '工具返回的整段内容'));
+    acc.push(line('answer', 'delta_content', '继续。'));
+    expect(acc.assistantText).toBe('继续。');
+  });
+
+  it('keeps the prefix before edit_index when a tool_response edits the text', () => {
+    // `edit_content` 覆盖 edit_index 之后的内容 ⇒ 那里的排除区间要一起截断。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('answer', 'delta_content', '答案。'));
+    acc.push('data: {"type":"chat:completion","data":{"phase":"tool_response","edit_content":"X","edit_index":0}}\n');
+    acc.push(line('answer', 'delta_content', '尾。'));
+    expect(acc.assistantText).toBe('尾。');
+  });
+
+  it('drops every excluded range at or after edit_index (no straddling involved)', () => {
+    // 这里的区间 `[2,6)` **整段落在落点之后**（`start=2 >= editIndex=1`）⇒ 走 pop 分支，
+    // 不发生「跨落点」：
+    //   text 先由 'AB' + 'TOOL' 变成 'ABTOOL'，区间 [2,6)；
+    //   edit_index=1 用 tool_response 写 'ZZZ' ⇒ text = 'A' + 'ZZZ' = 'AZZZ'，
+    //   区间 [2,6) 被弹掉（start>=1），本帧是 tool_response ⇒ 再压 [1,4)；
+    //   最后 answer 追加 '!' ⇒ 答案 = 'A'（[1,4) 被排除）+ '!' = 'A!'。
+    // ⚠️ **真正的跨落点形态见下一条用例** —— 这一条的标题早前误写成了
+    // 「straddles the edit point」，与实际走的 pop 分支不符。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('answer', 'delta_content', 'AB'));
+    acc.push(line('tool_response', 'delta_content', 'TOOL'));   // 区间 [2, 6)
+    acc.push('data: {"type":"chat:completion","data":{"phase":"tool_response","edit_content":"ZZZ","edit_index":1}}\n');
+    acc.push(line('answer', 'delta_content', '!'));
+    expect(acc.assistantText).toBe('A!');
+  });
+
+  it('truncates a truly straddling excluded range at the edit point', () => {
+    // ⚠️ **真正的跨落点**：区间 `[2,6)`，落点 `editIndex=3` 落在**区间内部**（2 < 3 < 6）。
+    //   text 'AB' + 'TOOL' = 'ABTOOL'，区间 [2,6)；
+    //   index=3 用 **answer** 相位写 'XYZ' ⇒ text = 'ABT' + 'XYZ' = 'ABTXYZ'；
+    //   区间要**截到落点为止** ⇒ [2,3)，只排除 'T'；
+    //   answer 相位不压新区间 ⇒ 答案 = 'AB' + 'XYZ' = 'ABXYZ'。
+    // ⚠️ 如果整段作废（只 pop 不截断），'TXYZ' 会一起漏进答案 ⇒ 'ABTXYZ'；
+    //    如果把 `start` 往后推到落点，'T' 会漏进答案 ⇒ 'ABTXYZ'。两个方向都被这条钉住。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('answer', 'delta_content', 'AB'));
+    acc.push(line('tool_response', 'delta_content', 'TOOL'));   // 区间 [2, 6)
+    acc.push('data: {"type":"chat:completion","data":{"phase":"answer","edit_content":"XYZ","edit_index":3}}\n');
+    expect(acc.assistantText).toBe('ABXYZ');
+  });
+
+  it('still treats search and unknown phases as answer text', () => {
+    // ⚠️ `search` 没有真机样本证明它带正文 ⇒ 不排除；未知相位同理（失败方向安全）。
+    const acc = createZaiStreamAccumulator();
+    acc.push(line('answer', 'delta_content', '答案。'));
+    acc.push(line('search', 'delta_content', '搜索结果摘要'));
+    acc.push(line('future_phase', 'delta_content', '未来相位'));
+    expect(acc.assistantText).toBe('答案。搜索结果摘要未来相位');
+  });
+});
+
 describe('zai model-facing filter', () => {
   // ⚠️ **web 工具的 fixture 必须带真实 provider** —— 判据是「provider 契约 + 名字」，
   // 不带 provider 的 fixture 会让 `web_search` 被判成**非扩展自带**（MCP 同名那种），
@@ -939,59 +1044,25 @@ describe('zai model-facing filter', () => {
       transport: 'streamable_http',
     });
 
-  it('keeps web_search and web_fetch when the web tools switch is on', () => {
+  // ⚠️⚠️ **站点只剩 agent 模式（2026-10-19）**：扩展自带的 web 工具**恒裁**，
+  // 与侧边栏开关、页面原生联网都无关。下面三条把「无论传什么都裁」钉死 ——
+  // 曾经它们是「开关开着就放行」的三档对照，现在收成一条不变式。
+  it('always filters the extension-owned web tools regardless of the switches', () => {
     const descriptors = [
       mk('memory_save', 'memory_save'),
       mkOwnWebTool('web_search'),
       mkOwnWebTool('web_fetch'),
     ];
-    const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
-      isAgent: false,
-      webToolsEnabled: true,
-    });
-    expect(filtered.map((d) => d.name)).toEqual(['memory_save', 'web_search', 'web_fetch']);
-  });
-
-  it('keeps web tools when page-native search is on even if the switch is off', () => {
-    const descriptors = [
-      mk('memory_save', 'memory_save'),
-      mkOwnWebTool('web_search'),
-      mkOwnWebTool('web_fetch'),
-    ];
-    const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
-      isAgent: false,
-      webToolsEnabled: false,
-      nativeSearchOn: true,
-    });
-    expect(filtered.map((d) => d.name)).toEqual(['memory_save', 'web_search', 'web_fetch']);
-  });
-
-  it('filters web tools when the switch is off and native search is off', () => {
-    const descriptors = [
-      mk('memory_save', 'memory_save'),
-      mkOwnWebTool('web_search'),
-      mkOwnWebTool('web_fetch'),
-    ];
-    const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
-      isAgent: false,
-      webToolsEnabled: false,
-      nativeSearchOn: false,
-    });
-    expect(filtered.map((d) => d.name)).toEqual(['memory_save']);
-  });
-
-  it('filters web_search and web_fetch out of the model catalog for agent turns', () => {
-    const descriptors = [
-      mk('memory_save', 'memory_save'),
-      mkOwnWebTool('web_search'),
-      mkOwnWebTool('web_fetch'),
-    ];
-    const filtered = filterZaiModelFacingToolDescriptors(descriptors, {
-      isAgent: true,
-      webToolsEnabled: true,
-      nativeSearchOn: true,
-    });
-    expect(filtered.map((d) => d.name)).toEqual(['memory_save']);
+    for (const options of [
+      undefined,
+      {},
+      { webToolsEnabled: true },
+      { webToolsEnabled: false, nativeSearchOn: true },
+      { webToolsEnabled: false, nativeSearchOn: false },
+    ]) {
+      const filtered = filterZaiModelFacingToolDescriptors(descriptors, options);
+      expect(filtered.map((d) => d.name), JSON.stringify(options)).toEqual(['memory_save']);
+    }
   });
 
   it('keeps skill_draft/memory_import in the model catalog and filters local_skill_preview out', () => {
@@ -1026,27 +1097,14 @@ describe('zai model-facing filter', () => {
       mkMcpLookalike('web_fetch'),
     ];
 
-    // agent 模式：扩展自带的恒裁，MCP 同名的一个都不裁。
-    expect(filterZaiModelFacingToolDescriptors(descriptors, { isAgent: true })
-      .map((d) => d.id)).toEqual([
-      'id-web_search',
-      'id-web_fetch',
-    ]);
-
-    // chat 模式 + 开关关 + 原生关：同样只裁扩展自带的。
-    expect(filterZaiModelFacingToolDescriptors(descriptors, {
-      isAgent: false,
-      webToolsEnabled: false,
-      nativeSearchOn: false,
-    }).map((d) => d.id)).toEqual([
-      'id-web_search',
-      'id-web_fetch',
-    ]);
-
-    // 反向：开关开着时扩展自带的也放行，四个都在。
-    expect(filterZaiModelFacingToolDescriptors(descriptors, {
-      isAgent: false,
-      webToolsEnabled: true,
-    })).toHaveLength(4);
+    // 扩展自带的恒裁，MCP 同名的一个都不裁 —— 开关怎么传都一样。
+    for (const options of [
+      undefined,
+      { webToolsEnabled: true },
+      { webToolsEnabled: false, nativeSearchOn: true },
+    ]) {
+      expect(filterZaiModelFacingToolDescriptors(descriptors, options).map((d) => d.id))
+        .toEqual(['id-web_search', 'id-web_fetch']);
+    }
   });
 });

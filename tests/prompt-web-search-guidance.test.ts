@@ -55,14 +55,22 @@ describe('web search guidance injection', () => {
   const guidanceZh = translate('zh-CN', 'prompt.webSearchGuidance');
   const guidanceEn = translate('en', 'prompt.webSearchGuidance');
 
-  it('injects the guidance when the extension-owned web tools are in the catalog', () => {
+  // ⚠️⚠️ **站点只剩 agent 模式（2026-10-19）后，这段引导恒不注入** ——
+  // agent 的联网由服务端沙箱承担，扩展自带的 web 工具在模型目录里被恒裁
+  // （`core/zai/model-facing.ts`），引导自然不该出现。
+  // ⇒ 下面三条把「无论目录里有什么，都不注入」钉死。
+
+  it('never injects the guidance even when the extension-owned web tools are in the catalog', () => {
     const descriptors = createWebSearchToolDescriptors('zh-CN');
-    // 前置事实：这几条描述符**必须**被判成扩展自带 —— 判错时下面的断言会以
-    // 「引导没注入」的形式红，而那会被误读成「判据太严」。先把它钉住。
+    // 前置事实：这几条描述符**仍然**被判成扩展自带（那是 provider 契约判据，没变）。
     expect(descriptors.every(isExtensionWebToolDescriptor)).toBe(true);
 
-    expect(renderPrompt(descriptors, 'zh-CN')).toContain(guidanceZh);
-    expect(renderPrompt(descriptors, 'en')).toContain(guidanceEn);
+    const zh = renderPrompt(descriptors, 'zh-CN');
+    expect(zh).not.toContain(guidanceZh);
+    // 场景自检：目录本身**是**进了提示词的 —— 否则「没注入引导」只是因为工具都没列，
+    // 这条用例就退化成「什么都不注入也通过」。
+    expect(zh).toContain('web_search');
+    expect(renderPrompt(descriptors, 'en')).not.toContain(guidanceEn);
   });
 
   it('does not inject the guidance for a third-party tool that merely shares the name', () => {
@@ -72,35 +80,25 @@ describe('web search guidance injection', () => {
 
     const prompt = renderPrompt([lookalike], 'zh-CN');
     expect(prompt).not.toContain(guidanceZh);
-    // 场景自检：目录本身**是**进了提示词的（否则「没注入引导」只是因为工具都没列，
-    // 这条用例就退化成「什么都不注入也通过」）。
+    // 场景自检：目录本身**是**进了提示词的（否则这条用例退化成「什么都不注入也通过」）。
     expect(prompt).toContain('browser_tools_web_search');
   });
 
-  it('keeps the guidance when the extension tools are present alongside a lookalike', () => {
+  it('does not inject the guidance when the extension tools are present alongside a lookalike', () => {
     const descriptors = [
       ...createWebSearchToolDescriptors('zh-CN'),
       mcpLookalike('web_search'),
     ];
-    // 同名工具混在一起时，判据必须按**各自**的 provider 分别得出结果。
+    // 同名工具混在一起时，provider 判据仍按**各自**的 provider 分别得出结果。
     expect(descriptors.map(isExtensionWebToolDescriptor)).toEqual([true, true, false]);
 
-    expect(renderPrompt(descriptors, 'zh-CN')).toContain(guidanceZh);
-  });
-
-  it('never injects the guidance on agent turns', () => {
-    // agent 模式的联网由服务端沙箱承担，这条门与工具判据无关（是另一条独立实现）。
-    const prompt = buildPromptAugmentation('帮我查一下。', {
-      memories: [],
-      toolDescriptors: createWebSearchToolDescriptors('zh-CN'),
-      locale: 'zh-CN',
-      isAgent: true,
-    }).augmented;
-    expect(prompt).not.toContain(guidanceZh);
+    expect(renderPrompt(descriptors, 'zh-CN')).not.toContain(guidanceZh);
   });
 
   it('judges the extension web tools by provider contract, not by name alone', () => {
     // 直接钉住判据本体：同一个名字，provider 不同 → 结论不同。
+    // ⚠️ 这条判据**仍然承重** —— 模型侧裁剪（`core/zai/model-facing.ts`）用它区分
+    // 「扩展自带的 web 工具」（恒裁）与「第三方 MCP 的同名工具」（不裁）。
     const own: ToolDescriptor = {
       ...mcpLookalike('web_search'),
       provider: WEB_PROVIDER,

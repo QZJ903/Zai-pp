@@ -2,12 +2,10 @@ import { EXPOSED_SHELL_TOOL_NAMES } from '../shell/contracts';
 import type { Memory, ToolDescriptor } from '../types';
 import { DEFAULT_LOCALE, translate, type SupportedLocale } from '../i18n/background';
 import {
-  DEFAULT_TOOL_DESCRIPTORS,
   createDefaultToolDescriptors,
   createToolInvocationCatalog,
   getPreferredToolInvocationName,
   getToolInvocationNames,
-  isExtensionWebToolDescriptor,
   type ToolInvocationCatalog,
 } from '../tool';
 import { estimateTokens, formatMemoriesBlock, getMemoryBudget, selectMemories } from '../memory/selector';
@@ -30,8 +28,6 @@ export interface PromptAugmentationOptions {
   memoryEnabled?: boolean;
   systemPromptEnabled?: boolean;
   forceResponseLanguage?: SupportedLocale | null;
-  /** z.ai agent 模式（chatNew.type/flags == general_agent）；用于按需注入沙盒段、抑制 chat 段。 */
-  isAgent?: boolean;
 }
 
 export interface PromptAugmentationResult {
@@ -54,7 +50,6 @@ export function buildPromptAugmentation(
     memoryEnabled = true,
     systemPromptEnabled = true,
     forceResponseLanguage = null,
-    isAgent = false,
   } = options ?? {};
   const toolDescriptors = options?.toolDescriptors ?? createDefaultToolDescriptors(locale);
   const visiblePromptMetadata = options?.visibleUserPrompt === undefined
@@ -72,8 +67,8 @@ export function buildPromptAugmentation(
   const toolsBlock = systemPromptEnabled ? renderToolSchemas(toolDescriptors, locale) : '';
   // ⚠️ **沙箱段的位置在 `systemChat` 模板里**（`{sandboxHost}` 占位，落在「已有记忆」
   // 之后、`## Tools` 之前）—— 这样它才与工具用法同处一段、且排在工具清单之前。
-  // chat 模式该函数返回空串，占位替换成空串 ⇒ **chat 模式的提示词逐字节不变**。
-  const sandboxHost = renderSandboxHostGuidance(isAgent, toolDescriptors, locale);
+  // 站点只有 agent 模式，这段**始终注入**（目录里没有本地 Shell 工具时返回空串）。
+  const sandboxHost = renderSandboxHostGuidance(toolDescriptors, locale);
   const baseSystem = systemPromptEnabled
     ? translate(locale, 'prompt.systemChat', {
       memories: memBlock,
@@ -92,7 +87,7 @@ export function buildPromptAugmentation(
     // 落脚点了 —— 单独补一条，保持「沙箱段与 systemPrompt 开关无关」这个既有行为。
     systemPromptEnabled ? '' : sandboxHost,
     renderProjectContext(projectContext),
-    systemPromptEnabled ? renderWebSearchGuidance(isAgent, toolDescriptors, locale) : '',
+    systemPromptEnabled ? renderWebSearchGuidance(toolDescriptors, locale) : '',
     renderForcedResponseLanguage(forceResponseLanguage, locale),
   ].filter(Boolean).join('\n\n');
   const presetPrefix = presetContent ? `${presetContent}\n\n---\n\n` : '';
@@ -142,41 +137,37 @@ export function renderToolSchemas(
 }
 
 /**
- * 联网搜索引导：chat 模式、目录里有扩展自带的 web_search 描述符就注入。
+ * 联网搜索引导：**永不注入**。
  *
- * 两个门：
- * 1. `isAgent` —— agent 模式的联网由服务端沙箱承担，不注入。⚠️ 它与模型侧的裁剪**是两处
- *    独立实现**（那处不是「某个名单」：web 工具的 agent 裁剪由 `core/zai/model-facing.ts`
- *    的 `isFilteredZaiModelFacingTool` 在 `isAgent` 为真时直接返回 true 完成）——
- *    所以这一门的作用是「即使将来那处判据变了，引导也不会漏进 agent」。
- * 2. 工具在不在 —— 用户在侧边栏关掉 web 工具时，目录里没有 web_search，
- *    引导也应随之消失。
+ * ⚠️ **站点只剩 agent 模式**（chat 已从页面移除），agent 的联网由服务端沙箱承担 ——
+ * 扩展自带的 `web_search` / `web_fetch` 在模型目录里已被恒裁
+ * （`core/zai/model-facing.ts`），引导自然不该出现。
+ *
+ * ⚠️ **本函数刻意保留、不删**：它是「引导该不该注入」这一判据的**唯一落点**，
+ * 删掉就要把 `buildPromptAugmentation` 里那一行也删掉；而将来若 chat 回归，
+ * 需要恢复的正是这一处。现在它恒返回空串，行为上等价于「没有这段」。
  */
 function renderWebSearchGuidance(
-  isAgent: boolean,
   descriptors: readonly ToolDescriptor[],
   locale: SupportedLocale,
 ): string {
-  if (isAgent) return '';
-  // ⚠️ **判据必须是「扩展自带的 web 工具」，不能只看名字** —— 这段引导讲的是
-  // 「输出 web_search 工具调用、结果自动展示在页面上」，那**只对扩展自带的联网成立**；
-  // 第三方 MCP 完全可以暴露一个同名工具，按名字判会把这段扩展专属的引导误注入给它。
-  // 判据与模型侧裁剪**同源**（`core/tool/web-search.ts` 的 `isExtensionWebToolDescriptor`）。
-  const hasWebSearch = descriptors.some(isExtensionWebToolDescriptor);
-  if (!hasWebSearch) return '';
-  return translate(locale, 'prompt.webSearchGuidance');
+  // ⚠️ 判据保留（不是空函数）：将来恢复 chat 时，把这个函数体改回
+  // `translate(locale, 'prompt.webSearchGuidance')` 即可。当前恒空。
+  void descriptors;
+  void locale;
+  return '';
 }
 
 /**
- * 沙盒 vs 宿主机提示：仅在 agent 模式（服务端沙箱语境）下追加，
- * 避免 chat 模式被「沙箱工具」措辞误导而拐去 shell_exec 等本地工具。
+ * 沙盒 vs 宿主机提示：**始终尝试注入**（站点只有 agent 模式）。
+ *
+ * ⚠️ 仍然要求目录里有本地 Shell 工具 —— 没有本地工具时这段「两套工具怎么分工」
+ * 就无从谈起，注入只会让模型去找不存在的 `shell_exec`。
  */
 function renderSandboxHostGuidance(
-  isAgent: boolean,
   descriptors: readonly ToolDescriptor[],
   locale: SupportedLocale,
 ): string {
-  if (!isAgent) return '';
   const needsLocalHostGuidance = descriptors.some(
     (descriptor) =>
       descriptor.name === 'shell_exec' || descriptor.name === 'local_file_read',

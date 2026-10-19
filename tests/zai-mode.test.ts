@@ -1,87 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import {
-  ZAI_AGENT_HOME_PATH,
-  ZAI_CHAT_HOME_PATH,
-  ZAI_SIDEBAR_MODE_TAB_SELECTOR,
-  readZaiSidebarAgentMode,
-  zaiNewConversationPath,
-} from '../core/zai/mode';
+import { ZAI_AGENT_HOME_PATH } from '../core/zai/mode';
 
 /**
- * 页面把两个模式 tab 的顺序写死（Chat 在前、Agent 在后），标签文案随语言变。
- * 这里用真实顺序搭最小 DOM。
+ * **新会话落点**（2026-10-19 收成常量）。
+ *
+ * ## 为什么只剩这一条
+ *
+ * 这里原本有 4 条 DOM 用例，测 `readZaiSidebarAgentMode` 从 `#sidebar` 的
+ * `data-active` 按钮里读当前模式。**那个前提已被真机推翻**：侧边栏现在只有
+ * `['false','文件夹']` 与 `['true','网页端']` 两个 `data-active` 按钮，
+ * 没有 Chat / Agent 两个模式 tab。
+ *
+ * ⇒ 站点只剩 agent 模式，落点写成常量；判定函数与选择器一起删掉。
+ *
+ * ⚠️ **这条断言不是「测常量等于字面量」的同义反复** —— 它钉的是**页面契约**：
+ * `/?mode=agent` 是 z.ai 页面自己的入口（入口读到 query 后设 `$APP_SCENE`
+ * 并删掉该参数）。改成别的写法（比如 `/agent`）页面认不出，会静默落回默认场景。
  */
-function mountSidebar(agentActive: boolean): HTMLElement {
-  document.body.innerHTML = `
-    <div id="sidebar">
-      <button data-active="${agentActive ? 'false' : 'true'}">Chat 模式</button>
-      <button data-active="${agentActive ? 'true' : 'false'}">Agent 模式</button>
-      <button id="nux-user-menu-btn">account</button>
-    </div>
-  `;
-  return document.body;
-}
-
-describe('zai sidebar mode detection', () => {
-  it('reads agent mode from the second mode tab', () => {
-    expect(readZaiSidebarAgentMode(mountSidebar(true))).toBe(true);
-    expect(readZaiSidebarAgentMode(mountSidebar(false))).toBe(false);
-  });
-
-  it('falls back to chat when the sidebar or the mode tabs are missing', () => {
-    document.body.innerHTML = '<div id="app"></div>';
-    expect(readZaiSidebarAgentMode(document.body)).toBe(false);
-
-    // 只有一个 tab（页面结构变了）→ 同样按 chat 处理，不猜。
-    document.body.innerHTML = `
-      <div id="sidebar"><button data-active="true">Chat 模式</button></div>
-    `;
-    expect(readZaiSidebarAgentMode(document.body)).toBe(false);
-  });
-
-  it('ignores the extension project panel\'s own data-active buttons', () => {
-    // 面板就插在 #sidebar 里，它的图标按钮激活时也写 data-active="true"。
-    // 不排除的话，面板按钮一旦排到模式 tab 前面就会被当成 Agent 模式读走。
-    document.body.innerHTML = `
-      <div id="sidebar">
-        <div data-dpp-project-panel="true">
-          <button data-active="true">归属</button>
-          <button data-active="true">新会话</button>
-        </div>
-        <button data-active="true">Chat 模式</button>
-        <button data-active="false">Agent 模式</button>
-      </div>
-    `;
-    expect(readZaiSidebarAgentMode(document.body)).toBe(false);
-
-    // 反向：排除面板后仍能正确读出 agent。
-    document.body.innerHTML = `
-      <div id="sidebar">
-        <div data-dpp-project-panel="true">
-          <button data-active="true">归属</button>
-        </div>
-        <button data-active="false">Chat 模式</button>
-        <button data-active="true">Agent 模式</button>
-      </div>
-    `;
-    expect(readZaiSidebarAgentMode(document.body)).toBe(true);
-  });
-
-  it('ignores data-active buttons outside the sidebar', () => {
-    document.body.innerHTML = `
-      <div id="sidebar">
-        <button data-active="false">Chat 模式</button>
-        <button data-active="false">Agent 模式</button>
-      </div>
-      <div id="elsewhere"><button data-active="true">别的开关</button></div>
-    `;
-    expect(readZaiSidebarAgentMode(document.body)).toBe(false);
-  });
-
-  it('maps the detected mode to the new-conversation path', () => {
-    expect(zaiNewConversationPath(true)).toBe(ZAI_AGENT_HOME_PATH);
-    expect(zaiNewConversationPath(false)).toBe(ZAI_CHAT_HOME_PATH);
+describe('zai new-conversation path', () => {
+  it('always points at the page-owned agent entry', () => {
     expect(ZAI_AGENT_HOME_PATH).toBe('/?mode=agent');
-    expect(ZAI_SIDEBAR_MODE_TAB_SELECTOR).toBe('#sidebar button[data-active]');
   });
 });

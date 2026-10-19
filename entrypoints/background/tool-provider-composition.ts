@@ -82,9 +82,9 @@ export function createProductionToolProviderRegistry(): ToolProviderRegistry {
     ),
     createLocalProvider(
       WEB_SEARCH_TOOL_PROVIDER.id,
-      // 始终返回全部 web 描述符：开关是否放行交给内容脚本按「本轮是否要用联网」决定
-      // （用户点开页面原生联网时，即使扩展搜索开关是关的也要放行，见 core/zai/model-facing.ts）。
-      // 这个 provider 只负责给出描述符与执行，不做可见性裁剪。
+      // 始终返回全部 web 描述符，**不做可见性裁剪** —— 裁剪只发生在
+      // `core/zai/model-facing.ts`（站点只剩 agent 模式，扩展自带的 web 工具在那里恒裁）。
+      // 这个 provider 只负责给出描述符与执行。
       ({ locale }) => createWebSearchToolDescriptors(locale),
       (call, _descriptor, { locale, signal }) => executeWebSearchToolCall(call, locale, { signal }),
     ),

@@ -53,14 +53,10 @@ describe('zai continuation marker', () => {
     expect(isZaiContinuationPrompt(prompt)).toBe(true);
   });
 
-  it('recognises both agent-mode variants too', () => {
-    // 沙箱措辞按模式分叉，但结构标签不变 —— 两种模式都要认。
-    const continuation = buildZaiContinuationPrompt(
-      '任务', [execution()], ['shell_exec'], { isAgent: true },
-    );
-    const nudge = buildZaiNudgePrompt(
-      '任务', '正文', [execution()], 1, ['shell_exec'], { isAgent: true },
-    );
+  it('recognises the templates when no local tool names are listed', () => {
+    // 工具清单为空时那行提醒整段消失，但结构标签不变 —— 仍要认得出。
+    const continuation = buildZaiContinuationPrompt('任务', [execution()], []);
+    const nudge = buildZaiNudgePrompt('任务', '正文', [execution()], 1, []);
     expect(isZaiContinuationPrompt(continuation)).toBe(true);
     expect(isZaiContinuationPrompt(nudge)).toBe(true);
   });

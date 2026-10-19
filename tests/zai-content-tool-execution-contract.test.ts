@@ -441,7 +441,6 @@ describe('request-scoped state is released once per request', () => {
       'chatSessionIdByRequestId',
       'executedToolCallSignatures',
       'executionsByRequest',
-      'isAgentTurnByRequestId',
       'localSkillDirByRequestId',
       'nativeSearchOnByRequestId',
       'requestToolDescriptorsByRequestId',
@@ -1044,15 +1043,15 @@ describe('tool tag recognition uses the descriptors injected into this request',
 
     // ⚠️⚠️ **续跑轮的口径必须取 `continuationLoop`，不能退化成别的来源。**
     // 理由是**时序约束**不是偏好：续跑轮的提示词**在提交之前就建好了**
-    // （`advanceContinuationLoop` 用 `loop.isAgentTurn` / `loop.nativeSearchOn` 过滤出
-    // toolNames 喂给 `buildZaiContinuationPrompt`，nudge 轮同理），建提示词那一刻这个请求的
+    // （`advanceContinuationLoop` 用 `loop.nativeSearchOn` 过滤出 toolNames 喂给
+    // `buildZaiContinuationPrompt`，nudge 轮同理），建提示词那一刻这个请求的
     // body 还不存在。识别与解析必须与提示词同源，所以只能取快照。
     // ⚠️ 循环不在时（用户手打了一段形似续跑模板的文本）退回读 body —— 那种请求就是真实的
     // 用户请求。**不能退化成「只看归属任务」**：模板文本不在 `taskIdByPromptText` 里、
     // `matchedTask` 取不到 ⇒ 那条路恒为 false。
     //
-    // 断言方式：`isAgent` 是**内联**在 options 里的，`nativeSearchOn` 是**分支内先声明**再传。
-    // 两种形态都要收 —— 只认一种会在重构时假红。
+    // ⚠️ **站点只剩 agent 模式后只剩 `nativeSearchOn` 一个标记**（2026-10-19 删 `isAgent`），
+    // 它必须是**分支内先声明**再传的形态 —— 只认内联会在重构时假红。
     const continuationBranch = findContinuationBranch();
     /** `continuationLoop?.xxx ?? …` 形态？ */
     const isLoopBacked = (value: t.Node | null | undefined): boolean => {
@@ -1072,7 +1071,7 @@ describe('tool tag recognition uses the descriptors injected into this request',
       if (isLoopBacked(node.init)) loopDerivedNames.add(node.id.name);
     });
 
-    // ② 传给 modelFacingDescriptorsFor 的两个值，各自算不算「loop 派生」。
+    // ② 传给 modelFacingDescriptorsFor 的值算不算「loop 派生」。
     const optionKeys = new Set<string>();
     walkSourceAst(continuationBranch, (node) => {
       if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
@@ -1082,7 +1081,7 @@ describe('tool tag recognition uses the descriptors injected into this request',
       for (const property of options.properties) {
         if (!t.isObjectProperty(property) || !t.isIdentifier(property.key)) continue;
         const key = property.key.name;
-        if (key !== 'isAgent' && key !== 'nativeSearchOn') continue;
+        if (key !== 'nativeSearchOn') continue;
         const value = property.value;
         // 内联形态，或引用分支内声明的 loop 派生标识符（含 shorthand `{ nativeSearchOn }`）。
         const backed = isLoopBacked(value)
@@ -1092,8 +1091,8 @@ describe('tool tag recognition uses the descriptors injected into this request',
     });
     expect(
       [...optionKeys].sort(),
-      '续跑轮的 isAgent / nativeSearchOn 都必须源自 `continuationLoop`（内联或经分支内声明）',
-    ).toEqual(['isAgent', 'nativeSearchOn']);
+      '续跑轮的 nativeSearchOn 必须源自 `continuationLoop`（内联或经分支内声明）',
+    ).toEqual(['nativeSearchOn']);
 
     // ⚠️⚠️ **续跑轮的「关原生通道」必须与「放行 web 工具」用同一个值。**
     //
