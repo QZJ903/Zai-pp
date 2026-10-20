@@ -79,8 +79,6 @@ describe('tool provider routing', () => {
       'memory_save',
       'memory_update',
       'memory_delete',
-      'web_search',
-      'web_fetch',
       'skill_draft_create',
       'memory_import_preview',
       'mcp_discover',

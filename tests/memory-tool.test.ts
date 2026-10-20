@@ -4,10 +4,6 @@ import {
   executeMemoryToolCall,
   type MemoryToolRuntime,
 } from '../core/tool/memory';
-import {
-  createWebSearchToolDescriptors,
-  executeWebSearchToolCall,
-} from '../core/tool/web-search';
 import type { ToolCall } from '../core/tool/types';
 
 function memorySaveCall(payload: Record<string, unknown>): ToolCall {
@@ -19,7 +15,7 @@ function memorySaveCall(payload: Record<string, unknown>): ToolCall {
 }
 
 function schemaPropertyDescription(
-  descriptor: ReturnType<typeof createMemoryToolDescriptors>[number] | ReturnType<typeof createWebSearchToolDescriptors>[number],
+  descriptor: ReturnType<typeof createMemoryToolDescriptors>[number],
   propertyName: string,
 ): string {
   const property = descriptor.inputSchema.properties?.[propertyName];
@@ -132,48 +128,5 @@ describe('memory tool validation', () => {
     expect(result.ok).toBe(true);
     expect(result.summary).toBe('Saved');
     expect(result.detail).toBe('Pinned decision');
-  });
-});
-
-describe('web tool localization', () => {
-  it('localizes web descriptors without changing tool protocol names', () => {
-    const english = createWebSearchToolDescriptors('en');
-    const chinese = createWebSearchToolDescriptors('zh-CN');
-
-    expect(english[0].name).toBe('web_search');
-    expect(english[0].invocationName).toBe('web_search');
-    expect(english[0].title).toBe('Search the web');
-    expect(schemaPropertyDescription(english[0], 'query')).toBe('Search query keywords');
-
-    // 模型可见的 descriptor 文案在 zh 下也保持英文（与 memory / browser 工具一致），
-    // 只有工具名（协议标识）必须恒定不变。
-    expect(chinese[0].name).toBe('web_search');
-    expect(chinese[0].invocationName).toBe('web_search');
-    expect(chinese[0].title).toBe('Search the web');
-    expect(schemaPropertyDescription(chinese[0], 'query')).toBe('Search query keywords');
-  });
-
-  it('returns localized web validation errors without network access', async () => {
-    const englishSearch = await executeWebSearchToolCall({
-      name: 'web_search',
-      payload: { query: '' },
-      raw: '<web_search />',
-    }, 'en');
-
-    const chineseSearch = await executeWebSearchToolCall({
-      name: 'web_search',
-      payload: { query: '' },
-      raw: '<web_search />',
-    }, 'zh-CN');
-
-    const englishFetch = await executeWebSearchToolCall({
-      name: 'web_fetch',
-      payload: { url: '' },
-      raw: '<web_fetch />',
-    }, 'en');
-
-    expect(englishSearch.summary).toBe('Search query cannot be empty');
-    expect(chineseSearch.summary).toBe('搜索查询不能为空');
-    expect(englishFetch.summary).toBe('URL cannot be empty');
   });
 });

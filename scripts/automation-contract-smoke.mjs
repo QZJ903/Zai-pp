@@ -45,8 +45,8 @@ for (const removed of removedPaths) {
 
 assertContains('entrypoints/sidepanel/App.tsx', "labelKey: 'app.tabs.capabilities'");
 assertContains('entrypoints/sidepanel/App.tsx', "import('./pages/CapabilitiesPage')");
-// Automation is its own capability sub-tab, sitting alongside Tools.
-assertContains('entrypoints/sidepanel/pages/CapabilitiesPage.tsx', "const AutomationPage = lazy(() => import('./AutomationPage'))");
+// Automation is its own capability sub-tab and must stay a lazy chunk.
+assertContains('entrypoints/sidepanel/pages/CapabilitiesPage.tsx', "lazy(() => import('./AutomationPage'))");
 assertContains('entrypoints/sidepanel/pages/CapabilitiesPage.tsx', "sub === 'automation' && <AutomationPage />");
 assertContains('entrypoints/sidepanel/pages/AutomationPage.tsx', 'export default function AutomationPage');
 assertContains('core/automation/scheduler.ts', 'runAutomation');

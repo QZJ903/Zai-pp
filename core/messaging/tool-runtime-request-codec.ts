@@ -3,7 +3,6 @@ import type {
   McpServerUpdateInput,
 } from '../mcp/types';
 import type { ToolCall } from '../tool/types';
-import { WEB_SEARCH_TOOL_NAMES } from '../tool/web-search';
 import { isPlainRuntimeRecord } from './runtime-boundary';
 import { isToolCallRecord } from './tool-record-codec';
 import type { ToolRuntimeCommandContracts } from './tool-runtime-contracts';
@@ -148,12 +147,6 @@ export const TOOL_RUNTIME_PAYLOAD_DECODERS: ToolRuntimePayloadDecoderMap = {
       'serverId',
     );
   },
-  SET_WEB_TOOL_SETTING(value) {
-    const payload = recordValue(value, 'SET_WEB_TOOL_SETTING.payload');
-    enumValue(payload.name, WEB_SEARCH_TOOL_NAMES, 'SET_WEB_TOOL_SETTING.payload.name');
-    booleanValue(payload.enabled, 'SET_WEB_TOOL_SETTING.payload.enabled');
-    return typedPayload<'SET_WEB_TOOL_SETTING'>(payload);
-  },
   SAVE_BROWSER_CONTROL_SETTINGS(value) {
     if (value === undefined) return undefined;
     const payload = recordValue(value, 'SAVE_BROWSER_CONTROL_SETTINGS.payload');
@@ -169,19 +162,6 @@ export const TOOL_RUNTIME_PAYLOAD_DECODERS: ToolRuntimePayloadDecoderMap = {
     const payload = recordValue(value, 'SET_BROWSER_CONTROL_TARGET.payload');
     integerValue(payload.tabId, 'SET_BROWSER_CONTROL_TARGET.payload.tabId');
     return typedPayload<'SET_BROWSER_CONTROL_TARGET'>(payload);
-  },
-  DIAGNOSE_WEB_SEARCH(value) {
-    if (!isPlainRuntimeRecord(value)) return { query: 'test' };
-    const payload = value;
-    return {
-      ...payload,
-      query: typeof payload.query === 'string' ? payload.query : 'test',
-    } as ToolRuntimePayload<'DIAGNOSE_WEB_SEARCH'>;
-  },
-  REQUEST_HOST_PERMISSION(value) {
-    const payload = recordValue(value, 'REQUEST_HOST_PERMISSION.payload');
-    stringArray(payload.origins, 'REQUEST_HOST_PERMISSION.payload.origins');
-    return typedPayload<'REQUEST_HOST_PERMISSION'>(payload);
   },
   CREATE_TOOL_AUTHORIZATION(value) {
     if (!isPlainRuntimeRecord(value)) {

@@ -77,7 +77,6 @@ export const GLM_CONTENT_RUNTIME_COMMANDS: ReadonlySet<string> = new Set([
   // ⚠️ 它**只读不写**，与侧边栏 MCP 页读同一份历史（`glm_pp_tool_history`）。
   'GET_TOOL_CALL_HISTORY',
   'GET_TOOL_DESCRIPTORS',
-  'GET_WEB_TOOL_SETTINGS',
   'IMPORT_MEMORY_DRAFTS',
   'RECORD_USAGE_TURN',
   'REMOVE_CONVERSATION_FROM_PROJECT',

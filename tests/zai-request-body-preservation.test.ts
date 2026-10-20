@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   applyZaiChatNewModelOverride,
   applyZaiModelOverride,
-  disableZaiNativeWebSearch,
-  mergeZaiNativeSearchDisabled,
   rewriteZaiChatNewUserMessages,
   rewriteZaiLastUserMessage,
 } from '../core/zai/request-codec';
@@ -165,55 +163,6 @@ describe('rewriting a chats/new body preserves every sibling field', () => {
     rewriteZaiChatNewUserMessages(body, ['增强一', '增强二']);
 
     expect(changedPaths(before, snapshot(body))).toEqual([]);
-  });
-});
-
-describe('disabling the native search channel preserves every sibling feature', () => {
-  it('writes only the two search flags and keeps unknown feature siblings', () => {
-    const body = completionBody();
-    const before = snapshot(body);
-
-    expect(disableZaiNativeWebSearch(body)).toBe(true);
-
-    expect(changedPaths(before, snapshot(body))).toEqual([
-      'features.auto_web_search',
-      'features.web_search',
-    ]);
-    // 真实约束：`mcp_servers` 扩展只读不写（写了会与服务端 advanced-search 抢通道）。
-    expect((body.features as Record<string, unknown>).mcp_servers).toEqual(['advanced-search']);
-    expect((body.features as Record<string, unknown>).brand_new_feature_flag).toBe(7);
-  });
-
-  it('merges into the existing features object instead of replacing it', () => {
-    const merged = mergeZaiNativeSearchDisabled({
-      auto_web_search: true,
-      web_search: true,
-      mcp_servers: ['advanced-search'],
-      brand_new_feature_flag: 7,
-    });
-    expect(merged).toEqual({
-      auto_web_search: false,
-      web_search: false,
-      mcp_servers: ['advanced-search'],
-      brand_new_feature_flag: 7,
-    });
-  });
-
-  it('never spreads a non-record features value into the request body', () => {
-    // ⚠️ `features` 是数组 / 字符串时**不能**展开它 —— 那会把数组下标或字符
-    // 变成 body 的键。这里必须退化成「只写两个 flag 的新对象」。
-    expect(mergeZaiNativeSearchDisabled(['advanced-search'])).toEqual({
-      auto_web_search: false,
-      web_search: false,
-    });
-    expect(mergeZaiNativeSearchDisabled('advanced-search')).toEqual({
-      auto_web_search: false,
-      web_search: false,
-    });
-    expect(mergeZaiNativeSearchDisabled(undefined)).toEqual({
-      auto_web_search: false,
-      web_search: false,
-    });
   });
 });
 

@@ -34,7 +34,6 @@ async function createTestAutomation() {
     },
     promptOptions: {
       model: null,
-      searchEnabled: false,
       fixedSession: false,
     },
   });

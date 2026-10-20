@@ -321,7 +321,6 @@ describe('automation durable lease and restart recovery', () => {
             parentMessageId: null,
             promptOptions: {
               model: null,
-              searchEnabled: false,
               fixedSession: false,
             },
             requestedAt,
@@ -369,7 +368,6 @@ async function createScheduledAutomation(): Promise<Automation> {
     },
     promptOptions: {
       model: null,
-      searchEnabled: false,
       fixedSession: false,
     },
   });

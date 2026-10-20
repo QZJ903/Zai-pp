@@ -11,8 +11,6 @@ import {
   createShellMcpPresetInput,
 } from '../../../core/shell';
 import { decodeToolCallHistory } from '../../../core/tool/history-codec';
-import type { WebSearchToolName } from '../../../core/tool/web-search';
-import type { WebToolSettings } from '../../../core/tool/web-settings';
 import type {
   McpCapabilityExposureMode,
   McpCapabilitySettings,
@@ -63,15 +61,6 @@ export interface McpToolsController {
   }): Promise<McpCapabilitySettings>;
   requestServerPermission(server: McpServerConfig): Promise<McpPermissionResult>;
   connectServer(server: McpServerConfig, action: McpConnectionAction): Promise<McpToolCacheEntry>;
-  getWebToolSettings(): Promise<WebToolSettings>;
-  setWebToolEnabled(name: WebSearchToolName, enabled: boolean): Promise<void>;
-  diagnoseWebSearch(query: string): Promise<Record<string, {
-    status: number;
-    length: number;
-    error?: string;
-    preview?: string;
-  }>>;
-  requestHostPermission(origins: string[]): Promise<boolean>;
 }
 
 export interface SidepanelHostPermissionPort {
@@ -199,25 +188,6 @@ export function createMcpToolsController(
         },
       );
     },
-    getWebToolSettings: () => runtimeClient.request(
-      { type: 'GET_WEB_TOOL_SETTINGS' },
-      { decode: decodeWebToolSettings },
-    ),
-    async setWebToolEnabled(name, enabled) {
-      await runtimeClient.request(
-        { type: 'SET_WEB_TOOL_SETTING', payload: { name, enabled } },
-        { decode: decodeAck },
-      );
-    },
-    diagnoseWebSearch: (query) => runtimeClient.request(
-      { type: 'DIAGNOSE_WEB_SEARCH', payload: { query } },
-      { decode: decodeWebSearchDiagnostics },
-    ),
-    requestHostPermission(origins) {
-      // chrome.permissions.request must be called synchronously from the
-      // sidepanel click handler to preserve Chrome's required user gesture.
-      return hostPermissions.request(origins);
-    },
   };
   return Object.freeze(controller);
 }
@@ -337,6 +307,18 @@ export function nextMcpToolAllowlist(
   return shouldEnable ? allowlist : { mode: 'deny', toolNames: [tool.name] };
 }
 
+/**
+ * 一键把某个工具（含它所在的服务）切到可用：写 `enabled` + `execution` + `allowlist` 三项。
+ *
+ * ⚠️ **当前生产侧零消费者，刻意保留** —— 它原先服务工具页那张 Python 卡片
+ * （一次点击同时开服务开关、执行策略、白名单），卡片随工具页在 2.15.52 删除。
+ * 现在唯一引用是 `tests/sidepanel-mcp-tools-controller.test.ts`。
+ * ⚠️ **不删**：它是「一次开关跨三层」这一语义的唯一实现，MCP 页现在只写 allowlist
+ * （`toggleTool` 走 `patchServer({ allowlist })`），两边口径不同是刻意的 ——
+ * 将来若要给某个工具做「一键启用」的入口，重新接线的是这个函数而不是复制一份。
+ * ⚠️ 它**不对称**：`shouldEnable ? true : server.enabled` 只会往上开、不会往下关。
+ * 若要改它，先想清楚「关掉」该不该同时关服务与执行策略。
+ */
 export function createPythonToolTogglePatch(
   server: McpServerConfig,
   tool: ToolDescriptor,
@@ -421,41 +403,6 @@ function decodePlatformEnvironment(value: unknown): PlatformEnvironment {
     }
   }
   return value as PlatformEnvironment;
-}
-
-function decodeWebToolSettings(value: unknown): WebToolSettings {
-  const record = requireRecord(value, 'GET_WEB_TOOL_SETTINGS response');
-  if (typeof record.web_search !== 'boolean' || typeof record.web_fetch !== 'boolean') {
-    throw new Error('Invalid GET_WEB_TOOL_SETTINGS response.');
-  }
-  return { web_search: record.web_search, web_fetch: record.web_fetch };
-}
-
-function decodeWebSearchDiagnostics(value: unknown): Record<string, {
-  status: number;
-  length: number;
-  error?: string;
-  preview?: string;
-}> {
-  const record = requireRecord(value, 'DIAGNOSE_WEB_SEARCH response');
-  return Object.fromEntries(Object.entries(record).map(([domain, raw]) => {
-    const diagnostic = requireRecord(raw, `DIAGNOSE_WEB_SEARCH response.${domain}`);
-    if (!Number.isFinite(diagnostic.status) || !Number.isFinite(diagnostic.length)) {
-      throw new Error(`Invalid DIAGNOSE_WEB_SEARCH response for ${domain}.`);
-    }
-    if (diagnostic.error !== undefined && typeof diagnostic.error !== 'string') {
-      throw new Error(`Invalid DIAGNOSE_WEB_SEARCH error for ${domain}.`);
-    }
-    if (diagnostic.preview !== undefined && typeof diagnostic.preview !== 'string') {
-      throw new Error(`Invalid DIAGNOSE_WEB_SEARCH preview for ${domain}.`);
-    }
-    return [domain, diagnostic] as const;
-  })) as Record<string, {
-    status: number;
-    length: number;
-    error?: string;
-    preview?: string;
-  }>;
 }
 
 function decodeAck(value: unknown): void {

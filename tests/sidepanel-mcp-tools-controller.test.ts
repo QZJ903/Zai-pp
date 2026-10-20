@@ -132,26 +132,6 @@ describe('sidepanel MCP and Tools controller', () => {
     });
   });
 
-  it('requests host permission directly from the sidepanel click boundary', async () => {
-    const sendMessage = vi.fn(async () => {
-      throw new Error('Host permission requests must not cross the runtime bridge.');
-    });
-    const permissions = {
-      request: vi.fn(async () => true),
-    };
-    const controller = createMcpToolsController(
-      createSidepanelRuntimeClient(sendMessage),
-      permissions,
-    );
-
-    await expect(controller.requestHostPermission([
-      'http://*/*',
-      'https://*/*',
-    ])).resolves.toBe(true);
-    expect(permissions.request).toHaveBeenCalledWith(['http://*/*', 'https://*/*']);
-    expect(sendMessage).not.toHaveBeenCalled();
-  });
-
   it('centralizes tool allowlist and Python provider policy', () => {
     expect(isMcpToolEnabled(server, pythonTool)).toBe(true);
     expect(nextMcpToolAllowlist(server.allowlist, pythonTool, false)).toEqual({

@@ -39,7 +39,6 @@ const AUTOMATION_UPDATE_EVENTS = ['AUTOMATIONS_UPDATED', 'AUTOMATION_RUNS_UPDATE
 
 const DEFAULT_PROMPT_OPTIONS: AutomationPromptOptions = {
   model: null,
-  searchEnabled: false,
   fixedSession: false,
 };
 
@@ -50,7 +49,6 @@ type FormState = {
   expression: string;
   timezone: string;
   model: string;
-  searchEnabled: boolean;
   fixedSession: boolean;
 };
 
@@ -61,7 +59,6 @@ const EMPTY_FORM: FormState = {
   expression: '',
   timezone: DEFAULT_TIMEZONE,
   model: '',
-  searchEnabled: false,
   fixedSession: false,
 };
 
@@ -511,16 +508,17 @@ function AutomationForm({
       </label>
 
       <div className="grid grid-cols-2 gap-2">
-        <ToggleRow
-          title={t('sidepanel.automationPage.form.search')}
-          enabled={form.searchEnabled}
-          onToggle={(next) => update('searchEnabled', next)}
-        />
-        <ToggleRow
-          title={t('sidepanel.automationPage.form.fixedSession')}
-          enabled={form.fixedSession}
-          onToggle={(next) => update('fixedSession', next)}
-        />
+        {/* ⚠️ **`col-span-2` is deliberate**: this row used to hold two toggles
+            (web search | fixed session). The search switch is gone, so the remaining
+            toggle takes the whole row — the label sits at the row's left edge (where the
+            search label used to be) and its switch stays at the far right. */}
+        <div className="col-span-2">
+          <ToggleRow
+            title={t('sidepanel.automationPage.form.fixedSession')}
+            enabled={form.fixedSession}
+            onToggle={(next) => update('fixedSession', next)}
+          />
+        </div>
       </div>
 
       <div className="flex justify-end gap-2 pt-1">
@@ -660,7 +658,6 @@ function fromAutomation(automation: Automation): FormState {
     expression: automation.schedule.expression ?? '',
     timezone: automation.schedule.timezone || DEFAULT_TIMEZONE,
     model: automation.promptOptions.model ?? '',
-    searchEnabled: automation.promptOptions.searchEnabled ?? false,
     fixedSession: automation.promptOptions.fixedSession ?? false,
   };
 }
@@ -674,7 +671,6 @@ function toAutomationInput(form: FormState): AutomationCreateInput {
     promptOptions: {
       ...DEFAULT_PROMPT_OPTIONS,
       model: form.model.trim() || null,
-      searchEnabled: form.searchEnabled,
       fixedSession: form.fixedSession,
     },
   };

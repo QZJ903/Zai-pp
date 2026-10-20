@@ -19,8 +19,6 @@ import type {
   ToolDescriptor,
   ToolResult,
 } from '../types';
-import type { WebSearchToolName } from '../tool/web-search';
-import type { WebToolSettings } from '../tool/web-settings';
 
 type DeclaredRuntimeRequest<TType extends MessageAction['type']> = Extract<
   MessageAction,
@@ -46,15 +44,6 @@ export function requiresCurrentToolAuthorizationSubject(type: string): boolean {
   return TOOL_AUTHORIZATION_SUBJECT_RUNTIME_COMMANDS.has(type);
 }
 
-export interface WebSearchDiagnostic {
-  status: number;
-  length: number;
-  error?: string;
-  preview?: string;
-}
-
-export type WebSearchDiagnostics = Record<string, WebSearchDiagnostic>;
-
 export type McpServerPermissionResponse =
   | { ok: boolean; origin: string | null }
   | DomainFailure;
@@ -64,10 +53,6 @@ export interface McpServerConnectionResponse {
   cache: McpToolCacheEntry;
   health: McpServerHealth;
 }
-
-export type HostPermissionResponse =
-  | { ok: boolean; origins: string[] }
-  | DomainFailure;
 
 export interface ToolRuntimeCommandContracts {
   GET_MCP_SERVERS: {
@@ -118,17 +103,6 @@ export interface ToolRuntimeCommandContracts {
     request: { type: 'TEST_MCP_SERVER_CONNECTION'; payload: { serverId: string } };
     response: McpServerConnectionResponse;
   };
-  GET_WEB_TOOL_SETTINGS: {
-    request: { type: 'GET_WEB_TOOL_SETTINGS' };
-    response: WebToolSettings;
-  };
-  SET_WEB_TOOL_SETTING: {
-    request: {
-      type: 'SET_WEB_TOOL_SETTING';
-      payload: { name: WebSearchToolName; enabled: boolean };
-    };
-    response: Ack;
-  };
   GET_BROWSER_CONTROL_SETTINGS: {
     request: { type: 'GET_BROWSER_CONTROL_SETTINGS' };
     response: BrowserControlSettings;
@@ -155,14 +129,6 @@ export interface ToolRuntimeCommandContracts {
   DETACH_BROWSER_CONTROL: {
     request: { type: 'DETACH_BROWSER_CONTROL' };
     response: Ack;
-  };
-  DIAGNOSE_WEB_SEARCH: {
-    request: { type: 'DIAGNOSE_WEB_SEARCH'; payload?: { query?: string } };
-    response: WebSearchDiagnostics;
-  };
-  REQUEST_HOST_PERMISSION: {
-    request: { type: 'REQUEST_HOST_PERMISSION'; payload: { origins: string[] } };
-    response: HostPermissionResponse;
   };
   GET_TOOL_DESCRIPTORS: {
     request: DeclaredRuntimeRequest<'GET_TOOL_DESCRIPTORS'>;

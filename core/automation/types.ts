@@ -56,7 +56,6 @@ export interface AutomationPromptOptions {
    * （不同轮次会带不同 id），不存在「agent 由服务端装配、覆写无效」这回事。
    */
   model: string | null;
-  searchEnabled: boolean;
   /** 固定会话：开启后该自动化任务的后续运行沿用同一个对话（首跑新建，之后续用）。 */
   fixedSession: boolean;
 }

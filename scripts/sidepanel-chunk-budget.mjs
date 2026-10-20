@@ -60,7 +60,18 @@ const BASELINE = Object.freeze({
   // raw 338568 / gzip 105635 —— **−12 raw / −9 gzip**。
   // ⚠️ 涨跌幅度远小于「1 键 ≈ 276 raw」的量级，因为这次**没增删键**，
   // 只是两处值的字符数变了（域名字符串变短）。**降了也要回写**（同下面那条教训）。
-  initialShell: { raw: 338_568, gzip: 105_635 },
+  // ⚠️⚠️ **2026-10-20 八测（删除扩展自带的联网搜索）**：删掉 `sidepanel.toolsPage`
+  // 的 web 开关与诊断搜索共 11 对键（中英各一份）后实测 raw 330535 / gzip 103253
+  // —— **−8033 raw / −2382 gzip**。涨幅量级与「删 45 键 → −8052 raw」一致，
+  // 说明这里是键数本身在起作用（`sidepanel` 段整份进初始 shell）。
+  // ⚠️⚠️ **2026-10-20 九测（自动化并入工具页）**：删掉 `capabilitiesPage.tabs.automation`
+  // （中英各 1 键）后实测 raw 330479 / gzip 103241 —— **−56 raw / −12 gzip**。
+  // ⚠️⚠️ **2026-10-20 十测（删工具页 + 自动化回归能力页）**：删掉整个 `toolsPage` i18n 段
+  // （中英各 24 键，含 web 那批与 python 那批）后实测 raw 327153 / gzip 102570
+  // —— **−3326 raw / −671 gzip**。
+  // ⚠️ **2026-10-20 十一测（评审收口）**：加 `sidepanel.mcpPage.shellSetup.listSeparator`
+  // （中英各 1 键）后实测 raw 327195 / gzip 102595 —— **+42 raw / +25 gzip**。
+  initialShell: { raw: 327_195, gzip: 102_595 },
   // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
   // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
   // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，
@@ -98,9 +109,14 @@ const BUDGET = Object.freeze({
     SavedPage: { raw: 10_000, gzip: 4_000 },
     CapabilitiesPage: { raw: 5_000, gzip: 2_000 },
     SkillPage: { raw: 60_000, gzip: 13_000 },
-    McpPage: { raw: 50_000, gzip: 12_000 },
-    ToolsPage: { raw: 18_000, gzip: 6_000 },
+    // ⚠️ **2.15.52：`mcp-tools-controller` 从独立 chunk 并进了 McpPage** —— 它原来
+    // 被 McpPage 与已删除的 ToolsPage 共用，工具页没了之后只剩一个消费者，
+    // Rollup 就把它内联了（与「entrypoint 数量决定切分」那条同源）。
+    // ⇒ **总字节没有涨**：旧产物 `McpPage 39632 + controller 15343 = 54975`，
+    // 现在 McpPage 单文件 54922。预算按新的单文件实测抬到 56_000 / 14_500。
+    McpPage: { raw: 56_000, gzip: 14_500 },
     BrowserControlPage: { raw: 10_000, gzip: 4_000 },
+    // 自动化仍是能力页的一个 tab，独立懒加载 chunk。
     AutomationPage: { raw: 35_000, gzip: 10_000 },
     SettingsPage: { raw: 45_000, gzip: 14_000 },
     // The background-image section moved from AppearanceSubPage into General,

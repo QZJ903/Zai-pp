@@ -13,8 +13,8 @@ import type {
   ToolCall,
   ToolDescriptor,
 } from '../core/tool/types';
-import { createWebSearchToolDescriptors } from '../core/tool/web-search';
-import { executeRuntimeToolCall } from './helpers/production-tool-runtime';
+import { createRuntimeToolRuntime } from '../core/tool/runtime';
+import { ToolProviderRegistry, type RuntimeToolProvider } from '../core/tool/provider-registry';
 
 /**
  * `core/tool/authorization.ts` 的边界契约。
@@ -502,20 +502,19 @@ describe('tool authorization context', () => {
   });
 
   it('rejects a mismatched provider before the runtime provider performs I/O', async () => {
-    const descriptor = createWebSearchToolDescriptors('en')
-      .find((item) => item.name === 'web_fetch')!;
+    const descriptor = makeDescriptor();
+    const execute = vi.fn(async () => ({ ok: true as const, summary: 'provider completed' }));
+    const runtime = createTestRuntime(execute);
     const grant = await createGrant([descriptor]);
-    const fetchSpy = vi.fn();
-    vi.stubGlobal('fetch', fetchSpy);
 
-    const result = await executeRuntimeToolCall({
+    const result = await runtime.executeToolCall({
       id: 'call-1',
       descriptorId: descriptor.id,
       provider: { ...descriptor.provider, id: 'forged-provider' },
       name: descriptor.name,
       invocationName: descriptor.invocationName,
-      payload: { url: 'https://example.test/private' },
-      raw: '<web_fetch>{"url":"https://example.test/private"}</web_fetch>',
+      payload: {},
+      raw: '<sample_tool>{}</sample_tool>',
       source: { trigger: 'manual_chat', requestId: 'request-1', chatSessionId: 'chat-1' },
     }, {
       kind: 'grant',
@@ -524,31 +523,35 @@ describe('tool authorization context', () => {
     }, 'en');
 
     expect(result.error?.code).toBe('tool_descriptor_mismatch');
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
     expect(chrome.storage.local.set).toHaveBeenCalledWith(expect.objectContaining({
       glm_pp_tool_history: expect.any(Array),
     }));
   });
 
   it('fails closed before provider I/O when reservation persistence fails', async () => {
-    const descriptor = createWebSearchToolDescriptors('en')
-      .find((item) => item.name === 'web_fetch')!;
+    const descriptor = makeDescriptor();
+    const execute = vi.fn(async () => ({ ok: true as const, summary: 'provider completed' }));
+    const runtime = createTestRuntime(execute);
     const grant = await createGrant([descriptor]);
     vi.mocked(chrome.storage.session.set).mockRejectedValueOnce(new Error('session write failed'));
-    const fetchSpy = vi.fn();
-    vi.stubGlobal('fetch', fetchSpy);
 
-    await expect(executeRuntimeToolCall(
-      makeWebFetchCall(descriptor),
+    await expect(runtime.executeToolCall(
+      makeCall(),
       { kind: 'grant', grantId: grant.id, subject: SUBJECT },
       'en',
     )).rejects.toThrow('session write failed');
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('preserves the provider result when completion persistence fails', async () => {
-    const descriptor = createWebSearchToolDescriptors('en')
-      .find((item) => item.name === 'web_fetch')!;
+    const descriptor = makeDescriptor();
+    const execute = vi.fn(async () => ({
+      ok: true as const,
+      summary: 'provider completed',
+      output: { content: 'provider-result' },
+    }));
+    const runtime = createTestRuntime(execute);
     const grant = await createGrant([descriptor]);
     let subsequentWrites = 0;
     vi.mocked(chrome.storage.session.set).mockImplementation(async (value: Record<string, unknown>) => {
@@ -556,22 +559,17 @@ describe('tool authorization context', () => {
       if (subsequentWrites === 2) throw new Error('completion write failed');
       sessionStorage = structuredClone({ ...sessionStorage, ...value });
     });
-    const fetchSpy = vi.fn(async () => new Response('provider-result', {
-      status: 200,
-      headers: { 'content-type': 'text/plain' },
-    }));
-    vi.stubGlobal('fetch', fetchSpy);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    const result = await executeRuntimeToolCall(
-      makeWebFetchCall(descriptor),
+    const result = await runtime.executeToolCall(
+      makeCall(),
       { kind: 'grant', grantId: grant.id, subject: SUBJECT },
       'en',
     );
 
     expect(result.ok).toBe(true);
     expect(result.output).toMatchObject({ content: 'provider-result' });
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
     expect(consoleError).toHaveBeenCalledWith(
       '[Zai++] tool authorization completion persistence failed',
       expect.any(Error),
@@ -647,20 +645,13 @@ async function createGrant(descriptors: ToolDescriptor[], now?: number) {
   });
 }
 
-function makeWebFetchCall(
-  descriptor: ToolDescriptor,
-  url: string = 'https://example.test/page',
-): ToolCall {
-  return {
-    id: 'call-1',
-    descriptorId: descriptor.id,
-    provider: descriptor.provider,
-    name: descriptor.name,
-    invocationName: descriptor.invocationName,
-    payload: { url },
-    raw: `<web_fetch>{"url":${JSON.stringify(url)}}</web_fetch>`,
-    source: { trigger: 'manual_chat', requestId: 'request-1', chatSessionId: 'chat-1' },
+function createTestRuntime(execute: RuntimeToolProvider['execute']) {
+  const provider: RuntimeToolProvider = {
+    registration: { kind: 'local', id: 'test' },
+    listTools: async () => [makeDescriptor()],
+    execute,
   };
+  return createRuntimeToolRuntime(new ToolProviderRegistry([provider]));
 }
 
 interface StoredAuthorizationTestState {

@@ -171,7 +171,7 @@ describe('failure phase tolerant read-back', () => {
         prompt: 'Run.',
         status: 'active',
         schedule: { kind: 'manual', expression: null, timezone: 'UTC', enabled: false, minimumIntervalMinutes: 0 },
-        promptOptions: { model: null, searchEnabled: false, fixedSession: false },
+        promptOptions: { model: null, fixedSession: false },
         glm: { chatSessionId: null, sessionUrl: null },
         createdAt: 1,
         updatedAt: 1,

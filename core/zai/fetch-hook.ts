@@ -618,7 +618,7 @@ async function interceptCompletionResponse(
  *
  * ⚠️ **不加字节上限** —— 这是页面**必需**的响应，读一半就废掉整个会话。
  * 实测量级：`messages/batch` 80 KB、`chats/{id}` 34 KB。与「六处刻意不加限」
- * 同一取舍（那些是 GitHub / Bing / chatNew 诊断这类非必需响应）。
+ * 同一取舍（那些是 GitHub / chatNew 诊断这类非必需响应）。
  */
 /**
  * 从历史请求的 URL 里读出会话 id（`/api/v1/chats/<id>[/messages/batch]`）。

@@ -183,7 +183,6 @@ function makeAutomation(): Automation {
     },
     promptOptions: {
       model: null,
-      searchEnabled: false,
       fixedSession: false,
     },
     glm: {

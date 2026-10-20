@@ -535,7 +535,7 @@ export function createToolBlockRestoreController(
    * ⚠️⚠️ **它挡的是「旧会话的工具挂到新会话」的另一半**（第一半是
    * `resolveTarget` 的会话判据）：切会话后旧记录的三条定位腿全 miss，
    * 兜底腿会把它挂到新会话的消息上 —— 真机实测过（旧会话的
-   * web_fetch / web_search / shell_status 出现在新会话里）。
+   * shell_status 之类出现在新会话里）。
    * ⚠️ **为什么还要清**：会话判据只挡住「挂错」，但旧记录会一直躺在表里，
    * 每次 `requeueAll` 都要重跑一遍（白扫），且切回原会话时会与新拉到的历史
    * 记录混在一起。**清掉是「不该留的别留」**。
@@ -560,7 +560,7 @@ export function createToolBlockRestoreController(
    * ⚠️⚠️ **兜底腿之前必须过「这条记录属不属于当前会话」这一关**（上游
    * `findRestoredToolTarget` 的 `if (!isSameRoute) return null;`）——
    * 没有它，切过会话之后旧记录的三条腿全 miss、被兜底挂到**新会话的消息**上
-   * （真机实测：旧会话的 web_fetch / web_search / shell_status 挂到了新会话）。
+   * （真机实测：旧会话的 shell_status 挂到了新会话）。
    * ⚠️ **兜底腿只在 `source !== 'storage'` 时用**：storage 腿没有锚点信息，
    * 挂到哪里都是猜的；history 腿至少有顺序可依。
    */

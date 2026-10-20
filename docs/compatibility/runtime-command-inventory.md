@@ -1,20 +1,20 @@
 # Runtime Command Name Inventory
 
-This annex is the name-level authority for the runtime command surface. It freezes the 99 live names and 74 declared names, and documents the router/union split rather than collapsing it.
+This annex is the name-level authority for the runtime command surface. It freezes the 95 live names and 74 declared names, and documents the router/union split rather than collapsing it.
 
 ## Invariants
 
-- The production registry owns 99 live commands exactly once through typed handlers; no transitional case or legacy router remains.
+- The production registry owns 95 live commands exactly once through typed handlers; no transitional case or legacy router remains.
 - `core/types.ts::MessageAction` declares 74 unique command names.
-- Seventy-two names are shared, 27 are live-router-only, and two are declared-only.
+- Seventy-two names are shared, 23 are live-router-only, and two are declared-only.
 - A live name and its legal behavior remain compatible until an explicit migration changes the contract.
 - `TOOL_CALL_EXECUTED` and `MEMORIES_UPDATED` are client-only notifications, not live background commands; direct background dispatch rejects them with `runtime_command_unknown`.
-- The typed handler seam requires explicit unknown-command failure. The `2 / 50 / 31 / 3 / 13` slices below were migrated without changing the frozen live-name surface.
+- The typed handler seam requires explicit unknown-command failure. The `2 / 50 / 27 / 3 / 13` slices below were migrated without changing the frozen live-name surface.
 - The ownership ledger below is authoritative for scope. A live command appears exactly once; no command is owned by two groups.
 
-The production ownership model and the grouping ledger below serve different purposes. `core/messaging/runtime-command-contracts.ts` is the single 101-name metadata and current-owner authority (`99 typed / 0 legacy / 2 client-only`), consumed by the dispatch registry; the sections below retain the historical grouping (`2 / 50 / 31 / 3 / 13`). Contract tests fail on a duplicate, missing, or cross-owner name.
+The production ownership model and the grouping ledger below serve different purposes. `core/messaging/runtime-command-contracts.ts` is the single 97-name metadata and current-owner authority (`95 typed / 0 legacy / 2 client-only`), consumed by the dispatch registry; the sections below retain the historical grouping (`2 / 50 / 27 / 3 / 13`). Contract tests fail on a duplicate, missing, or cross-owner name.
 
-## Command Group Ledger — 99 Live Commands
+## Command Group Ledger — 95 Live Commands
 
 ### Group A — Typed seam bootstrap (2)
 
@@ -78,7 +78,7 @@ SAVE_BACKGROUND
 CLEAR_BACKGROUND
 ```
 
-### Group C — MCP, tool, browser control, and sandbox (31)
+### Group C — MCP, tool, browser control, and sandbox (27)
 
 ```text
 GET_MCP_SERVERS
@@ -93,16 +93,12 @@ GET_MCP_TOOL_CACHE
 REFRESH_MCP_SERVER_TOOLS
 REQUEST_MCP_SERVER_PERMISSION
 TEST_MCP_SERVER_CONNECTION
-GET_WEB_TOOL_SETTINGS
-SET_WEB_TOOL_SETTING
 GET_BROWSER_CONTROL_SETTINGS
 SAVE_BROWSER_CONTROL_SETTINGS
 SET_BROWSER_CONTROL_ENABLED
 GET_BROWSER_CONTROL_STATE
 SET_BROWSER_CONTROL_TARGET
 DETACH_BROWSER_CONTROL
-DIAGNOSE_WEB_SEARCH
-REQUEST_HOST_PERMISSION
 GET_TOOL_DESCRIPTORS
 REFRESH_TOOL_DESCRIPTORS
 CREATE_TOOL_AUTHORIZATION
@@ -140,9 +136,9 @@ GET_ZAI_MODELS
 EXPORT_DIAGNOSTIC_LOGS
 ```
 
-`TOOL_CALL_EXECUTED` and `MEMORIES_UPDATED` remain declared-only compatibility records. They are not counted among the 99 live commands and must be classified explicitly rather than given invented handlers.
+`TOOL_CALL_EXECUTED` and `MEMORIES_UPDATED` remain declared-only compatibility records. They are not counted among the 96 live commands and must be classified explicitly rather than given invented handlers.
 
-## Live Background Router — 99
+## Live Background Router — 95
 
 ```text
 GET_MEMORIES
@@ -195,16 +191,12 @@ GET_MCP_TOOL_CACHE
 REFRESH_MCP_SERVER_TOOLS
 REQUEST_MCP_SERVER_PERMISSION
 TEST_MCP_SERVER_CONNECTION
-GET_WEB_TOOL_SETTINGS
-SET_WEB_TOOL_SETTING
 GET_BROWSER_CONTROL_SETTINGS
 SAVE_BROWSER_CONTROL_SETTINGS
 SET_BROWSER_CONTROL_ENABLED
 GET_BROWSER_CONTROL_STATE
 SET_BROWSER_CONTROL_TARGET
 DETACH_BROWSER_CONTROL
-DIAGNOSE_WEB_SEARCH
-REQUEST_HOST_PERMISSION
 GET_TOOL_DESCRIPTORS
 REFRESH_TOOL_DESCRIPTORS
 CREATE_TOOL_AUTHORIZATION
@@ -325,22 +317,18 @@ SAVE_BACKGROUND
 CLEAR_BACKGROUND
 ```
 
-## Live Router Only — 27
+## Live Router Only — 23
 
 ```text
 TOUCH_MEMORIES
 REQUEST_MCP_SERVER_PERMISSION
 TEST_MCP_SERVER_CONNECTION
-GET_WEB_TOOL_SETTINGS
-SET_WEB_TOOL_SETTING
 GET_BROWSER_CONTROL_SETTINGS
 SAVE_BROWSER_CONTROL_SETTINGS
 SET_BROWSER_CONTROL_ENABLED
 GET_BROWSER_CONTROL_STATE
 SET_BROWSER_CONTROL_TARGET
 DETACH_BROWSER_CONTROL
-DIAGNOSE_WEB_SEARCH
-REQUEST_HOST_PERMISSION
 WHATS_NEW_DISMISSED
 DOM_TASK_STARTED
 DOM_TASK_COMPLETE
@@ -366,4 +354,4 @@ MEMORIES_UPDATED
 
 ## Validation Method
 
-`tests/runtime-command-contract.test.ts` derives the typed registry and literal `MessageAction` names, then compares them with this inventory and the production 101-name contract map. It freezes `99/74/72/27/2`, current `69/30` payload access, `99/0/2` ownership, and `66 decoded / 0 direct-cast / 0 delegated`; it also proves the historical `2/50/31/3/13` grouping partition. Serializable specimens cover every request/response/error family without creating another command-name authority.
+`tests/runtime-command-contract.test.ts` derives the typed registry and literal `MessageAction` names, then compares them with this inventory and the production 97-name contract map. It freezes `95/74/72/23/2`, current `66/29` payload access, `95/0/2` ownership, and `63 decoded / 0 direct-cast / 0 delegated`; it also proves the historical `2/50/27/3/13` grouping partition. Serializable specimens cover every request/response/error family without creating another command-name authority.

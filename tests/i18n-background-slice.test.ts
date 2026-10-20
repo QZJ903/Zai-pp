@@ -117,7 +117,7 @@ describe('background i18n slice', () => {
 
   it('narrows the background key type to the four sections', () => {
     // Compile-time sanity: the exported key type must reject a sidepanel key.
-    const typeCheck: LocaleMessageKey = 'tool.web.providerName';
-    expect(typeCheck).toBe('tool.web.providerName');
+    const typeCheck: LocaleMessageKey = 'tool.memory.providerName';
+    expect(typeCheck).toBe('tool.memory.providerName');
   });
 });

@@ -52,7 +52,6 @@ import {
 import { filterZaiModelFacingToolDescriptors } from '../core/zai/model-facing';
 import {
   applyZaiModelOverrideForRoute,
-  disableZaiNativeWebSearch,
   parseZaiBody,
   parseZaiChatNewBody,
   readZaiCurrentUserMessageParentId,
@@ -156,11 +155,6 @@ let currentSkillAutoActivation: SkillAutoActivationSettings = DEFAULT_SKILL_AUTO
 let currentActivePreset: SystemPromptPreset | null = null;
 let currentPromptSettings: PromptInjectionSettings = DEFAULT_PROMPT_INJECTION_SETTINGS;
 let currentContentLocale: SupportedLocale = DEFAULT_LOCALE;
-/**
- * 侧边栏「联网搜索」开关的存储值。与「本轮是否开着页面原生联网」取或决定 web 工具
- * 是否进模型目录 —— 任一为真就放行，保证「用户想搜」时一定用扩展自己的搜索。
- */
-let currentWebToolsEnabled = false;
 let currentRequestMessageCount = 0;
 /**
  * 收到的 `AUGMENT_REQUEST_BODY` 消息数（页面每发一次 completion / chats-new 请求 +1）。
@@ -193,15 +187,13 @@ let projectPanelController: ProjectPanelController | null = null;
 const executedToolCallSignatures = new Map<string, Set<string>>();
 /** requestId → chatSessionId 映射：执行时补全 source.chatSessionId 用。 */
 const chatSessionIdByRequestId = new Map<string, string | null>();
-/** requestId → 本轮是否开着原生联网：供 handleResponseComplete 建续跑循环时取用。 */
-const nativeSearchOnByRequestId = new Map<string, boolean>();
 /**
  * requestId → 本轮激活的本地 Skill 目录（只在真有激活时写入）。
  *
  * ⚠️ **建授权时已经用了它，这里再记一份是给续跑循环用的** —— 续跑轮会**重新建授权**
  * （防上一轮 grant 被关掉），而续跑 prompt 是模板、不是用户输入，重新跑一遍 Skill 激活
- * 只会得到 null。所以要把「启动该循环的那一轮」的目录带到循环上（与 `nativeSearchOn` /
- * `model` 同一类状态）。少了它，续跑轮里 `shell_exec` 的初始 cwd
+ * 只会得到 null。所以要把「启动该循环的那一轮」的目录带到循环上（与 `model`
+ * 同一类状态）。少了它，续跑轮里 `shell_exec` 的初始 cwd
  * 就不再被归一到 Skill 目录，而**提示词里那句软约束照样在** ⇒ 静默退化。
  */
 const localSkillDirByRequestId = new Map<string, string>();
@@ -235,8 +227,8 @@ const requestToolDescriptorsByRequestId = new Map<string, ToolDescriptor[]>();
  * ⚠️ **没有 `REQUEST_TERMINAL` 的两条路径会留下残余**：HTML 挑战页与响应直接 reject
  * （fetch hook 在这两条路上只发各自的回调）。但这两条路都没有流、也就没有工具执行，
  * 所以 `executedToolCallSignatures` / `executionsByRequest` 两个大容器根本不会被写；
- * 残留的是 `chatSessionIdByRequestId` / `nativeSearchOnByRequestId` /
- * `localSkillDirByRequestId` 三个 UUID / 短串级小条目，**外加 `requestToolDescriptorsByRequestId`**
+ * 残留的是 `chatSessionIdByRequestId` /
+ * `localSkillDirByRequestId` 两个 UUID / 短串级小条目，**外加 `requestToolDescriptorsByRequestId`**
  * （增广已成功、已写入，但它不是小条目 —— 是整份 `descriptors` 数组）。**这是有意接受的**：
  * 让 terminal 在这两条路上也发出会连带触发 `armManualStopDetection`，可能给高峰挑战
  * 误报一次 `DOM_TASK_FAILED` —— 那是行为改动，不该混在内存清理里。
@@ -245,7 +237,6 @@ function releaseRequestState(requestId: string): void {
   executedToolCallSignatures.delete(requestId);
   executionsByRequest.delete(requestId);
   chatSessionIdByRequestId.delete(requestId);
-  nativeSearchOnByRequestId.delete(requestId);
   localSkillDirByRequestId.delete(requestId);
   requestToolDescriptorsByRequestId.delete(requestId);
 }
@@ -408,8 +399,6 @@ interface ActiveDomTask {
   kind: string;
   prompt: string;
   chatSessionId: string | null;
-  /** 该任务是否开启 z.ai 联网搜索（命中归属后置请求体 features.web_search/auto_web_search）。 */
-  searchEnabled: boolean;
   /** 该任务选定的模型 id（两种模式下都覆写请求体的 model）；null = 跟随页面默认。 */
   model: string | null;
   status: 'pending' | 'injected' | 'running' | 'done' | 'failed' | 'cancelled';
@@ -438,8 +427,6 @@ interface ContinuationLoop {
   taskId: string | null;
   /** 续跑收尾时回传给后台的最终回复正文。 */
   finalAssistantText: string;
-  /** 启动该循环的那轮是否开着原生联网：续跑/nudge 轮同样要据此放行 web 工具。 */
-  nativeSearchOn: boolean;
   /** 归属任务选定的模型 id：续跑轮也要把同一模型写回请求体。 */
   model: string | null;
   /**
@@ -522,21 +509,6 @@ function getCurrentConversationTitle(): string {
 
 function isContinuationRequest(text: string): boolean {
   return isZaiContinuationPrompt(text);
-}
-
-/** 读 chatNew body 是否已开原生联网：chat.auto_web_search 为 true 视为开。 */
-function readChatNewNativeSearchEnabled(body: Record<string, unknown>): boolean {
-  const chat = body.chat;
-  if (!chat || typeof chat !== 'object' || Array.isArray(chat)) return false;
-  return (chat as Record<string, unknown>).auto_web_search === true;
-}
-
-/** 读 completion body 是否已开原生联网：features 的 auto_web_search / web_search 任一为 true 视为开。 */
-function readCompletionNativeSearchEnabled(body: Record<string, unknown>): boolean {
-  const features = body.features;
-  if (!features || typeof features !== 'object' || Array.isArray(features)) return false;
-  const record = features as Record<string, unknown>;
-  return record.auto_web_search === true || record.web_search === true;
 }
 
 function hasLiveExtensionContext(): boolean {
@@ -681,41 +653,22 @@ function catalogNamesFor(descriptors: readonly ToolDescriptor[]): string[] {
  * ⚠️⚠️ **为什么要有这个函数**：`filterZaiModelFacingToolDescriptors` 曾经只在
  * `augmentPrompt` 内部调用一次，结果只喂给了提示词；而**标签识别**（回传给主世界的
  * `toolDescriptorNames`）与**兜底解析**（`requestToolDescriptorsByRequestId`）用的都是
- * **授权返回的完整目录**。两份名单分叉的后果是**静默的**：
- * 用户在侧边栏关掉 web 工具后，提示词里已经没有 schema 了，但模型照**会话历史里
- * 首条注入的示例**照样吐 `<web_search>` 标签 —— 而识别名单里有它、执行侧无人拦，
- * **于是真的搜了**。用户看到的是「关了搜索它还在搜」。
- *
- * ⚠️ **站点只剩 agent 模式后，web 工具恒裁**（`core/zai/model-facing.ts`）——
- * `nativeSearchOn` / `webToolsEnabled` 已不再影响结果。保留这两个形参是为了
- * 不动调用点形状（chat 回归时判据在那里恢复）。
+ * **授权返回的完整目录**。两份名单分叉的后果是**静默的**：提示词里没有的工具，
+ * 模型照**会话历史里首条注入的示例**照样吐标签 —— 而识别名单里有它、执行侧无人拦，
+ * **于是真的执行了**。
  */
 function modelFacingDescriptorsFor(
   descriptors: readonly ToolDescriptor[],
-  options: { nativeSearchOn: boolean; webToolsEnabled?: boolean },
 ): ToolDescriptor[] {
-  return filterZaiModelFacingToolDescriptors(descriptors, {
-    nativeSearchOn: options.nativeSearchOn,
-    webToolsEnabled: options.webToolsEnabled ?? currentWebToolsEnabled,
-  });
+  return filterZaiModelFacingToolDescriptors(descriptors);
 }
 
 /**
  * 按 requestId 取本请求的模型可见目录 —— 供**执行期**的读点用（那时只有 requestId）。
- *
- * ⚠️ 请求级标记从 `nativeSearchOnByRequestId` 取，**不是**从当前 body 重算 ——
- * 执行发生在流式回答期间，那时已经拿不到 body 了。这个 Map 由增广阶段写入、
- * 由 `releaseRequestState` 释放。
- *
- * ⚠️ **站点只剩 agent 模式后，web 工具恒裁**，这个标记已不影响结果；
- * 保留它是为了 chat 回归时判据能原样恢复。
  */
 function modelFacingForRequest(requestId: string): ToolDescriptor[] {
   return modelFacingDescriptorsFor(
     requestToolDescriptorsByRequestId.get(requestId) ?? currentToolDescriptors,
-    {
-      nativeSearchOn: nativeSearchOnByRequestId.get(requestId) ?? false,
-    },
   );
 }
 
@@ -751,7 +704,7 @@ function syncSkillPopup(): void {
 }
 
 /**
- * 运行时状态同步（记忆 / 技能 / 工具目录 / 预设 / 联网开关）。
+ * 运行时状态同步（记忆 / 技能 / 工具目录 / 预设 / 界面语言）。
  *
  * ⚠️ **两次同步并发时，必须只有最新那次能落到模块状态上。** 触发源分布在两条不同的
  * 时间线上：`chrome.runtime.onMessage` 的广播监听（`STATE_UPDATED` 与
@@ -769,14 +722,6 @@ const toolDescriptorSyncGate = createLatestSyncGate();
 
 interface LoadedRuntimeState {
   descriptors: ToolDescriptor[];
-  /**
-   * 本次同步看到的「联网开关」存储值（任一开关开着即为 true）。
-   *
-   * ⚠️ **调用方要「我这次拿到的」时，必须读这个返回值，不能读 `currentWebToolsEnabled`** ——
-   * 模块状态按「只有最新一次同步生效」落地（见 `loadAndSyncRuntimeState` 的说明），
-   * 本次结果可能被一条更新的同步顶掉，那时读模块状态会拿到更旧的快照。
-   */
-  webToolsEnabled: boolean;
   /**
    * 本次拿到的目录是否**可用作「新目录」**（`false` = 不可用，调用方别拿它当「最新」）。
    *
@@ -808,7 +753,6 @@ async function loadAndSyncRuntimeState(): Promise<LoadedRuntimeState> {
     SkillAutoActivationSettings,
     SystemPromptPreset | null,
     PromptInjectionSettings,
-    Record<string, unknown> | undefined,
     Awaited<ReturnType<typeof getResolvedLocaleState>>,
   ];
   try {
@@ -825,16 +769,14 @@ async function loadAndSyncRuntimeState(): Promise<LoadedRuntimeState> {
       sendRuntimeMessage<PromptInjectionSettings>({ type: 'GET_PROMPT_INJECTION_SETTINGS' }).then(
         (v) => normalizePromptInjectionSettings(v),
       ),
-      // 联网开关的存储值：决定 web 工具是否进模型目录（见 augmentPrompt 的 modelFacing）。
-      sendRuntimeMessage<Record<string, unknown>>({ type: 'GET_WEB_TOOL_SETTINGS' }),
       getResolvedLocaleState(LOCALE_READ_TIMEOUT_MS),
     ]);
   } catch (error) {
     // ⚠️⚠️ **这里刻意不往外抛，也刻意不 commit。**
     //
-    // ⚠️ **当前静态不可达** —— 八条腿里唯一可能 reject 的 `getResolvedLocaleState`
+    // ⚠️ **当前静态不可达** —— 七条腿里唯一可能 reject 的 `getResolvedLocaleState`
     // 已收敛为**永不 reject**（读失败吞成默认值、超时只 resolve），
-    // 其余七条走 `sendRuntimeMessage`（自带 try/catch 成 `undefined`），
+    // 其余六条走 `sendRuntimeMessage`（自带 try/catch 成 `undefined`），
     // 两个 `normalize*` 都是纯函数。**所以这是防御性兜底，不是活路径** ——
     // 留着是为了「将来有人给某条腿加一个会抛的实现」时不至于把整个同步炸掉。
     // ⚠️ 下面两条决策的**理由**仍然成立（它们说的是「万一抛了会怎样」）：
@@ -849,19 +791,14 @@ async function loadAndSyncRuntimeState(): Promise<LoadedRuntimeState> {
     // 而不是被清空。⚠️ 这条是有意的 —— `currentCatalogNames` 会推到主世界供
     // fetch hook 识别工具标签，而 `extractAndNotifyToolCalls` 在名字集合为空时
     // **直接 return、一个工具都不识别**。清空等于把「识别」整条关掉。
-    // 沿用旧值的口径与 `currentWebToolsEnabled` 一致（「读取失败时沿用上一次的值」）。
+    // 沿用旧值的口径与 `currentToolDescriptors` 一致（「读取失败时沿用上一次的值」）。
     console.error('[Zai++] runtime state sync failed', error);
     return {
       descriptors: currentToolDescriptors,
-      webToolsEnabled: currentWebToolsEnabled,
       fresh: false,
     };
   }
-  const [memories, descriptors, skills, skillAutoActivation, activePreset, promptSettings, webToolSettings, resolvedLocale] = loaded;
-  // 任一工具开关开着就算「联网可用」；**读取失败时沿用上一次的值**（沿用语义，别改成 false）。
-  const webToolsEnabled = webToolSettings && typeof webToolSettings === 'object'
-    ? webToolSettings.web_search === true || webToolSettings.web_fetch === true
-    : currentWebToolsEnabled;
+  const [memories, descriptors, skills, skillAutoActivation, activePreset, promptSettings, resolvedLocale] = loaded;
   // 只有最新一次同步能落地；被顶掉时静默放弃（旧数据不该覆盖新数据）。
   syncLease.commit(() => {
     currentMemories = memories;
@@ -870,13 +807,12 @@ async function loadAndSyncRuntimeState(): Promise<LoadedRuntimeState> {
     currentSkillAutoActivation = skillAutoActivation;
     currentActivePreset = activePreset;
     currentPromptSettings = promptSettings;
-    currentWebToolsEnabled = webToolsEnabled;
     currentContentLocale = resolvedLocale.locale;
     syncHookState();
   });
   // ⚠️ `fresh` 的判据是「取数没抛错**且**目录非空」—— 只看「没抛错」不够：
   // `GET_TOOL_DESCRIPTORS` 失败会被收敛成空数组、这条路上不会抛（见 `fresh` 字段的说明）。
-  return { descriptors, webToolsEnabled, fresh: descriptors.length > 0 };
+  return { descriptors, fresh: descriptors.length > 0 };
 }
 
 interface ResolvedProjectAugmentationContext {
@@ -1095,19 +1031,20 @@ function parseToolXml(
 
 function isContinuableExecution(execution: ToolExecutionRecord): boolean {
   // 与 ds++ 的 selectContinuableToolExecutions 对齐：所有 MCP 工具（含用户自配）
-  // + mcp capability + web + browser 都算可续跑；本地执行类工具（shell_/local_file_/python_）
+  // + mcp capability + browser 都算可续跑；本地执行类工具（shell_/local_file_/python_）
   // 也一并算（它们在 z.ai 里是 Shell Local MCP server 的工具，provider.kind 是 mcp）。
   // 终态工具（memory_save/update/delete、skill_draft_create、memory_import_preview 等）
   // 不在此列 → 自然不可续跑。
   //
   // ⚠️⚠️ **这里的「按名字」是刻意的，不是漏改的身份判据 —— 别顺手删。**
-  // 它问的不是「这个工具是不是扩展自带的 web 工具」（那个问题按 provider 契约判，
-  // 见 `core/tool/web_search` 的 `isExtensionWebToolDescriptor`），而是
-  // **「这一轮还值不值得继续跑」** —— 方向是**向宽**：判错成「可续跑」只是多跑一轮，
-  // 判错成「不可续跑」会让续跑循环提前收尾（自动化那边表现为卡到租约超时）。
+  // 它问的不是「这个工具属于哪个 provider」，而是**「这一轮还值不值得继续跑」** ——
+  // 方向是**向宽**：判错成「可续跑」只是多跑一轮，判错成「不可续跑」会让续跑循环
+  // 提前收尾（自动化那边表现为卡到租约超时）。
   // 所以保留按名字的那几条作为**缺 provider 记录的安全网**：`provider` 在
   // `ToolExecutionRecord` 上是可选字段（工具历史编解码明确允许缺省），
   // 只认 provider 会在那种记录上恒 false。
+  // ⚠️ `web` 那几条对应的扩展自带联网工具已删除，留下是为了**老会话里的历史记录**
+  // 仍按「可续跑」处理 —— 它们可能出现在 `glm_pp_tool_history` 与页面历史里。
   return Boolean(
     !execution.pending &&
       (execution.provider?.kind === 'mcp' ||
@@ -1383,13 +1320,6 @@ async function handleAugmentRequestBody(
         }
       }
 
-      // 联网判定：自动化任务自身的 searchEnabled，或页面 body 已带原生联网标记
-      // （手动点网页开关的场景）。检测到即为「本轮要用联网」——一律关掉原生通道，
-      // 走扩展自带的 web_search / web_fetch。
-      const nativeSearchOn = firstTaskId
-        ? (activeDomTasks.get(firstTaskId)?.searchEnabled === true || readChatNewNativeSearchEnabled(body))
-        : readChatNewNativeSearchEnabled(body);
-
       // ⚠️ **Skill 激活必须早于建授权** —— 它算出的 `activeLocalSkillDir` 要随授权一起
       // 上报给后台，后台才可能在执行期把 `shell_exec` 的初始 cwd 归一到 Skill 目录。
       // 顺序反过来（先建授权再激活）就只能拿到一份没有 dir 的 grant，而**表现是静默的**：
@@ -1419,12 +1349,10 @@ async function handleAugmentRequestBody(
       const pendingProject = await resolvePendingProjectContextForFirstMessage();
       // 本请求的模型可见目录：**提示词、标签识别、兜底解析共用这一份**（见
       // `modelFacingDescriptorsFor`）。这里由授权返回的完整目录过滤而来。
-      const modelFacing = modelFacingDescriptorsFor(authorization.descriptors, {
-        nativeSearchOn,
-      });
-      // 首条（chats/new）始终增强：把工具目录 + 记忆 + 联网引导注入，让模型在建会话
-      // 那一刻就学会工具用法（web_search 搜、shell 写文件、memory 等）。首条注入不会污染
-      // parent 链（首条是会话起点，无 parent），所以联网会话也照常注入。
+      const modelFacing = modelFacingDescriptorsFor(authorization.descriptors);
+      // 首条（chats/new）始终增强：把工具目录 + 记忆注入，让模型在建会话
+      // 那一刻就学会工具用法（shell 写文件、memory 等）。首条注入不会污染
+      // parent 链（首条是会话起点，无 parent）。
       const augmented = parsed.userMessageTexts.map((text) =>
         augmentPrompt(text, {
           toolDescriptors: modelFacing,
@@ -1436,18 +1364,7 @@ async function handleAugmentRequestBody(
       );
       const nextBody = rewriteZaiChatNewUserMessages(body, augmented);
 
-      // 关闭原生联网（chatNew 阶段）：**不能**改 chat.features（它是「数组」，
-      // 覆盖成对象会 400 卡首页），而是在 chat 对象「顶层」写布尔字段。
-      // 抓包实证：普通搜索时 chat.auto_web_search=true；高级搜索时同样为 true 且带
-      // chat.mcp_servers:["advanced-search"]。这里统一写 false，让会话从头就走扩展的
-      // web_search / web_fetch，不启用服务端检索通道。
-      if (nativeSearchOn) {
-        const chat = nextBody.chat;
-        if (chat && typeof chat === 'object' && !Array.isArray(chat)) {
-          (chat as Record<string, unknown>).auto_web_search = false;
-        }
-      }
-      const searchTask = firstTaskId ? activeDomTasks.get(firstTaskId) : undefined;
+      const chatNewTask = firstTaskId ? activeDomTasks.get(firstTaskId) : undefined;
       // 模型覆写（chatNew 阶段）：会话模型在**建会话那一刻**定下 —— 落点是
       // `chat.models`（与首条 user 消息的 `models` 同值），由路由决定，见
       // `applyZaiModelOverrideForRoute`。这一步不能省：只在 completion 阶段写
@@ -1456,7 +1373,7 @@ async function handleAugmentRequestBody(
       // （同一会话不同轮次会带不同 id），用户选的模型能进 body；挡着它的只有
       // 「服务端按 general_agent 装配」这个从未验证过的假设。
       // 写函数自带「只在字段已存在时覆写」的守卫 ⇒ 页面发哪个字段就改哪个。
-      applyZaiModelOverrideForRoute(nextBody, 'chatNew', searchTask?.model ?? null);
+      applyZaiModelOverrideForRoute(nextBody, 'chatNew', chatNewTask?.model ?? null);
       postToMainWorld({
         type: 'AUGMENT_REQUEST_BODY_RESULT',
         id,
@@ -1467,7 +1384,7 @@ async function handleAugmentRequestBody(
           // ⚠️ **回传本请求实际注入提示词的那份描述符名**（就是上面那份过滤后的
           // `modelFacing`），不是全局 `currentCatalogNames`、也不是未过滤的
           // `authorization.descriptors` —— 主世界识别 XML 标签时用这份，才能与提示词
-          // 严格同源。⚠️ 用未过滤目录会让「用户在侧边栏关掉的工具」仍被识别并执行。
+          // 严格同源。⚠️ 用未过滤的授权目录会让「模型可见目录里没有的工具」仍被识别并执行。
           toolDescriptorNames: catalogNamesFor(modelFacing),
         },
       });
@@ -1533,30 +1450,8 @@ async function handleAugmentRequestBody(
         localSkillDir: continuationLoop?.localSkillDir ?? undefined,
       });
       activeToolAuthorizations.set(requestId, auth);
-      // 本请求的联网标记 —— **一个变量，两处用途**：
-      // ① 决定「模型可见目录列不列 web 工具」—— ⚠️ **2026-10-19 起这一支已失效**：
-      //    web 工具在 `core/zai/model-facing.ts` 里**恒裁**（站点只剩 agent 模式），
-      //    `nativeSearchOn` 不再影响可见性；保留这个语义是为了 chat 回归时判据能恢复。
-      // ② 决定「要不要在这个 body 上写 disableZaiNativeWebSearch」。**这一支仍然承重。**
-      //
-      // ⚠️⚠️ **②必须取循环上记的那一份**（`ContinuationLoop.nativeSearchOn`）—— 这是
-      // **时序约束**不是偏好：续跑轮的提示词**在提交之前就建好了**（`advanceContinuationLoop`
-      // 用 `loop.nativeSearchOn` 过滤出 toolNames 喂给 `buildZaiContinuationPrompt`，
-      // nudge 轮同理），建提示词那一刻这个请求的 body 还不存在。识别与解析必须与提示词
-      // 同源，所以只能取快照。
-      //
-      // ⚠️ 循环不在时（用户手打了一段形似续跑模板的文本）退回**读 body** ——
-      // 那种请求就是真实的用户请求，body 是它自己的真相。
-      // **不能退化成「只看归属任务」**：模板文本不在 `taskIdByPromptText` 里、
-      // `matchedTask` 取不到 ⇒ 那条路会恒为 false，与 body 的真实内容无关。
-      //
-      // ⚠️ **已知残留（可接受）**：快照是「启动循环那一刻」的，用户中途改地球不会反映到
-      // 后续续跑轮。失败方向安全 —— 那时原生通道可用，用户仍能搜，只是不列扩展工具。
-      const nativeSearchOn = continuationLoop?.nativeSearchOn ?? readCompletionNativeSearchEnabled(body);
       // 本请求的模型可见目录（续跑轮）：**与提示词、识别、解析共用同一份**。
-      const modelFacing = modelFacingDescriptorsFor(auth.descriptors, {
-        nativeSearchOn,
-      });
+      const modelFacing = modelFacingDescriptorsFor(auth.descriptors);
       requestToolDescriptorsByRequestId.set(requestId, modelFacing);
       // 续跑轮同样把任务选定的模型写回请求体：页面每轮都会重新带 model，
       // 只在首条写会退回到页面默认。
@@ -1568,10 +1463,9 @@ async function handleAugmentRequestBody(
       const continuationModel: string | null =
         matchedTask?.model ?? loopTask?.model ?? continuationLoop?.model ?? null;
       let nextBodyStr = bodyStr;
-      if (nativeSearchOn || continuationModel) {
+      if (continuationModel) {
         const parsedBody = parseZaiBody(bodyStr);
         if (parsedBody) {
-          if (nativeSearchOn) disableZaiNativeWebSearch(parsedBody);
           // 续跑轮走 completion 端点 → 落点是顶层 `model`，由路由决定。
           applyZaiModelOverrideForRoute(parsedBody, 'completion', continuationModel);
           nextBodyStr = JSON.stringify(parsedBody);
@@ -1615,28 +1509,10 @@ async function handleAugmentRequestBody(
     if (skillActivation.activeLocalSkillDir !== undefined) {
       localSkillDirByRequestId.set(requestId, skillActivation.activeLocalSkillDir);
     }
-    // 联网判定：自动化任务自身的 searchEnabled，或 body 已带原生联网标记
-    // （features.auto_web_search / features.web_search）。检测到即为「本轮要用联网」——
-    // 一律关掉原生通道，走扩展自带的 web_search / web_fetch。
-    //
-    // ⚠️⚠️ **任务的来源必须是上面那次归属的结果（`matchedTask`），不能再去查
-    // `taskIdByPromptText`** —— 那个 Map 的语义是「**待认领**的 prompt → taskId」，
-    // 本请求的条目**已经在上面的归属里被 delete 掉了**（读取时机晚于删除）。
-    // 曾经在这里重查一次，于是这个分支**恒不成立**、任务的 `searchEnabled` 从来没被并进来；
-    // 那时它只让本轮少一个「关原生」的来源，而现在 `nativeSearchOnByRequestId` 还会经
-    // `ContinuationLoop.nativeSearchOn` 决定续跑轮**列不列 web 工具** —— 少一次就是
-    // 「开了搜索的自动化在续跑轮既不列工具、也不关原生」。
-    const nativeSearchOn = matchedTask?.searchEnabled === true
-      || readCompletionNativeSearchEnabled(body);
-    // 记下 requestId → 联网标记：同上。
-    nativeSearchOnByRequestId.set(requestId, nativeSearchOn);
     // 本请求的模型可见目录：**提示词、标签识别、兜底解析共用这一份**（见
     // `modelFacingDescriptorsFor`）。⚠️ 存进 Map 的必须是**过滤后**的这份 ——
     // 它同时是「主世界认不认这个标签」与「兜底解析认不认这个块」的判据。
-    // 存未过滤目录会让「用户在侧边栏关掉的工具」仍被识别并执行（见该函数的说明）。
-    const modelFacing = modelFacingDescriptorsFor(auth.descriptors, {
-      nativeSearchOn,
-    });
+    const modelFacing = modelFacingDescriptorsFor(auth.descriptors);
     requestToolDescriptorsByRequestId.set(requestId, modelFacing);
     // 项目上下文：ds++ 对首条消息才 bindPendingProject；z.ai 会话 id 从 /c/<id> 读，不需要 conversation title/url 也能拿到对话归属。
     const project = await resolveProjectContextForRequest(chatSessionId, isFirstMessage);
@@ -1644,8 +1520,7 @@ async function handleAugmentRequestBody(
     //
     // 这里历史上曾按「本轮是否联网」跳过续写轮注入（`searchMode === 'off' || isFirstMessage`），
     // 那是为了让页面原生联网能正常工作 —— 原生通道在续写轮会因 messages.content 被替换而
-    // 不再装配工具。现在联网一律走扩展自己的 web_search / web_fetch（原生通道由下方
-    // disableZaiNativeWebSearch 关掉），那个前提不复存在，跳过的理由也随之作废。
+    // 不再装配工具。原生通道后来不再由扩展接管，那个前提不复存在，跳过的理由也随之作废。
     const augmented = augmentPrompt(originalPrompt, {
       toolDescriptors: modelFacing,
       isFirstMessage,
@@ -1660,11 +1535,6 @@ async function handleAugmentRequestBody(
     const visibleOriginal = extractVisibleUserPrompt(augmented) ?? originalPrompt;
     (nextBody as Record<string, unknown>).signature_prompt = visibleOriginal;
 
-    // 关闭原生联网：检测到本轮要用联网时，把 features 的 auto_web_search / web_search
-    // 都写成 false，让服务端不装配原生检索通道，联网一律走扩展的 web_search / web_fetch。
-    if (nativeSearchOn) {
-      disableZaiNativeWebSearch(nextBody);
-    }
     // 模型覆写：请求归属到自动化任务时覆写 body 的 model。
     // ⚠️ **agent 轮同样覆写** —— 真机实测 agent 的 completion body 带顶层 `model`，
     // 且不同轮次是不同的 id ⇒ 模型字段是活的，不是「服务端自己装配」。
@@ -1711,7 +1581,7 @@ async function dispatchMainWorldMessage(data: Record<string, unknown>): Promise<
   // 「响应已到达」的登记同样必须在串行队列**之外**、消息抵达瞬间完成。
   // ⚠️ **它是「是否用户手动停止」的判据**（`armManualStopDetection` 挂窗口时与窗口到期时各读一次
   // `respondedRequestIds`），而那个判定只有 4 秒宽限窗口；`RESPONSE_COMPLETE` 却常常排在一段
-  // 十几秒的工具执行之后（`TOOL_CALL` 分支要 await 整条执行链，web_fetch 上界 15 秒）⇒ 在队列内
+  // 十几秒的工具执行之后（`TOOL_CALL` 分支要 await 整条执行链，MCP 工具默认 120 秒上界）⇒ 在队列内
   // 登记会让慢工具被误判成「用户手动停止」，并连带摘掉 taskId、回收续跑循环。
   // 与上面那段同一个坑、同一处落点：判据的源头必须在队列外。
   // ⚠️ **解码一并前置**：主世界发的 `RESPONSE_COMPLETE` 载荷本就只有一个信封层
@@ -1775,7 +1645,7 @@ async function dispatchMainWorldMessageInner(
           console.error('[Zai++] rejected a malformed TOOL_CALL payload');
           return;
         }
-        // ⚠️ **不 await** —— 执行会跑十几秒（web_fetch 上界 15 秒），await 会把它后面
+        // ⚠️ **不 await** —— 执行会跑十几秒（MCP 工具默认 120 秒上界），await 会把它后面
         // 的 `RESPONSE_COMPLETE` / `REQUEST_TERMINAL` 全堵在这条串行队列里
         // ⇒ 慢工具被误判成「用户手动停止」、8 秒的增广超时也会连带触发。
         // 执行改由 `startDetectedToolCall` 挂到本请求的执行串行链上，队列只做记账。
@@ -2019,11 +1889,8 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
       // 懒建路径也记一份（走的是 `currentToolDescriptors`，那是此刻唯一可得的目录）。
       //
       // ⚠️⚠️ **这里刻意存「未过滤」的 `authorization.descriptors`，与另外两处不同。**
-      // 理由：这条路的请求级标记 `nativeSearchOnByRequestId` **没被写过** ——
-      // 增广压根没跑完（id / body 缺失、body 解析失败、或外层 catch），
-      // 所以「本轮该不该放行 web 工具」这个语义**根本不存在**。
-      // ⇒ 存原样，把过滤留给读侧：`modelFacingForRequest` 统一过一次判据。
-      // ⚠️ 站点只剩 agent 模式后 web 工具恒裁，这条路的差异已经不影响结果。
+      // 理由：这条路的增广压根没跑完（id / body 缺失、body 解析失败、或外层 catch），
+      // 请求级状态都不存在 ⇒ 存原样，把过滤留给读侧：`modelFacingForRequest` 统一过一次判据。
       // 可接受：模型没有拿到我们的目录，能吐出的标签只可能来自会话历史里的旧示例，
       // 而那正是「过滤而非删除」有意保留的能力（见 `modelFacingForRequest` 的说明）。
       requestToolDescriptorsByRequestId.set(requestId, authorization.descriptors);
@@ -2326,14 +2193,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       // 实时拉取最新工具目录，nudge 轮注入的「可用工具清单」同样实时。
       // ⚠️ 用返回值而不是模块状态：模块状态按「最新一次同步生效」落地，本次可能被顶掉。
       const nudgeState = await loadAndSyncRuntimeState();
-      // ⚠️ `webToolsEnabled` 传的是**本次同步的返回值**，不是模块状态 —— 同理。
-      const nudgeToolNames = catalogNamesFor(modelFacingDescriptorsFor(
-        nudgeState.descriptors,
-        {
-          webToolsEnabled: nudgeState.webToolsEnabled,
-          nativeSearchOn: continuationLoop.nativeSearchOn,
-        },
-      ));
+      const nudgeToolNames = catalogNamesFor(modelFacingDescriptorsFor(nudgeState.descriptors));
       const nudgePrompt = buildZaiNudgePrompt(
         continuationLoop.originalTask,
         complete.assistantText,
@@ -2475,13 +2335,9 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     lastVisibleText: complete.assistantText,
     taskId: taskIdByRequestId.get(complete.requestId) ?? null,
     finalAssistantText: complete.assistantText,
-    nativeSearchOn: nativeSearchOnByRequestId.get(complete.requestId) ?? false,
     model: resolveLoopModel(complete.requestId),
     localSkillDir: localSkillDirByRequestId.get(complete.requestId) ?? null,
   };
-  // 这里不再单独清 `nativeSearchOnByRequestId` ——
-  // 释放统一由 `releaseRequestState` 在 `REQUEST_TERMINAL` 做。原先只在这个分支里清，
-  // 而原生轮的三条提前 return 都漏掉了（那才是真正的残留来源）。
   await advanceContinuationLoop();
 }
 
@@ -2506,16 +2362,9 @@ async function advanceContinuationLoop(): Promise<void> {
   // （用户新增 skill / MCP 后，续跑轮立刻能用到，而非首条消息时的快照）。
   // ⚠️ 用返回值而不是模块状态：模块状态按「最新一次同步生效」落地，本次可能被顶掉。
   const loopState = await loadAndSyncRuntimeState();
-  // ⚠️ `webToolsEnabled` 传的是**本次同步的返回值**，不是模块状态 —— 同理。
   // ⚠️⚠️ **这份 `toolNames` 与续跑分支的 `modelFacing` 必须同源** —— 前者写进提示词、
-  // 后者决定识别与解析；两边都取 `loop.nativeSearchOn`，口径一致。
-  const toolNames = catalogNamesFor(modelFacingDescriptorsFor(
-    loopState.descriptors,
-    {
-      webToolsEnabled: loopState.webToolsEnabled,
-      nativeSearchOn: loop.nativeSearchOn,
-    },
-  ));
+  // 后者决定识别与解析。
+  const toolNames = catalogNamesFor(modelFacingDescriptorsFor(loopState.descriptors));
   const prompt = buildZaiContinuationPrompt(
     loop.originalTask,
     loop.toolExecutions,
@@ -2669,11 +2518,6 @@ async function submitAutomationPromptViaPage(
       recordAutomationSendError('agent_not_idle');
       return false;
     }
-
-    // 联网任务：不再点前端的「高级搜索」开关 —— 高级搜索会把 mcp_servers 写成
-    // ["advanced-search"]、让服务端硬注入 search/open/click/find，与扩展自带的
-    // web_search / web_fetch 抢通道。联网一律交给扩展工具，由 handleAugmentRequestBody
-    // 把 features.auto_web_search / features.web_search 强制写成 false 关掉原生通道。
 
     // 原生 setter + input 事件（真机验证过的写法）。不 disable 输入框。
     setTextareaValue(textarea, '');
@@ -2876,7 +2720,6 @@ async function runDomTask(input: {
   kind: string;
   prompt: string;
   chatSessionId: string | null;
-  searchEnabled: boolean;
   model: string | null;
 }): Promise<{ ok: boolean; error?: string }> {
   if (!input.taskId || !input.prompt) {
@@ -2903,7 +2746,6 @@ async function runDomTask(input: {
     kind: input.kind,
     prompt: input.prompt,
     chatSessionId: currentSessionId,
-    searchEnabled: input.searchEnabled === true,
     model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : null,
     status: 'pending',
   };
@@ -4000,8 +3842,6 @@ export default defineContentScript({
               prompt: typeof message.prompt === 'string' ? message.prompt : '',
               chatSessionId:
                 typeof message.chatSessionId === 'string' ? message.chatSessionId : null,
-              searchEnabled:
-                typeof message.searchEnabled === 'boolean' ? message.searchEnabled : false,
               model: typeof message.model === 'string' ? message.model : null,
             });
             sendResponse(result);
@@ -4029,7 +3869,7 @@ export default defineContentScript({
             // 收尾不会漏。这里补一次会合只是为了**给「取消」也留一个唤醒源** ——
             // 防的是将来某条错误路径不再发终态（那一刻会合状态就永远没人推进）。
             // ⚠️ **不能在这里直接置 `terminalSeen = true` 再收尾** —— 那会立刻关授权、立刻释放
-            // 请求级状态，而在飞的工具（web_fetch 上界十几秒）落地后会查不到 grant、落到
+            // 请求级状态，而在飞的工具（MCP 工具上界可达 120 秒）落地后会查不到 grant、落到
             // `executeDetected` 的懒建授权路径。会合点自己会因 `pendingExecutions > 0` 提前返回，
             // 真正收尾仍等执行落地。
             settleToolTurn(requestId);

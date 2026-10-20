@@ -15,7 +15,6 @@ import {
   TOOL_RISK_LEVELS,
   TOOL_TRANSPORT_KINDS,
 } from './types';
-import { isRetryableWebFetchPermissionPrecondition } from './web-fetch-permission';
 
 export const TOOL_AUTHORIZATION_STORAGE_KEY = 'glm_pp_tool_authorizations';
 const TOOL_AUTHORIZATION_STATE_VERSION = 1 as const;
@@ -295,17 +294,14 @@ export async function authorizeExternalToolPayloadChunk(input: {
 
 export async function completeToolExecutionAuthorization(
   reservation: AuthorizedToolExecution['reservation'],
-  result?: ToolResult,
+  _result?: ToolResult,
 ): Promise<void> {
   if (!reservation) return;
   await mutateState((state) => {
     const grant = state.grants[reservation.grantId];
     const call = grant?.calls[reservation.callId];
     if (!call) return { result: undefined, changed: false };
-    call.state = isRetryableWebFetchPermissionPrecondition(call.descriptorId, result) &&
-      !call.retryUsed
-      ? 'retryable'
-      : 'consumed';
+    call.state = 'consumed';
     return { result: undefined, changed: true };
   });
 }

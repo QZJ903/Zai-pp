@@ -167,7 +167,7 @@ export interface ToolPanelController {
    *
    * ⚠️⚠️ **必须接**（`zai.content.ts` 的 `onZaiSessionChange`）：不接的话旧会话的
    * 工具记录会挂到新会话的消息上（真机实测：切过会话后旧会话的
-   * web_fetch / web_search / shell_status 出现在新会话里）。
+   * shell_status 之类出现在新会话里）。
    * 这里与 `resolveTarget` 的会话判据是**两道**：那条挡「挂错」，这条挡「留着」。
    */
   handleSessionChange: () => void;

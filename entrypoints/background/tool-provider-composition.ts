@@ -35,11 +35,6 @@ import {
   type MemoryToolRuntime,
 } from '../../core/tool/memory';
 import {
-  createWebSearchToolDescriptors,
-  executeWebSearchToolCall,
-  WEB_SEARCH_TOOL_PROVIDER,
-} from '../../core/tool/web-search';
-import {
   MCP_CAPABILITY_TOOL_PROVIDER,
   createMcpCapabilityToolDescriptors,
   disambiguateMcpCapabilityToolDescriptors,
@@ -79,14 +74,6 @@ export function createProductionToolProviderRegistry(): ToolProviderRegistry {
         call,
         locale,
       ),
-    ),
-    createLocalProvider(
-      WEB_SEARCH_TOOL_PROVIDER.id,
-      // 始终返回全部 web 描述符，**不做可见性裁剪** —— 裁剪只发生在
-      // `core/zai/model-facing.ts`（站点只剩 agent 模式，扩展自带的 web 工具在那里恒裁）。
-      // 这个 provider 只负责给出描述符与执行。
-      ({ locale }) => createWebSearchToolDescriptors(locale),
-      (call, _descriptor, { locale, signal }) => executeWebSearchToolCall(call, locale, { signal }),
     ),
     createLocalProvider(
       SKILL_CREATOR_TOOL_PROVIDER.id,

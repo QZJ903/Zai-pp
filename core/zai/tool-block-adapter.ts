@@ -156,7 +156,7 @@ export type ToolBlockTitleFormatter = (count: number) => string;
  * ⚠️⚠️ **口径来自上游 inline-agent 控制台的 `getToolResultDetailText`，不是
  * `.dpp-tool-block` 的 `formatToolResultDetail`。** 两者的差别是根本性的：
  * 后者是「有 `detail` 就不看 `output`」（我们原先照搬的就是它），
- * 前者**三段无条件拼接**。之所以换口径：`web_fetch` 成功时 `detail` 只是
+ * 前者**三段无条件拼接**。之所以换口径：取回正文类工具成功时 `detail` 只是
  * 「页面长度 N 字符」这种摘要、正文在 `output.content` 里 ⇒ 旧口径下正文
  * **永远进不了面板**（全仓除续跑链无人读 `output.content`）。
  *
@@ -172,7 +172,7 @@ export type ToolBlockTitleFormatter = (count: number) => string;
  * 小 payload 上生效，方向是反的。
  * ⇒ **重复由详情框的 `max-height: 160px` 兜住**（与上游同值），二者是配套的一对。
  *
- * ⚠️ **截断是必须的**：`web_fetch` 的 `output.content` 上限 50_000 字符，
+ * ⚠️ **截断是必须的**：取回正文类工具的 `output.content` 上限 50_000 字符，
  * 不截就是一条把面板撑爆。取值与上游一致（detail / error 各 2000、output 4000）。
  */
 export function formatZaiToolDetail(result: ToolCardResult): string {

@@ -39,7 +39,6 @@ If the Available Tools list below includes any of these capabilities, you may pr
 
 - Local command execution (running CLI tools, scripts, file operations on the user's machine)
 - Browser control (opening pages, clicking, typing, reading page snapshots)
-- Web search and web fetch (real-time information, news, documentation)
 - Office document processing (.docx / .xlsx / .pptx)
 - Long-term memory (saving durable user context via memory_save)
 
@@ -94,35 +93,6 @@ Got it. React + TypeScript is a common modern frontend stack. Ask me anything re
 - Save only information with long-term value, not one-off Q&A
 - Do not save information that already exists in Existing Memories
 
-`,
-  webSearchGuidance: `## Web Search Rules
-
-Use the web_search tool when any of these apply:
-- The user asks about real-time information, news, events, exchange rates, weather, or similar
-- The user asks about knowledge you are not sure about and current sources are needed
-- The user explicitly asks you to search or look something up
-- You need to verify facts, data, or cited sources
-
-### Search Flow
-1. First output a web_search tool call
-2. The search runs automatically; results are shown on the page and sent back to you
-3. Read the results, then answer based on them
-
-### Example
-
-User: Who won the 2024 Nobel Prizes?
-Assistant reply:
-
-I will search for the latest information.
-
-<web_search>
-{"query": "2024 Nobel Prize winners"}
-</web_search>
-
-### Rules
-- Use keywords that match the user's language and target sources
-- If one search is not enough, call web_search again with different keywords
-- Do not invent real-time information without searching
 `,
   toolFormatReminder: `---
 Local tool call format reminder:

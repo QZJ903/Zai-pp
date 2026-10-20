@@ -338,7 +338,6 @@ async function createTestAutomation(): Promise<Automation> {
     },
     promptOptions: {
       model: null,
-      searchEnabled: false,
       fixedSession: false,
     },
   });
@@ -357,7 +356,6 @@ async function createScheduledAutomation(): Promise<Automation> {
     },
     promptOptions: {
       model: null,
-      searchEnabled: false,
       fixedSession: false,
     },
   });
@@ -446,7 +444,7 @@ describe('automation site hint and write-back', () => {
   it('passes the remembered site for a fixed session', async () => {
     const automation = await createTestAutomation();
     await updateAutomation(automation.id, {
-      promptOptions: { model: null, searchEnabled: false, fixedSession: true },
+      promptOptions: { model: null, fixedSession: true },
     });
     await updateAutomationRuntime(automation.id, {
       glm: {
@@ -477,7 +475,7 @@ describe('automation site hint and write-back', () => {
     // 开在记录里那一站。
     const automation = await createTestAutomation();
     await updateAutomation(automation.id, {
-      promptOptions: { model: null, searchEnabled: false, fixedSession: true },
+      promptOptions: { model: null, fixedSession: true },
     });
     await updateAutomationRuntime(automation.id, {
       glm: {
@@ -562,7 +560,7 @@ describe('automation model is carried into the run request', () => {
   it('passes the selected model through regardless of mode', async () => {
     const automation = await createTestAutomation();
     await updateAutomation(automation.id, {
-      promptOptions: { model: 'glm-5.3', searchEnabled: false, fixedSession: false },
+      promptOptions: { model: 'glm-5.3', fixedSession: false },
     });
 
     const observed: AutomationRunnerRequest[] = [];

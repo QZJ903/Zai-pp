@@ -309,30 +309,6 @@ function readRecord(value: unknown): Record<string, unknown> | null {
 }
 
 // ---------------------------------------------------------------------------
-// z.ai 原生联网开关：强制关闭（features.auto_web_search + features.web_search 一起置 false）。
-// 协议依据：z.ai 真机抓包 —— 普通搜索两个 flag 都是 true，高级搜索是
-// auto_web_search=true / web_search=false；两个都写 false 用来观测能否关掉原生联网。
-// 联网一律走扩展自带的 web_search / web_fetch。
-// ---------------------------------------------------------------------------
-
-/**
- * 安全合并 features：关闭原生联网 = auto_web_search + web_search 都置 false。
- * 语义（z.ai 真机抓包）：`auto_web_search`=自动判断要不要搜，`web_search`=强制联网搜索。
- * 两个都置 false 用于关闭服务器侧的原生检索通道（保留其它既有 features 字段）。
- */
-export function mergeZaiNativeSearchDisabled(features: unknown): Record<string, unknown> {
-  const existing = readRecord(features) ?? {};
-  return { ...existing, auto_web_search: false, web_search: false };
-}
-
-/** 在 body 顶层 `features` 上关闭原生联网搜索（原地合并浅拷贝，返回是否可写）。 */
-export function disableZaiNativeWebSearch(body: Record<string, unknown>): boolean {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
-  body.features = mergeZaiNativeSearchDisabled(body.features);
-  return true;
-}
-
-// ---------------------------------------------------------------------------
 // 自动化任务的模型选择：把任务选定的模型写进请求体。
 // ⚠️ **chat 与 agent 两种模式都适用** —— 真机实测 agent 的请求体里模型字段是活的
 // （同一会话不同轮次会带不同 id），不存在「agent 由服务端装配、覆写无效」这回事。

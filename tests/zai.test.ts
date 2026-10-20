@@ -37,7 +37,6 @@ import {
   type ZaiWebRouteName,
 } from '../core/zai/contracts';
 import { filterZaiModelFacingToolDescriptors } from '../core/zai/model-facing';
-import { createWebSearchToolProviderIdentity } from '../core/tool/web-search';
 import type { ToolDescriptor } from '../core/tool/types';
 
 // 签名测试向量：与 zhipu-ai-proxy/intl-sign.js、GLM-Free-API zai.go 交叉验证。
@@ -1012,12 +1011,6 @@ describe('zai stream codec: server tool phases are not answer text', () => {
 });
 
 describe('zai model-facing filter', () => {
-  // ⚠️ **web 工具的 fixture 必须带真实 provider** —— 判据是「provider 契约 + 名字」，
-  // 不带 provider 的 fixture 会让 `web_search` 被判成**非扩展自带**（MCP 同名那种），
-  // 于是那几条用例会红，而红的原因不是代码错、是 fixture 缺字段。
-  // provider 由**生产同一个工厂**派生，不手抄。
-  const webProvider = createWebSearchToolProviderIdentity('en');
-
   const mk = (
     name: string,
     invocationName: string,
@@ -1030,40 +1023,6 @@ describe('zai model-facing filter', () => {
       inputSchema: {},
       ...(provider ? { provider } : {}),
     }) as unknown as ToolDescriptor;
-
-  /** 扩展自带的 web 工具（生产形状：`name === invocationName` 且 provider 是 `local/web`）。 */
-  const mkOwnWebTool = (name: 'web_search' | 'web_fetch'): ToolDescriptor =>
-    mk(name, name, webProvider);
-
-  /** 第三方 MCP 服务暴露的、**恰好同名**的工具（长 invocationName + mcp provider）。 */
-  const mkMcpLookalike = (name: 'web_search' | 'web_fetch'): ToolDescriptor =>
-    mk(name, `browser_tools_${name}`, {
-      kind: 'mcp',
-      id: 'browser-tools',
-      displayName: 'Browser Tools',
-      transport: 'streamable_http',
-    });
-
-  // ⚠️⚠️ **站点只剩 agent 模式（2026-10-19）**：扩展自带的 web 工具**恒裁**，
-  // 与侧边栏开关、页面原生联网都无关。下面三条把「无论传什么都裁」钉死 ——
-  // 曾经它们是「开关开着就放行」的三档对照，现在收成一条不变式。
-  it('always filters the extension-owned web tools regardless of the switches', () => {
-    const descriptors = [
-      mk('memory_save', 'memory_save'),
-      mkOwnWebTool('web_search'),
-      mkOwnWebTool('web_fetch'),
-    ];
-    for (const options of [
-      undefined,
-      {},
-      { webToolsEnabled: true },
-      { webToolsEnabled: false, nativeSearchOn: true },
-      { webToolsEnabled: false, nativeSearchOn: false },
-    ]) {
-      const filtered = filterZaiModelFacingToolDescriptors(descriptors, options);
-      expect(filtered.map((d) => d.name), JSON.stringify(options)).toEqual(['memory_save']);
-    }
-  });
 
   it('keeps skill_draft/memory_import in the model catalog and filters local_skill_preview out', () => {
     const descriptors = [
@@ -1083,28 +1042,26 @@ describe('zai model-facing filter', () => {
     ]);
   });
 
-  // ⚠️⚠️ **这一条守的是「判身份要按 provider 契约，不能只按名字」。**
-  // web 工具的裁剪理由是「agent 模式联网由服务端沙箱承担」「用户没想搜」——
-  // 那两条**只对扩展自带的联网成立**。第三方 MCP 服务完全可以把工具命名为
-  // `web_search`，那与我们的联网策略无关，误裁的表现是「用户的工具凭空消失」。
-  // ⚠️ 反面对照同样必要：扩展自带的那一个**必须仍被裁**，否则这条用例会退化成
-  // 「什么都不裁」也通过。
-  it('never filters an MCP tool that merely shares the web tool names', () => {
+  // ⚠️ **判据只按「名字在不在那份封闭名单里」，不看 provider** ——
+  // 唯一被裁的是扩展自己的 `local_skill_preview`。第三方 MCP 服务用任何名字
+  // （包括历史上的 web 工具名）都必须原样放行，误裁的表现是「用户的工具凭空消失」。
+  it('never filters a tool that merely shares a name with a retired built-in', () => {
     const descriptors = [
-      mkOwnWebTool('web_search'),
-      mkMcpLookalike('web_search'),
-      mkOwnWebTool('web_fetch'),
-      mkMcpLookalike('web_fetch'),
+      mk('web_search', 'browser_tools_web_search', {
+        kind: 'mcp',
+        id: 'browser-tools',
+        displayName: 'Browser Tools',
+        transport: 'streamable_http',
+      }),
+      mk('web_fetch', 'web_fetch', {
+        kind: 'mcp',
+        id: 'browser-tools',
+        displayName: 'Browser Tools',
+        transport: 'streamable_http',
+      }),
     ];
 
-    // 扩展自带的恒裁，MCP 同名的一个都不裁 —— 开关怎么传都一样。
-    for (const options of [
-      undefined,
-      { webToolsEnabled: true },
-      { webToolsEnabled: false, nativeSearchOn: true },
-    ]) {
-      expect(filterZaiModelFacingToolDescriptors(descriptors, options).map((d) => d.id))
-        .toEqual(['id-web_search', 'id-web_fetch']);
-    }
+    expect(filterZaiModelFacingToolDescriptors(descriptors).map((d) => d.id))
+      .toEqual(['id-web_search', 'id-web_fetch']);
   });
 });

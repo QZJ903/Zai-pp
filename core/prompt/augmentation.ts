@@ -87,7 +87,6 @@ export function buildPromptAugmentation(
     // 落脚点了 —— 单独补一条，保持「沙箱段与 systemPrompt 开关无关」这个既有行为。
     systemPromptEnabled ? '' : sandboxHost,
     renderProjectContext(projectContext),
-    systemPromptEnabled ? renderWebSearchGuidance(toolDescriptors, locale) : '',
     renderForcedResponseLanguage(forceResponseLanguage, locale),
   ].filter(Boolean).join('\n\n');
   const presetPrefix = presetContent ? `${presetContent}\n\n---\n\n` : '';
@@ -134,28 +133,6 @@ export function renderToolSchemas(
     .map((descriptor) => renderToolSchema(descriptor, catalog))
     .join('\n\n');
   return [shellHint, pythonHint, schemas].filter(Boolean).join('\n\n');
-}
-
-/**
- * 联网搜索引导：**永不注入**。
- *
- * ⚠️ **站点只剩 agent 模式**（chat 已从页面移除），agent 的联网由服务端沙箱承担 ——
- * 扩展自带的 `web_search` / `web_fetch` 在模型目录里已被恒裁
- * （`core/zai/model-facing.ts`），引导自然不该出现。
- *
- * ⚠️ **本函数刻意保留、不删**：它是「引导该不该注入」这一判据的**唯一落点**，
- * 删掉就要把 `buildPromptAugmentation` 里那一行也删掉；而将来若 chat 回归，
- * 需要恢复的正是这一处。现在它恒返回空串，行为上等价于「没有这段」。
- */
-function renderWebSearchGuidance(
-  descriptors: readonly ToolDescriptor[],
-  locale: SupportedLocale,
-): string {
-  // ⚠️ 判据保留（不是空函数）：将来恢复 chat 时，把这个函数体改回
-  // `translate(locale, 'prompt.webSearchGuidance')` 即可。当前恒空。
-  void descriptors;
-  void locale;
-  return '';
 }
 
 /**

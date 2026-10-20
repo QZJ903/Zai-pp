@@ -128,7 +128,6 @@ import {
   createShellMcpPresetInput,
   isShellMcpServer,
 } from '../core/shell';
-import { getWebToolSettings, setWebToolEnabled } from '../core/tool/web-settings';
 import {
   createAutomation,
   deleteAutomation,
@@ -391,16 +390,12 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         broadcastToolDescriptorsUpdate,
       },
       browser: {
-        getWebToolSettings,
-        setWebToolEnabled,
         getBrowserControlSettings,
         saveBrowserControlSettings,
         setBrowserControlEnabled,
         getBrowserControlState,
         setBrowserControlTarget: (tabId) => browserControlService.setTarget(tabId),
         detachBrowserControl: () => browserControlService.detach(),
-        requestHostPermission: (origins) => chrome.permissions.request({ origins }),
-        fetch: (input, init) => fetch(input, init),
         broadcastToolDescriptorsUpdate,
         broadcastBrowserControlUpdate,
       },
@@ -947,9 +942,6 @@ async function executeAutomationWithContext(
   // 会造出「会话按新对话发、站点却按旧会话选」的组合（请求侧判据见
   // `createAutomationRunnerRequest`）。这个函数只是从请求里的记录快照重新算，
   // 不读存储。
-  // 联网与固定会话互不影响：联网走扩展自带的 web_search / web_fetch，由内容脚本
-  // 每轮注入目录，复用会话续写时同样可用。
-  const searchEnabled = request.promptOptions?.searchEnabled === true;
   // 任务选定的模型（null = 跟随页面默认）。chat / agent 两种模式都生效，判定在内容脚本。
   const model = request.promptOptions?.model ?? null;
   const chatSessionId = resolveAutomationReusableSessionId({
@@ -968,7 +960,6 @@ async function executeAutomationWithContext(
         // 站点提示：**只有复用已有会话时**才有值（那条会话属于哪一站是确定的）。
         // 新对话恒为 null ⇒ 协调器按「用户当前所在的标签页」判定，见 `resolveDomTab`。
         siteOrigin: request.siteOrigin ?? null,
-        searchEnabled,
         model,
       },
       {

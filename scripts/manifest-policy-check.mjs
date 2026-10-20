@@ -25,8 +25,6 @@ const expectedHostPermissions = [
   // 这是一份手抄清单，少一个下面 `assertSetEqual` 立刻红。
   '*://zchat.z.ai/*',
   '*://chat.z.ai/*',
-  '*://cn.bing.com/*',
-  '*://www.bing.com/*',
   'http://*/*',
   'https://*/*',
 ];

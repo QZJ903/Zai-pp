@@ -25,7 +25,7 @@ const CONTENT_SOURCE = 'entrypoints/zai.content.ts';
  *
  * ⚠️ **续跑轮不能重跑激活**：续跑 prompt 是模板（`<original_task>` + `<tool_results>`），
  * 不是用户输入 ⇒ `parseSkillCommand` 匹配不到、隐式打分也对不上，重跑必然得到 null。
- * 所以它必须复用启动该循环那一轮记下的目录（与 `isAgentTurn` / `nativeSearchOn` 同一类状态）。
+ * 所以它必须复用启动该循环那一轮记下的目录（与 `model` 同一类状态）。
  */
 function readContentProgram(): t.Program {
   return parseTypeScriptSource(CONTENT_SOURCE, readFileSync(CONTENT_SOURCE, 'utf8'));

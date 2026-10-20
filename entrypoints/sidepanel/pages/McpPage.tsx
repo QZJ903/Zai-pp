@@ -16,6 +16,7 @@ import type {
   ToolExecutionMode,
   PlatformEnvironment,
 } from '../../../core/types';
+import { SHELL_TOOL_NAMES } from '../../../core/shell/contracts';
 import PageIntro from '../components/PageIntro';
 import { useI18n } from '../i18n';
 import {
@@ -807,7 +808,7 @@ function ServerDetail({
             {busy === 'test' ? t('sidepanel.mcpPage.row.testing') : t('common.test')}
           </button>
           <button onClick={onRefresh} className="ds-btn-secondary px-2 py-1 text-[11px] rounded-md" disabled={busy !== null}>
-            {busy === 'refresh' ? t('sidepanel.toolsPage.pythonRefreshing') : t('sidepanel.mcpPage.row.refreshTools')}
+            {busy === 'refresh' ? t('sidepanel.mcpPage.row.refreshing') : t('sidepanel.mcpPage.row.refreshTools')}
           </button>
         </div>
       </div>
@@ -1306,7 +1307,14 @@ function ShellSetupHint({
       title="Shell Native Host"
       message={message}
       isError={isError}
-      ready={cache?.health.status === 'ready'}
+      // ⚠️⚠️ **两个条件缺一不可。**
+      // 组件默认「已就绪就折叠」（`useState(() => !ready)`，惰性初始化 ⇒ 之后不再重算）。
+      // ① `!isError` —— 「连上了但少返回工具」那条告警的状态恰恰是 `ready`，
+      //    只看 health 会让它躺在折叠区里，用户不展开就看不见（等于没提示）。
+      // ② `health.status === 'ready'` —— 只看 `!isError` 会把 `disabled`（已建未启用）
+      //    与 `installFirst`（请先安装）这两档也一起折叠掉，而那正是**首次使用、
+      //    最该看见安装命令**的时刻；首帧 `cache` 为 null 时还会永久折叠（惰性初始化不再重算）。
+      ready={!isError && cache?.health.status === 'ready'}
       installSteps={(<>
         <div style={{ color: 'var(--ds-text-tertiary)' }}>
           {t('sidepanel.mcpPage.shellSetup.localIntro')}
@@ -1410,7 +1418,13 @@ function browserLabel(browser: NativeHostBrowser): string {
   return 'Chrome';
 }
 
-function shellSetupMessage(
+/**
+ * Shell Native Host 那一栏该显示什么。
+ *
+ * ⚠️ **导出是为了可测** —— 它是这一栏的全部判据，而页面渲染测试要走
+ * `展开服务行 → ServerDetail → ShellSetupHint` 三层，脆弱且慢。
+ */
+export function shellSetupMessage(
   server: McpServerConfig,
   cache: McpToolCacheEntry | null,
   t: Translator,
@@ -1426,21 +1440,63 @@ function shellSetupMessage(
   if (error.includes('native_messaging_unavailable')) {
     return { message: t('sidepanel.mcpPage.shellSetup.unavailable'), isError: true };
   }
-  if (
-    error.includes('failed to fetch') ||
+  if (error.includes('failed to fetch') ||
     error.includes('mcp_network_error') ||
     error.includes('cannot reach') ||
     error.includes('connection refused')
   ) {
     return { message: t(`${setupKey}.cannotConnect` as LocaleMessageKey), isError: true };
   }
+  // ⚠️⚠️ **「连上了、但少返回了工具」这一档必须排在 `ready` 之前。**
+  //
+  // 它是 Native Host 版本旧时**唯一**的可见信号：那时 `health.status` 是 `ready`、
+  // `health.error` 为空 ⇒ 下面那条 `ready` 分支会报「已连接，发现 N 个工具」，
+  // 而工具列表里就是少几个、**一句话都不解释**（用户只能猜「是不是坏了」）。
+  //
+  // ⚠️ 判据是「应有 − 实有」，不是「数量对不对」：缺的可能是任意一个工具，不只 python。
+  // ⚠️ `SHELL_TOOL_NAMES` 是**完整清单**（含 `local_skill_preview`，host 侧也真的发布它），
+  // 不能换成 `EXPOSED_SHELL_TOOL_NAMES`（那个是给提示词看的裁剪版），否则会假报缺失。
   if (cache?.health.status === 'ready') {
+    const missing = missingShellTools(cache.descriptors);
+    // ⚠️⚠️ **撞到本地「工具上限」时不报缺失。**
+    // `cache.descriptors` 来自 `listMcpTools`，而它在 allowlist 过滤**之前**就
+    // `slice(0, server.limits.maxToolCount)`（`core/mcp/client.ts`）—— 上限在 MCP 页
+    // 高级表单里**可编辑**，而后台的自动抬升（`buildShellToolLimitUpgrade`）只在启动时
+    // 对存量记录跑一次。用户把上限调到 8 再刷新，就会看到「4 个工具没有返回……
+    // 多半是 Native Host 版本旧了，重装并重启浏览器」—— 原因是**他自己的设置**，
+    // 而提示指向重装 ⇒ 让人白装一遍。
+    //
+    // 判据：**实有数量没撞到上限**才说明是 host 少发。撞到了就是本地截断。
+    // ⚠️ **已知漏报面**（可接受）：host 少发的数量恰好等于上限时（如都等于 8），
+    // 这里会判成「不是缺失」。失败方向是**不提示**，比让人白装一遍轻。
+    const truncatedLocally = cache.descriptors.length >= server.limits.maxToolCount;
+    if (missing.length > 0 && !truncatedLocally) {
+      return {
+        message: t(`${setupKey}.missingTools` as LocaleMessageKey, {
+          count: missing.length,
+          tools: missing.join(t(`${setupKey}.listSeparator` as LocaleMessageKey)),
+        }),
+        isError: true,
+      };
+    }
     return { message: t(`${setupKey}.ready` as LocaleMessageKey, { count: cache.health.toolCount }), isError: false };
   }
   if (!server.enabled) {
     return { message: t(`${setupKey}.disabled` as LocaleMessageKey), isError: false };
   }
   return { message: t(`${setupKey}.installFirst` as LocaleMessageKey), isError: false };
+}
+
+/**
+ * Native Host 应该发布、但这次发现没回来的工具名。
+ *
+ * ⚠️ **判据是「应有 − 实有」**：`SHELL_TOOL_NAMES` 是完整清单（12 个，含
+ * `local_skill_preview` —— host 侧 `skill-provider.mjs` 确实发布它）。
+ * 不能用 `EXPOSED_SHELL_TOOL_NAMES`（那是给提示词看的裁剪版，会假报缺失）。
+ */
+export function missingShellTools(descriptors: readonly { name: string }[] | undefined): string[] {
+  const present = new Set((descriptors ?? []).map((descriptor) => descriptor.name));
+  return SHELL_TOOL_NAMES.filter((name) => !present.has(name));
 }
 
 function transportLabel(kind: McpTransportKind): string {

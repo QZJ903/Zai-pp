@@ -7,7 +7,7 @@
  * ② **行级** —— 每行自己是按钮（`aria-expanded` + `hidden` 详情），**默认收起**。
  *    上游 `createAgentToolRow` 就是这么做的，两层缺一不可：
  *    只有块级折叠时，块一展开所有行的详情会一次性全铺出来，长正文
- *    （`web_fetch` 的网页正文可达 4000 字符）会把后面的工具行冲散。
+ *    （例如 `shell_exec` 的长输出）会把后面的工具行冲散。
  *
  * 每行 = 圆点 + 工具名 + **结果摘要**（`result.summary`）+ 状态，展开看详情。
  * 摘要与详情由调用方注入（`formatStatus` / `formatDetail`），本模块只管
@@ -241,7 +241,7 @@ export function updateToolBlockContent(
     }
 
     // ⚠️ **默认收起**（上游 `createAgentToolRow`：`aria-expanded="false"` + `hidden`）——
-    // 展开后长正文（`web_fetch` 的网页正文可达 4000 字符）会把后面的工具行冲散。
+    // 展开后长正文（例如 `shell_exec` 的长输出）会把后面的工具行冲散。
     const expanded = hasDetail && expandedKeys.has(rowKey);
     setRowExpanded(item, toggle, hasDetail ? detailId : '', expanded);
 

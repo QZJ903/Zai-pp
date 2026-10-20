@@ -204,12 +204,11 @@ function decodeSchedule(raw: unknown, path: string): AutomationSchedule {
 function decodePromptOptions(raw: unknown, path: string): AutomationPromptOptions {
   const value = recordValue(raw, path);
   // 保留未知字段：旧存储里的历史 promptOptions 字段（如 modelType / refFileIds /
-  // thinkingEnabled）原样带过，避免写入时把它们抹掉。
+  // thinkingEnabled / searchEnabled）原样带过，避免写入时把它们抹掉。
   return {
     ...value,
     // 兼容缺省：模型选择是后加的字段，旧存储里没有 → 视为 null（跟随页面默认）。
     model: defaultedNullableString(value.model, `${path}.model`),
-    searchEnabled: booleanValue(value.searchEnabled, `${path}.searchEnabled`),
     fixedSession: booleanValue(value.fixedSession, `${path}.fixedSession`),
   } as AutomationPromptOptions;
 }

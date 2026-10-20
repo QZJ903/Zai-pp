@@ -11,11 +11,12 @@ import AutomationPage from '../entrypoints/sidepanel/pages/AutomationPage';
  * 从上游 `automation-page-storage-errors.test.ts` 移植，改动集中在 fixture：
  *  - `deepseek: {...}` → `glm: {...}`（本项目是 `AutomationGLMSession`）
  *  - `promptOptions: { modelType, thinkingEnabled, refFileIds }` →
- *    `{ model, searchEnabled, fixedSession }`
+ *    `{ model, fixedSession }`
  *  - mock 里补 `GET_ZAI_MODELS`（本项目页面挂载时会拉模型清单，上游没有这一步）
  *
- * ⚠️ **四条断言本身一字未改** —— 它们测的是 fence 机制（`loadFence` /
- * `hasConfirmedSnapshot` / `loadError`），而那一套在移植时是**行级对齐保留**的。
+ * ⚠️ **四条断言本身自移植起未改过写法**（后续只在 fixture 侧做过增删）——
+ * 它们测的是 fence 机制（`loadFence` / `hasConfirmedSnapshot` / `loadError`），
+ * 而那一套在移植时是**行级对齐保留**的。
  *
  * ⚠️ 默认 locale 是 `zh-CN`（`core/i18n/types.ts` 的 `DEFAULT_LOCALE`），
  * 且测试不包 `I18nProvider` 时 `useI18n()` 给的是默认 zh 翻译器 ——
@@ -159,7 +160,6 @@ const automation: Automation = {
   },
   promptOptions: {
     model: null,
-    searchEnabled: false,
     fixedSession: false,
   },
   glm: {

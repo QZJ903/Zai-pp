@@ -5,16 +5,14 @@ import { useI18n } from '../i18n';
 
 const SkillPage = lazy(() => import('./SkillPage'));
 const McpPage = lazy(() => import('./McpPage'));
-const ToolsPage = lazy(() => import('./ToolsPage'));
 const BrowserControlPage = lazy(() => import('./BrowserControlPage'));
 const AutomationPage = lazy(() => import('./AutomationPage'));
 
-type CapabilitiesSubTab = 'skill' | 'mcp' | 'tools' | 'browser' | 'automation';
+type CapabilitiesSubTab = 'skill' | 'mcp' | 'browser' | 'automation';
 
-const SUB_TABS: { key: CapabilitiesSubTab; labelKey: 'sidepanel.capabilitiesPage.tabs.skill' | 'sidepanel.capabilitiesPage.tabs.mcp' | 'sidepanel.capabilitiesPage.tabs.tools' | 'sidepanel.capabilitiesPage.tabs.browser' | 'sidepanel.capabilitiesPage.tabs.automation' }[] = [
+const SUB_TABS: { key: CapabilitiesSubTab; labelKey: 'sidepanel.capabilitiesPage.tabs.skill' | 'sidepanel.capabilitiesPage.tabs.mcp' | 'sidepanel.capabilitiesPage.tabs.browser' | 'sidepanel.capabilitiesPage.tabs.automation' }[] = [
   { key: 'skill', labelKey: 'sidepanel.capabilitiesPage.tabs.skill' },
   { key: 'mcp', labelKey: 'sidepanel.capabilitiesPage.tabs.mcp' },
-  { key: 'tools', labelKey: 'sidepanel.capabilitiesPage.tabs.tools' },
   { key: 'browser', labelKey: 'sidepanel.capabilitiesPage.tabs.browser' },
   { key: 'automation', labelKey: 'sidepanel.capabilitiesPage.tabs.automation' },
 ];
@@ -36,7 +34,6 @@ export default function CapabilitiesPage() {
         <Suspense fallback={<RouteFallback />}>
           {sub === 'skill' && <SkillPage />}
           {sub === 'mcp' && <McpPage />}
-          {sub === 'tools' && <ToolsPage />}
           {sub === 'browser' && <BrowserControlPage />}
           {sub === 'automation' && <AutomationPage />}
         </Suspense>

@@ -9,13 +9,29 @@
  * 工厂要拖整条 i18n 资源链（约 80–92 KB），而本模块跑在**页面主世界**、每个 z.ai
  * 页面都会加载它 ⇒ 不能 import 那些工厂。
  *
- * ⚠️⚠️ **防漂移靠守卫，不靠自觉**：`tests/zai-history-tool-names.test.ts` 会**从真
+ * ⚠️⚠️ **防漂移靠守卫，不靠自觉**：`tests/zai-history-cleanup.test.ts` 会**从真
  * 工厂派生**全部内置工具名，断言这份清单**恰好等于**那个集合。加了新内置工具却忘了
  * 往这里补，那条用例会红 —— 这正是「手抄必然分叉」那条通则要求的对账机制。
  *
  * ⚠️ **不含 MCP 工具名**（它们由用户配置、名字含随机 server UUID）—— 那部分只能靠
  * 动态快照。所以实际用的是**本清单 ∪ 快照**（见 `resolveHistoryToolNames`）。
  */
+
+/**
+ * **已经从扩展里删掉的**内置工具名。
+ *
+ * ⚠️ **它们必须继续被剥离** —— 老会话的历史里（服务端 `messages/batch` 与
+ * `glm_pp_tool_history`）还留着这些标签的 XML，删掉这一项的表现是
+ * **旧会话里的工具块突然原样显示出来**（失败方向静默）。
+ *
+ * ⚠️ 这一份**不参与**「与真工厂派生集合恰好相等」的对账（那几个工厂已经不生产它们了），
+ * 只作为历史剥离的额外基线。
+ */
+export const ZAI_RETIRED_TOOL_NAMES: readonly string[] = [
+  'web_search',
+  'web_fetch',
+];
+
 export const ZAI_BUILTIN_HISTORY_TOOL_NAMES: readonly string[] = [
   // shell / 本地执行（`core/shell/contracts.ts` 的 SHELL_TOOL_NAMES）
   'shell_exec',
@@ -30,9 +46,6 @@ export const ZAI_BUILTIN_HISTORY_TOOL_NAMES: readonly string[] = [
   'shell_session_begin',
   'shell_session_exec',
   'shell_session_end',
-  // 联网（`core/tool/web-search.ts` 的 WEB_SEARCH_TOOL_NAMES）
-  'web_search',
-  'web_fetch',
   // 记忆（`core/tool/memory.ts`）
   'memory_save',
   'memory_update',
@@ -41,6 +54,8 @@ export const ZAI_BUILTIN_HISTORY_TOOL_NAMES: readonly string[] = [
   // 结果走 `core/ui/` 的卡片渲染）
   'skill_draft_create',
   'memory_import_preview',
+  // 已退役的内置工具名（本文件上方的 `ZAI_RETIRED_TOOL_NAMES`，零依赖、只需展开）
+  ...ZAI_RETIRED_TOOL_NAMES,
 ];
 
 /**

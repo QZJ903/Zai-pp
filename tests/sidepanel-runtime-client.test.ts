@@ -59,10 +59,10 @@ describe('sidepanel runtime client', () => {
   });
 
   it('lets a controller decode commands whose typed status can be ok false', async () => {
-    const client = createSidepanelRuntimeClient(async () => ({ ok: false, origins: [] }));
+    const client = createSidepanelRuntimeClient(async () => ({ ok: false, error: 'permission_denied' }));
 
     await expect(client.request(
-      { type: 'REQUEST_HOST_PERMISSION', payload: { origins: ['https://example.com/*'] } },
+      { type: 'REQUEST_MCP_SERVER_PERMISSION', payload: { serverId: 'server-1' } },
       {
         acceptFailure: true,
         decode: (value) => (value as { ok: boolean }).ok,

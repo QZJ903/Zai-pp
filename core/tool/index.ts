@@ -62,24 +62,6 @@ export {
 } from './runtime';
 
 export {
-  WEB_SEARCH_TOOL_DESCRIPTORS,
-  WEB_SEARCH_TOOL_NAMES,
-  WEB_SEARCH_TOOL_PROVIDER,
-  createWebSearchToolDescriptors,
-  createWebSearchToolProviderIdentity,
-  executeWebSearchToolCall,
-  isExtensionWebToolDescriptor,
-  isWebSearchToolName,
-} from './web-search';
-
-export {
-  WEB_FETCH_DESCRIPTOR_ID,
-  WEB_FETCH_PERMISSION_ERROR_CODE,
-  isRetryableWebFetchPermissionPrecondition,
-  shouldRequestWebFetchPermission,
-} from './web-fetch-permission';
-
-export {
   SKILL_CREATOR_TOOL_NAMES,
   SKILL_CREATOR_TOOL_PROVIDER,
   createSkillCreatorToolDescriptors,
@@ -126,10 +108,6 @@ export type {
   MemoryToolRuntime,
   MemoryToolSaveConfirmation,
 } from './memory';
-
-export type {
-  WebSearchToolName,
-} from './web-search';
 
 export type {
   ToolInvocationCatalog,

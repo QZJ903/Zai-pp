@@ -74,7 +74,7 @@ describe('reconcileStaleRuns', () => {
       name: 'A',
       prompt: 'p',
       schedule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC', enabled: true, minimumIntervalMinutes: 0 },
-      promptOptions: { model: null, searchEnabled: false, fixedSession: false },
+      promptOptions: { model: null, fixedSession: false },
     });
     const startedAt = 1_000_000;
     await seedRun(makeRun({ id: 'run-stale', startedAt }));

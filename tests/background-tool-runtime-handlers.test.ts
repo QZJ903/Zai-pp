@@ -91,7 +91,7 @@ const call: ToolCall = {
 };
 
 describe('tool runtime handler ownership', () => {
-  it('creates exactly the 31 inventory-assigned handlers without duplicate ownership', () => {
+  it('creates exactly the 27 inventory-assigned handlers without duplicate ownership', () => {
     const handlers = createToolRuntimeHandlers({
       mcp: createMcpDependencies(),
       browser: createBrowserDependencies(),
@@ -99,11 +99,11 @@ describe('tool runtime handler ownership', () => {
     });
     const types = handlers.map((handler) => handler.type);
     const expected = readInventoryCommands(
-      'Group C — MCP, tool, browser control, and sandbox (31)',
+      'Group C — MCP, tool, browser control, and sandbox (27)',
     );
 
-    expect(types).toHaveLength(31);
-    expect(new Set(types).size).toBe(31);
+    expect(types).toHaveLength(27);
+    expect(new Set(types).size).toBe(27);
     expect([...types].sort()).toEqual([...expected].sort());
     for (const type of types) expect(getRuntimeCommandOwner(type)).toBe('typed-handler');
 
@@ -113,7 +113,7 @@ describe('tool runtime handler ownership', () => {
       .filter((type) => expected.includes(type))
       .sort();
     expect(Object.keys(TOOL_RUNTIME_PAYLOAD_DECODERS).sort()).toEqual(decodedTypes);
-    expect(decodedTypes).toHaveLength(21);
+    expect(decodedTypes).toHaveLength(18);
   });
 
   it('rejects malformed nested MCP input before persistence or external I/O', async () => {
@@ -346,77 +346,6 @@ describe('browser and web runtime handlers', () => {
     expect(dependencies.broadcastBrowserControlUpdate).toHaveBeenCalledWith(17);
   });
 
-  it('defaults missing or non-string diagnostic queries and isolates failures by domain', async () => {
-    const dependencies = createBrowserDependencies();
-    vi.mocked(dependencies.fetch)
-      .mockResolvedValueOnce({ status: 200, text: async () => '<b>Bing result</b>' })
-      .mockRejectedValueOnce(new Error('network unavailable'))
-      .mockResolvedValueOnce({ status: 204, text: async () => '' })
-      .mockResolvedValueOnce({ status: 204, text: async () => '' })
-      .mockResolvedValueOnce({ status: 204, text: async () => '' })
-      .mockResolvedValueOnce({ status: 204, text: async () => '' });
-    const handlers = createBrowserToolRuntimeHandlers(dependencies);
-
-    await expect(dispatch(handlers, { type: 'DIAGNOSE_WEB_SEARCH' })).resolves.toEqual({
-      'cn.bing.com': { status: 200, length: 18, preview: 'Bing result' },
-      'www.bing.com': { status: 0, length: 0, error: 'network unavailable' },
-    });
-    expect(dependencies.fetch).toHaveBeenNthCalledWith(
-      1,
-      'https://cn.bing.com/search?q=test',
-      expect.any(Object),
-    );
-
-    await dispatch(handlers, {
-      type: 'DIAGNOSE_WEB_SEARCH',
-      payload: null,
-    });
-    expect(dependencies.fetch).toHaveBeenNthCalledWith(
-      3,
-      'https://cn.bing.com/search?q=test',
-      expect.any(Object),
-    );
-
-    await dispatch(handlers, {
-      type: 'DIAGNOSE_WEB_SEARCH',
-      payload: { query: 7 },
-    });
-    expect(dependencies.fetch).toHaveBeenNthCalledWith(
-      5,
-      'https://cn.bing.com/search?q=test',
-      expect.any(Object),
-    );
-  });
-
-  it('preserves empty, denied, rejected-Promise, and synchronous permission responses', async () => {
-    const dependencies = createBrowserDependencies();
-    const handlers = createBrowserToolRuntimeHandlers(dependencies);
-
-    await expect(dispatch(handlers, {
-      type: 'REQUEST_HOST_PERMISSION',
-      payload: { origins: [] },
-    })).resolves.toEqual({ ok: false, error: 'no_origins' });
-    expect(dependencies.requestHostPermission).not.toHaveBeenCalled();
-
-    vi.mocked(dependencies.requestHostPermission)
-      .mockResolvedValueOnce(false)
-      .mockRejectedValueOnce(new Error('permissions Promise rejected'))
-      .mockImplementationOnce(() => {
-        throw new Error('permissions API unavailable');
-      });
-    await expect(dispatch(handlers, {
-      type: 'REQUEST_HOST_PERMISSION',
-      payload: { origins: ['https://example.test/*'] },
-    })).resolves.toEqual({ ok: false, origins: ['https://example.test/*'] });
-    await expect(dispatch(handlers, {
-      type: 'REQUEST_HOST_PERMISSION',
-      payload: { origins: ['https://example.test/*'] },
-    })).resolves.toEqual({ ok: false, origins: ['https://example.test/*'] });
-    await expect(dispatch(handlers, {
-      type: 'REQUEST_HOST_PERMISSION',
-      payload: { origins: ['https://example.test/*'] },
-    })).resolves.toEqual({ ok: false, error: 'permissions API unavailable' });
-  });
 });
 
 describe('tool execution runtime handlers', () => {
@@ -777,16 +706,12 @@ function createMcpDependencies(): McpRuntimeHandlerDependencies {
 
 function createBrowserDependencies(): BrowserToolRuntimeHandlerDependencies {
   return {
-    getWebToolSettings: vi.fn(async () => ({ web_search: true, web_fetch: true })),
-    setWebToolEnabled: vi.fn(async () => undefined),
     getBrowserControlSettings: vi.fn(async () => createBrowserSettings()),
     saveBrowserControlSettings: vi.fn(async () => createBrowserSettings()),
     setBrowserControlEnabled: vi.fn(async (enabled) => createBrowserSettings({ enabled })),
     getBrowserControlState: vi.fn(async () => createBrowserState()),
     setBrowserControlTarget: vi.fn(async () => createBrowserTarget()),
     detachBrowserControl: vi.fn(async () => undefined),
-    requestHostPermission: vi.fn(async () => true),
-    fetch: vi.fn(async () => ({ status: 200, text: async () => '' })),
     broadcastToolDescriptorsUpdate: vi.fn(async () => undefined),
     broadcastBrowserControlUpdate: vi.fn(async () => undefined),
   };

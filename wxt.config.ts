@@ -39,16 +39,13 @@ export function createManifest(env: ConfigEnv): UserManifest {
       ? [...chromiumPermissions, 'sidePanel']
       : basePermissions,
     host_permissions: [
-      // Bing: web_search 依赖。
-      '*://cn.bing.com/*',
-      '*://www.bing.com/*',
       // GLM++ (z.ai) hosts：国区站 + 国际站。两站跑同一份前端产物，
       // 内容脚本与 host 权限都要覆盖到（只声明一个会让另一站整块失效）。
       // ⚠️ **必须是精确模式，不能写成 `*://*.z.ai/*`** —— 站点自己有
       // `zcode.z.ai` 之类的同域子站，通配会把权限范围放大到一个域。
       '*://zchat.z.ai/*',
       '*://chat.z.ai/*',
-      // web_fetch 抓任意站点、MCP 自配端点、GitHub skill 导入都要跨源访问。
+      // 跨源访问：MCP 自配端点、GitHub skill 导入都要用。
       // 声明成必需权限（而非 optional_host_permissions）以省掉运行时授权步骤 ——
       // 此前实测在开发者模式下扩展本就已获得「所有网站」访问权，声明成必需
       // 只是把这件事实写明，安装时用户即可看到权限范围。

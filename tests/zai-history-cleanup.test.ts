@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ZAI_BUILTIN_HISTORY_TOOL_NAMES,
+  ZAI_RETIRED_TOOL_NAMES,
   resolveHistoryToolNames,
 } from '../core/zai/history-tool-names';
 import { stripZaiHistoryResponse } from '../core/zai/history-cleanup';
@@ -34,7 +35,7 @@ const UUID_B = '46e47678-0b4f-4c55-a972-21abd4e64a70';
 const NAMES = ['shell_exec', 'memory_save', 'local_file_write'];
 
 describe('zai history tool name baseline', () => {
-  // ⚠️⚠️ **这份手抄清单必须与真工厂派生的集合恰好相等** ——
+  // ⚠️⚠️ **这份手抄清单必须与「真工厂派生集合 ∪ 已退役工具名」恰好相等** ——
   // 主世界不能 import 那些工厂（会拖整条 i18n 资源链，约 80 KB），
   // 所以只能手抄；而「手抄必然分叉」，唯一防线就是这条对账。
   // 加了新内置工具却忘了往清单里补 ⇒ 这条立刻红。
@@ -45,6 +46,8 @@ describe('zai history tool name baseline', () => {
     for (const descriptor of createSkillCreatorToolDescriptors('en')) derived.add(descriptor.name);
     for (const descriptor of createMemoryImportToolDescriptors('en')) derived.add(descriptor.name);
 
+    // 基线 = 真工厂派生集合 ∪ 已退役工具名（后者只为剥离老会话里残留的 XML）。
+    for (const name of ZAI_RETIRED_TOOL_NAMES) derived.add(name);
     expect([...ZAI_BUILTIN_HISTORY_TOOL_NAMES].sort()).toEqual([...derived].sort());
   });
 

@@ -1,6 +1,5 @@
 import { DEFAULT_LOCALE, type SupportedLocale } from '../i18n/background';
 import { createMemoryToolDescriptors } from './memory';
-import { createWebSearchToolDescriptors } from './web-search';
 import type { ToolCall, ToolDescriptor, ToolError, ToolPayload } from './types';
 import { findFirstXmlToolTag } from './xml-tags';
 
@@ -9,7 +8,6 @@ export function createDefaultToolDescriptors(
 ): readonly ToolDescriptor[] {
   return [
     ...createMemoryToolDescriptors(locale),
-    ...createWebSearchToolDescriptors(locale),
   ];
 }
 
@@ -89,8 +87,7 @@ export function createToolInvocationCatalog(
  * 那是刻意支持 `< name >` 这类带空格标签的写法，且不参与重叠。
  *
  * 去掉后是近线性（4000 空白 0ms）。⚠️ **代价是捕获组会带上尾部空白**
- * （原先由 `\s*` 吃掉）—— 调用方需自行 `trim()`。本函数当前无生产消费者，
- * 唯一的用法在 `scripts/web-search-smoke.mjs`，那里本来就 `.trim()`。
+ * （原先由 `\s*` 吃掉）—— 调用方需自行 `trim()`。本函数当前无生产消费者。
  */
 export function createXmlToolCallRegex(catalog: ToolInvocationCatalog): RegExp {
   if (catalog.invocationNames.length === 0) return /$a/g;
