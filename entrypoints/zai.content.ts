@@ -59,7 +59,11 @@ import {
   rewriteZaiChatNewUserMessages,
   rewriteZaiLastUserMessage,
 } from '../core/zai/request-codec';
-import { isZaiContinuationRequestBody } from '../core/zai/continuation-request';
+import {
+  classifyAugmentRequest,
+  classifySendEvidence,
+  type ZaiSendEvidence,
+} from '../core/zai/send-evidence';
 import {
   buildZaiContinuationPrompt,
   buildZaiNudgePrompt,
@@ -159,11 +163,14 @@ let currentRequestMessageCount = 0;
 /**
  * 收到的 `AUGMENT_REQUEST_BODY` 消息数（页面每发一次 completion / chats-new 请求 +1）。
  *
- * ⚠️ **这是自动化发送链的判据，不是诊断** —— `submitAutomationPromptViaPage` 靠它判断
- * 「请求到底发出去了没有」（发送前后各读一次、变大即为已发出），进而决定返回 true/false，
- * 而 `submitDomTaskPrompt` 会据此在失败时回 `DOM_TASK_FAILED`。**删它会打断自动化发送链。**
- * ⚠️ **在 `handleAugmentRequestBody` 的提前 return 之前自增** —— 语义是「消息到了」，
- * 与那一次增广成功与否无关。
+ * ⚠️ **这是两个发送链的判据，不是诊断**：
+ * - `submitAutomationPromptViaPage`（自动化首条）靠它判断「请求到底发出去了没有」；
+ * - `waitForSendEvidence`（续跑 / nudge）用它区分「桥通了但 body 不是续跑模板」
+ *   与「桥挂了」—— 前者请求确实出去了，后者才该收尾。
+ * **删它会同时打断这两条链。**
+ * ⚠️ **自增点在 `dispatchMainWorldMessage` 的同步区（串行队列之外）** ——
+ * 语义是「消息到了」，与那一次增广成功与否无关；而放进队列内会让续跑链自锁
+ * （等它的代码自己就占着队列）。
  */
 let observedAugRequestCount = 0;
 /**
@@ -438,6 +445,13 @@ interface ContinuationLoop {
    * 到 Skill 目录 —— 而**提示词里那句软约束照旧在**，所以是静默退化。
    */
   localSkillDir: string | null;
+  /**
+   * 「这一发没拿到发出证据」的看门狗句柄（没有看门狗在挂则为 null）。
+   *
+   * ⚠️ **收尾时必须撤掉**（`finishContinuationLoop` 会做）—— 否则它到点会对着
+   * 一个已收尾的循环再跑一遍，把已经完成的任务标成失败。
+   */
+  pendingWatchdog: ReturnType<typeof setTimeout> | null;
 }
 
 let continuationLoop: ContinuationLoop | null = null;
@@ -1267,10 +1281,6 @@ async function handleAugmentRequestBody(
   const route = message.route === 'chatNew' ? 'chatNew' : 'completion';
   const bodyStr = typeof message.body === 'string' ? message.body : '';
 
-  // 请求计数：自动化发送链靠它判断「请求到底发出去了没有」（发送前后各读一次、变大即为已发出）。
-  // ⚠️ **必须放在下面所有提前 return 之前** —— 语义是「消息到了」，与这次增广成功与否无关。
-  observedAugRequestCount += 1;
-
   if (!id) return;
   if (!bodyStr) {
     postToMainWorld({ type: 'AUGMENT_REQUEST_BODY_RESULT', id, ok: true, result: null });
@@ -1571,12 +1581,24 @@ async function handleAugmentRequestBody(
 // ---------------------------------------------------------------------------
 
 async function dispatchMainWorldMessage(data: Record<string, unknown>): Promise<void> {
-  // 同步探测续跑请求：必须在串行队列外、消息抵达瞬间就标记，否则 `waitForSendEvidence`
-  // 因串行队列阻塞而永远看不到 `AUGMENT_REQUEST_BODY`（自锁）。这里只看一眼 body 是否续跑模板。
-  if (data.type === 'AUGMENT_REQUEST_BODY' && typeof data.body === 'string') {
-    if (isZaiContinuationRequestBody(data.body)) {
-      continuationRequestSeq += 1;
-    }
+  // 两个请求计数器**都必须在串行队列之外涨** —— `waitForSendEvidence` 本身就跑在队列里
+  // （`settleToolTurn` → `handleResponseComplete` → `advanceContinuationLoop` → 发送链），
+  // 它占着队列等这两个数变大；若增量发生在队列内，那个增量永远排不到 ⇒ **自锁**，
+  // 只能等满 5 秒窗口再判成「没证据」。这就是这两个自增放在这里而不是各自处理函数里的原因。
+  //
+  // ⚠️ **两件事、两个计数器，别合并**：
+  // ① `observedAugRequestCount` = 桥消息到了几条（语义是「请求要发出去了」，与内容无关）；
+  // ② `continuationRequestSeq` = 其中几条是**续跑模板**（`waitForSendEvidence` 的主判据）。
+  // 两者的差值说明「请求出去了、但这一发不是我们注入的模板」—— 那也算发出去了。
+  if (data.type === 'AUGMENT_REQUEST_BODY') {
+    // 记账规则本身在 `core/zai/send-evidence.ts`（纯函数、可被真输入喂满）；
+    // 这里只负责「在队列外同步调用」这一件事 —— 而它恰恰是那条约束的全部。
+    const delta = classifyAugmentRequest(
+      data.body,
+      data.route === 'chatNew' ? 'chatNew' : 'completion',
+    );
+    observedAugRequestCount += delta.requestDelta;
+    continuationRequestSeq += delta.continuationDelta;
   }
   // 「响应已到达」的登记同样必须在串行队列**之外**、消息抵达瞬间完成。
   // ⚠️ **它是「是否用户手动停止」的判据**（`armManualStopDetection` 挂窗口时与窗口到期时各读一次
@@ -2201,12 +2223,27 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
         continuationLoop.nudgeCount,
         nudgeToolNames,
       );
-      const submitted = await submitContinuationViaPage(nudgePrompt);
-      if (!submitted) {
+      // ⚠️ **await 之后必须重新取，且要判 null** —— `submitContinuationViaPage` 内部最长等 5 秒，
+      // 这期间 `chrome.runtime.onMessage` 的取消分支（不在串行队列上）可能已经把
+      // `continuationLoop` 置空 ⇒ 直接读它会抛 TypeError，被外层 catch 吞成一行日志、nudge 静默丢弃。
+      const nudgeLoop = continuationLoop;
+      if (!nudgeLoop) return;
+      const nudgeStepAtArm = nudgeLoop.stepCount;
+      const nudgeAtArm = nudgeLoop.nudgeCount;
+      const nudgeEvidence = await submitContinuationViaPage(nudgePrompt);
+      if (nudgeEvidence === 'unsent') {
         console.error('[Zai++] nudge continuation was not observed', {
-          step: continuationLoop.stepCount,
+          step: nudgeStepAtArm,
         });
-        finishContinuationLoop(continuationLoop);
+        finishContinuationLoop(nudgeLoop);
+        return;
+      }
+      if (nudgeEvidence === 'ambiguous') {
+        // 与 `advanceContinuationLoop` 同口径：可能发出去了 ⇒ 不重发，挂看门狗。
+        console.error('[Zai++] nudge continuation left no evidence; arming the watchdog', {
+          step: nudgeStepAtArm,
+        });
+        armAmbiguousSendWatchdog(nudgeLoop, nudgeStepAtArm, nudgeAtArm);
       }
       return;
     }
@@ -2337,6 +2374,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     finalAssistantText: complete.assistantText,
     model: resolveLoopModel(complete.requestId),
     localSkillDir: localSkillDirByRequestId.get(complete.requestId) ?? null,
+    pendingWatchdog: null,
   };
   await advanceContinuationLoop();
 }
@@ -2372,6 +2410,9 @@ async function advanceContinuationLoop(): Promise<void> {
   );
   loop.pendingPrompt = prompt;
   loop.stepCount += 1;
+  /** 看门狗要认「挂上时是哪一步」——见 `armAmbiguousSendWatchdog` 的五条复检。 */
+  const armedAtStep = loop.stepCount;
+  const armedAtNudge = loop.nudgeCount;
 
   // 续跑注入策略（不丢弃用户输入）：
   // 1. 注入前复制用户已有的输入文字；2. 注入时覆盖为续跑 prompt；3. 注入后恢复用户文字。
@@ -2381,8 +2422,8 @@ async function advanceContinuationLoop(): Promise<void> {
     pendingUserComposerRestore = composerInput.value;
   }
 
-  // 主路：复用页面原生 form submit（send 函数路线）；兜底：DOM 点按钮。
-  const submitted = await submitContinuationViaPage(prompt);
+  // 主路：复用页面原生 form submit（send 函数路线）；兜底：DOM 点按钮（只在 unsent 时）。
+  const evidence = await submitContinuationViaPage(prompt);
 
   // 注入完成后，恢复用户之前输入的草稿（如果有）。恢复时不要触发输入事件，避免误发。
   if (pendingUserComposerRestore !== null) {
@@ -2393,26 +2434,42 @@ async function advanceContinuationLoop(): Promise<void> {
     pendingUserComposerRestore = null;
   }
 
-  if (!submitted) {
+  if (evidence === 'unsent') {
+    // 确定没发出去 ⇒ 直接收尾（这一刻没有任何副作用，收掉是安全的）。
     console.error('[Zai++] continuation submit was not observed', { step: loop.stepCount });
     finishContinuationLoop(loop);
+    return;
+  }
+  if (evidence === 'ambiguous') {
+    // 可能发出去了、也可能没有 ⇒ **不许重发**，挂看门狗等一小段再判。
+    console.error('[Zai++] continuation submit left no evidence; arming the watchdog', {
+      step: loop.stepCount,
+    });
+    armAmbiguousSendWatchdog(loop, armedAtStep, armedAtNudge);
   }
 }
 
 /**
  * 续跑提交：主路 trySubmitViaFormRequestSubmit（原生 form submit，send 函数路线），
- * 失败回退 sendPromptViaDom（点 #send-message-button，DOM 兜底）。
+ * **只在确定没发出去时**才回退 sendPromptViaDom（点 #send-message-button，DOM 兜底）。
+ *
+ * ⚠️⚠️ **只有 `unsent` 能重发，`ambiguous` 不能** —— 后者的意思是「可能已经发出去了」，
+ * 再发一遍就是同一段 prompt 发两次（同一批工具再跑一次、用户看到两条一样的消息）。
+ * 这正是不允许用布尔判据的原因：布尔只有「发出去了 / 没发出去」两档，
+ * 而现实有第三档。
+ *
+ * ⚠️⚠️ **这一层刻意不看 Stop 按钮** —— 它拿不到「提交已经触发过」这个前提：
+ * `trySubmitViaFormRequestSubmit` 的提前返回里有一档是「上一轮没答完」
+ * （`waitForAgentIdle` 超时），那种情况下页面**正在生成、而我们根本没注入**，
+ * 看 Stop 会把它误判成「已经发出去了」⇒ 续跑等一个不会来的响应 ⇒ 只能等 180s 租约。
  */
-async function submitContinuationViaPage(prompt: string): Promise<boolean> {
-  const sentViaForm = await trySubmitViaFormRequestSubmit(prompt);
-  if (sentViaForm) return true;
+async function submitContinuationViaPage(prompt: string): Promise<ZaiSendEvidence> {
+  const viaForm = await trySubmitViaFormRequestSubmit(prompt);
+  if (viaForm !== 'unsent') return viaForm;
 
-  // ⚠️⚠️ **这一层刻意不再看一次 Stop 按钮** —— 它拿不到「提交已经触发过」这个前提：
-  // `trySubmitViaFormRequestSubmit` 的提前返回里有一档是「上一轮没答完」
-  // （`waitForAgentIdle` 超时），那种情况下页面**正在生成、而我们根本没注入**，
-  // 看 Stop 会把它误判成「已经发出去了」⇒ 续跑等一个不会来的响应 ⇒ 只能等 180s 租约。
-  // 「页面在生成」这条证据只在 `waitForSendEvidence` 里采 —— 那里已经在提交之后。
-  return sendPromptViaDom(prompt);
+  const viaDom = await sendPromptViaDom(prompt);
+  // ⚠️ 兜底路返回的仍然是三态（它自己也会区分）；这里**不能**再压成布尔。
+  return viaDom;
 }
 
 // ---------------------------------------------------------------------------
@@ -2540,7 +2597,8 @@ async function submitAutomationPromptViaPage(
     // 早先抓到的引用会变成脱连节点（对它提交只报「form is not connected」且不发请求）。
     const liveTextarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR) ?? textarea;
     submitFormViaRequestSubmit(liveTextarea);
-    // requestSubmit 触发了，等 AUGMENT_REQUEST_BODY 真正被串行队列加工并记录（不一味 sleep）。
+    // requestSubmit 触发了，等桥上那条 AUGMENT_REQUEST_BODY 把计数推上去（不一味 sleep）。
+    // ⚠️ 计数在**串行队列之外**自增（见 `dispatchMainWorldMessage` 的同步区），不是等队列加工。
     const submitted = await waitForNewAugRequest(observedBefore);
 
     if (!submitted) {
@@ -2619,7 +2677,7 @@ async function waitForDomTaskRecognized(taskId: string, timeoutMs = AUTOMATION_R
   return false;
 }
 
-/** 等 `observedAugRequestCount` 变大（首条 chatNew 从发送到 main-world hook 上报串行队列有延迟）。 */
+/** 等 `observedAugRequestCount` 变大（首条 chatNew 从发送到桥上广播有延迟，与串行队列无关）。 */
 async function waitForNewAugRequest(beforeCount: number, timeoutMs = 1_200): Promise<boolean> {
   const endAt = Date.now() + timeoutMs;
   while (Date.now() < endAt) {
@@ -2764,19 +2822,19 @@ async function runDomTask(input: {
  * 与 DOM 点按钮同层（都要先设 textarea value + dispatch input 让 bound-value 同步），
  * 区别只在「触发提交」这一步走原生 submit 事件链而非模拟点击。
  */
-async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
-  if (domSendInFlight) return false;
+async function trySubmitViaFormRequestSubmit(prompt: string): Promise<ZaiSendEvidence> {
+  if (domSendInFlight) return 'unsent';
   domSendInFlight = true;
   /** 注入期间对输入框做的那层「看不见」的撤销函数（任何出口都要走 finally 还原）。 */
   let restoreComposerAppearance: (() => void) | null = null;
   try {
     await waitForComposerReady();
     const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
-    if (!textarea) return false;
+    if (!textarea) return 'unsent';
 
     // 等上一轮生成结束，避免首页双提交（首条消息卡在首页的根因）。
     if (!(await waitForAgentIdle())) {
-      return false;
+      return 'unsent';
     }
 
     // 注入期间锁定输入框，避免用户打字与注入交错。
@@ -2798,7 +2856,7 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
     if (!sendButton) {
       clearInjectedComposerText();
       textarea.disabled = wasDisabled;
-      return false;
+      return 'unsent';
     }
 
     // 异常已在 `submitFormViaRequestSubmit` 内部吞掉并转成 `'threw'`，这里只判结果。
@@ -2806,7 +2864,7 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
     if (outcome !== 'ok') {
       clearInjectedComposerText();
       textarea.disabled = wasDisabled;
-      return false;
+      return 'unsent';
     }
 
     // 提交已触发 ⇒ 页面已经读过值（见 `clearInjectedComposerText` 的说明）⇒ 立刻清掉，
@@ -2820,7 +2878,8 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<boolean> {
     textarea.disabled = wasDisabled;
 
     // 成功判据见 `waitForSendEvidence` —— 不能用「输入框被清空」（上面那行替页面满足了它）。
-    return waitForSendEvidence();
+    // ⚠️ 这里**不再把三态压成布尔** —— 压掉之后调用方就分不清「能不能重发」了。
+    return (await waitForSendEvidence()).evidence;
   } finally {
     // ⚠️ **任何出口都要撤销那层「看不见」** —— 漏一次，用户的输入框会一直是透明的。
     restoreComposerAppearance?.();
@@ -3245,8 +3304,103 @@ function formatProjectPanelAge(timestamp: number): string {
   );
 }
 
+/**
+ * 「这一发可能发出去了、也可能没有」的看门狗：到点还不前进就把循环收掉。
+ *
+ * **为什么需要它**：`waitForSendEvidence` 返回 `ambiguous` 时，调用方既不能重发
+ * （可能已经发出去了 ⇒ 双发）也不能就此放手（万一真没出去，这一轮永远等不到响应）。
+ * 没有看门狗的话，`continuationLoop` 会**永久停在 `running`** ——
+ * 而 `submitDomTaskPrompt` 的 busy 判据读的就是它 ⇒ **那之后的每一次自动化都会被拒**，
+ * 且 `busy` 不在 `RETRYABLE_PRE_SEND_ERRORS` 里，后台不会重试。切会话也不清它
+ * （`handleSessionChange` 只清工具面板）。
+ *
+ * **为什么不能直接调 `finishContinuationLoop`**：它内部 `if (loop.taskId)` 会发
+ * `DOM_TASK_COMPLETE` —— 那是「续跑正常跑完」的语义，而这里的事实是「可能根本没发出去」。
+ * 回 COMPLETE 会让自动化显示成功、正文却是空的。所以照 `terminateDomTaskAsStopped`
+ * 的形状：**先摘 `taskId`**（它就不再进 COMPLETE 那一支）→ 收尾 → 自己发 FAILED。
+ *
+ * ⚠️ **刻意不复用 `terminateDomTaskAsStopped`** —— 那个函数会往 `respondedRequestIds`
+ * 里塞 requestId，而我们此刻**没有 requestId**（请求可能压根没发出去）。
+ *
+ * ⚠️⚠️ **复检必须是四条，缺一条都能误收正在进行的循环**：
+ * ① 同一个 loop；② `status === 'running'`；③ `activeRequestId === null`
+ * （null = 还没有请求被认领成续跑轮）；④ **`stepCount` 与 `nudgeCount` 都没变**。
+ *
+ * ⚠️ **④ 为什么要带 `nudgeCount`** —— `advanceContinuationLoop` 会先 `stepCount += 1` 再挂看门狗，
+ * 所以「步数」对它是有效令牌；但 **nudge 分支不推进 `stepCount`**（只递增 `nudgeCount`）。
+ * 只看步数时，连续两次 nudge 各自挂的看门狗会成为对方的「合法收尾者」——
+ * 第一个到点时四条判据全过，而第二个那一发可能正在发送。
+ *
+ * ⚠️ **重新武装前必须先 `clearTimeout` 旧的** —— `pendingWatchdog` 是单数字段、
+ * 承担「一个 loop 至多一个看门狗」的语义；直接覆盖会让旧 timer 留在事件循环里
+ * （它到点后靠复检自我消音，但那是**泄漏**，不是设计）。
+ */
+function armAmbiguousSendWatchdog(
+  loop: ContinuationLoop,
+  stepAtArm: number,
+  nudgeAtArm: number,
+): void {
+  // ⚠️ 覆盖前先撤旧的 —— 同一个 loop 至多一个看门狗，旧的不撤就是泄漏。
+  if (loop.pendingWatchdog !== null) {
+    clearTimeout(loop.pendingWatchdog);
+    loop.pendingWatchdog = null;
+  }
+  const timer = setTimeout(() => {
+    // 期间可能已被正常推进（下一轮已经来了）、已被取消、或被新循环顶替。
+    if (continuationLoop !== loop) return;
+    if (loop.status !== 'running') return;
+    if (loop.activeRequestId !== null) return;
+    // 步数与纠偏次数任一变了 ⇒ 已经推进过一轮，正在注入下一轮。
+    if (loop.stepCount !== stepAtArm || loop.nudgeCount !== nudgeAtArm) return;
+
+    console.error('[Zai++] continuation send left no evidence; reclaiming the loop', {
+      step: loop.stepCount,
+      taskId: loop.taskId,
+    });
+    const stuckTaskId = loop.taskId;
+    // 先摘 taskId ⇒ `finishContinuationLoop` 不再进「回 COMPLETE」那一支。
+    loop.taskId = null;
+    finishContinuationLoop(loop);
+    if (stuckTaskId) {
+      clearActiveDomTask(stuckTaskId);
+      void sendRuntimeMessage({
+        type: 'DOM_TASK_FAILED',
+        taskId: stuckTaskId,
+        error: ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE,
+        chatSessionId: getCurrentChatSessionId(),
+      });
+    }
+  }, ZAI_CONTINUATION_SEND_WATCHDOG_MS);
+  loop.pendingWatchdog = timer;
+}
+
+/**
+ * 看门狗时长：从 `waitForSendEvidence` 返回 `ambiguous` 之后再等这么久。
+ *
+ * 依据（实测，见 zai-site §9.1）：桥上那条 `AUGMENT_REQUEST_BODY` 在**真实请求之前**
+ * 几十毫秒就到了（探针口径里它晚 13–16ms，但那是探针包在最外层导致的）。
+ * 所以「5 秒证据窗口里一条桥消息都没来」之后，再等 5 秒已经足够宽松 ——
+ * 正常情况只需要几十毫秒。上限 10 秒的依据是 Stop 存活最短 5.1 秒：
+ * 超过这个还没动静就不可能是正常轮。对照原来的 180 秒租约，降到十八分之一。
+ */
+const ZAI_CONTINUATION_SEND_WATCHDOG_MS = 5_000;
+
+/**
+ * 「续跑这一发没拿到发出证据」的失败码。
+ *
+ * ⚠️ 与 `continuation_loop_missing` / `continuation_loop_superseded` 分开：
+ * 那两个说的是「循环没了」，这个说的是「循环还在但这一发可能没出去」，
+ * 用户能做的事不同（前者只能等，后者可以重跑）。
+ */
+const ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE = 'continuation_send_unconfirmed';
+
 function finishContinuationLoop(loop: ContinuationLoop): void {
   if (continuationLoop !== loop) return;
+  // 收尾时撤销还没触发的看门狗 —— 否则它到点会对着一个已收尾的循环再跑一遍逻辑。
+  if (loop.pendingWatchdog !== null) {
+    clearTimeout(loop.pendingWatchdog);
+    loop.pendingWatchdog = null;
+  }
   loop.status = 'idle';
   loop.activeRequestId = null;
   loop.pendingPrompt = null;
@@ -3420,24 +3574,24 @@ async function waitForAgentIdle(timeoutMs = 8_000): Promise<boolean> {
  * ⚠️ **只有续跑链用它**（`sendPromptViaDom` ← `submitContinuationViaPage` 的兜底）；
  * 自动化的首条注入走另一条 `submitAutomationPromptViaPage`，不经过这里。
  * 它负责：等输入框就绪 → 等上一轮生成结束 → 写 value → 派发 input → 点 send 按钮
- * → 判定「已发出」（见 `waitForSendEvidence`：请求计数为主、等待期间看到过 Stop 为副）。
+ * → 判定「已发出」（见 `waitForSendEvidence`：两个请求计数分三态，Stop 只作诊断、不参与分档）。
  *
  * 注意：这里只管「发送动作是否成功发出」，**不管**后续的请求归属/续跑/收尾，
  * 那些是调用方（续跑状态机 / 自动化任务状态机）各自的职责。续跑机制不被本函数改动。
  */
-async function sendPromptPrimitive(prompt: string): Promise<boolean> {
-  if (domSendInFlight) return false;
+async function sendPromptPrimitive(prompt: string): Promise<ZaiSendEvidence> {
+  if (domSendInFlight) return 'unsent';
   domSendInFlight = true;
   /** 注入期间对输入框做的那层「看不见」的撤销函数（任何出口都要走 finally 还原）。 */
   let restoreComposerAppearance: (() => void) | null = null;
   try {
     await waitForComposerReady();
     const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
-    if (!textarea) return false;
+    if (!textarea) return 'unsent';
 
     // 等上一轮生成结束，避免注入被当作用户抢答丢弃（首页首条尤其重要）。
     if (!(await waitForAgentIdle())) {
-      return false;
+      return 'unsent';
     }
 
     const wasDisabled = textarea.disabled;
@@ -3454,20 +3608,22 @@ async function sendPromptPrimitive(prompt: string): Promise<boolean> {
     if (!sendButton) {
       clearInjectedComposerText();
       textarea.disabled = wasDisabled;
-      return false;
+      return 'unsent';
     }
 
     sendButton.click();
 
     // 成功判据见 `waitForSendEvidence`（同样不能再用「输入框被清空」）。
-    const observed = await waitForSendEvidence();
-    // ⚠️ **成功时不在这里清空** —— 这一路是「点按钮」的兜底，
-    // 页面从点击到读完值之间的时序没有实测过（`requestSubmit` 那条实测过）。
-    // 在它读完之前清空会把这次发送打空，且失败方向是静默的。
-    // 失败时才清：那时值已不会再被读到，留着只会让注入的 prompt 一直挂在输入框上。
-    if (!observed) clearInjectedComposerText();
+    const { evidence } = await waitForSendEvidence();
+    // ⚠️ **提交触发之后不再清空，一档都不清** ——
+    // `sent`：页面自己会清；
+    // `ambiguous`：那一发**可能已经发出去了**，页面还没读走值，清了会把这次发送打空
+    //   且失败方向静默（请求照发、正文是空的）；
+    // `unsent`：**这个函数拿不到这一档** —— `classifySendEvidence` 只产出 `sent` / `ambiguous`，
+    //   `unsent` 的三个出口（无 textarea / agent 不空闲 / 点前无发送按钮）都在点击**之前**，
+    //   那三处已各自清过。
     textarea.disabled = wasDisabled;
-    return observed;
+    return evidence;
   } finally {
     // ⚠️ **任何出口都要撤销那层「看不见」** —— 漏一次，用户的输入框会一直是透明的。
     restoreComposerAppearance?.();
@@ -3475,7 +3631,7 @@ async function sendPromptPrimitive(prompt: string): Promise<boolean> {
   }
 }
 
-async function sendPromptViaDom(prompt: string): Promise<boolean> {
+async function sendPromptViaDom(prompt: string): Promise<ZaiSendEvidence> {
   // 收敛到共享发送原语：等上一轮生成结束 → 写 value → 点 send → 判定已发出。
   return sendPromptPrimitive(prompt);
 }
@@ -3676,36 +3832,76 @@ async function waitForAutomationComposer(timeoutMs = 60_000): Promise<boolean> {
   return document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR) !== null;
 }
 
+/*
+ * 三档的含义与调用方该怎么处置（类型定义在 `core/zai/send-evidence.ts`）：
+ *
+ * | 档 | 含义 | 该做什么 |
+ * |---|---|---|
+ * | `sent` | 请求确实发出去了 | 正常推进 |
+ * | `unsent` | 确定没发出去 | **可以安全重发**（没有任何副作用） |
+ * | `ambiguous` | 证据不足 —— 可能发出去了，也可能没有 | **不许重发**（重发就是双发），起看门狗 |
+ */
 /**
  * 等「这一发确实发出去了」的证据，最多 5 秒。
  *
- * 判据有两条，**优先级不同**：
+ * 判据有两个**独立的**计数器，它们回答的是不同的问题：
  *
- * ① **请求计数**（`continuationRequestSeq`）—— 主判据。它在桥上那条 `AUGMENT_REQUEST_BODY`
- *    抵达时 +1，而那份探测跑在**串行队列之外**（我们此刻正占着队列，队列内的计数读不到）。
- *    ⚠️ 不能用 `continuationLoop.status` 判定：那会自锁 ——
- *    `RESPONSE_COMPLETE` 在串行队列里被本函数阻塞，而本函数又在等 status 变化。
+ * ① `observedAugRequestCount` —— **桥消息到了几次**。它在 `dispatchMainWorldMessage`
+ *    的**串行队列之外**就 +1，语义是「主世界说有请求要发出去了」。
+ * ② `continuationRequestSeq` —— **其中几次是续跑模板**。它只在
+ *    `isZaiContinuationRequestBody` 判 true 时 +1。
  *
- * ② **等待期间看到过 Stop 按钮** —— 副判据。它读 DOM，不经桥也不经队列。
- *    ⚠️⚠️ **它只被记录、不参与等待**（看到了也不提前返回），只在①始终没涨时
- *    用来区分「其实已经发出去了」与「真没发出去」。**这是刻意的**：Stop 出现的时刻
- *    没有实测过，若它早于页面自己清空输入框，提前返回会让调用方把用户草稿恢复得过早、
- *    随后被页面那次清空抹掉。
+ * 两者都在**串行队列之外**涨（`dispatchMainWorldMessage` 的同步区），
+ * 所以我们占着队列也读得到。⚠️ **不能用 `continuationLoop.status` 判定**：
+ * `RESPONSE_COMPLETE` 在串行队列里被本函数阻塞，而本函数又在等 status 变化 ⇒ 自锁。
  *
- * ⚠️ **调用点必须在「提交已经触发」之后** —— ②的语义是「页面在生成」，
- * 而页面在生成也可能是上一轮还没答完（例如 `waitForAgentIdle` 超时那条提前返回），
- * 在提交之前观测会把它误记成「这一发发出去了」。
+ * **两个计数器的组合决定档位**（这是区分 `ambiguous` 两种成因的唯一办法：
+ * 「桥挂了」与「桥通了但 body 不是续跑模板」代价完全不同，前者这一轮真的不会前进，
+ * 后者请求正常发出、回答照常回来，只是主判据没涨）：
+ *
+ * | ① count | ② seq | 档 | 说明 |
+ * |---|---|---|---|
+ * | 涨 | 涨 | `sent` | 正常：桥通了、而且认得出是续跑模板 |
+ * | 涨 | 没涨 | `sent` | 桥通了，但这一发的 body 不是续跑模板（注入没被采纳等）—— **请求确实出去了** |
+ * | 没涨 | 没涨 | `ambiguous` | 桥挂了，或请求压根没发 |
+ *
+ * ⚠️ **「看到过 Stop」不再参与分档** —— 它只作为**诊断字段**留在返回值里。
+ * 理由是实测：Stop 早于请求 3–5ms、存活 5–7 秒，把它当证据等于「只要页面在生成就算发出去了」。
+ *
+ * ⚠️ **调用点必须在「提交已经触发」之后** —— 两个计数器都只反映「提交之后」发生的事，
+ * 在提交之前读会拿上一轮的残留。
  */
-async function waitForSendEvidence(): Promise<boolean> {
+async function waitForSendEvidence(): Promise<{
+  evidence: ZaiSendEvidence;
+  /** 诊断用：等待期间看到过 Stop 按钮（**不参与分档**）。 */
+  sawStop: boolean;
+  /** 诊断用：这一轮桥上来了几条请求（`observedAugRequestCount` 的增量）。 */
+  requestDelta: number;
+  /** 诊断用：其中几条认作续跑模板（`continuationRequestSeq` 的增量）。 */
+  continuationDelta: number;
+}> {
   const startSeq = continuationRequestSeq;
+  const startCount = observedAugRequestCount;
   const endAt = Date.now() + 5_000;
   let sawStop = false;
+
+  const verdict = (): ZaiSendEvidence => classifySendEvidence(
+    observedAugRequestCount - startCount,
+    continuationRequestSeq - startSeq,
+  );
+
   while (Date.now() < endAt) {
-    if (continuationRequestSeq > startSeq) return true;
+    if (verdict() === 'sent') break;
     if (!sawStop && isAgentCurrentlyRunning()) sawStop = true;
     await sleep(150);
   }
-  return sawStop;
+
+  return {
+    evidence: verdict(),
+    sawStop,
+    requestDelta: observedAugRequestCount - startCount,
+    continuationDelta: continuationRequestSeq - startSeq,
+  };
 }
 
 // ---------------------------------------------------------------------------

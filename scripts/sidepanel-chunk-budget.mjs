@@ -71,7 +71,28 @@ const BASELINE = Object.freeze({
   // —— **−3326 raw / −671 gzip**。
   // ⚠️ **2026-10-20 十一测（评审收口）**：加 `sidepanel.mcpPage.shellSetup.listSeparator`
   // （中英各 1 键）后实测 raw 327195 / gzip 102595 —— **+42 raw / +25 gzip**。
-  initialShell: { raw: 327_195, gzip: 102_595 },
+  // ⚠️⚠️ **2026-10-21 十二测（MCP 页工具卡片改人话）**：新增
+  // `sidepanel.mcpPage.detail.toolInfo`（12 个 Shell 工具各一组 label/summary
+  // + 三条风险徽章文案，中英各 27 键），并删掉零引用的 `schemaNone` /
+  // `schemaSummary` / `schemaRequired`（中英各 3 键）后，实测 raw **331733** /
+  // gzip **103777** —— **+4538 raw / +1182 gzip**。
+  // ⚠️ 涨幅来自键数本身（`sidepanel` 段整份进初始 shell，同上面几条），
+  // 净增 48 对键 —— 与「1 键 ≈ 276 raw」的量级对得上。
+  // ⚠️ **同日十三测（续跑「未确认发出」那条文案改措辞）**：把「请重试」改成
+  // 「请先检查对话内容，再决定是否重试」（中英各 1 键的值变长）后实测
+  // raw **331837** / gzip **103806** —— **+104 raw / +29 gzip**。
+  // 只改值不增删键，涨幅远小于「1 键 ≈ 276 raw」，符合上面第七条注释的规律。
+  // ⚠️ **同日十四测（MCP 页状态四档与空状态文案改中文）**：`status.{ready,error,disabled,unknown}`
+  // 与 `detail.noTools`（中英各 5 键，只改值不增删键）后实测
+  // raw **331993** / gzip **103994** —— **+156 raw / +188 gzip**。
+  // ⚠️ **gzip 涨幅大于 raw** —— 与 2026-10-07 那条同源：中文 UTF-8 占 3 字节但压得更狠，
+  // 反过来英文（`ready` → `Connected`）字符变多、raw 略涨而 gzip 涨得更多。
+  // ⚠️ **同日十五测（首发导览文案）**：`whatsNew` 段副标题改功能定位、
+  // 条目由 3 条改 6 条（删 `browserControlBoundary` / `sidepanelFeedback`，
+  // 新增 `memory` / `skill` / `mcp` / `automation` / `project`，中英各净增 3 键）后
+  // 实测 raw **332879** / gzip **103981** —— **+886 raw / −13 gzip**。
+  // ⚠️ **gzip 反而降了** —— 中文条目压得更狠，同上面第七条注释的规律。
+  initialShell: { raw: 332_879, gzip: 103_981 },
   // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
   // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
   // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，
@@ -114,7 +135,11 @@ const BUDGET = Object.freeze({
     // Rollup 就把它内联了（与「entrypoint 数量决定切分」那条同源）。
     // ⇒ **总字节没有涨**：旧产物 `McpPage 39632 + controller 15343 = 54975`，
     // 现在 McpPage 单文件 54922。预算按新的单文件实测抬到 56_000 / 14_500。
-    McpPage: { raw: 56_000, gzip: 14_500 },
+    // ⚠️ **2026-10-21 抬到 60_000 / 15_000** —— 工具卡片改人话（工具说明 12 组
+    // + 风险徽章三档）后实测 raw 57501 / gzip 14119，原预算 56000 差 1501 字节。
+    // 这是**真实增长**（不是合并），来源是 `classifyAugmentRequest` 那套判定
+    // 与 12 个工具的中文说明进了同一个 chunk。抬预算时留了 ~2500 / ~880 余量。
+    McpPage: { raw: 60_000, gzip: 15_000 },
     BrowserControlPage: { raw: 10_000, gzip: 4_000 },
     // 自动化仍是能力页的一个 tab，独立懒加载 chunk。
     AutomationPage: { raw: 35_000, gzip: 10_000 },

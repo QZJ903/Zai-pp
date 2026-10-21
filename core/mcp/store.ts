@@ -416,8 +416,19 @@ function shouldInvalidateMcpToolCache(previous: McpServerConfig, next: McpServer
   return mcpDiscoveryFingerprint(previous) !== mcpDiscoveryFingerprint(next);
 }
 
+/**
+ * 配置「会不会影响发现结果」的指纹 —— 值相同就相等，**与键序无关**。
+ *
+ * ⚠️⚠️ **必须过 `canonicalizeForFingerprint`，不能直接 `JSON.stringify`**：
+ * `normalizeServerForMutation` 重建 `timeouts` 时按源码声明序
+ * （`connectMs` / `requestMs` / `discoveryMs`），而从 `chrome.storage` 读回的
+ * 是**键名字母序**（`connectMs` / `discoveryMs` / `requestMs`）。
+ * 同一个值、两种键序 ⇒ 指纹不相等 ⇒ 「配置变了」被误判 ⇒
+ * **任何一次配置写入都会清空工具缓存、把状态打成 `unknown`、抹掉上次连接时间**
+ * （表现：改个显示名或关掉一个工具，工具列表就变成 0 个、要重新刷新）。
+ */
 function mcpDiscoveryFingerprint(server: McpServerConfig): string {
-  return JSON.stringify({
+  return JSON.stringify(canonicalizeForFingerprint({
     // Older valid records omit optional transport and secret fields. Mutating
     // status after discovery normalizes those omissions, which must not
     // invalidate the cache that discovery just wrote. Secret IDs are UI
@@ -429,9 +440,15 @@ function mcpDiscoveryFingerprint(server: McpServerConfig): string {
       command: server.transport.command ?? '',
       args: server.transport.args ?? [],
       cwd: server.transport.cwd ?? '',
-      env: canonicalStringRecord(server.transport.env),
+      // ⚠️ **`?? {}` 是承重的** —— `normalizeServerForMutation` 那一侧用
+      // `stringRecordValue()` 把缺省的 `env` 补成 `{}`；若这里留着 `undefined`，
+      // `JSON.stringify` 会**整个丢掉这个键** ⇒ 两侧指纹不等 ⇒ 又变成「每次写入都清缓存」。
+      env: server.transport.env ?? {},
     },
     headers: server.headers,
+    // ⚠️ **先按「影响连接的四个字段」投影，再排序** —— 不要直接把原始 `secrets`
+    // 交给 canonicalize：那样 `id` 会进指纹（它是 UI 身份，不影响连接），
+    // 而缺省字段会与补齐后的形状产生假差异。
     secrets: server.secrets.map((secret) => ({
       kind: secret.kind,
       headerName: secret.headerName ?? '',
@@ -440,11 +457,26 @@ function mcpDiscoveryFingerprint(server: McpServerConfig): string {
     })),
     timeouts: server.timeouts,
     limits: server.limits,
-  });
+  }));
 }
 
-function canonicalStringRecord(value: Record<string, string> | undefined): Record<string, string> {
-  return Object.fromEntries(Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right)));
+/**
+ * 递归按**键名**排序后再交给调用方序列化。
+ *
+ * ⚠️ **数组不排序** —— `headers` 与 `transport.args` 的顺序有语义，
+ * 换个顺序就是另一份配置。
+ */
+function canonicalizeForFingerprint(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeForFingerprint);
+  if (value && typeof value === 'object') {
+    const source = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(source)
+        .sort((left, right) => left.localeCompare(right))
+        .map((key) => [key, canonicalizeForFingerprint(source[key])]),
+    );
+  }
+  return value;
 }
 
 function headerArrayValue(value: unknown): McpHeaderValue[] {

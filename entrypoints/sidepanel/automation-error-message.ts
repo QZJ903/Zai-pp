@@ -69,6 +69,7 @@ const AUTOMATION_ERROR_KEYS: Readonly<Record<string, LocaleMessageKey>> = Object
   dom_automation_cancelled: 'sidepanel.automationPage.error.pageStopped',
   dom_automation_continuation_loop_missing: 'sidepanel.automationPage.error.pageContinuationBroken',
   dom_automation_continuation_loop_superseded: 'sidepanel.automationPage.error.pageContinuationBroken',
+  dom_automation_continuation_send_unconfirmed: 'sidepanel.automationPage.error.pageSendUnconfirmed',
   dom_automation_continuation_session_id_missing: 'sidepanel.automationPage.error.pageSessionMissing',
   dom_automation_no_current_conversation: 'sidepanel.automationPage.error.pageSessionMissing',
   dom_automation_missing_task_id_or_prompt: 'sidepanel.automationPage.error.pageTaskParamsMissing',

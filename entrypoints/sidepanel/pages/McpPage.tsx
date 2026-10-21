@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import type { LocaleMessageKey, MessageParams, SupportedLocale } from '../../../core/i18n';
 import type {
   McpCapabilityExposureMode,
@@ -22,11 +22,14 @@ import { useI18n } from '../i18n';
 import {
   countEnabledMcpTools,
   getAllowedMcpTransportKinds,
+  describeMcpTool,
   isMcpNativeMessagingSupported,
   isMcpToolEnabled,
   isMcpToolSelected,
   isShellMcpServer,
   orderMcpToolsByPin,
+  riskBadgeLabelKey,
+  type McpToolRiskBadge,
 } from '../controllers/mcp-tools-controller';
 import { useMcpPageController } from '../controllers/useMcpPageController';
 import {
@@ -1000,12 +1003,18 @@ function ToolRow({
 }) {
   const enabled = isMcpToolEnabled(server, tool);
   const selected = isMcpToolSelected(server, tool);
+  const presentation = describeMcpTool(tool, t);
   return (
     <div className="ds-card rounded-lg px-3 py-2">
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-xs font-medium truncate" style={{ color: 'var(--ds-text)' }}>{tool.title || tool.name}</div>
-          <div className="text-[11px] mt-0.5 truncate" style={{ color: 'var(--ds-blue)' }}>{tool.invocationName}</div>
+        <div className="min-w-0 flex items-center gap-1.5">
+          <span className="text-xs font-medium truncate" style={{ color: 'var(--ds-text)' }}>{presentation.label}</span>
+          <span
+            className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+            style={riskBadgeStyle(presentation.risk)}
+          >
+            {t(riskBadgeLabelKey(presentation.risk))}
+          </span>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -1028,13 +1037,39 @@ function ToolRow({
         </div>
       </div>
       <div className="text-[11px] mt-1 leading-4" style={{ color: 'var(--ds-text-secondary)' }}>
-        {tool.description}
-      </div>
-      <div className="text-[10px] mt-2 truncate" style={{ color: 'var(--ds-text-tertiary)' }}>
-        {schemaSummary(tool, t)}
+        {presentation.summary}
       </div>
     </div>
   );
+}
+
+/**
+ * 风险徽章的配色。
+ *
+ * 三档各用一种已有的语义色：只读 = 中性、写入 = 警告、执行 = 危险。
+ * 与「只有两种颜色」相比，这里刻意让**写入**与**执行**分开 —— 用户最需要分辨的
+ * 正是「它改我的文件」和「它在我机器上跑东西」。
+ */
+function riskBadgeStyle(risk: McpToolRiskBadge): CSSProperties {
+  if (risk === 'read') {
+    return {
+      color: 'var(--ds-text-tertiary)',
+      background: 'var(--ds-surface)',
+      border: '1px solid var(--ds-border)',
+    };
+  }
+  if (risk === 'write') {
+    return {
+      color: 'var(--ds-warning)',
+      background: 'var(--ds-warning-bg)',
+      border: '1px solid var(--ds-warning-border)',
+    };
+  }
+  return {
+    color: 'var(--ds-danger)',
+    background: 'var(--ds-danger-bg)',
+    border: '1px solid var(--ds-danger-border)',
+  };
 }
 
 function EmptyState({ label, hint, actions }: { label: string; hint?: string; actions?: ReactNode }) {
@@ -1270,18 +1305,6 @@ function positiveInt(value: string, label: string, t: Translator): number | stri
 
 function isHeaderName(value: string): boolean {
   return /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(value);
-}
-
-function schemaSummary(tool: ToolDescriptor, t: Translator): string {
-  const props = Object.keys(tool.inputSchema.properties ?? {});
-  const required = tool.inputSchema.required ?? [];
-  if (props.length === 0) return t('sidepanel.mcpPage.detail.schemaNone');
-  return t('sidepanel.mcpPage.detail.schemaSummary', {
-    props: `${props.slice(0, 6).join(', ')}${props.length > 6 ? '...' : ''}`,
-    required: required.length
-      ? t('sidepanel.mcpPage.detail.schemaRequired', { required: required.join(', ') })
-      : '',
-  });
 }
 
 function statusMeta(status: McpServerStatus, t: Translator) {

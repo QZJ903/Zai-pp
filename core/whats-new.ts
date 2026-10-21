@@ -13,9 +13,12 @@ export interface WhatsNewState {
 }
 
 export const WHATS_NEW_ITEMS: WhatsNewItem[] = [
+  { id: 'memory', titleKey: 'sidepanel.whatsNew.items.memory' },
+  { id: 'skill', titleKey: 'sidepanel.whatsNew.items.skill' },
+  { id: 'mcp', titleKey: 'sidepanel.whatsNew.items.mcp' },
   { id: 'browser-control', titleKey: 'sidepanel.whatsNew.items.browserControl' },
-  { id: 'browser-control-boundary', titleKey: 'sidepanel.whatsNew.items.browserControlBoundary' },
-  { id: 'sidepanel-feedback', titleKey: 'sidepanel.whatsNew.items.sidepanelFeedback' },
+  { id: 'automation', titleKey: 'sidepanel.whatsNew.items.automation' },
+  { id: 'project', titleKey: 'sidepanel.whatsNew.items.project' },
 ];
 
 const LAST_SEEN_VERSION_KEY = 'glm_pp_whats_new_dismissed_version';

@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WhatsNewPanel from '../entrypoints/sidepanel/components/WhatsNewPanel';
+import { WHATS_NEW_ITEMS } from '../core/whats-new';
 
 const LAST_SEEN_VERSION_KEY = 'glm_pp_whats_new_dismissed_version';
 const PENDING_UPDATE_VERSION_KEY = 'glm_pp_whats_new_pending_version';
@@ -71,8 +72,12 @@ describe('WhatsNewPanel', () => {
 
     expect(container.textContent).toContain('版本更新内容');
     expect(container.textContent).toContain('v0.7.2');
-    expect(container.textContent).toContain('浏览器控制可在侧边栏选择目标标签页');
-    expect(container.textContent).toContain('保存项、项目和提示词控制增加更明确的成功、失败和不可用状态反馈。');
+    expect(container.textContent).toContain('记忆：对话中自动积累偏好与项目背景');
+    expect(container.textContent).toContain('项目：项目指令与项目记忆随该项目的对话自动进入上下文。');
+
+    // 条目表与 i18n 键是一对：少一条渲染说明有一处对不上。
+    expect(container.querySelectorAll('.ds-whats-new-item')).toHaveLength(WHATS_NEW_ITEMS.length);
+    expect(WHATS_NEW_ITEMS).toHaveLength(6);
 
     const button = container.querySelector('button');
     expect(button?.textContent).toBe('知道了');

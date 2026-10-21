@@ -166,16 +166,39 @@ describe('composer clear: 点按钮那条兜底路只在失败时清空', () => 
     ).toEqual([]);
   });
 
-  it('「没等到发送按钮」与「请求没观察到」两条分支各自都清空', () => {
+  it('提交触发之后一次都不清空，只剩「没等到发送按钮」那一条前置出口', () => {
     const { program, source } = context();
     const body = findFunctionBody(program, DOM_PATH_FN);
 
     const guard = ifWithTest(body, source, '!sendButton');
     expect(callsTo(guard[0]!, CLEAR_FN), '「没等到发送按钮」分支必须清空').toHaveLength(1);
 
-    const notObserved = ifWithTest(body, source, '!observed');
-    expect(notObserved, '应当有一条 `!observed` 分支').toHaveLength(1);
-    expect(callsTo(notObserved[0]!, CLEAR_FN), '「请求没观察到」分支必须清空').toHaveLength(1);
+    // ⚠️⚠️ **提交之后不再有任何清空分支** —— 三态里这个函数只能拿到 `sent` / `ambiguous`：
+    // `sent` 页面自己会清；`ambiguous`（可能已发出）**不能清**，清了会把这次发送打空、
+    // 失败方向静默。**`unsent` 不由 `classifySendEvidence` 产出**，它的三个出口
+    // （无 textarea / agent 不空闲 / 点前无发送按钮）全在点击**之前**。
+    //
+    // ⇒ 这条用例判的是「**除了 `!sendButton` 那一条，没有第二处清空**」。
+    // ⚠️ 曾经的判据是「清空只能挂在只认 unsent 的条件上」，而那条 `if` 恒假 ——
+    // 用例被一条**永远不会执行的**分支喂饱，看着绿、实际什么都没守。
+    // **判据要对着「真实可能执行的路径」写**，不是对着「代码里写了什么」。
+    const clears = callsTo(body, CLEAR_FN);
+    const outsideSendButtonGuard = clears.filter((call) => !within(call, guard[0]!));
+    expect(
+      outsideSendButtonGuard.map((call) => call.loc?.start.line ?? -1),
+      '提交之后的任何清空都是错的 —— ambiguous 那一发可能已经发出去了',
+    ).toEqual([]);
+
+    // 反面自检：`unsent` 这个字面量不该再以「清空条件」的形式出现。
+    // 它出现即说明有人把那条恒假分支加回来了（它永远执行不到，只会误导读者）。
+    const unsentGuards = ifStatements(body).filter((statement) => {
+      const testText = source.slice(statement.test.start ?? 0, statement.test.end ?? 0);
+      return testText.includes("'unsent'");
+    });
+    expect(
+      unsentGuards.map((statement) => statement.loc?.start.line ?? -1),
+      '`evidence` 在这个函数里永远不等于 unsent —— 别写这条分支，它执行不到',
+    ).toEqual([]);
   });
 });
 

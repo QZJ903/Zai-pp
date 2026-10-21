@@ -189,13 +189,16 @@ export const sidepanel = {
   },
   whatsNew: {
     title: "What's new",
-    subtitle: 'This release adds Browser Control and tightens side-panel feedback and permission copy.',
+    subtitle: 'Turns Zai from a chat window into an assistant that remembers context, calls tools, and acts on its own.',
     versionBadge: 'v{version}',
     dismiss: 'Got it',
     items: {
-      browserControl: 'Browser Control can select a target tab from the side panel and perform visible web actions for Zai++.',
-      browserControlBoundary: 'Browser Control stays off by default and only adds text snapshots and browser action tools to new conversations after it is enabled.',
-      sidepanelFeedback: 'Saved items, projects, and prompt controls now show clearer success, failure, and unavailable-state feedback.',
+      memory: 'Memory: preferences and project context accumulate from your conversations and carry into later replies.',
+      skill: 'Skills: import reusable workflows from local folders or GitHub, then invoke with /skill-name or let auto-activation match them.',
+      mcp: 'MCP: connect local or remote MCP servers and hand their tools to the model.',
+      browserControl: 'Browser Control: drive a tab you select through the Debugger — read the page, click, and fill forms.',
+      automation: 'Automation: hand fixed tasks to a dedicated session, triggered manually or on a Cron / RRULE schedule.',
+      project: 'Projects: project instructions and memories enter the context of every conversation filed under that project.',
     },
   },
   memoryPage: {
@@ -513,19 +516,69 @@ export const sidepanel = {
       adaptiveBudgetApply: 'Apply',
       adaptiveBudgetInvalid: 'Use 1–64 schemas and 2,000–256,000 bytes.',
       discoveredTools: 'Discovered tools',
-      noTools: 'No tools discovered yet',
+      noTools: 'No tools discovered yet. Use "Refresh tools" to discover them.',
       recentCalls: 'Recent calls',
       noHistory: 'No call history',
-      schemaNone: 'Params: none',
-      schemaSummary: 'Params: {props}{required}',
-      schemaRequired: '; required {required}',
       hintExpand: 'Show install guide',
+      toolInfo: {
+        riskRead: 'Read',
+        riskWrite: 'Write',
+        riskExecute: 'Execute',
+        shell_exec: {
+          label: 'Run shell command',
+          summary: 'Runs a shell command on this machine and returns stdout, stderr, and the exit code.',
+        },
+        shell_status: {
+          label: 'Shell environment',
+          summary: 'Checks whether the local shell is reachable, which shell it is, and the current directory.',
+        },
+        python_status: {
+          label: 'Python environment',
+          summary: 'Checks whether a local Python is available and which common packages are installed.',
+        },
+        python_exec: {
+          label: 'Run Python code',
+          summary: 'Runs a short Python snippet for computation or validation. No package installs, no network.',
+        },
+        local_skill_preview: {
+          label: 'Preview local skill folder',
+          summary: 'Reads SKILL.md files and scripts from a skill folder without executing any of it.',
+        },
+        local_folder_pick: {
+          label: 'Pick local folder',
+          summary: 'Opens the system folder picker and returns the path the user selects.',
+        },
+        local_file_stat: {
+          label: 'File information',
+          summary: 'Reports whether a path exists, its size and modification time, without reading its contents.',
+        },
+        local_file_read: {
+          label: 'Read text file',
+          summary: 'Reads a local text file, with paged reads for large files.',
+        },
+        local_file_write: {
+          label: 'Write text file',
+          summary: 'Writes text to a local file, either overwriting or appending.',
+        },
+        shell_session_begin: {
+          label: 'Open persistent shell session',
+          summary: 'Starts a shell that keeps its directory, environment, and running processes across calls.',
+        },
+        shell_session_exec: {
+          label: 'Run command in persistent session',
+          summary: 'Runs a command inside the shell session that is already open, keeping its state.',
+        },
+        shell_session_end: {
+          label: 'Close persistent shell session',
+          summary: 'Ends the shell session and releases its processes. Its session id stops working.',
+        },
+      },
     },
     status: {
-      ready: 'ready',
-      error: 'error',
-      disabled: 'disabled',
-      unknown: 'unknown',
+      ready: 'Connected',
+      error: 'Error',
+      disabled: 'Disabled',
+      unknown: 'Unknown',
     },
     shellSetup: {
       localIntro: 'Open a terminal in the project root and run:',
@@ -586,6 +639,7 @@ export const sidepanel = {
       pageHandshakeTimeout: 'Timed out connecting to the page — make sure a Zai tab is open',
       pageStopped: 'Stopped manually',
       pageContinuationBroken: 'The execution chain broke (continuation state was lost) — please retry',
+      pageSendUnconfirmed: 'This continuation step could not be confirmed as sent (it may have gone through) — waiting stopped. Check the conversation before retrying',
       pageSessionMissing: 'Could not resolve the current conversation — reload the Zai page and retry',
       pageTaskParamsMissing: 'Task parameters are incomplete — save the task again before running',
       pageTaskAlreadyRunning: 'This task is already running',

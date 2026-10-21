@@ -189,13 +189,16 @@ export const sidepanel = {
   },
   whatsNew: {
     title: '版本更新内容',
-    subtitle: '本次重点新增浏览器控制，并继续收紧侧边栏反馈和权限说明。',
+    subtitle: '把 Zai 从对话窗口变成能记住上下文、调用工具、自己动手的助手。',
     versionBadge: 'v{version}',
     dismiss: '知道了',
     items: {
-      browserControl: '浏览器控制可在侧边栏选择目标标签页，让 Zai++ 执行可见网页操作。',
-      browserControlBoundary: '浏览器控制默认关闭，启用后只向新会话提供文本快照和浏览器动作工具。',
-      sidepanelFeedback: '保存项、项目和提示词控制增加更明确的成功、失败和不可用状态反馈。',
+      memory: '记忆：对话中自动积累偏好与项目背景，之后的回复会带上它们。',
+      skill: 'Skill：从本地或 GitHub 导入可复用工作流，输入 /技能名 或自动匹配后激活。',
+      mcp: 'MCP：连接本机或远程 MCP 服务，把外部工具交给模型调用。',
+      browserControl: '浏览器控制：通过 Debugger 控制你选中的标签页，可读页面、点击和填表。',
+      automation: '自动化：把固定任务交给独立会话，手动触发或按 Cron / RRULE 定时执行。',
+      project: '项目：项目指令与项目记忆随该项目的对话自动进入上下文。',
     },
   },
   memoryPage: {
@@ -513,19 +516,69 @@ export const sidepanel = {
       adaptiveBudgetApply: '应用',
       adaptiveBudgetInvalid: 'Schema 数须为 1–64，字节预算须为 2,000–256,000。',
       discoveredTools: '发现工具',
-      noTools: '尚未发现工具',
+      noTools: '尚未发现工具。点「刷新工具」重新发现。',
       recentCalls: '最近调用',
       noHistory: '暂无调用记录',
-      schemaNone: '参数：无',
-      schemaSummary: '参数：{props}{required}',
-      schemaRequired: '；必填 {required}',
       hintExpand: '展开安装指引',
+      toolInfo: {
+        riskRead: '只读',
+        riskWrite: '写入',
+        riskExecute: '执行',
+        shell_exec: {
+          label: '执行 Shell 命令',
+          summary: '在你本机跑一条 shell 命令，返回输出、错误和退出码。',
+        },
+        shell_status: {
+          label: '查看 Shell 环境',
+          summary: '确认本机 shell 是否连上、用的是什么 shell、当前在哪个目录。',
+        },
+        python_status: {
+          label: '检查 Python 环境',
+          summary: '确认本机有没有可用的 Python，以及装了哪些常用库。',
+        },
+        python_exec: {
+          label: '执行 Python 代码',
+          summary: '跑一小段 Python 做计算或验证，不能装包、不能联网。',
+        },
+        local_skill_preview: {
+          label: '预览本地技能文件夹',
+          summary: '读一个技能文件夹里的 SKILL.md 和相关脚本，不执行其中代码。',
+        },
+        local_folder_pick: {
+          label: '选择本地文件夹',
+          summary: '弹出系统的文件夹选择框，把用户选中的路径拿回来。',
+        },
+        local_file_stat: {
+          label: '查看文件信息',
+          summary: '看一个文件或文件夹存不存在、多大、什么时候改的，不读正文。',
+        },
+        local_file_read: {
+          label: '读取文本文件',
+          summary: '读本机上一个文本文件的内容，大文件可以分片读。',
+        },
+        local_file_write: {
+          label: '写入文本文件',
+          summary: '把文本写进本机的一个文件，可以覆盖也可以追加。',
+        },
+        shell_session_begin: {
+          label: '开启持久 Shell 会话',
+          summary: '开一个能连续跑命令、保留目录与环境变量的 shell。',
+        },
+        shell_session_exec: {
+          label: '在持久会话中执行命令',
+          summary: '在已开启的那个 shell 里继续跑命令，状态会保留。',
+        },
+        shell_session_end: {
+          label: '关闭持久 Shell 会话',
+          summary: '结束并回收那个 shell 会话，之后它的会话 id 就失效了。',
+        },
+      },
     },
     status: {
-      ready: 'ready',
-      error: 'error',
-      disabled: 'disabled',
-      unknown: 'unknown',
+      ready: '已连接',
+      error: '出错',
+      disabled: '已停用',
+      unknown: '未知',
     },
     shellSetup: {
       localIntro: '打开终端，在项目根目录执行以下命令：',
@@ -585,6 +638,7 @@ export const sidepanel = {
       pageHandshakeTimeout: '与页面建立连接超时，请确认 Zai 标签页已打开',
       pageStopped: '已手动停止',
       pageContinuationBroken: '执行链中断（续跑状态丢失），请重试',
+      pageSendUnconfirmed: '这一轮续跑没能确认发出（可能已发出），已停止等待。请先检查对话内容，再决定是否重试',
       pageSessionMissing: '拿不到当前会话，请刷新 Zai 页面后重试',
       pageTaskParamsMissing: '任务参数不完整，请重新保存任务后再运行',
       pageTaskAlreadyRunning: '该任务已在运行中',

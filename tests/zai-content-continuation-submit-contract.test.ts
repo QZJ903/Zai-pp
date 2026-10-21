@@ -13,15 +13,19 @@ import { isZaiContinuationRequestBody } from '../core/zai/continuation-request';
  * 同步认一次是不是续跑模板（`continuationRequestSeq`）。那个观察信号一旦没响，
  * 调用方会走兜底**把同一段 prompt 再发一遍**（重复的用户消息 ⇒ 同一批工具再跑一次）。
  *
- * ⚠️⚠️ **它是队列外判据，这条约束不能破** —— 等它的时候我们正占着串行队列，
- * 队列内的一切（`observedAugRequestCount` 那类计数、`handleResponseComplete` 那类回调）
- * 此刻都读不到；把这份判据挪进队列内会让它**永远看不到**（自锁）。下面第一组断言钉住这一点。
+ * ⚠️⚠️ **它们都是队列外判据，这条约束不能破** —— 等它们的时候我们正占着串行队列，
+ * 队列内的一切此刻都读不到；把自增挪进队列内会让它**永远看不到**（自锁）。
+ *
+ * ⚠️ **两个计数器都受这条约束**：`continuationRequestSeq`（续跑模板）与
+ * `observedAugRequestCount`（桥消息总数）。后者原先在 `handleAugmentRequestBody` 里自增，
+ * 而那个函数跑在队列内 —— 续跑链只能靠前者兜住，后者在续跑路径上恒为 0，
+ * 于是「桥通了但 body 不是模板」这一档永远落不到 `sent`。下面第一组断言钉住两者。
  */
 
 const CONTENT_SOURCE = 'entrypoints/zai.content.ts';
 const PEEK_FN = 'dispatchMainWorldMessage';
 const SUBMIT_FN = 'submitContinuationViaPage';
-/** 等「这一发确实发出去了」的证据（主判据计数 + 副判据 Stop）。 */
+/** 等「这一发确实发出去了」的证据（两个请求计数分三态；Stop 只作诊断、不参与分档）。 */
 const EVIDENCE_FN = 'waitForSendEvidence';
 
 const SHELL_PROVIDER = {
@@ -71,21 +75,29 @@ function ifStatements(node: t.Node): t.IfStatement[] {
 }
 
 /** 子树里有没有出现某个标识符（不区分读/写）。 */
-function referencesIdentifier(node: t.Node, name: string): boolean {
+function referencesAnyIdentifier(node: t.Node, names: readonly string[]): boolean {
+  const wanted = new Set(names);
   let found = false;
   t.traverseFast(node, (child) => {
-    if (t.isIdentifier(child, { name })) found = true;
+    if (t.isIdentifier(child) && wanted.has(child.name)) found = true;
   });
   return found;
 }
 
-/** 子树里有没有 `return true`。 */
-function containsReturnTrue(node: t.Node): boolean {
+/** 函数体里所有三元表达式。 */
+function conditionalExpressions(node: t.Node): t.ConditionalExpression[] {
+  const found: t.ConditionalExpression[] = [];
+  t.traverseFast(node, (child) => {
+    if (t.isConditionalExpression(child)) found.push(child);
+  });
+  return found;
+}
+
+/** 子树里有没有**任何** `return`（不管返回什么）。 */
+function containsAnyReturn(node: t.Node): boolean {
   let found = false;
   t.traverseFast(node, (child) => {
-    if (t.isReturnStatement(child) && t.isBooleanLiteral(child.argument, { value: true })) {
-      found = true;
-    }
+    if (t.isReturnStatement(child)) found = true;
   });
   return found;
 }
@@ -134,23 +146,30 @@ describe('continuation request peek: 判据行为', () => {
 });
 
 describe('continuation request peek: 必须在串行队列之外', () => {
-  it('那一处计数增量排在队列 run 之前，且用的是共用判据', () => {
+  it('记账调用落在串行队列之外，且账本规则来自共用模块', () => {
     const { program } = context();
     const body = findFunctionBody(program, PEEK_FN);
 
-    // ① 恰好一处增量 —— 多一处会让「只统计一次」的前提失效，也会让位置断言失焦。
-    const increments: t.Node[] = [];
-    t.traverseFast(body, (node) => {
-      if (!t.isExpressionStatement(node)) return;
-      const expression = node.expression;
-      if (!t.isAssignmentExpression(expression) || expression.operator !== '+=') return;
-      if (t.isIdentifier(expression.left) && expression.left.name === 'continuationRequestSeq') {
-        increments.push(node);
-      }
-    });
-    expect(increments, '应当恰好一处 `continuationRequestSeq += 1`').toHaveLength(1);
+    // ⚠️⚠️ **这条守的是「接线」，不是「规则」** —— 规则本身（两个计数器怎么组合、
+    // body 不是字符串时记不记账）已经抽进 `core/zai/send-evidence.ts`，
+    // 由 `tests/zai-send-evidence.test.ts` 用真输入喂满。
+    //
+    // 为什么接线只能这样守：`waitForSendEvidence` 本身跑在串行队列里
+    // （`settleToolTurn` → `handleResponseComplete` → `advanceContinuationLoop` → 发送链），
+    // 它占着队列等这两个计数器变大；**记账若发生在队列内，那次记账永远排不到** ⇒
+    // 自锁，只能等满 5 秒窗口再判成「没证据」。
+    //
+    // ⚠️ **残余绕过面（已知、接受）**：把这次调用包进一个声明在前、调用在队列内的
+    // 嵌套函数，位置断言仍会通过。要根治只能换介质（行为测试），而这条链不可 import。
+    // 抽出规则模块已经把「逻辑错」那一半的风险降下来了 —— 剩下这一半只有接线。
 
-    // ② 它必须早于 `await mainWorldQueue.run(...)`。
+    // ① 记账必须由共用模块驱动，不是就地另写一份判断。
+    expect(
+      callsTo(body, 'classifyAugmentRequest'),
+      '记账必须走 `classifyAugmentRequest`（规则在 core/zai/send-evidence.ts）',
+    ).toHaveLength(1);
+
+    // ② 调用必须早于 `await mainWorldQueue.run(...)`。
     // ⚠️ 判据要按**成员表达式**收，不能用 `callsTo(body, 'run')` ——
     // 那条只认 `callee` 是标识符的形态，会一个都收不到（第一版就是这么假红的）。
     const queueRuns: t.CallExpression[] = [];
@@ -166,52 +185,135 @@ describe('continuation request peek: 必须在串行队列之外', () => {
     expect(queueRuns.length, '应当能定位到 `mainWorldQueue.run(...)`').toBeGreaterThan(0);
 
     const queueStart = Math.min(...queueRuns.map((call) => call.start ?? 0));
+    const recordCalls = callsTo(body, 'classifyAugmentRequest');
     expect(
-      increments[0]!.start ?? 0,
-      '这份判据必须跑在串行队列之外 —— 挪进队列内会因为它被自己堵住而永远看不到（自锁）',
+      recordCalls[0]!.start ?? 0,
+      '记账必须跑在串行队列之外 —— 挪进队列内会让它被自己堵住而永远看不到（自锁）',
     ).toBeLessThan(queueStart);
+  });
 
-    // ③ 增量由共用判据驱动（不是就地另写一份名字判断）。
-    expect(
-      callsTo(body, 'isZaiContinuationRequestBody'),
-      '增量必须由 `isZaiContinuationRequestBody` 驱动',
-    ).toHaveLength(1);
+  it('两个计数器只在那一处、按返回值累加（不许就地另算一遍）', () => {
+    // ⚠️ **自增只能出现在 `classifyAugmentRequest` 的返回值上。**
+    // 就地写 `continuationRequestSeq += 1` 会让「什么时候 +1」的判断绕开共用模块，
+    // 而那一半已经有行为测试了 —— 绕开它等于绕开覆盖。
+    const { program } = context();
+    const body = findFunctionBody(program, PEEK_FN);
+
+    const counters = ['continuationRequestSeq', 'observedAugRequestCount'];
+    for (const counter of counters) {
+      const direct: t.Node[] = [];
+      t.traverseFast(body, (node) => {
+        if (!t.isExpressionStatement(node)) return;
+        const expression = node.expression;
+        if (!t.isAssignmentExpression(expression) || expression.operator !== '+=') return;
+        if (!t.isIdentifier(expression.left) || expression.left.name !== counter) return;
+        // 允许的形态：`x += delta.<field>`；不允许：`x += 1` / `x += 任何别的表达式`
+        const right = expression.right;
+        const isDeltaField = t.isMemberExpression(right)
+          && t.isIdentifier(right.object, { name: 'delta' });
+        if (!isDeltaField) direct.push(node);
+      });
+      expect(
+        direct.map((node) => node.loc?.start.line ?? -1),
+        `${counter} 只能按 \`classifyAugmentRequest\` 的返回值累加 —— 就地另算会绕开已测的规则`,
+      ).toEqual([]);
+    }
+  });
+
+  it('`handleAugmentRequestBody` 里不再自增任何一个计数器', () => {
+    // 反面：那两个自增曾经在 `handleAugmentRequestBody` 里，而它跑在队列**内** ⇒
+    // 续跑链占着队列等它们、它们却排在队列后面 ⇒ 那一路径上恒为 0。
+    const { program } = context();
+    const body = findFunctionBody(program, 'handleAugmentRequestBody');
+    const text = readFileSync(CONTENT_SOURCE, 'utf8').slice(body.start ?? 0, body.end ?? 0);
+    expect(text).not.toContain('observedAugRequestCount +=');
+    expect(text).not.toContain('continuationRequestSeq +=');
   });
 });
 
-describe('continuation submit: 「页面在生成」只记录、不参与等待', () => {
-  it('等待函数把 Stop 记成标志位，而不是拿它提前返回', () => {
-    const { program } = context();
+describe('continuation submit: 发送判据是三态的，Stop 只作诊断', () => {
+  it('等待函数用两个请求计数器分档，Stop 不进分档', () => {
+    const { program, source } = context();
     const body = findFunctionBody(program, EVIDENCE_FN);
 
-    // ① 恰好读一次 Stop。
+    // ① 恰好读一次 Stop（诊断字段用）。
     expect(callsTo(body, 'isAgentCurrentlyRunning'), '应当读一次 Stop 按钮').toHaveLength(1);
 
-    // ② ⚠️⚠️ **它不能是「提前返回」的驱动** —— Stop 出现的时刻没有实测过，
-    // 若它早于页面自己清空输入框，提前返回会让调用方把用户草稿恢复得过早、
-    // 随后被页面那次清空抹掉（就是那条「草稿恢复的时机」）。
+    // ② ⚠️⚠️ **Stop 不能是「提前返回」的驱动**。实测（zai-site §9.1）：Stop 比请求
+    // 早 3–5ms 出现 —— 它是页面进入生成态的信号，**不是**「这一发发出去了」的证据。
+    // 把它当证据，主判据一失效就会误判。
+    // ⚠️ **判据是「那个 if 的 consequent 里有没有任何 return」** —— 现在返回的是对象字面量
+    // 而不是 `return true`，只认布尔字面量会让这条守卫失效（第一版就是）。
     const returnsOnStop = ifStatements(body).filter(
       (statement) => callsTo(statement.test, 'isAgentCurrentlyRunning').length > 0
-        && containsReturnTrue(statement.consequent),
+        && containsAnyReturn(statement.consequent),
     );
+    expect(returnsOnStop, 'Stop 只许被记录，不许决定分档').toEqual([]);
+
+    // ③ 两个计数器都必须参与 —— `observedAugRequestCount`（桥消息到了几次）与
+    // `continuationRequestSeq`（其中几次是续跑模板）。缺了前者就分不出
+    // 「桥挂了」与「桥通了但 body 不是模板」，而这两种代价完全不同。
+    const bodyText = source.slice(body.start ?? 0, body.end ?? 0);
+    expect(bodyText, '必须读 `observedAugRequestCount`').toContain('observedAugRequestCount');
+    expect(bodyText, '必须读 `continuationRequestSeq`').toContain('continuationRequestSeq');
+
+    // ④ ⚠️⚠️ **分档必须外派给共用模块，不许就地再写一遍。**
+    // 规则本身（哪一种组合算 sent）已经由 `tests/zai-send-evidence.test.ts`
+    // 用真输入喂满；在等待函数里内联一份等价逻辑，等于绕开那份覆盖 ——
+    // 而两份规则一旦分叉是静默的（都「看着对」）。
+    const verdictCalls = callsTo(body, 'classifySendEvidence');
+    expect(verdictCalls, '分档必须走 `classifySendEvidence`').toHaveLength(1);
+    // 两个实参必须就是那两个差值（不是常量、不是别的计数）。
+    const verdictArgs = verdictCalls[0]!.arguments;
+    expect(verdictArgs, '`classifySendEvidence` 要接收两个增量').toHaveLength(2);
     expect(
-      returnsOnStop,
-      'Stop 只许被记录，不许决定什么时候返回',
+      source.slice(verdictArgs[0]!.start ?? 0, verdictArgs[0]!.end ?? 0),
+      '第一个实参必须是 `observedAugRequestCount` 的增量',
+    ).toContain('observedAugRequestCount');
+    expect(
+      source.slice(verdictArgs[1]!.start ?? 0, verdictArgs[1]!.end ?? 0),
+      '第二个实参必须是 `continuationRequestSeq` 的增量',
+    ).toContain('continuationRequestSeq');
+
+    // ⑤ ⚠️ **`ambiguous` / `unsent` 这两个字面量不许出现在等待函数里。**
+    // 内联分档的签名就是「自己算出非 sent 的那一档」，而这两个词只在被内联时才会出现
+    // （`sent` 允许 —— 循环的跳出条件要拿它比较函数返回值，那是函数的**消费者**，
+    // 不是规则的**副本**）。
+    expect(bodyText, '不许出现 `ambiguous` 字面量（内联分档的签名）').not.toContain("'ambiguous'");
+    expect(bodyText, '不许出现 `unsent` 字面量').not.toContain("'unsent'");
+
+    // ⑥ ⚠️ **两个计数器不许直接进 if / 三元的判据** —— 它们唯一的合法去处是
+    // `classifySendEvidence` 的实参。进了判据就说明分档规则被就地重写了一份。
+    const counterTests = [
+      ...ifStatements(body),
+      ...conditionalExpressions(body),
+    ].filter((node) => {
+      return referencesAnyIdentifier(node.test, ['observedAugRequestCount', 'continuationRequestSeq']);
+    });
+    expect(
+      counterTests.map((node) => node.loc?.start.line ?? -1),
+      '计数器只能进 `classifySendEvidence` 的实参，不许直接进判据 —— 那是内联分档',
     ).toEqual([]);
+  });
 
-    // ③ 主判据（请求计数）必须还在，而且就是那个提前返回。
-    const countReturns = ifStatements(body).filter(
-      (statement) => referencesIdentifier(statement.test, 'continuationRequestSeq')
-        && containsReturnTrue(statement.consequent),
+  it('三态里只有 `unsent` 允许触发兜底重发', () => {
+    const { program, source } = context();
+    const body = findFunctionBody(program, SUBMIT_FN);
+
+    // ⚠️⚠️ `ambiguous` 重发 = 同一段 prompt 发两次（同一批工具再跑一次、
+    // 用户看到两条一样的消息）⇒ 判据必须是「只有 unsent 才继续走兜底」。
+    const guarded = ifStatements(body).filter(
+      (statement) => source.slice(statement.test.start ?? 0, statement.test.end ?? 0)
+        .includes("'unsent'"),
     );
-    expect(countReturns, '应当有一条「计数涨了 ⇒ return true」').toHaveLength(1);
+    expect(guarded, "应当有一条 `!== 'unsent'` 这类守卫").toHaveLength(1);
 
-    // ④ 超时之后返回的是那个标志位 —— 写成 `return false` 等于把副判据丢掉。
-    const last = body.body[body.body.length - 1];
-    expect(t.isReturnStatement(last), '函数最后一个语句应当是 return').toBe(true);
+    // 兜底那一步在守卫之后 —— 写成前置就等于「不管怎样都重发」。
+    const fallbackCalls = callsTo(body, 'sendPromptViaDom');
+    expect(fallbackCalls, '应当有一处兜底发送').toHaveLength(1);
     expect(
-      t.isIdentifier((last as t.ReturnStatement).argument),
-      '超时后必须回看那个标志位，不能直接 return false',
+      (fallbackCalls[0]!.start ?? 0) > (guarded[0]!.start ?? 0),
+      '兜底发送必须排在「只有 unsent 才继续」那条守卫之后',
     ).toBe(true);
   });
 

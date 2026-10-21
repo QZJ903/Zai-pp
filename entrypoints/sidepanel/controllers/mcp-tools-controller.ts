@@ -8,9 +8,12 @@ import {
 import {
   SHELL_MCP_NATIVE_HOST,
   SHELL_MCP_SERVER_NAME,
+  SHELL_TOOL_NAMES,
   createShellMcpPresetInput,
+  type ShellToolName,
 } from '../../../core/shell';
 import { decodeToolCallHistory } from '../../../core/tool/history-codec';
+import type { LocaleMessageKey, MessageParams } from '../../../core/i18n';
 import type {
   McpCapabilityExposureMode,
   McpCapabilitySettings,
@@ -31,6 +34,171 @@ import {
 
 export type McpPresetKind = 'shell';
 export type McpConnectionAction = 'refresh' | 'test';
+
+/**
+ * 工具卡片上那个风险徽章的三档。
+ *
+ * ⚠️ **这三档是给人看的，与 `ToolRiskLevel`（low / medium / high）不是同一套。**
+ * 后者是执行策略用的机器分级，这里回答的是「点了它，本机会发生什么」：
+ * `read` 只读、`write` 只改文件、`execute` 会在本机真的跑起来。
+ */
+export type McpToolRiskBadge = 'read' | 'write' | 'execute';
+
+export interface McpToolPresentation {
+  /** 卡片标题：中文短名，或服务端给的 title。 */
+  label: string;
+  /** 卡片正文：一句话说清这个工具做什么。 */
+  summary: string;
+  risk: McpToolRiskBadge;
+}
+
+/**
+ * 内置 Shell 工具的中文说明键。
+ *
+ * ⚠️ **键必须是字面量，不能用 `` `…${tool.name}.label` `` 拼** ——
+ * `tests/i18n-asserted-keys.test.ts` 只认「字符串字面量」与「模板串里每个 `${}`
+ * 都能在文件内找到字符串常量」两种形态，拼一个运行时变量会让它显式失败；
+ * 而字面量还有额外好处：`LocaleMessageKey` 会在编译期就挡掉写错的键。
+ */
+const SHELL_TOOL_INFO_KEYS: Record<ShellToolName, { label: LocaleMessageKey; summary: LocaleMessageKey }> = {
+  shell_exec: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.shell_exec.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.shell_exec.summary',
+  },
+  shell_status: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.shell_status.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.shell_status.summary',
+  },
+  python_status: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.python_status.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.python_status.summary',
+  },
+  python_exec: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.python_exec.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.python_exec.summary',
+  },
+  local_skill_preview: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.local_skill_preview.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.local_skill_preview.summary',
+  },
+  local_folder_pick: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.local_folder_pick.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.local_folder_pick.summary',
+  },
+  local_file_stat: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.local_file_stat.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.local_file_stat.summary',
+  },
+  local_file_read: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.local_file_read.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.local_file_read.summary',
+  },
+  local_file_write: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.local_file_write.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.local_file_write.summary',
+  },
+  shell_session_begin: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.shell_session_begin.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.shell_session_begin.summary',
+  },
+  shell_session_exec: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.shell_session_exec.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.shell_session_exec.summary',
+  },
+  shell_session_end: {
+    label: 'sidepanel.mcpPage.detail.toolInfo.shell_session_end.label',
+    summary: 'sidepanel.mcpPage.detail.toolInfo.shell_session_end.summary',
+  },
+};
+
+/**
+ * 内置 Shell 工具的风险徽章。
+ *
+ * ⚠️ **不能从 `annotations.risk` 推** —— native host 把 `shell_exec` 标成
+ * `operation: 'write'`、`risk: 'high'`，而 `local_file_write` 同样是 `high`：
+ * 按 `high` 一刀切会把「写一个文件」与「执行任意命令」显示成同一档，正好抹掉
+ * 用户最需要分辨的那个差别。这张表是**逐个判过的**，不派生。
+ *
+ * ⚠️ `SHELL_TOOL_SPECS.risk` 也不能复用 —— 它要和 native host 的
+ * `annotations.risk` 逐项相等（`tests/shell-host-external-contract.test.ts` 钉着），
+ * 那是协议字段，不是给人看的分档。
+ */
+const SHELL_TOOL_RISK: Record<ShellToolName, McpToolRiskBadge> = {
+  shell_status: 'read',
+  python_status: 'read',
+  local_skill_preview: 'read',
+  local_folder_pick: 'read',
+  local_file_stat: 'read',
+  local_file_read: 'read',
+  local_file_write: 'write',
+  shell_session_end: 'write',
+  shell_exec: 'execute',
+  python_exec: 'execute',
+  shell_session_begin: 'execute',
+  shell_session_exec: 'execute',
+};
+
+const SHELL_TOOL_NAME_SET = new Set<string>(SHELL_TOOL_NAMES);
+
+function isShellToolName(name: string): name is ShellToolName {
+  return SHELL_TOOL_NAME_SET.has(name);
+}
+
+/**
+ * 第三方 MCP 工具的风险徽章：按它自己声明的 `execution.risk` 折一档。
+ *
+ * ⚠️ **这是近似**，不是判断 —— 外部服务给的是 low / medium / high，
+ * 它不知道那些工具到底读文件还是跑命令。内置 Shell 工具因此不走这条路。
+ */
+function riskBadgeFromLevel(risk: ToolDescriptor['execution']['risk']): McpToolRiskBadge {
+  if (risk === 'low') return 'read';
+  if (risk === 'high') return 'execute';
+  return 'write';
+}
+
+/**
+ * 把一条工具描述符投影成卡片要显示的三样东西。
+ *
+ * 内置 Shell 工具走中文表（`SHELL_TOOL_INFO_KEYS` / `SHELL_TOOL_RISK`），
+ * 第三方 MCP 工具回落到服务端自己给的 `title` / `description` —— 我们没法替
+ * 每个外部工具预先写一句人话。
+ *
+ * ⚠️⚠️ **「是不是内置 Shell 工具」必须同时看名字与传输方式** —— 只看 `tool.name` 的话，
+ * 第三方 MCP 服务恰好导出一个叫 `shell_exec` 的工具时，卡片会显示「执行 Shell 命令」
+ * 并挂「执行」徽章，**用户会以为它操作本机**，而实际是远端工具。
+ * 内置 Shell 工具都走 `native_messaging`（`core/shell/contracts.ts` 的 preset），
+ * 所以再判一层 `transport` 就够。
+ *
+ * ⚠️ **这里只影响显示，不改描述符本身** —— `title` / `description` / `inputSchema`
+ * 是喂给模型的工具 schema，`tests/tool-schema-language.test.ts` 钉着它们必须是英文，
+ * 与卡片上显示什么无关。
+ */
+export function describeMcpTool(
+  tool: ToolDescriptor,
+  t: (key: LocaleMessageKey, params?: MessageParams) => string,
+): McpToolPresentation {
+  if (isShellToolName(tool.name) && tool.provider.transport === 'native_messaging') {
+    const keys = SHELL_TOOL_INFO_KEYS[tool.name];
+    return {
+      label: t(keys.label),
+      summary: t(keys.summary),
+      risk: SHELL_TOOL_RISK[tool.name],
+    };
+  }
+
+  return {
+    label: tool.title || tool.name,
+    summary: tool.description,
+    risk: riskBadgeFromLevel(tool.execution.risk),
+  };
+}
+
+/** 风险徽章的文案键。 */
+export function riskBadgeLabelKey(risk: McpToolRiskBadge): LocaleMessageKey {
+  if (risk === 'read') return 'sidepanel.mcpPage.detail.toolInfo.riskRead';
+  if (risk === 'write') return 'sidepanel.mcpPage.detail.toolInfo.riskWrite';
+  return 'sidepanel.mcpPage.detail.toolInfo.riskExecute';
+}
 
 export interface McpSnapshot {
   servers: McpServerConfig[];

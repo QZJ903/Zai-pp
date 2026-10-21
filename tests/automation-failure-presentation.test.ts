@@ -56,6 +56,10 @@ describe('formatAutomationError', () => {
       'dom_automation_continuation_loop_missing',
       'dom_automation_continuation_loop_superseded',
       'dom_automation_continuation_session_id_missing',
+      // 续跑这一发「没拿到发出证据」—— 可能已发出、也可能没有。
+      // ⚠️ 与 `continuation_loop_missing` / `superseded` 不同：那两个说「循环没了」，
+      // 这个说「循环还在但这一发可能没出去」，用户能做的事不同（后者该先看对话再重试）。
+      'dom_automation_continuation_send_unconfirmed',
       'dom_automation_no_current_conversation',
       'dom_automation_missing_task_id_or_prompt',
       'dom_automation_empty_prompt_text',
