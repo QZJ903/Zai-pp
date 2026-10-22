@@ -106,12 +106,12 @@ function renderSkillDraftResult(input: ToolResultRendererInput): boolean {
   const memoryKey = draft.draft.memoryEnabled
     ? 'tool.skillCreator.result.memoryOn'
     : 'tool.skillCreator.result.memoryOff';
-  const wrapper = createResultPanel('dpp-skill-draft-result');
+  const wrapper = createResultPanel('zpp-skill-draft-result');
   const meta = document.createElement('div');
-  meta.className = 'dpp-result-meta';
+  meta.className = 'zpp-result-meta';
   meta.textContent = `/${draft.draft.name} · ${translate(locale, memoryKey)}`;
   const description = document.createElement('div');
-  description.className = 'dpp-result-text';
+  description.className = 'zpp-result-text';
   description.textContent = draft.draft.description;
   const button = createSmallButton(translate(locale, 'tool.skillCreator.result.saveSkill'));
   button.addEventListener('click', (event) => {
@@ -176,15 +176,15 @@ function renderMemoryImportPreviewResult(input: ToolResultRendererInput): boolea
   if (!preview) return false;
 
   const locale = input.locale ?? DEFAULT_LOCALE;
-  const wrapper = createResultPanel('dpp-memory-import-result');
+  const wrapper = createResultPanel('zpp-memory-import-result');
   const meta = document.createElement('div');
-  meta.className = 'dpp-result-meta';
+  meta.className = 'zpp-result-meta';
   meta.textContent = translate(locale, 'tool.memoryImport.result.metaSummary', {
     count: preview.memories.length,
     duplicates: preview.duplicates,
   });
   const list = document.createElement('div');
-  list.className = 'dpp-result-text';
+  list.className = 'zpp-result-text';
   // 只列有名字的条目 —— 结果对象是外部输入，元素缺 `name` 时直接拼会渲染出 `- undefined`。
   list.textContent = preview.memories
     .filter((memory) => typeof memory?.name === 'string' && memory.name.trim())
@@ -298,24 +298,24 @@ function getMemoryImportPreviewOutput(value: unknown): {
 }
 function createResultPanel(className: string): HTMLDivElement {
   const wrapper = document.createElement('div');
-  wrapper.className = `dpp-rich-result ${className}`;
+  wrapper.className = `zpp-rich-result ${className}`;
   return wrapper;
 }
 
 function createSmallButton(text: string): HTMLButtonElement {
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = 'dpp-result-action';
+  button.className = 'zpp-result-action';
   button.textContent = text;
   return button;
 }
 
-const RESULT_STYLE_ID = 'dpp-result-css';
+const RESULT_STYLE_ID = 'zpp-result-css';
 
 /**
  * 变量块与主题同步都在这里自己调一次，不依赖内容脚本启动时的
  * `installInjectedThemeWatch()` —— 那样卡片就隐式依赖「谁先谁后」，顺序一变
- * 所有 `var(--dpp-ui-*)` 都会解析成空值（深色页面上表现为卡片整体看不见）。
+ * 所有 `var(--zpp-ui-*)` 都会解析成空值（深色页面上表现为卡片整体看不见）。
  * 两处调用都是幂等的（样式节点按 id 去重、同步是纯赋值），重复调用没有代价。
  */
 function ensureResultStyles(): void {
@@ -325,40 +325,40 @@ function ensureResultStyles(): void {
   const style = document.createElement('style');
   style.id = RESULT_STYLE_ID;
   style.textContent = `
-.dpp-rich-result {
+.zpp-rich-result {
   display: block;
   padding: 8px 10px;
-  border: 1px solid var(--dpp-ui-border);
+  border: 1px solid var(--zpp-ui-border);
   border-radius: 8px;
-  background: var(--dpp-ui-accent-panel);
+  background: var(--zpp-ui-accent-panel);
 }
-.dpp-result-meta {
+.zpp-result-meta {
   min-width: 0;
   font-size: 12px;
   font-weight: 600;
-  color: var(--dpp-ui-text);
+  color: var(--zpp-ui-text);
 }
-.dpp-result-text {
+.zpp-result-text {
   margin-top: 6px;
   white-space: pre-wrap;
   font-size: 12px;
-  color: var(--dpp-ui-text-muted);
+  color: var(--zpp-ui-text-muted);
 }
-.dpp-result-action {
+.zpp-result-action {
   margin-top: 8px;
   border: 0;
   border-radius: 7px;
-  background: var(--dpp-ui-accent);
+  background: var(--zpp-ui-accent);
   /* ⚠️ **不能写 white** —— 两套主题的 accent 都偏亮（浅色 #497ef7 / 深色 #80acff），
    * 白字压上去分别只有 3.74:1 与 2.27:1，深色下基本读不出来。
    */
-  color: var(--dpp-ui-accent-contrast);
+  color: var(--zpp-ui-accent-contrast);
   font-size: 11px;
   font-weight: 600;
   padding: 5px 9px;
   cursor: pointer;
 }
-.dpp-result-action:disabled {
+.zpp-result-action:disabled {
   opacity: 0.65;
   cursor: default;
 }

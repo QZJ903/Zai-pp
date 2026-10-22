@@ -87,8 +87,8 @@
 ## 回复语言
 请使用简体中文回复。
 
-<!-- glm-visible-user-prompt:start -->
+<!-- zai-visible-user-prompt:start -->
 请总结兼容性计划。
-<!-- glm-visible-user-prompt:end -->
+<!-- zai-visible-user-prompt:end -->
 usedMemoryIds=[]
 renderedToolCount=0

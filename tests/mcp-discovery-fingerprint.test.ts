@@ -129,7 +129,7 @@ describe('MCP 配置指纹：真值变化仍然要清缓存', () => {
   const invalidatingPatches: Array<[string, Record<string, unknown>]> = [
     ['transport.url', { transport: { kind: 'http', url: 'https://example.test/mcp' } }],
     ['transport.nativeHost', { transport: { kind: 'native_messaging', nativeHost: 'com.other.host' } }],
-    ['transport.env', { transport: { kind: 'native_messaging', nativeHost: 'com.glm_pp.shell', env: { A: '1' } } }],
+    ['transport.env', { transport: { kind: 'native_messaging', nativeHost: 'com.zai_pp.shell', env: { A: '1' } } }],
     ['headers', { headers: [{ name: 'X-Test', value: '1' }] }],
     ['secrets', { secrets: [{ kind: 'bearer', value: 'token' }] }],
     // ⚠️ 上限在 `listMcpTools` 里就 slice（`core/mcp/client.ts`），改小必须重新发现 ——
@@ -178,7 +178,7 @@ describe('MCP 配置指纹：改用等价路径写回时不该误判', () => {
     const created = await createMcpServer({
       displayName: 'Shell Local',
       enabled: true,
-      transport: { kind: 'native_messaging', nativeHost: 'com.glm_pp.shell' },
+      transport: { kind: 'native_messaging', nativeHost: 'com.zai_pp.shell' },
       headers: [],
       secrets: [{ id: 'id-A', kind: 'bearer', value: 'v1' }],
       timeouts: { connectMs: 5000, requestMs: 120000, discoveryMs: 10000 },
@@ -221,7 +221,7 @@ describe('MCP 配置指纹：改用等价路径写回时不该误判', () => {
       displayName: 'Shell Local',
       enabled: true,
       // ⚠️ 刻意不带 env
-      transport: { kind: 'native_messaging', nativeHost: 'com.glm_pp.shell' },
+      transport: { kind: 'native_messaging', nativeHost: 'com.zai_pp.shell' },
       headers: [],
       secrets: [],
       timeouts: { connectMs: 5000, requestMs: 120000, discoveryMs: 10000 },

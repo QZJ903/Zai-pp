@@ -124,7 +124,7 @@ describe('session-based project context', () => {
     expect((await getProjectContextState()).pendingProjectId).toBeNull();
   });
 
-  it('refreshes stale project conversation titles without letting default GLM titles overwrite real titles', async () => {
+  it('refreshes stale project conversation titles without letting default site titles overwrite real titles', async () => {
     const project = await createProjectContext({ name: 'Alpha' });
 
     await addConversationToProject(project.id, {
@@ -147,7 +147,7 @@ describe('session-based project context', () => {
       conversations: [expect.objectContaining({ title: '真实项目标题' })],
     });
 
-    // 占位类标题（GLM 默认标题）不能覆盖真名。
+    // 占位类标题（站点默认标题）不能覆盖真名。
     await refreshProjectConversation({
       conversationId: 'session-1',
       title: 'GLM-探索未至之境',

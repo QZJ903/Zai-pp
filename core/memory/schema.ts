@@ -1,4 +1,4 @@
-export const MEMORY_DATABASE_NAME = 'GlmPP';
+export const MEMORY_DATABASE_NAME = 'ZaiPP';
 export const MEMORY_DATABASE_VERSION = 3 as const;
 export const MEMORY_TABLE_NAME = 'memories';
 

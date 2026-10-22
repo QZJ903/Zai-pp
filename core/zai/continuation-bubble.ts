@@ -19,7 +19,7 @@ import { containsZaiContinuationPlaceholder, isZaiContinuationPrompt } from './c
 /**
  * 用户消息容器。
  *
- * ⚠️ **已由探针验证**（`F:\Conversation\GLM\zai-续跑气泡探针.js`）：真机上 4 条用户消息里
+ * ⚠️ **已由真机探针验证**：4 条用户消息里
  * 2 条是续跑模板，命中准确。⚠️ **别换成更宽的写法**：`[class*="user-message"]` 计数是 **8**
  * （页面上还有个 `edit-user-message-button` 也含这个子串）⇒ 子串匹配会多抓一倍元素。
  * ⚠️ 它错了的表现是**静默的**（气泡照旧可见，其余功能不受影响）。
@@ -27,7 +27,7 @@ import { containsZaiContinuationPlaceholder, isZaiContinuationPrompt } from './c
 const CONTINUATION_BUBBLE_SELECTOR = '.user-message';
 
 /** 隐藏标记 —— 幂等判据（同一条消息只处理一次）。 */
-const HIDDEN_ATTR = 'data-dpp-hidden-continuation';
+const HIDDEN_ATTR = 'data-zpp-hidden-continuation';
 
 /**
  * 单次扫描最多看**最后**多少条候选（页面长了之后别整页扫）。

@@ -53,6 +53,20 @@ describe('shellSetupMessage', () => {
     expect(result.message).not.toContain('个工具没有返回');
   });
 
+  it('reports disabled instead of connected once the server is switched off', () => {
+    // ⚠️⚠️ **关掉开关不清缓存** —— 指纹只含连接字段、不含 `enabled`，所以
+    // `cache.health.status` 仍然是 `ready`。判据若先看缓存，关掉之后会继续显示
+    // 「已连接，发现 12 个工具」，而实际上这个服务的工具一个都不会被提供。
+    // 真机上就是这样：关掉 Shell 开关，状态徽章仍显示「已连接」。
+    const cache = shellCache([]); // 12 个工具齐全 ⇒ 不做缺失检查
+    const disabled: McpServerConfig = { ...shellServer, enabled: false, status: 'disabled' };
+
+    const result = shellSetupMessage(disabled, cache, translateAt('zh-CN'));
+    expect(result.message).toContain('服务已创建但尚未启用');
+    expect(result.message).not.toContain('已连接');
+    expect(result.isError).toBe(false);
+  });
+
   it('does not report missing tools when the local tool limit truncated them', () => {
     // ⚠️⚠️ **这条守的是「假报」**：`listMcpTools` 在 allowlist 过滤**之前**就
     // `slice(0, limits.maxToolCount)`，而上限在 MCP 页高级表单里可编辑。

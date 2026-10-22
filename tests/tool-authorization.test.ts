@@ -53,7 +53,7 @@ describe('tool authorization context', () => {
   it('keeps the registered session storage identity stable', () => {
     // 存储 key 本身是对外契约：改名会让升级后所有在途授权凭空消失，
     // 表现为「用户刚点的工具突然要重新授权」。这条守卫把改名变成显式的失败。
-    expect(TOOL_AUTHORIZATION_STORAGE_KEY).toBe('glm_pp_tool_authorizations');
+    expect(TOOL_AUTHORIZATION_STORAGE_KEY).toBe('zai_pp_tool_authorizations');
   });
 
   it('executes high-risk auto tools on both the grant (page) and trusted surfaces', async () => {
@@ -78,11 +78,11 @@ describe('tool authorization context', () => {
   });
 
   it('fails visibly without rewriting malformed or future session state', async () => {
-    sessionStorage.glm_pp_tool_authorizations = { version: 99, grants: {} };
+    sessionStorage.zai_pp_tool_authorizations = { version: 99, grants: {} };
 
     await expect(createGrant([makeDescriptor()]))
       .rejects.toThrow('Stored tool authorization state is invalid.');
-    expect(sessionStorage.glm_pp_tool_authorizations).toEqual({ version: 99, grants: {} });
+    expect(sessionStorage.zai_pp_tool_authorizations).toEqual({ version: 99, grants: {} });
   });
 
   it('rejects nested corrupt v1 state without rewriting it', async () => {
@@ -98,11 +98,11 @@ describe('tool authorization context', () => {
         },
       },
     };
-    sessionStorage.glm_pp_tool_authorizations = corrupt;
+    sessionStorage.zai_pp_tool_authorizations = corrupt;
 
     await expect(createGrant([makeDescriptor()]))
       .rejects.toThrow('Stored tool authorization state is invalid.');
-    expect(sessionStorage.glm_pp_tool_authorizations).toEqual(corrupt);
+    expect(sessionStorage.zai_pp_tool_authorizations).toEqual(corrupt);
   });
 
   it('rejects oversized stored authorization state before rewriting it', async () => {
@@ -111,16 +111,16 @@ describe('tool authorization context', () => {
       grants: {},
       padding: 'x'.repeat(4 * 1024 * 1024),
     };
-    sessionStorage.glm_pp_tool_authorizations = oversized;
+    sessionStorage.zai_pp_tool_authorizations = oversized;
 
     await expect(createGrant([makeDescriptor()]))
       .rejects.toThrow('Stored tool authorization state is invalid.');
-    expect(sessionStorage.glm_pp_tool_authorizations).toBe(oversized);
+    expect(sessionStorage.zai_pp_tool_authorizations).toBe(oversized);
   });
 
   it('rejects stored state that exceeds the grant or per-grant call caps', async () => {
     const grant = await createGrant([makeDescriptor()]);
-    const original = structuredClone(sessionStorage.glm_pp_tool_authorizations) as {
+    const original = structuredClone(sessionStorage.zai_pp_tool_authorizations) as {
       version: 1;
       grants: Record<string, Record<string, unknown>>;
     };
@@ -131,7 +131,7 @@ describe('tool authorization context', () => {
         return [id, { ...structuredClone(template), id }];
       }),
     );
-    sessionStorage.glm_pp_tool_authorizations = original;
+    sessionStorage.zai_pp_tool_authorizations = original;
 
     await expect(createGrant([makeDescriptor()]))
       .rejects.toThrow('Stored tool authorization state is invalid.');
@@ -145,7 +145,7 @@ describe('tool authorization context', () => {
         { descriptorId: makeDescriptor().id, state: 'collecting', retryUsed: false },
       ]),
     );
-    sessionStorage.glm_pp_tool_authorizations = {
+    sessionStorage.zai_pp_tool_authorizations = {
       version: 1,
       grants: { [grant.id]: callOverflow },
     };
@@ -162,7 +162,7 @@ describe('tool authorization context', () => {
       { kind: 'grant', grantId: grant.id, subject: SUBJECT },
       [descriptor],
     );
-    const valid = structuredClone(sessionStorage.glm_pp_tool_authorizations) as StoredAuthorizationTestState;
+    const valid = structuredClone(sessionStorage.zai_pp_tool_authorizations) as StoredAuthorizationTestState;
     const corruptions: Array<(state: StoredAuthorizationTestState) => void> = [
       (state) => {
         const call = state.grants[grant.id].calls['call-1'];
@@ -191,7 +191,7 @@ describe('tool authorization context', () => {
     for (const corrupt of corruptions) {
       const state = structuredClone(valid);
       corrupt(state);
-      sessionStorage.glm_pp_tool_authorizations = state;
+      sessionStorage.zai_pp_tool_authorizations = state;
       await expect(createGrant([descriptor]))
         .rejects.toThrow('Stored tool authorization state is invalid.');
     }
@@ -525,7 +525,7 @@ describe('tool authorization context', () => {
     expect(result.error?.code).toBe('tool_descriptor_mismatch');
     expect(execute).not.toHaveBeenCalled();
     expect(chrome.storage.local.set).toHaveBeenCalledWith(expect.objectContaining({
-      glm_pp_tool_history: expect.any(Array),
+      zai_pp_tool_history: expect.any(Array),
     }));
   });
 
@@ -599,7 +599,7 @@ describe('tool authorization context', () => {
 });
 
 const SUBJECT: ToolAuthorizationSubject = {
-  surface: 'glm_content',
+  surface: 'zai_content',
   documentSessionId: 'document-1',
   tabId: 7,
   frameId: 0,

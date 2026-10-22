@@ -9,7 +9,7 @@ import type {
   McpCapabilitySettingsPatch,
 } from './mcp/capability-types';
 import type {
-  CurrentGLMConversation,
+  CurrentZaiConversation,
   ProjectContextCreateInput,
   ProjectContextState,
   ProjectContextUpdateInput,
@@ -93,7 +93,7 @@ export type {
 } from './tool/types';
 
 export type {
-  CurrentGLMConversation,
+  CurrentZaiConversation,
   ProjectContext,
   ProjectContextCreateInput,
   ProjectContextState,
@@ -491,7 +491,7 @@ export type MessageAction =
   | { type: 'ADD_CONVERSATION_TO_PROJECT'; payload: { projectId: string; conversation: ProjectConversationInput } }
   | { type: 'REMOVE_CONVERSATION_FROM_PROJECT'; payload: { conversationId: string } }
   | { type: 'SET_PENDING_PROJECT_CONTEXT'; payload: { projectId: string | null } }
-  | { type: 'GET_CURRENT_GLM_CONVERSATION' }
+  | { type: 'GET_CURRENT_ZAI_CONVERSATION' }
   | { type: 'GET_PROJECT_CONTEXT_FOR_CONVERSATION'; payload: { conversation: ProjectConversationInput; bindPendingProject?: boolean } }
   | { type: 'GET_CONFIG' }
   | { type: 'RECORD_USAGE_TURN'; payload: UsageTurnInputType }

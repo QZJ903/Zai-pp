@@ -6,7 +6,7 @@ import {
 } from '../messaging/tool-record-codec';
 import type {
   Automation,
-  AutomationGLMSession,
+  AutomationZaiSession,
   AutomationErrorState,
   AutomationFailurePhase,
   AutomationPromptContext,
@@ -19,7 +19,7 @@ import type {
   AutomationSchedule,
 } from './types';
 
-export const AUTOMATION_STORAGE_KEY = 'glm_pp_automations';
+export const AUTOMATION_STORAGE_KEY = 'zai_pp_automations';
 export const AUTOMATION_STORAGE_VERSION = 1 as const;
 export const LEGACY_AUTOMATION_RUN_TIMEOUT_MS = 180_000;
 
@@ -136,9 +136,9 @@ function decodeAutomation(raw: unknown, path: string): Automation {
     schedule: decodeSchedule(value.schedule, `${path}.schedule`),
     promptOptions: decodePromptOptions(value.promptOptions, `${path}.promptOptions`),
     // The initial released reader projected missing session state to nulls.
-    glm: value.glm === undefined
-      ? createEmptyGLMSession()
-      : decodeGLMSession(value.glm, `${path}.glm`),
+    zai: value.zai === undefined
+      ? createEmptyZaiSession()
+      : decodeZaiSession(value.zai, `${path}.zai`),
     createdAt: finiteNumber(value.createdAt, `${path}.createdAt`),
     updatedAt: finiteNumber(value.updatedAt, `${path}.updatedAt`),
     lastRunAt: nullableFiniteNumber(value.lastRunAt, `${path}.lastRunAt`),
@@ -213,7 +213,7 @@ function decodePromptOptions(raw: unknown, path: string): AutomationPromptOption
   } as AutomationPromptOptions;
 }
 
-function createEmptyGLMSession(): AutomationGLMSession {
+function createEmptyZaiSession(): AutomationZaiSession {
   return {
     chatSessionId: null,
     sessionUrl: null,
@@ -222,7 +222,7 @@ function createEmptyGLMSession(): AutomationGLMSession {
   };
 }
 
-function decodeGLMSession(raw: unknown, path: string): AutomationGLMSession {
+function decodeZaiSession(raw: unknown, path: string): AutomationZaiSession {
   const value = recordValue(raw, path);
   // 已删字段（parentMessageId / lastHistorySyncedAt）刻意**不再解出** —— 它们是上游
   // HTTP 直连架构的续写链锚点与落库校验时间戳，本项目 DOM 注入架构下恒为空。
@@ -234,7 +234,7 @@ function decodeGLMSession(raw: unknown, path: string): AutomationGLMSession {
     // ⚠️ **兼容缺省**：站点是后加字段，旧记录里没有 ⇒ 视为 null（不知道）。
     // 写成 `requiredString` 会让所有旧记录直接判 corrupt、**整份自动化存储打不开**。
     siteOrigin: defaultedNullableString(value.siteOrigin, `${path}.siteOrigin`),
-  } as AutomationGLMSession;
+  } as AutomationZaiSession;
 }
 
 function decodeRunnerRequest(
@@ -330,7 +330,7 @@ function decodeRunnerSuccess(
     ok: true,
     chatSessionId: stringValue(value.chatSessionId, `${path}.chatSessionId`),
     sessionUrl: nullableString(value.sessionUrl, `${path}.sessionUrl`),
-    // ⚠️ **兼容缺省**（与 `AutomationGLMSession.siteOrigin` 同口径）：站点是后加字段，
+    // ⚠️ **兼容缺省**（与 `AutomationZaiSession.siteOrigin` 同口径）：站点是后加字段，
     // 旧记录里没有 ⇒ null（不知道）。写成必填会让旧记录判 corrupt、整份存储打不开。
     siteOrigin: defaultedNullableString(value.siteOrigin, `${path}.siteOrigin`),
     assistantText: stringValue(value.assistantText, `${path}.assistantText`),

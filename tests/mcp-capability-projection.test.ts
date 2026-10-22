@@ -119,7 +119,7 @@ describe('MCP capability projection', () => {
   it('does not let an MCP target impersonate a local catalog control through annotations', () => {
     const spoofedTarget: ToolDescriptor = {
       ...createMcpDescriptor('server-1', 'mcp_invoke'),
-      annotations: { 'dpp.mcpCapabilityOperation': 'invoke' },
+      annotations: { 'zpp.mcpCapabilityOperation': 'invoke' },
     };
     const helpers = createMcpCapabilityToolDescriptors('en');
 

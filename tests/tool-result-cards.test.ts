@@ -55,7 +55,7 @@ describe('tool result card mounting', () => {
 
     mountToolResultCards([execution(skillDraftResult())], deps());
 
-    expect(message.querySelector('.dpp-skill-draft-result')).not.toBeNull();
+    expect(message.querySelector('.zpp-skill-draft-result')).not.toBeNull();
   });
 
   it('does nothing when there is no assistant message anchor', () => {
@@ -72,7 +72,7 @@ describe('tool result card mounting', () => {
     );
 
     expect(message.childElementCount).toBe(0);
-    expect(message.querySelector('[data-dpp-result-cards]')).toBeNull();
+    expect(message.querySelector('[data-zpp-result-cards]')).toBeNull();
   });
 
   it('mounts only once for the same message on repeated calls', () => {
@@ -82,8 +82,8 @@ describe('tool result card mounting', () => {
     mountToolResultCards(executions, deps());
     mountToolResultCards(executions, deps());
 
-    expect(message.querySelectorAll('.dpp-skill-draft-result')).toHaveLength(1);
-    expect(message.querySelectorAll('[data-dpp-result-cards]')).toHaveLength(1);
+    expect(message.querySelectorAll('.zpp-skill-draft-result')).toHaveLength(1);
+    expect(message.querySelectorAll('[data-zpp-result-cards]')).toHaveLength(1);
   });
 
   it('adds a genuinely new result on a later call without duplicating the old one', () => {
@@ -95,7 +95,7 @@ describe('tool result card mounting', () => {
       deps(),
     );
 
-    expect(message.querySelectorAll('.dpp-skill-draft-result')).toHaveLength(2);
+    expect(message.querySelectorAll('.zpp-skill-draft-result')).toHaveLength(2);
   });
 
   it('caps the number of cards mounted into one message', () => {
@@ -106,7 +106,7 @@ describe('tool result card mounting', () => {
 
     mountToolResultCards(executions, deps());
 
-    expect(message.querySelectorAll('.dpp-skill-draft-result')).toHaveLength(3);
+    expect(message.querySelectorAll('.zpp-skill-draft-result')).toHaveLength(3);
   });
 
   it('targets the last assistant message, not the first', () => {
@@ -115,8 +115,8 @@ describe('tool result card mounting', () => {
 
     mountToolResultCards([execution(skillDraftResult())], deps());
 
-    expect(first.querySelector('.dpp-skill-draft-result')).toBeNull();
-    expect(second.querySelector('.dpp-skill-draft-result')).not.toBeNull();
+    expect(first.querySelector('.zpp-skill-draft-result')).toBeNull();
+    expect(second.querySelector('.zpp-skill-draft-result')).not.toBeNull();
   });
 
   it('keeps an empty host hidden instead of removing it, so the fingerprints survive', () => {
@@ -126,7 +126,7 @@ describe('tool result card mounting', () => {
     mountToolResultCards([unrenderable], deps());
 
     // 容器留着（隐藏）—— 指纹挂在它上面；删掉就等于把「这批结果已经处理过」忘了。
-    const host = message.querySelector<HTMLElement>('[data-dpp-result-cards]');
+    const host = message.querySelector<HTMLElement>('[data-zpp-result-cards]');
     expect(host).not.toBeNull();
     expect(host!.hidden).toBe(true);
     expect(host!.childElementCount).toBe(0);
@@ -138,11 +138,11 @@ describe('tool result card mounting', () => {
     const unrenderable = execution({ ok: true, summary: 'x', output: { kind: 'skill_draft' } });
 
     mountToolResultCards([unrenderable], deps());
-    const hostAfterFirst = message.querySelector<HTMLElement>('[data-dpp-result-cards]')!;
+    const hostAfterFirst = message.querySelector<HTMLElement>('[data-zpp-result-cards]')!;
     mountToolResultCards([unrenderable], deps());
 
-    expect(message.querySelector('[data-dpp-result-cards]')).toBe(hostAfterFirst);
-    expect(hostAfterFirst.getAttribute('data-dpp-mounted')).toContain('skill_draft_create');
+    expect(message.querySelector('[data-zpp-result-cards]')).toBe(hostAfterFirst);
+    expect(hostAfterFirst.getAttribute('data-zpp-mounted')).toContain('skill_draft_create');
   });
 
   it('redraws a card when the page itself dropped our host', () => {
@@ -153,13 +153,13 @@ describe('tool result card mounting', () => {
     const result = skillDraftResult();
 
     mountToolResultCards([execution(result)], deps());
-    expect(message.querySelectorAll('.dpp-skill-draft-result')).toHaveLength(1);
+    expect(message.querySelectorAll('.zpp-skill-draft-result')).toHaveLength(1);
 
     // 模拟页面重建子节点：把我们的容器摘掉，消息元素本身还在。
-    message.querySelector('[data-dpp-result-cards]')!.remove();
+    message.querySelector('[data-zpp-result-cards]')!.remove();
     mountToolResultCards([execution(result)], deps());
 
-    expect(message.querySelectorAll('.dpp-skill-draft-result')).toHaveLength(1);
+    expect(message.querySelectorAll('.zpp-skill-draft-result')).toHaveLength(1);
   });
 
   it('still mounts a later, genuinely new result after an unrenderable one was remembered', () => {
@@ -171,7 +171,7 @@ describe('tool result card mounting', () => {
     );
     mountToolResultCards([execution(skillDraftResult('later'))], deps());
 
-    expect(message.querySelectorAll('.dpp-skill-draft-result')).toHaveLength(1);
+    expect(message.querySelectorAll('.zpp-skill-draft-result')).toHaveLength(1);
   });
 
   it('keeps a mounted card out of a hidden host when a new result arrives later', () => {
@@ -182,12 +182,12 @@ describe('tool result card mounting', () => {
       [execution({ ok: true, summary: 'x', output: { kind: 'skill_draft' } })],
       deps(),
     );
-    const host = message.querySelector<HTMLElement>('[data-dpp-result-cards]')!;
+    const host = message.querySelector<HTMLElement>('[data-zpp-result-cards]')!;
     expect(host.hidden).toBe(true);
 
     mountToolResultCards([execution(skillDraftResult('later'))], deps());
 
-    expect(message.querySelector('[data-dpp-result-cards]')).toBe(host);
+    expect(message.querySelector('[data-zpp-result-cards]')).toBe(host);
     expect(host.hidden).toBe(false);
   });
 
@@ -199,6 +199,6 @@ describe('tool result card mounting', () => {
 
     mountToolResultCards([execution(skillDraftResult())], deps());
 
-    expect(message.querySelector('.dpp-skill-draft-result')).not.toBeNull();
+    expect(message.querySelector('.zpp-skill-draft-result')).not.toBeNull();
   });
 });

@@ -587,7 +587,7 @@ function AutomationCard({
       <div className="grid grid-cols-2 gap-2 text-[11px]">
         <Meta label={t('sidepanel.automationPage.meta.next')} value={formatTime(automation.nextRunAt, locale, t('sidepanel.automationPage.meta.none'))} />
         <Meta label={t('sidepanel.automationPage.meta.previous')} value={formatTime(automation.lastRunAt, locale, t('sidepanel.automationPage.meta.none'))} />
-        <Meta label={t('sidepanel.automationPage.meta.session')} value={automation.glm.chatSessionId ? shortId(automation.glm.chatSessionId) : t('sidepanel.automationPage.meta.notCreated')} />
+        <Meta label={t('sidepanel.automationPage.meta.session')} value={automation.zai.chatSessionId ? shortId(automation.zai.chatSessionId) : t('sidepanel.automationPage.meta.notCreated')} />
         <Meta label={t('sidepanel.automationPage.meta.recent')} value={latestRun ? formatRun(latestRun, t) : t('sidepanel.automationPage.meta.none')} />
       </div>
 
@@ -723,7 +723,7 @@ function shortId(id: string): string {
  * 不通用（token 也互不认），拿错站拼出来的链接会打开一个 401 或「会话不存在」的页面。
  * 判定顺序（每条都是**这条记录自己的证据**，越靠越可靠）：
  *
- * 1. `glm.siteOrigin` —— 上一次运行明确记下的站点；
+ * 1. `zai.siteOrigin` —— 上一次运行明确记下的站点；
  * 2. `sessionUrl` 自身的 origin —— 旧记录没有 `siteOrigin`，但那条 url 就是证据。
  *
  * ⚠️ **两者都没有时不拼链接**（返回 null，按钮置灰）—— 与后台收尾链同一个口径：
@@ -732,7 +732,7 @@ function shortId(id: string): string {
  * 被拼成 B 站的链接（B 站既没有这条会话、token 也不通用）。
  */
 function resolveSessionUrl(automation: Automation): string | null {
-  const { chatSessionId, sessionUrl, siteOrigin } = automation.glm;
+  const { chatSessionId, sessionUrl, siteOrigin } = automation.zai;
   if (!chatSessionId) return sessionUrl;
   const base = resolveZaiSiteOrigin(siteOrigin) ?? resolveZaiSiteOrigin(sessionUrl);
   if (!base) return null;

@@ -127,7 +127,7 @@ export const RUNTIME_COMMAND_CONTRACTS = {
   ADD_CONVERSATION_TO_PROJECT: typedCommand('payload-decoded', 'status'),
   REMOVE_CONVERSATION_FROM_PROJECT: typedCommand('payload-decoded', 'ack'),
   SET_PENDING_PROJECT_CONTEXT: typedCommand('payload-decoded', 'ack'),
-  GET_CURRENT_GLM_CONVERSATION: typedCommand('none', 'status-or-domain-error'),
+  GET_CURRENT_ZAI_CONVERSATION: typedCommand('none', 'status-or-domain-error'),
   GET_PROJECT_CONTEXT_FOR_CONVERSATION: typedCommand('payload-decoded', 'nullable-value'),
   GET_CONFIG: typedCommand('none', 'value'),
   WHATS_NEW_DISMISSED: typedCommand('none', 'ack', 'background-error', 'live-only'),

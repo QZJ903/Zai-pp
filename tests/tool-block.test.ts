@@ -17,7 +17,7 @@ import type { ToolCardResult, ToolExecutionRecord } from '../core/types';
  * 所以这里既验模块本身，也顺带钉住「生产的注入能满足它的契约」。
  */
 
-const STYLE_ID = 'dpp-tool-block-css';
+const STYLE_ID = 'zpp-tool-block-css';
 
 function deps(overrides: Partial<ToolBlockDependencies> = {}): ToolBlockDependencies {
   return {
@@ -60,16 +60,16 @@ afterEach(() => {
 describe('tool block shell', () => {
   it('renders the collapsed header with a title slot', () => {
     const block = createToolBlockShell(deps(), { restoreKey: 'r1', collapsed: true });
-    expect(block.className).toBe('dpp-tool-block');
-    expect(block.getAttribute('data-dpp-tool-key')).toBe('r1');
+    expect(block.className).toBe('zpp-tool-block');
+    expect(block.getAttribute('data-zpp-tool-key')).toBe('r1');
     expect(block.getAttribute('data-collapsed')).toBe('true');
-    expect(block.querySelector('.dpp-tool-block-title')).not.toBeNull();
-    expect(block.querySelector('.dpp-tool-block-body')).not.toBeNull();
+    expect(block.querySelector('.zpp-tool-block-title')).not.toBeNull();
+    expect(block.querySelector('.zpp-tool-block-body')).not.toBeNull();
   });
 
   it('toggles collapsed state on click', () => {
     const block = createToolBlockShell(deps(), { collapsed: true });
-    const header = block.querySelector<HTMLElement>('.dpp-tool-block-header')!;
+    const header = block.querySelector<HTMLElement>('.zpp-tool-block-header')!;
     header.click();
     expect(block.getAttribute('data-collapsed')).toBe('false');
     header.click();
@@ -78,7 +78,7 @@ describe('tool block shell', () => {
 
   it('toggles collapsed state from the keyboard too', () => {
     const block = createToolBlockShell(deps(), { collapsed: true });
-    const header = block.querySelector<HTMLElement>('.dpp-tool-block-header')!;
+    const header = block.querySelector<HTMLElement>('.zpp-tool-block-header')!;
     // ⚠️ 上游只挂 click —— 键盘用户打不开。这条守的是「我们补上了键盘通路」。
     header.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     expect(block.getAttribute('data-collapsed')).toBe('false');
@@ -92,8 +92,8 @@ describe('tool block content', () => {
     const block = createToolBlockShell(deps());
     updateToolBlockContent(block, [execution(), execution({ name: 'web_search' })], deps(), (n) => `${n} tools`);
 
-    expect(block.querySelector('.dpp-tool-block-title')?.textContent).toBe('2 tools');
-    const names = [...block.querySelectorAll('.dpp-tool-block-item-name')].map((el) => el.textContent);
+    expect(block.querySelector('.zpp-tool-block-title')?.textContent).toBe('2 tools');
+    const names = [...block.querySelectorAll('.zpp-tool-block-item-name')].map((el) => el.textContent);
     expect(names).toEqual(['shell_exec', 'web_search']);
   });
 
@@ -105,7 +105,7 @@ describe('tool block content', () => {
       deps(),
       () => 't',
     );
-    expect(block.querySelector('.dpp-tool-block-item-status')?.className)
+    expect(block.querySelector('.zpp-tool-block-item-status')?.className)
       .toContain('error');
   });
 
@@ -113,7 +113,7 @@ describe('tool block content', () => {
     const block = createToolBlockShell(deps());
     updateToolBlockContent(block, [execution()], deps(), () => 't');
     updateToolBlockContent(block, [execution({ name: 'web_search' })], deps(), () => 't');
-    const names = [...block.querySelectorAll('.dpp-tool-block-item-name')].map((el) => el.textContent);
+    const names = [...block.querySelectorAll('.zpp-tool-block-item-name')].map((el) => el.textContent);
     // ⚠️ 整块重画 —— 增量插入要维护「哪一行对应哪条执行」的映射，漂移即状态串行。
     expect(names).toEqual(['web_search']);
   });
@@ -132,7 +132,7 @@ describe('tool block content', () => {
     );
     expect(renderDetail).toHaveBeenCalledOnce();
     // ⚠️ 渲染器成功时必须**不**再写纯文本，否则卡片会被文本盖住。
-    expect(block.querySelector('.dpp-tool-block-item-detail')?.textContent).toBe('CARD');
+    expect(block.querySelector('.zpp-tool-block-item-detail')?.textContent).toBe('CARD');
   });
 
   it('falls back to plain text when the renderer declines', () => {
@@ -143,13 +143,13 @@ describe('tool block content', () => {
       deps({ renderDetail: () => false }),
       () => 't',
     );
-    expect(block.querySelector('.dpp-tool-block-item-detail')?.textContent).toBe('RAW');
+    expect(block.querySelector('.zpp-tool-block-item-detail')?.textContent).toBe('RAW');
   });
 
   it('omits the detail element when there is no detail text', () => {
     const block = createToolBlockShell(deps());
     updateToolBlockContent(block, [execution()], deps(), () => 't');
-    expect(block.querySelector('.dpp-tool-block-item-detail')).toBeNull();
+    expect(block.querySelector('.zpp-tool-block-item-detail')).toBeNull();
   });
 
   it('draws the result summary on the row, not only the status', () => {
@@ -162,7 +162,7 @@ describe('tool block content', () => {
     );
     // ⚠️ 折叠态下每行只有「工具名 + 状态」时长得一模一样，看不出做了什么
     // ⇒ 摘要必须进行内（上游控制台的已完成行就是这个形态）。
-    expect(block.querySelector('.dpp-tool-block-item-summary')?.textContent)
+    expect(block.querySelector('.zpp-tool-block-item-summary')?.textContent)
       .toBe('搜索完成，找到 8 条结果');
   });
 });
@@ -179,18 +179,18 @@ describe('tool block row-level collapse', () => {
   }
 
   function toggleOf(block: HTMLElement, index = 0): HTMLElement {
-    return block.querySelectorAll<HTMLElement>('.dpp-tool-block-item-toggle')[index];
+    return block.querySelectorAll<HTMLElement>('.zpp-tool-block-item-toggle')[index];
   }
 
   function detailOf(block: HTMLElement, index = 0): HTMLElement | null {
-    return block.querySelectorAll<HTMLElement>('.dpp-tool-block-item-detail')[index] ?? null;
+    return block.querySelectorAll<HTMLElement>('.zpp-tool-block-item-detail')[index] ?? null;
   }
 
   it('starts collapsed and expands on click', () => {
     const block = render();
     const toggle = toggleOf(block);
     // ⚠️ 默认收起（上游 `createAgentToolRow`：`aria-expanded="false"` + `hidden`）——
-    // 长正文（web_fetch 的网页正文可达 4000 字符）会把后面的工具行冲散。
+    // 长正文（第三方 MCP 返回的正文可达数千字符）会把后面的工具行冲散。
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(detailOf(block)?.hidden).toBe(true);
 
@@ -238,7 +238,7 @@ describe('tool block row-level collapse', () => {
   it('does not draw a chevron or a toggle for rows without detail', () => {
     const block = render([execution()]);
     // ⚠️ 没有详情的行挂开关 = 一个点了没反应的死控件。
-    expect(block.querySelector('.dpp-tool-block-item-chevron')).toBeNull();
+    expect(block.querySelector('.zpp-tool-block-item-chevron')).toBeNull();
     expect(toggleOf(block).getAttribute('aria-expanded')).toBe('false');
     expect(detailOf(block)).toBeNull();
   });
@@ -253,8 +253,8 @@ describe('tool block row-level collapse', () => {
     updateToolBlockContent(block, [execution({ result: { ok: true, summary: '执行中' } as ToolCardResult })], deps({
       formatDetail: (result) => result.summary ?? '',
     }), () => 't');
-    expect(block.querySelector('.dpp-tool-block-item-chevron')).toBeNull();
-    expect(block.querySelector('.dpp-tool-block-item-detail')).toBeNull();
+    expect(block.querySelector('.zpp-tool-block-item-chevron')).toBeNull();
+    expect(block.querySelector('.zpp-tool-block-item-detail')).toBeNull();
   });
 });
 
@@ -277,8 +277,8 @@ describe('tool block placement', () => {
     // ⚠️ 页面上同时存在多块，而 `id` 只能有一个 —— 不摘旧的会让
     // `getElementById` 一直指向上一次的那块。
     expect(blockA.id).toBe('');
-    expect(blockB.id).toBe('dpp-tool-block');
-    expect(document.getElementById('dpp-tool-block')).toBe(blockB);
+    expect(blockB.id).toBe('zpp-tool-block');
+    expect(document.getElementById('zpp-tool-block')).toBe(blockB);
   });
 
   it('reports failure when the host is not there yet', () => {
@@ -306,17 +306,17 @@ describe('tool block placement', () => {
     const block = createToolBlockShell(deps());
     appendToolBlockToMessage(bubble, block, deps());
     // 挂上时是「当前这块」（带 id + 焦点标记）。
-    expect(block.id).toBe('dpp-tool-block');
+    expect(block.id).toBe('zpp-tool-block');
 
     removeToolBlock(block);
 
     expect(block.isConnected).toBe(false);
     // ⚠️ **脱连的块必须同时摘掉 id 与焦点标记** —— `appendToolBlockToMessage`
-    // 摘「上一个带 `data-dpp-tool-active` 的块」时用的是 `querySelector`
-    //（只看**在文档里**的节点）⇒ 脱连块上残留的 `id="dpp-tool-block"`
+    // 摘「上一个带 `data-zpp-tool-active` 的块」时用的是 `querySelector`
+    //（只看**在文档里**的节点）⇒ 脱连块上残留的 `id="zpp-tool-block"`
     // 会让 `getElementById` 在那之后返回 null（页面上明明有一块，id 却查不到）。
     expect(block.id).toBe('');
-    expect(block.hasAttribute('data-dpp-tool-active')).toBe(false);
+    expect(block.hasAttribute('data-zpp-tool-active')).toBe(false);
   });
 });
 

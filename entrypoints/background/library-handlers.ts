@@ -28,7 +28,7 @@ export interface LibraryRuntimeHandlerDependencies {
   getAllSavedItems(): Promise<SavedItem[]>;
   saveSavedItem(input: SavedItemInput): Promise<SavedItem>;
   deleteSavedItem(id: string): Promise<void>;
-  insertPromptIntoActiveGLMTab(text: string): Promise<AckOrFailure>;
+  insertPromptIntoActiveZaiTab(text: string): Promise<AckOrFailure>;
   broadcastStateUpdate(excludeTabId?: number): Promise<void>;
   broadcastSavedItemsUpdate(excludeTabId?: number): Promise<void>;
 }
@@ -88,7 +88,7 @@ export function createLibraryRuntimeHandlers(
       return { ok: true as const };
     }),
     definePersistencePayloadRuntimeCommandHandler('INSERT_SAVED_PROMPT_INTO_CHAT', (payload) => (
-      dependencies.insertPromptIntoActiveGLMTab(
+      dependencies.insertPromptIntoActiveZaiTab(
         typeof payload?.text === 'string' ? payload.text : '',
       )
     )),

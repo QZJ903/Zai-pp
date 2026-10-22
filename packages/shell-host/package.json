@@ -1,12 +1,12 @@
 {
-  "name": "glm-pp-shell-host",
-  "version": "2.15.54",
-  "description": "Native Messaging Shell MCP host installer for GLM++",
+  "name": "zai-pp-shell-host",
+  "version": "2.15.55",
+  "description": "Native Messaging Shell MCP host installer for Zai++",
   "type": "module",
   "private": true,
   "license": "Apache-2.0",
   "bin": {
-    "glm-pp-shell-host": "bin/glm-pp-shell-host.mjs"
+    "zai-pp-shell-host": "bin/zai-pp-shell-host.mjs"
   },
   "files": [
     "bin/",

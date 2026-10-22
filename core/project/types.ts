@@ -56,7 +56,7 @@ export interface ProjectPromptContext {
   instructions: string;
 }
 
-export interface CurrentGLMConversation {
+export interface CurrentZaiConversation {
   conversationId: string;
   title: string;
   url: string;

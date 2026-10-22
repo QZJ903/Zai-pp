@@ -28,10 +28,10 @@ describe('automation storage contract', () => {
     const requestedAt = 1_000_000;
     const rawAutomation = {
       ...makeAutomation(),
-      glm: undefined,
+      zai: undefined,
       additiveAutomationField: { retained: true },
     };
-    delete rawAutomation.glm;
+    delete rawAutomation.zai;
     const decoded = decodeAutomationStorageState({
       version: 1,
       additiveRootField: 'retained',
@@ -67,12 +67,12 @@ describe('automation storage contract', () => {
     expect(decoded.additiveRootField).toBe('retained');
     expect((decoded.automations[0] as Automation & { additiveAutomationField: unknown }).additiveAutomationField)
       .toEqual({ retained: true });
-    expect(decoded.automations[0].glm).toEqual({
+    expect(decoded.automations[0].zai).toEqual({
       chatSessionId: null,
       sessionUrl: null,
-      // ⚠️ **`glm` 整块缺失时的新字段也要投影成 null**（旧记录没有它）——
-      // `createEmptyGLMSession()` 与 `decodeGLMSession()` 两条路要同形，
-      // 否则「有 glm 字段」与「没有」的旧记录解出来形状不同，下游得处理两种缺省。
+      // ⚠️ **`zai` 整块缺失时的新字段也要投影成 null**（旧记录没有它）——
+      // `createEmptyZaiSession()` 与 `decodeZaiSession()` 两条路要同形，
+      // 否则「有 zai 字段」与「没有」的旧记录解出来形状不同，下游得处理两种缺省。
       siteOrigin: null,
     });
     // 遗留的 deadlineAt 别名仍投影（这个别名还在用）。
@@ -185,7 +185,7 @@ function makeAutomation(): Automation {
       model: null,
       fixedSession: false,
     },
-    glm: {
+    zai: {
       chatSessionId: null,
       sessionUrl: null,
       siteOrigin: null,

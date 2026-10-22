@@ -7,7 +7,7 @@ import {
 } from './checksum';
 import type { SyncDataSnapshot } from './snapshot';
 
-export const SYNC_LOCAL_APPLY_JOURNAL_KIND = 'glm-pp.sync-local-apply-journal' as const;
+export const SYNC_LOCAL_APPLY_JOURNAL_KIND = 'zai-pp.sync-local-apply-journal' as const;
 export const SYNC_LOCAL_APPLY_JOURNAL_SCHEMA_VERSION = 1 as const;
 
 export const SYNC_APPLY_STEP_ORDER = [

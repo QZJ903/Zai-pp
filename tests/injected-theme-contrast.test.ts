@@ -60,7 +60,7 @@ const DIMMED_ELEMENT_KINDS = {
 } as const;
 
 /**
- * 菜单项图标的真实底 —— 它坐在 `#MENU_ID` 的 `--dpp-ui-surface-raised` 上，
+ * 菜单项图标的真实底 —— 它坐在 `#MENU_ID` 的 `--zpp-ui-surface-raised` 上，
  * **不是**页面底色、也不是侧边栏底色。
  *
  * ⚠️ **断言要对着真实生效的那个面算** —— 对页面底色算会在深色下给出偏乐观的值
@@ -99,7 +99,7 @@ function deriveDimmedElements(): DimmedElement[] {
     if (!opacity) continue;
     const value = Number(opacity[1]);
     if (!(value < 1)) continue;
-    const classNames = [...selector!.matchAll(/\.dpp-project-panel__([a-z-]+)/g)];
+    const classNames = [...selector!.matchAll(/\.zpp-project-panel__([a-z-]+)/g)];
     expect(classNames.length, `选择器里找不到面板类名：${selector}`).toBeGreaterThan(0);
     let name = classNames[classNames.length - 1]![1]!;
     if (/\bsvg\b/.test(selector!)) name = `${name}-svg`;
@@ -168,7 +168,7 @@ describe('injected theme readability', () => {
   it('keeps both palettes key-for-key identical', () => {
     // ⚠️ 少一个键不会报错 —— 那一套主题下该处静默回落到继承值。
     const light = readVariableBlock('body {');
-    const dark = readVariableBlock('body.dpp-theme-dark {');
+    const dark = readVariableBlock('body.zpp-theme-dark {');
 
     expect([...light.keys()].sort()).toEqual([...dark.keys()].sort());
     expect(light.size).toBeGreaterThan(0);
@@ -177,8 +177,8 @@ describe('injected theme readability', () => {
   it('keeps the prefers-color-scheme fallback block in sync too', () => {
     // ⚠️ 第三份变量块（`@media (prefers-color-scheme: dark)`）是 `DARK_VARS` 用字符串
     // `replace` 换缩进拼出来的 —— 键名集合比对只覆盖前两份，那份拼坏了没人报。
-    const media = readVariableBlock('body:not(.dpp-theme-light) {', '@media');
-    const dark = readVariableBlock('body.dpp-theme-dark {');
+    const media = readVariableBlock('body:not(.zpp-theme-light) {', '@media');
+    const dark = readVariableBlock('body.zpp-theme-dark {');
 
     expect([...media.keys()].sort()).toEqual([...dark.keys()].sort());
     // 值也必须一致：缩进替换若吃掉某个值，键还在、值会不同。
@@ -189,16 +189,16 @@ describe('injected theme readability', () => {
 
   it('reads primary text at body-copy contrast in both themes', () => {
     const light = readVariableBlock('body {');
-    const dark = readVariableBlock('body.dpp-theme-dark {');
+    const dark = readVariableBlock('body.zpp-theme-dark {');
 
-    expect(contrast(resolve(light, '--dpp-ui-text'), PAGE_BACKGROUND.light))
+    expect(contrast(resolve(light, '--zpp-ui-text'), PAGE_BACKGROUND.light))
       .toBeGreaterThanOrEqual(4.5);
-    expect(contrast(resolve(dark, '--dpp-ui-text'), PAGE_BACKGROUND.dark))
+    expect(contrast(resolve(dark, '--zpp-ui-text'), PAGE_BACKGROUND.dark))
       .toBeGreaterThanOrEqual(4.5);
 
     // ⚠️ 与深色对称：真正的底是**侧边栏**，浅色下它比页底更暗。
     expect(
-      contrast(resolve(light, '--dpp-ui-text'), LIGHT_SIDEBAR_BACKGROUND),
+      contrast(resolve(light, '--zpp-ui-text'), LIGHT_SIDEBAR_BACKGROUND),
       '面板正文压在浅色侧边栏上也要够读',
     ).toBeGreaterThanOrEqual(4.5);
   });
@@ -214,14 +214,14 @@ describe('injected theme readability', () => {
     // - **非文本图标**（常显按钮）：WCAG 1.4.11 的 3:1。它们是要点的东西，不是装饰。
     for (const [block, background] of [
       ['body {', PAGE_BACKGROUND.light],
-      ['body.dpp-theme-dark {', PAGE_BACKGROUND.dark],
+      ['body.zpp-theme-dark {', PAGE_BACKGROUND.dark],
     ] as const) {
       const vars = readVariableBlock(block);
-      const text = resolve(vars, '--dpp-ui-text');
+      const text = resolve(vars, '--zpp-ui-text');
       for (const [name, opacity] of DIMMED_TEXT_ELEMENTS) {
         expect(
           contrast(composite(text, background, opacity), background),
-          `${block} 的 .dpp-project-panel__${name}（opacity ${opacity}）`,
+          `${block} 的 .zpp-project-panel__${name}（opacity ${opacity}）`,
         ).toBeGreaterThanOrEqual(2.4);
       }
       for (const [name, opacity] of DIMMED_ICON_ELEMENTS) {
@@ -230,22 +230,22 @@ describe('injected theme readability', () => {
         if (MENU_SURFACE_ELEMENTS.has(name)) continue;
         expect(
           contrast(composite(text, background, opacity), background),
-          `${block} 的 .dpp-project-panel__${name}（图标，opacity ${opacity}）`,
+          `${block} 的 .zpp-project-panel__${name}（图标，opacity ${opacity}）`,
         ).toBeGreaterThanOrEqual(3);
       }
     }
   });
 
   it('keeps the dimmed elements visible on the worst-case sidebar background too', () => {
-    // ⚠️ 与 `--dpp-ui-text` 那条对称：**面板挂在 `#sidebar` 里**，而侧边栏底色与
+    // ⚠️ 与 `--zpp-ui-text` 那条对称：**面板挂在 `#sidebar` 里**，而侧边栏底色与
     // 页面底色不是同一个值（浅色更暗、深色更亮）。只对着页面底色核会漏掉最坏情况 ——
     // `conversation-age`（0.4）压浅色侧边栏只有 2.394，比页面底色的 2.430 更低。
     for (const [block, background] of [
       ['body {', LIGHT_SIDEBAR_BACKGROUND],
-      ['body.dpp-theme-dark {', DARK_SIDEBAR_BACKGROUND],
+      ['body.zpp-theme-dark {', DARK_SIDEBAR_BACKGROUND],
     ] as const) {
       const vars = readVariableBlock(block);
-      const text = resolve(vars, '--dpp-ui-text');
+      const text = resolve(vars, '--zpp-ui-text');
       // 最深的那一档（0.4）是这里的下限；它压最坏底色上仍要 ≥ 2.3。
       const worst = Math.min(...DIMMED_TEXT_ELEMENTS.map(([, opacity]) => opacity));
       expect(
@@ -256,19 +256,19 @@ describe('injected theme readability', () => {
   });
 
   it('reads the menu-item icon against the raised surface it actually sits on', () => {
-    // ⚠️ **菜单项图标（`menu-item-svg`）的真实底是 `--dpp-ui-surface-raised`**（菜单底色），
+    // ⚠️ **菜单项图标（`menu-item-svg`）的真实底是 `--zpp-ui-surface-raised`**（菜单底色），
     // 不是页面底色、也不是侧边栏底色。上面两条合成断言都对着后两者算 —— 对这个元素
     // 会给偏乐观的值（深色下对着页底算是 5.96，对着真实菜单底是 4.83 那一类偏差）。
     // 所以单独按真实面核一次。
-    for (const block of ['body {', 'body.dpp-theme-dark {'] as const) {
+    for (const block of ['body {', 'body.zpp-theme-dark {'] as const) {
       const vars = readVariableBlock(block);
-      const text = resolve(vars, '--dpp-ui-text');
-      const raised = resolve(vars, '--dpp-ui-surface-raised');
+      const text = resolve(vars, '--zpp-ui-text');
+      const raised = resolve(vars, '--zpp-ui-surface-raised');
       for (const [name, opacity] of DIMMED_ICON_ELEMENTS) {
         if (!MENU_SURFACE_ELEMENTS.has(name)) continue;
         expect(
           contrast(composite(text, raised, opacity), raised),
-          `${block} 的 .dpp-project-panel__${name} 压在菜单底 surface-raised 上`,
+          `${block} 的 .zpp-project-panel__${name} 压在菜单底 surface-raised 上`,
         ).toBeGreaterThanOrEqual(3);
       }
     }
@@ -277,42 +277,42 @@ describe('injected theme readability', () => {
   it('reads the error status line at body-copy contrast in both themes', () => {
     // 状态行是 10px 小字，且只在出错时出现 —— 读不清就等于没提示。
     const light = readVariableBlock('body {');
-    const dark = readVariableBlock('body.dpp-theme-dark {');
+    const dark = readVariableBlock('body.zpp-theme-dark {');
 
-    expect(contrast(resolve(light, '--dpp-ui-error'), PAGE_BACKGROUND.light))
+    expect(contrast(resolve(light, '--zpp-ui-error'), PAGE_BACKGROUND.light))
       .toBeGreaterThanOrEqual(4.5);
-    expect(contrast(resolve(dark, '--dpp-ui-error'), PAGE_BACKGROUND.dark))
+    expect(contrast(resolve(dark, '--zpp-ui-error'), PAGE_BACKGROUND.dark))
       .toBeGreaterThanOrEqual(4.5);
   });
 
   it('reads active-state icons and badge text against what they actually sit on', () => {
     for (const [block, background] of [
       ['body {', PAGE_BACKGROUND.light],
-      ['body.dpp-theme-dark {', PAGE_BACKGROUND.dark],
+      ['body.zpp-theme-dark {', PAGE_BACKGROUND.dark],
     ] as const) {
       const vars = readVariableBlock(block);
-      const accentStrong = resolve(vars, '--dpp-ui-accent-strong');
+      const accentStrong = resolve(vars, '--zpp-ui-accent-strong');
       // ⚠️ 激活态图标的**实际**背景不是页面底色，而是 `overlay-active` 叠在页底上
       // （面板给激活按钮加了底色）。断言得对着真实面算，否则将来把图标换成文字
       // 时这条会给假绿灯。
-      const activeSurface = composite(resolve(vars, '--dpp-ui-overlay-active'), background);
+      const activeSurface = composite(resolve(vars, '--zpp-ui-overlay-active'), background);
       // 15px 描边 SVG 属非文本，按 WCAG 1.4.11 的 3:1。
       expect(contrast(accentStrong, activeSurface), `${block} 激活态图标`).toBeGreaterThanOrEqual(3);
       // 待绑角标的文字是 10px 文本，按 4.5:1。
-      const badge = composite(resolve(vars, '--dpp-ui-accent-soft'), background);
+      const badge = composite(resolve(vars, '--zpp-ui-accent-soft'), background);
       expect(contrast(accentStrong, badge), `${block} 待绑角标`).toBeGreaterThanOrEqual(4.5);
     }
   });
 
   it('keeps solid accent fills readable by pairing them with an inverted label token', () => {
     // 实心 accent 底（卡片按钮）上的字**不能写死白色** —— 浅色 accent 上白字只有
-    // 3.74:1，深色 accent 上白字只有 2.27:1。字色走 `--dpp-ui-accent-contrast`。
+    // 3.74:1，深色 accent 上白字只有 2.27:1。字色走 `--zpp-ui-accent-contrast`。
     // ⚠️ 卡片那边「确实用了这个 token、没留字面色」由 `tool-result-renderer.test.ts` 守；
     // 这里只算配色本身够不够读。
-    for (const block of ['body {', 'body.dpp-theme-dark {'] as const) {
+    for (const block of ['body {', 'body.zpp-theme-dark {'] as const) {
       const vars = readVariableBlock(block);
-      const fill = resolve(vars, '--dpp-ui-accent');
-      const label = composite(resolve(vars, '--dpp-ui-accent-contrast'), fill);
+      const fill = resolve(vars, '--zpp-ui-accent');
+      const label = composite(resolve(vars, '--zpp-ui-accent-contrast'), fill);
       expect(contrast(label, fill), `${block} 实心按钮文字`).toBeGreaterThanOrEqual(4.5);
       // 这条 token 的语义就是「与 accent 反相」：两套主题的 accent 都偏亮，
       // 所以字色两边都该是**比 accent 暗**的那一侧。写死白字会同时踩坏
@@ -327,8 +327,8 @@ describe('injected theme readability', () => {
   it('lifts the raised surface above the sidebar so overlays stay readable', () => {
     // ⚠️ 深色下浮层若用 `surface`（与页底几乎同值），菜单会糊在页面上。
     // 判据是「比底亮」，不是某个具体色值。
-    const dark = readVariableBlock('body.dpp-theme-dark {');
-    const raised = resolve(dark, '--dpp-ui-surface-raised');
+    const dark = readVariableBlock('body.zpp-theme-dark {');
+    const raised = resolve(dark, '--zpp-ui-surface-raised');
     expect(relativeLuminance(raised)).toBeGreaterThan(relativeLuminance(PAGE_BACKGROUND.dark));
 
     // ⚠️ 真正的底是**侧边栏**（比 `#app` 的 `#161616` 亮），所以对着更亮的最坏情况再核一次。
@@ -339,7 +339,7 @@ describe('injected theme readability', () => {
     ).toBeGreaterThanOrEqual(1.1);
 
     // 菜单文字落在 raised 上，同样要够读。
-    expect(contrast(resolve(dark, '--dpp-ui-text'), raised)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(resolve(dark, '--zpp-ui-text'), raised)).toBeGreaterThanOrEqual(4.5);
   });
 
   it('makes hover and active overlays visible in both themes', () => {
@@ -347,11 +347,11 @@ describe('injected theme readability', () => {
     // 这条断言就是钉住那个方向：叠加层必须在**当前主题的底**上产生可见差异。
     for (const [block, background] of [
       ['body {', PAGE_BACKGROUND.light],
-      ['body.dpp-theme-dark {', PAGE_BACKGROUND.dark],
+      ['body.zpp-theme-dark {', PAGE_BACKGROUND.dark],
     ] as const) {
       const vars = readVariableBlock(block);
-      const hover = relativeLuminance(composite(resolve(vars, '--dpp-ui-overlay-hover'), background));
-      const active = relativeLuminance(composite(resolve(vars, '--dpp-ui-overlay-active'), background));
+      const hover = relativeLuminance(composite(resolve(vars, '--zpp-ui-overlay-hover'), background));
+      const active = relativeLuminance(composite(resolve(vars, '--zpp-ui-overlay-active'), background));
       const page = relativeLuminance(background);
 
       expect(luminanceRatio(hover, page), `${block} hover`).toBeGreaterThanOrEqual(1.1);
@@ -363,14 +363,14 @@ describe('injected theme readability', () => {
 });
 
 /**
- * 从注入的样式表里取出某个选择器块的 `--dpp-ui-*` 声明。
+ * 从注入的样式表里取出某个选择器块的 `--zpp-ui-*` 声明。
  *
  * ⚠️ **按花括号配平取块，不按固定缩进找闭合** —— 媒体查询里那份副本是嵌套的
  * （`@media (…) { body:not(…) { … } }`），闭合括号的缩进与顶层块不同。
  */
 function readVariableBlock(selector: string, context = ''): Map<string, string> {
   injectInjectedThemeStyles();
-  const css = document.getElementById('dpp-injected-theme-css')?.textContent ?? '';
+  const css = document.getElementById('zpp-injected-theme-css')?.textContent ?? '';
   const start = css.search(new RegExp(`^\\s*${escapeRegExp(selector)}`, 'm'));
   expect(start, `样式表里没有 ${selector} 块${context ? `（${context}）` : ''}`)
     .toBeGreaterThanOrEqual(0);
@@ -396,13 +396,13 @@ function readVariableBlock(selector: string, context = ''): Map<string, string> 
   // （`…; /* ≈ #6b7280 */`）静默挡掉，而两套变量块同时丢掉同一个键时，
   // 键名集合比对**仍然相等** —— 于是少了一个 token 也没人报。
   const declarations = new Map<string, string>();
-  for (const match of block.matchAll(/(--dpp-ui-[a-z-]+)\s*:\s*([^;]+);/g)) {
+  for (const match of block.matchAll(/(--zpp-ui-[a-z-]+)\s*:\s*([^;]+);/g)) {
     declarations.set(match[1]!, match[2]!.trim());
   }
 
   // ⚠️ **解析必须无损** —— 每丢一条声明就等于少守一个 token。拿「块里出现的
-  // 键名个数」对账（`(?=\s*:)` 保证只数键、不数 `var(--dpp-ui-x)` 那种值引用）。
-  const declared = block.match(/--dpp-ui-[a-z-]+(?=\s*:)/g) ?? [];
+  // 键名个数」对账（`(?=\s*:)` 保证只数键、不数 `var(--zpp-ui-x)` 那种值引用）。
+  const declared = block.match(/--zpp-ui-[a-z-]+(?=\s*:)/g) ?? [];
   expect(declarations.size, `${selector} 里有声明没解析出来`).toBe(declared.length);
   expect(declarations.size, `${selector} 块里一条声明都没有`).toBeGreaterThan(0);
   return declarations;
@@ -413,10 +413,10 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** 解析一层 `var(--dpp-ui-x)` 引用；非变量值原样返回。 */function resolve(vars: Map<string, string>, name: string, depth = 0): string {
+/** 解析一层 `var(--zpp-ui-x)` 引用；非变量值原样返回。 */function resolve(vars: Map<string, string>, name: string, depth = 0): string {
   const value = vars.get(name);
   expect(value, `样式表里没有 ${name}`).toBeDefined();
-  const reference = /^var\((--dpp-ui-[a-z-]+)\)$/.exec(value!.trim());
+  const reference = /^var\((--zpp-ui-[a-z-]+)\)$/.exec(value!.trim());
   if (!reference || depth > 4) return value!;
   return resolve(vars, reference[1]!, depth + 1);
 }

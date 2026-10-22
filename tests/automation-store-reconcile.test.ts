@@ -6,7 +6,7 @@ import {
 } from '../core/automation/store';
 import type { AutomationRun } from '../core/automation/types';
 
-const STORAGE_KEY = 'glm_pp_automations';
+const STORAGE_KEY = 'zai_pp_automations';
 
 function createChromeStub() {
   const storage = new Map<string, unknown>();

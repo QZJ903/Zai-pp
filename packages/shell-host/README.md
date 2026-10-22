@@ -1,6 +1,6 @@
-# glm-pp-shell-host
+# zai-pp-shell-host
 
-Native Messaging Shell MCP host installer for GLM++.
+Native Messaging Shell MCP host installer for Zai++.
 
 The host gives the extension a `shell_exec` / `local_file_*` capability by running a
 small Node.js process on the local machine and talking to it over Chrome's Native
@@ -15,7 +15,7 @@ npm run shell:install -- --browser chrome --extension-id <extension-id>
 ```
 
 `--extension-id` is the 32-character ID of the loaded extension
-(`chrome://extensions` → GLM++ → ID). It is required: the generated Native Messaging
+(`chrome://extensions` → Zai++ → ID). It is required: the generated Native Messaging
 manifest whitelists exactly that origin. The side panel's MCP page fills in the
 current ID for you.
 
@@ -37,5 +37,5 @@ administrator rights are required.
 Pass `--log-file <path>` to have the host wrapper redirect its stderr there:
 
 ```bash
-npm run shell:install -- --browser chrome --extension-id <id> --log-file "$HOME/glm-host.log"
+npm run shell:install -- --browser chrome --extension-id <id> --log-file "$HOME/zai-host.log"
 ```

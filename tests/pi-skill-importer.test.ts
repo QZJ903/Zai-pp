@@ -1,7 +1,7 @@
 /**
  * pi-ecosystem SKILL.md import contract tests.
  *
- * The GLM++ local-import pipeline already supports the agentskills.io /
+ * The Zai++ local-import pipeline already supports the agentskills.io /
  * pi-ecosystem SKILL.md format (BOM strip + frontmatter name/description/
  * version + body + H1/parent-dir fallbacks). These tests harden that surface as a
  * contract:
@@ -122,7 +122,7 @@ describe('SKILL.md parsing contract (pi-ecosystem format)', () => {
 describe('pi-field bridge contract', () => {
   it('maps pi disable-model-invocation to a metadata-preserving surface (no semantic change)', () => {
     // The pi ecosystem's `disable-model-invocation` flag is not consumed by
-    // the GLM++ model-visibility semantics (enablement is app-owned).
+    // the Zai++ model-visibility semantics (enablement is app-owned).
     // The bridge must not crash on it and must keep the parsed doc stable.
     const parsed = parseSkillDoc(
       [
@@ -303,7 +303,7 @@ describe('pi-ecosystem SKILL.md end-to-end import compatibility', () => {
     // instructions); persistence of the local source lands under the
     // released skill key, asserted below.
     // No new persistence keys: the import lands under the released skill key.
-    expect(Object.keys(storage).some((key) => key.startsWith('glm_pp_skills'))).toBe(true);
+    expect(Object.keys(storage).some((key) => key.startsWith('zai_pp_skills'))).toBe(true);
 
     vi.unstubAllGlobals();
     vi.clearAllMocks();

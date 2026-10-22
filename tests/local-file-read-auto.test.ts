@@ -19,7 +19,7 @@ function makeTempFile(content: string | Uint8Array): string {
 function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
   return {
     id: 's', displayName: 'Shell Local', enabled: true,
-    transport: { kind: 'native_messaging', nativeHost: 'com.glm_pp.shell' },
+    transport: { kind: 'native_messaging', nativeHost: 'com.zai_pp.shell' },
     timeouts: { connectMs: 0, requestMs: 30000, discoveryMs: 0 },
     limits: { maxResultBytes: 64000, maxToolCount: 100 },
     version: 1, status: 'ready', lastConnectedAt: null, lastError: null,

@@ -20,25 +20,25 @@ vi.mock('../core/memory/store', () => ({
 }));
 
 vi.mock('../core/preset/store', () => ({
-  ACTIVE_PRESET_STORAGE_KEY: 'glm_pp_active_preset_id',
-  PRESETS_STORAGE_KEY: 'glm_pp_presets',
+  ACTIVE_PRESET_STORAGE_KEY: 'zai_pp_active_preset_id',
+  PRESETS_STORAGE_KEY: 'zai_pp_presets',
   clearActivePresetForSyncApply: mocks.clearActivePreset,
   replacePresetCollectionForSyncApply: mocks.replacePresets,
 }));
 
 vi.mock('../core/project/store', () => ({
-  PROJECT_CONTEXT_STORAGE_KEY: 'glm_pp_project_context',
+  PROJECT_CONTEXT_STORAGE_KEY: 'zai_pp_project_context',
   saveProjectContextStateForSyncApply: mocks.saveProject,
 }));
 
 vi.mock('../core/saved-items/store', () => ({
-  SAVED_ITEMS_STORAGE_KEY: 'glm_pp_saved_items',
+  SAVED_ITEMS_STORAGE_KEY: 'zai_pp_saved_items',
   replaceSavedItemsStateForSyncApply: mocks.replaceSavedItems,
 }));
 
 vi.mock('../core/skill/registry', () => ({
-  SKILLS_STORAGE_KEY: 'glm_pp_skills',
-  SKILL_SOURCES_STORAGE_KEY: 'glm_pp_skill_sources',
+  SKILLS_STORAGE_KEY: 'zai_pp_skills',
+  SKILL_SOURCES_STORAGE_KEY: 'zai_pp_skill_sources',
   replaceAllCustomSkillsForSyncApply: mocks.replaceSkills,
   replaceAllSkillSourcesForSyncApply: mocks.replaceSkillSources,
 }));

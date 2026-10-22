@@ -9,7 +9,7 @@
  * | 腿 | 有锚点吗 | 有真实结果吗 |
  * |---|---|---|
  * | **history**（打开/刷新会话时从 `messages/batch` 收集） | ✅ 消息 uuid + 正文 + 工具名 | ❌ 只有工具名与入参 |
- * | **storage**（`glm_pp_tool_history`，执行当时落库） | ❌ 没有消息 id、没有正文 | ✅ 有 `result.detail` / `output` |
+ * | **storage**（`zai_pp_tool_history`，执行当时落库） | ❌ 没有消息 id、没有正文 | ✅ 有 `result.detail` / `output` |
  *
  * ⇒ **合流不是优化，是必要条件**：storage 腿单独渲染不出来（找不到该挂哪条消息），
  * history 腿单独渲染只有摘要。两者按「工具签名」对齐后，才既知道挂哪儿、又有真结果。
@@ -176,8 +176,6 @@ export interface ToolBlockRestoreController {
    * ⚠️ 不 `stop()`：观察器要继续工作，只是记录不再属于当前会话。
    */
   clearAll: () => void;
-  /** 把所有记录重新排回待渲染（页面重建后调）。 */
-  requeueAll: () => void;
   /** 开始观察页面变动（页面重建我们的块时自动重排队）。 */
   start: () => void;
   /** 停止观察并清空全部状态。 */
@@ -297,7 +295,7 @@ export function createToolBlockRestoreController(
    * 成因是两条腿的**粒度不同**：
    * - **history 腿**：一条消息一条记录（3 个 `calls`、0 个 `executions`）；
    * - **storage 腿**：**一次调用一条记录**（各 1 个 call / 1 个 execution）——
-   *   因为 `glm_pp_tool_history` 是按调用落库的。
+   *   因为 `zai_pp_tool_history` 是按调用落库的。
    * 取「非空的那一方」时，第一条 storage 记录带进 1 个 execution 之后，
    * 后面两条的 execution **全被挡住**（`existing` 非空就永远胜出）⇒ 只剩 1 行。
    *
@@ -637,7 +635,7 @@ export function createToolBlockRestoreController(
     return dependencies.messageCarriesAnchorId(message, messageId);
   }
 
-  /** 把所有记录排回待渲染（页面重建后调）。 */
+  /** 把所有记录排回待渲染（观察器发现我们的块被移除时调）。 */
   function requeueAll(): void {
     if (records.size === 0) return;
     for (const id of records.keys()) pending.add(id);
@@ -755,7 +753,6 @@ export function createToolBlockRestoreController(
     renderPending,
     sealLive,
     clearAll,
-    requeueAll,
     start,
     stop,
     snapshot: () => ({ records: records.size, pending: pending.size }),

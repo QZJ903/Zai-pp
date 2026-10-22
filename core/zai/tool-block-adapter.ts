@@ -31,10 +31,10 @@ export const ZAI_ASSISTANT_MESSAGE_SELECTOR = '.chat-assistant';
  * 包含自己而再次命中**（上游那条腿漏了这一步，见 `tool-block-restore.ts` 的说明）。
  */
 export const ZAI_INJECTED_UI_SELECTOR = [
-  '.dpp-tool-block',
-  '[data-dpp-result-cards]',
-  '[data-dpp-hidden-continuation]',
-  '.dpp-project-panel',
+  '.zpp-tool-block',
+  '[data-zpp-result-cards]',
+  '[data-zpp-hidden-continuation]',
+  '.zpp-project-panel',
 ].join(', ');
 
 /** 取页面上的全部助手消息（按 DOM 顺序）。 */
@@ -154,7 +154,7 @@ export type ToolBlockTitleFormatter = (count: number) => string;
  * 详情的文本形态：**三段式**（`summary` + `detail` + `output: JSON`）。
  *
  * ⚠️⚠️ **口径来自上游 inline-agent 控制台的 `getToolResultDetailText`，不是
- * `.dpp-tool-block` 的 `formatToolResultDetail`。** 两者的差别是根本性的：
+ * `.zpp-tool-block` 的 `formatToolResultDetail`。** 两者的差别是根本性的：
  * 后者是「有 `detail` 就不看 `output`」（我们原先照搬的就是它），
  * 前者**三段无条件拼接**。之所以换口径：取回正文类工具成功时 `detail` 只是
  * 「页面长度 N 字符」这种摘要、正文在 `output.content` 里 ⇒ 旧口径下正文

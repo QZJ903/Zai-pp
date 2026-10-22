@@ -81,7 +81,7 @@ describe('MCP and Native external contract', () => {
       params: {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: MCP_PROTOCOL_CONTRACT.clientCapabilities,
-        clientInfo: { name: 'GLM++', version: '1.11.9' },
+        clientInfo: { name: 'Zai++', version: '1.11.9' },
       },
     });
     expect(

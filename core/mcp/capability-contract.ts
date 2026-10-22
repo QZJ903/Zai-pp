@@ -1,7 +1,7 @@
 import type { ToolDescriptor } from '../tool/types';
 
 export const MCP_CAPABILITY_TOOL_PROVIDER_ID = 'mcp_capability';
-export const MCP_CAPABILITY_OPERATION_ANNOTATION = 'dpp.mcpCapabilityOperation';
+export const MCP_CAPABILITY_OPERATION_ANNOTATION = 'zpp.mcpCapabilityOperation';
 
 export const MCP_CAPABILITY_OPERATIONS = [
   'discover',

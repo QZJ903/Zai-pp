@@ -20,7 +20,7 @@
  * 或访问级别。语义上「最近在用哪个站」跨浏览器重启保留也说得通。
  *
  * ⚠️ **写入方是内容脚本**（它才知道页面在哪一站），**读取方主要是侧边栏**。
- * 后台自己那几处走的是「记录里带的站点」，不读这里（见 `AutomationGLMSession.siteOrigin`）。
+ * 后台自己那几处走的是「记录里带的站点」，不读这里（见 `AutomationZaiSession.siteOrigin`）。
  *
  * ⚠️ **读不到 / 认不出时返回默认站点** —— 失败方向是「拼出默认站的链接」，
  * 与「拼一个 `'#'`」或「抛错」相比是安全的一侧。
@@ -28,7 +28,7 @@
 
 import { ZAI_DEFAULT_SITE_ID, ZAI_SITES, resolveZaiSiteOrigin } from './contracts';
 
-export const ZAI_ACTIVE_SITE_STORAGE_KEY = 'glm_pp_active_site';
+export const ZAI_ACTIVE_SITE_STORAGE_KEY = 'zai_pp_active_site';
 
 /**
  * 记下「当前这个页面属于哪个站」。由内容脚本在启动时调用一次（幂等）。

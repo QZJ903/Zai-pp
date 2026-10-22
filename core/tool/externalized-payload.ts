@@ -1,7 +1,7 @@
 import type { ToolCall, ToolError, ToolPayload } from './types';
 import { enforceLocalSkillCwd } from './local-skill-cwd';
 
-const EXTERNALIZED_TOOL_PAYLOAD_MARKER = '__dppExternalToolPayload';
+const EXTERNALIZED_TOOL_PAYLOAD_MARKER = '__zppExternalToolPayload';
 const EXTERNALIZED_TOOL_PAYLOAD_VERSION = 1 as const;
 const EXTERNALIZED_TOOL_PAYLOAD_TTL_MS = 30 * 60 * 1000;
 

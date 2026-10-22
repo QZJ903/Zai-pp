@@ -171,7 +171,7 @@ describe('site-less call sites thread the site explicitly', () => {
     // 兼容缺省：旧记录没有这个字段 ⇒ 必须 `defaultedNullableString`（写成必填会让
     // 所有旧记录判 corrupt、**整份自动化存储打不开**）。
     const occurrences = codec.match(/defaultedNullableString\(value\.siteOrigin/g) ?? [];
-    expect(occurrences.length, 'glm 会话 / run 请求 / run 结果三处都要兼容缺省').toBeGreaterThanOrEqual(3);
+    expect(occurrences.length, '会话 / run 请求 / run 结果三处都要兼容缺省').toBeGreaterThanOrEqual(3);
   });
 
   it('the coordinator resolves the site before picking a tab, and reports it back', () => {

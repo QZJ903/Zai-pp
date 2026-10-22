@@ -56,7 +56,7 @@ function buildHarness(overrides: Partial<ToolBlockRestoreDependencies> = {}): Ha
       mergedRecords.push(record);
       return true;
     },
-    ownUiSelector: '.dpp-tool-block',
+    ownUiSelector: '.zpp-tool-block',
     messageSelector: '.chat-assistant',
     observeRoot: () => document.body,
     // ⚠️ 默认「不知道当前会话」⇒ 兜底腿的会话判据一律放行（与生产里
@@ -187,7 +187,7 @@ describe('two legs merge', () => {
       getMessageOwnText: (message) => message.textContent ?? '',
       resolveHost: () => document.createElement('div'),
       render: (r) => { seen.push(`${r.id}:${r.executions.length}`); return true; },
-      ownUiSelector: '.dpp-tool-block',
+      ownUiSelector: '.zpp-tool-block',
       messageSelector: '.chat-assistant',
       observeRoot: () => document.body,
       getChatSessionId: () => null,
@@ -223,7 +223,7 @@ describe('two legs merge', () => {
       getMessageOwnText: () => '',
       resolveHost: () => null,
       render: () => true,
-      ownUiSelector: '.dpp-tool-block',
+      ownUiSelector: '.zpp-tool-block',
       messageSelector: '.chat-assistant',
       observeRoot: () => document.body,
       getChatSessionId: () => null,
@@ -249,7 +249,7 @@ describe('two legs merge', () => {
       getMessageOwnText: () => '',
       resolveHost: () => null,
       render: () => true,
-      ownUiSelector: '.dpp-tool-block',
+      ownUiSelector: '.zpp-tool-block',
       messageSelector: '.chat-assistant',
       observeRoot: () => document.body,
       getChatSessionId: () => null,
@@ -540,7 +540,7 @@ describe('requeue after the page rebuilds our UI', () => {
 
     // 页面上我们自己的块被移除了（= 页面重建了那块 DOM）。
     const block = document.createElement('div');
-    block.className = 'dpp-tool-block';
+    block.className = 'zpp-tool-block';
     document.body.appendChild(block);
     block.remove();
     await Promise.resolve();

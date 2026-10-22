@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
-  CurrentGLMConversation,
+  CurrentZaiConversation,
   Memory,
   NewMemory,
   ProjectContext,
@@ -8,7 +8,7 @@ import type {
   ProjectConversation,
 } from '../../../core/types';
 import {
-  decodeCurrentGLMConversation,
+  decodeCurrentZaiConversation,
   decodeProjectContext,
   decodeProjectContextState,
 } from '../../../core/project/codec';
@@ -67,7 +67,7 @@ export default function ProjectsPage() {
   const [editInstructions, setEditInstructions] = useState('');
   const [showMemoryForm, setShowMemoryForm] = useState(false);
   const [editingMemory, setEditingMemory] = useState<Memory | null>(null);
-  const [currentConversation, setCurrentConversation] = useState<CurrentGLMConversation | null>(null);
+  const [currentConversation, setCurrentConversation] = useState<CurrentZaiConversation | null>(null);
   /**
    * 兜底拼会话 URL 时用的 origin（「最近活跃站」）。
    *
@@ -203,7 +203,7 @@ export default function ProjectsPage() {
     const generation = conversationFence.current.begin();
     try {
       const conversation = await sidepanelRuntimeClient.request(
-        { type: 'GET_CURRENT_GLM_CONVERSATION' },
+        { type: 'GET_CURRENT_ZAI_CONVERSATION' },
         { acceptFailure: true, decode: decodeCurrentConversationResponse },
       );
       if (conversationFence.current.isCurrent(generation)) {
@@ -666,18 +666,18 @@ function isZaiPageUrl(url: string): boolean {
   return isZaiSiteOrigin(url);
 }
 
-function decodeCurrentConversationResponse(value: unknown): CurrentGLMConversation | null {
+function decodeCurrentConversationResponse(value: unknown): CurrentZaiConversation | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('Invalid GET_CURRENT_GLM_CONVERSATION response.');
+    throw new Error('Invalid GET_CURRENT_ZAI_CONVERSATION response.');
   }
   const response = value as Record<string, unknown>;
   if (response.ok === false) return null;
   if (response.ok !== true) {
-    throw new Error('Invalid GET_CURRENT_GLM_CONVERSATION response.');
+    throw new Error('Invalid GET_CURRENT_ZAI_CONVERSATION response.');
   }
-  return decodeCurrentGLMConversation(
+  return decodeCurrentZaiConversation(
     response.conversation,
-    'GET_CURRENT_GLM_CONVERSATION response.conversation',
+    'GET_CURRENT_ZAI_CONVERSATION response.conversation',
   );
 }
 

@@ -16,10 +16,10 @@ import { normalizeBackgroundConfig } from '../background/config';
 import { ZAI_CHAT_INPUT_SELECTOR } from './contracts';
 
 /** 注入元素的 id 与标记属性。 */
-const BG_ELEMENT_ID = 'dpp-bg';
-const BG_STYLE_ID = 'dpp-bg-style';
-const BG_ACTIVE_CLASS = 'dpp-bg-active';
-const TRANSPARENT_ATTR = 'data-dpp-transparent';
+const BG_ELEMENT_ID = 'zpp-bg';
+const BG_STYLE_ID = 'zpp-bg-style';
+const BG_ACTIVE_CLASS = 'zpp-bg-active';
+const TRANSPARENT_ATTR = 'data-zpp-transparent';
 
 /** z.ai 的 SPA 根容器。 */
 const APP_ROOT_ID = 'app';
@@ -49,9 +49,9 @@ export function applyBackground(config: BackgroundConfig | null): void {
   // 透明度语义与侧边栏预览一致：值越小遮罩越厚、图片越淡。
   const overlayAlpha = (1 - normalized.opacity).toFixed(3);
   const blurPx = ((1 - normalized.opacity) * MAX_BLUR_PX).toFixed(1);
-  document.body.style.setProperty('--dpp-overlay-light', `rgba(255, 255, 255, ${overlayAlpha})`);
-  document.body.style.setProperty('--dpp-overlay-dark', `rgba(30, 30, 30, ${overlayAlpha})`);
-  document.body.style.setProperty('--dpp-blur', `blur(${blurPx}px)`);
+  document.body.style.setProperty('--zpp-overlay-light', `rgba(255, 255, 255, ${overlayAlpha})`);
+  document.body.style.setProperty('--zpp-overlay-dark', `rgba(30, 30, 30, ${overlayAlpha})`);
+  document.body.style.setProperty('--zpp-blur', `blur(${blurPx}px)`);
 
   const bgDiv = existingBg ?? document.createElement('div');
   bgDiv.id = BG_ELEMENT_ID;
@@ -73,29 +73,29 @@ export function applyBackground(config: BackgroundConfig | null): void {
   const styleEl = existingStyle ?? document.createElement('style');
   styleEl.id = BG_STYLE_ID;
   styleEl.textContent = `
-    #dpp-bg::after {
+    #zpp-bg::after {
       content: '';
       position: absolute;
       inset: 0;
-      background: var(--dpp-overlay-light);
-      backdrop-filter: var(--dpp-blur);
-      -webkit-backdrop-filter: var(--dpp-blur);
+      background: var(--zpp-overlay-light);
+      backdrop-filter: var(--zpp-blur);
+      -webkit-backdrop-filter: var(--zpp-blur);
       pointer-events: none;
     }
 
-    body.dpp-bg-active,
-    body.dpp-bg-active #app,
-    body.dpp-bg-active #app > div,
-    body.dpp-bg-active #app > div > div {
+    body.zpp-bg-active,
+    body.zpp-bg-active #app,
+    body.zpp-bg-active #app > div,
+    body.zpp-bg-active #app > div > div {
       background: transparent !important;
     }
 
-    body.dpp-bg-active [data-dpp-transparent] {
+    body.zpp-bg-active [data-zpp-transparent] {
       background: transparent !important;
     }
 
-    html.dark #dpp-bg::after {
-      background: var(--dpp-overlay-dark);
+    html.dark #zpp-bg::after {
+      background: var(--zpp-overlay-dark);
     }
   `;
   if (!existingStyle) document.head.appendChild(styleEl);
@@ -107,9 +107,9 @@ export function removeBackground(): void {
   document.getElementById(BG_ELEMENT_ID)?.remove();
   document.getElementById(BG_STYLE_ID)?.remove();
   document.body.classList.remove(BG_ACTIVE_CLASS);
-  document.body.style.removeProperty('--dpp-overlay-light');
-  document.body.style.removeProperty('--dpp-overlay-dark');
-  document.body.style.removeProperty('--dpp-blur');
+  document.body.style.removeProperty('--zpp-overlay-light');
+  document.body.style.removeProperty('--zpp-overlay-dark');
+  document.body.style.removeProperty('--zpp-blur');
   document
     .querySelectorAll(`[${TRANSPARENT_ATTR}]`)
     .forEach((element) => element.removeAttribute(TRANSPARENT_ATTR));

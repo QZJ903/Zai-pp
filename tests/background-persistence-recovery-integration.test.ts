@@ -156,7 +156,7 @@ function createProjectDeletionDependencies(
     addConversationToProject: async () => unusedDependency(),
     removeConversationFromProject: async () => unusedDependency(),
     setPendingProjectContext: async () => unusedDependency(),
-    getCurrentGLMConversation: async () => unusedDependency(),
+    getCurrentZaiConversation: async () => unusedDependency(),
     bindPendingProjectConversation: async () => unusedDependency(),
     refreshProjectConversation: async () => unusedDependency(),
     getProjectForConversation: async () => unusedDependency(),

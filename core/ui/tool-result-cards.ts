@@ -26,10 +26,10 @@ import {
 const ASSISTANT_MESSAGE_SELECTOR = '.chat-assistant';
 
 /** 卡片容器的注入标记（同一条消息只挂一个）。 */
-const CARD_HOST_ATTR = 'data-dpp-result-cards';
+const CARD_HOST_ATTR = 'data-zpp-result-cards';
 
 /** 容器上记录「已挂过哪些结果」的属性 —— 去重的唯一真源（与容器同生命周期）。 */
-const MOUNTED_KEYS_ATTR = 'data-dpp-mounted';
+const MOUNTED_KEYS_ATTR = 'data-zpp-mounted';
 
 /** 单条消息最多挂几张卡片（结果多了会淹掉正文）。 */
 const MAX_CARDS_PER_MESSAGE = 3;

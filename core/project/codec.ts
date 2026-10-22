@@ -1,6 +1,6 @@
 import {
   PROJECT_CONTEXT_SCHEMA_VERSION,
-  type CurrentGLMConversation,
+  type CurrentZaiConversation,
   type ProjectContext,
   type ProjectContextState,
   type ProjectConversation,
@@ -69,17 +69,17 @@ export function decodeProjectConversation(
   } as ProjectConversation;
 }
 
-export function decodeCurrentGLMConversation(
+export function decodeCurrentZaiConversation(
   value: unknown,
-  path = 'currentGLMConversation',
-): CurrentGLMConversation {
+  path = 'currentZaiConversation',
+): CurrentZaiConversation {
   const object = recordValue(value, path);
   return {
     ...object,
     conversationId: requiredString(object.conversationId, `${path}.conversationId`),
     title: requiredString(object.title, `${path}.title`),
     url: requiredString(object.url, `${path}.url`),
-  } as CurrentGLMConversation;
+  } as CurrentZaiConversation;
 }
 
 export function removeProjectFromLegacyFields(

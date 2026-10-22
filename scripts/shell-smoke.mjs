@@ -78,7 +78,7 @@ function spawnHost(extraHostEnv) {
 
 function makeEnvelope(method, params, id) {
   return {
-    protocol: 'glm-pp-mcp-native',
+    protocol: 'zai-pp-mcp-native',
     version: 1,
     server: { id: 'test-shell' },
     message: {
@@ -122,7 +122,7 @@ await testMethod('initialize', 'initialize', {
   assert(res.jsonrpc === '2.0', 'expected jsonrpc 2.0');
   assert(res.result, 'expected result');
   assert(res.result.protocolVersion === '2025-06-18', 'expected protocol version');
-  assert(res.result.serverInfo.name === 'glm-pp-shell', 'expected server name');
+  assert(res.result.serverInfo.name === 'zai-pp-shell', 'expected server name');
   assert(res.result.serverInfo.version === SHELL_PACKAGE_VERSION, `expected server version ${SHELL_PACKAGE_VERSION}`);
 });
 
@@ -214,8 +214,8 @@ await testMethod('tools/call shell_exec (unicode stdout)', 'tools/call', {
 
 {
   const inheritedPath = process.env.Path || process.env.PATH || '';
-  const expectedPrefix = platform() === 'win32' ? 'C:\\glm-expected' : '/tmp/glm-expected';
-  const wrongPrefix = platform() === 'win32' ? 'C:\\glm-wrong' : '/tmp/glm-wrong';
+  const expectedPrefix = platform() === 'win32' ? 'C:\\zai-expected' : '/tmp/zai-expected';
+  const wrongPrefix = platform() === 'win32' ? 'C:\\zai-wrong' : '/tmp/zai-wrong';
   const pathSep = platform() === 'win32' ? ';' : ':';
   const command = platform() === 'win32'
     ? 'Write-Output $env:Path'
@@ -288,8 +288,8 @@ await testMethod('unknown method', 'unknown/method', {}, (res) => {
 const IS_WIN = platform() === 'win32';
 const PRINT_CWD = IS_WIN ? 'Get-Location' : 'pwd';
 const CD_PARENT = IS_WIN ? 'Set-Location ..' : 'cd ..';
-const EXPORT_VAR = IS_WIN ? '$env:DPP_SMOKE = "persisted"' : 'export DPP_SMOKE=persisted';
-const PRINT_VAR_CMD = IS_WIN ? 'Write-Output $env:DPP_SMOKE' : 'echo $DPP_SMOKE';
+const EXPORT_VAR = IS_WIN ? '$env:ZPP_SMOKE = "persisted"' : 'export ZPP_SMOKE=persisted';
+const PRINT_VAR_CMD = IS_WIN ? 'Write-Output $env:ZPP_SMOKE' : 'echo $ZPP_SMOKE';
 
 // The session_id from begin must be threaded into subsequent exec/end calls, so
 // use an explicit imperative block that talks to one long-lived host instead
@@ -398,20 +398,20 @@ await testMethod('shell_session_end missing session_id', 'tools/call', {
     DATABASE_URL: 'postgres://FAKE_DB_LEAK_SHOULD_NOT_APPEAR',
   };
   const TOOL_ENV = {
-    DPP_SAFE_ENV: 'safe-value-7f3a',
-    LD_PRELOAD: '/tmp/dpp-evil.so',
-    DYLD_INSERT_LIBRARIES: '/tmp/dpp-evil.dylib',
+    ZPP_SAFE_ENV: 'safe-value-7f3a',
+    LD_PRELOAD: '/tmp/zpp-evil.so',
+    DYLD_INSERT_LIBRARIES: '/tmp/zpp-evil.dylib',
   };
   const PROBE = platform() === 'win32'
-    ? 'Write-Output "DPP_ENV_PROBE|SAFE=$env:DPP_SAFE_ENV|AWS=$env:AWS_SECRET_ACCESS_KEY|DB=$env:DATABASE_URL|LD=$env:LD_PRELOAD|DYLD=$env:DYLD_INSERT_LIBRARIES"'
-    : 'printf "DPP_ENV_PROBE|SAFE=%s|AWS=%s|DB=%s|LD=%s|DYLD=%s\\n" "$DPP_SAFE_ENV" "$AWS_SECRET_ACCESS_KEY" "$DATABASE_URL" "$LD_PRELOAD" "$DYLD_INSERT_LIBRARIES"';
+    ? 'Write-Output "ZPP_ENV_PROBE|SAFE=$env:ZPP_SAFE_ENV|AWS=$env:AWS_SECRET_ACCESS_KEY|DB=$env:DATABASE_URL|LD=$env:LD_PRELOAD|DYLD=$env:DYLD_INSERT_LIBRARIES"'
+    : 'printf "ZPP_ENV_PROBE|SAFE=%s|AWS=%s|DB=%s|LD=%s|DYLD=%s\\n" "$ZPP_SAFE_ENV" "$AWS_SECRET_ACCESS_KEY" "$DATABASE_URL" "$LD_PRELOAD" "$DYLD_INSERT_LIBRARIES"';
 
   function assertEnvIsolated(out, context) {
     assert(out.includes('SAFE=safe-value-7f3a'), `${context}: explicit env should pass through, got "${out}"`);
     assert(!out.includes('FAKE_AWS_LEAK'), `${context}: host AWS secret leaked into child — "${out}"`);
     assert(!out.includes('FAKE_DB_LEAK'), `${context}: host DATABASE_URL leaked into child — "${out}"`);
-    assert(!out.includes('dpp-evil.so'), `${context}: LD_PRELOAD was not blocked — "${out}"`);
-    assert(!out.includes('dpp-evil.dylib'), `${context}: DYLD_INSERT_LIBRARIES was not blocked — "${out}"`);
+    assert(!out.includes('zpp-evil.so'), `${context}: LD_PRELOAD was not blocked — "${out}"`);
+    assert(!out.includes('zpp-evil.dylib'), `${context}: DYLD_INSERT_LIBRARIES was not blocked — "${out}"`);
   }
 
   // shell_exec

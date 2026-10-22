@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GLM_SSE_CURRENT_GAPS } from './fixtures/external-runtime/glm';
+import { ZAI_SSE_CURRENT_GAPS } from './fixtures/external-runtime/zai';
 import { INSTALLER_CURRENT_GAPS } from './fixtures/external-runtime/installer';
 import { MCP_CURRENT_GAPS } from './fixtures/external-runtime/mcp';
 import { PLATFORM_CURRENT_GAPS } from './fixtures/external-runtime/platform';
@@ -14,7 +14,7 @@ describe('live compatibility gap ownership', () => {
 
   it('gives every retained gap an explicit non-historical deferred owner', () => {
     const retainedGaps = [
-      ...GLM_SSE_CURRENT_GAPS,
+      ...ZAI_SSE_CURRENT_GAPS,
       ...INSTALLER_CURRENT_GAPS,
     ];
 

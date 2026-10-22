@@ -37,7 +37,7 @@ describe('sync recovery IndexedDB contract', () => {
     } = journalModule;
     const journal = syncRecoveryDb.table(SYNC_RECOVERY_JOURNAL_TABLE_NAME);
 
-    expect(SYNC_RECOVERY_DATABASE_NAME).toBe('GlmPPSyncRecovery');
+    expect(SYNC_RECOVERY_DATABASE_NAME).toBe('ZaiPPSyncRecovery');
     expect(SYNC_RECOVERY_DATABASE_VERSION).toBe(1);
     expect(SYNC_RECOVERY_JOURNAL_TABLE_NAME).toBe('journal');
     expect(SYNC_RECOVERY_JOURNAL_TABLE_SCHEMA).toBe('&id');

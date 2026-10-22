@@ -94,7 +94,6 @@ export {
   createDefaultToolDescriptors,
   createToolCallFromInvocation,
   createToolInvocationCatalog,
-  createXmlToolCallRegex,
   getToolCloseTag,
   getToolInvocationLabel,
   getPreferredToolInvocationName,

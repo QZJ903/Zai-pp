@@ -19,7 +19,7 @@ const result = spawnSync(
     cwd: rootDir,
     env: {
       ...process.env,
-      GLM_PP_UPDATE_PROMPT_GOLDENS: updateGoldens ? '1' : '0',
+      ZAI_PP_UPDATE_PROMPT_GOLDENS: updateGoldens ? '1' : '0',
     },
     stdio: 'inherit',
     timeout: timeoutMs,

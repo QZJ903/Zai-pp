@@ -9,7 +9,7 @@ export function createNativeRouter({ toolDefinitions, toolHandlerGroups, logger,
     ['initialize', id => jsonRpcResult(id, {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
-      serverInfo: { name: 'glm-pp-shell', version: serverVersion },
+      serverInfo: { name: 'zai-pp-shell', version: serverVersion },
       instructions: 'General-purpose shell execution host. Use shell_exec for local commands and python_exec only for short computation or validation snippets.',
     })],
     ['tools/list', id => jsonRpcResult(id, { tools: toolDefinitions })],
@@ -29,8 +29,8 @@ export function createNativeRouter({ toolDefinitions, toolHandlerGroups, logger,
 
   return {
     async handleEnvelope(envelope) {
-      if (!envelope || envelope.protocol !== 'glm-pp-mcp-native' || envelope.version !== 1) {
-        return jsonRpcError(null, -32600, 'Invalid envelope: expected glm-pp-mcp-native v1');
+      if (!envelope || envelope.protocol !== 'zai-pp-mcp-native' || envelope.version !== 1) {
+        return jsonRpcError(null, -32600, 'Invalid envelope: expected zai-pp-mcp-native v1');
       }
       const message = envelope.message;
       if (!message || typeof message !== 'object' || message.jsonrpc !== '2.0' || typeof message.method !== 'string') {

@@ -23,7 +23,7 @@ import {
   removeProjectFromLegacyFields,
 } from './codec';
 
-export const PROJECT_CONTEXT_STORAGE_KEY = 'glm_pp_project_context';
+export const PROJECT_CONTEXT_STORAGE_KEY = 'zai_pp_project_context';
 
 const projectContextRepository = createVersionedRepository({
   label: 'projectContext',

@@ -1,4 +1,4 @@
-// Per GLM's official guidance (https://docs.z.ai/quick_start/token_usage):
+// Per the official token-usage guidance (https://docs.z.ai/quick_start/token_usage):
 // 1 CJK character ~= 0.6 token, 1 ASCII character ~= 0.3 token.
 export function estimateTokenUnits(text: string): number {
   let tokens = 0;

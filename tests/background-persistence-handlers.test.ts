@@ -23,7 +23,7 @@ import type {
 } from '../core/types';
 import type { SavedItem } from '../core/saved-items/types';
 import type {
-  CurrentGLMConversation,
+  CurrentZaiConversation,
   ProjectContext,
   ProjectContextState,
   ProjectConversation,
@@ -60,8 +60,8 @@ import {
  *    `GET/SET_MODEL_TYPE`、`GET/SAVE/CLEAR_PET`、voice 三项（`GET_VOICE_SETTINGS` /
  *    `SAVE_VOICE_SETTINGS` / `GET_VOICE_CAPABILITIES`）
  *  - `ArtifactRecord` / `PetConfig` 类型在本项目**不存在**，一并删掉
- *  - 依赖构造器改名：`getCurrentDeepSeekConversation` → `getCurrentGLMConversation`、
- *    `insertPromptIntoActiveDeepSeekTab` → `insertPromptIntoActiveGLMTab`
+ *  - 依赖构造器改名：`getCurrentDeepSeekConversation` → `getCurrentZaiConversation`、
+ *    `insertPromptIntoActiveDeepSeekTab` → `insertPromptIntoActiveZaiTab`
  *  - `formatProjectPromptContext` 在本项目是**两参**（多一个 locale），
  *    所以依赖里要补 `getLocale()`
  *  - 会话 URL 换成 z.ai 的 `/c/<id>` 形式
@@ -337,7 +337,7 @@ describe('Skill and library handlers', () => {
       type: 'INSERT_SAVED_PROMPT_INTO_CHAT',
       payload: { text: 7 },
     })).resolves.toEqual({ ok: false, error: 'empty_prompt_text' });
-    expect(vi.mocked(libraryDependencies.insertPromptIntoActiveGLMTab).mock.calls)
+    expect(vi.mocked(libraryDependencies.insertPromptIntoActiveZaiTab).mock.calls)
       .toEqual([[''], ['']]);
   });
 
@@ -519,7 +519,7 @@ function createLibraryDependencies(): LibraryRuntimeHandlerDependencies {
     getAllSavedItems: vi.fn(async () => [savedItem]),
     saveSavedItem: vi.fn(async () => savedItem),
     deleteSavedItem: vi.fn(async () => undefined),
-    insertPromptIntoActiveGLMTab: vi.fn(async (text) => (
+    insertPromptIntoActiveZaiTab: vi.fn(async (text) => (
       text ? { ok: true as const } : { ok: false as const, error: 'empty_prompt_text' }
     )),
     broadcastStateUpdate: vi.fn(async () => undefined),
@@ -536,13 +536,13 @@ function createProjectDependencies(): ProjectRuntimeHandlerDependencies {
     addConversationToProject: vi.fn(async () => conversation),
     removeConversationFromProject: vi.fn(async () => undefined),
     setPendingProjectContext: vi.fn(async () => undefined),
-    getCurrentGLMConversation: vi.fn(async () => ({
+    getCurrentZaiConversation: vi.fn(async () => ({
       ok: true as const,
       conversation: {
         conversationId: conversation.conversationId,
         title: conversation.title,
         url: conversation.url,
-      } satisfies CurrentGLMConversation,
+      } satisfies CurrentZaiConversation,
     })),
     bindPendingProjectConversation: vi.fn(async () => conversation),
     refreshProjectConversation: vi.fn(async () => conversation),

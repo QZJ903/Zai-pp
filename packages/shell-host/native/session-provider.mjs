@@ -35,7 +35,9 @@ export function createSessionProvider({ logLine }) {
     if (platform() === 'win32') {
       return `Write-Output '${SESSION_MARKER_PREFIX}${token}__:'$LASTEXITCODE`;
     }
-    return `printf '__DPP_SESSION_END__%s__:%s\\n' "${token}" "$?"`;
+    // ⚠️ 前缀必须走常量，不能写死字面量 —— 与上面 win32 分支、以及本函数下方
+    // 同源；写死的话改常量只会改一半，POSIX 分支静默不匹配、退出码永远读不出来。
+    return `printf '${SESSION_MARKER_PREFIX}%s__:%s\\n' "${token}" "$?"`;
   }
 
   async function beginShellSession(args) {

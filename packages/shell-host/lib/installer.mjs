@@ -68,7 +68,7 @@ export function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`GLM++ Shell Native Host installer
+  console.log(`Zai++ Shell Native Host installer
 
 Usage (from the repository root):
   npm run shell:install -- install --browser chrome --extension-id <extension-id>
@@ -88,7 +88,7 @@ Options:
 
 Examples:
   npm run shell:install -- install --browser chrome --extension-id abcdefghijklmnopqrstuvwxyz123456
-  npm run shell:install -- install --browser chrome --extension-id abcdefghijklmnopqrstuvwxyz123456 --log-file "$HOME/glm-host.log"
+  npm run shell:install -- install --browser chrome --extension-id abcdefghijklmnopqrstuvwxyz123456 --log-file "$HOME/zai-host.log"
 `);
 }
 
@@ -152,7 +152,7 @@ function status(args) {
   const isReady = Boolean(manifest && missingRuntimeFiles.length === 0 && existsSync(manifest.path ?? wrapperPath));
   const logFile = detectLogFile(wrapperPath);
 
-  console.log('GLM++ Shell Native Host status');
+  console.log('Zai++ Shell Native Host status');
   console.log(`Browser:      ${args.browser}`);
   console.log(`Host name:    ${HOST_NAME}`);
   console.log(`Install dir:  ${installDir}`);

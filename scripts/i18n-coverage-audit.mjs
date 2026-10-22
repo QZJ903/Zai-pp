@@ -39,7 +39,7 @@ const lineAllowlist = [
   {
     path: 'core/project/title.ts',
     includes: '探索未至之境',
-    reason: 'default GLM conversation title suffix detection',
+    reason: 'default conversation title suffix detection',
   },
   {
     path: 'core/project/title.ts',

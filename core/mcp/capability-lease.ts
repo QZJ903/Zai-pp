@@ -10,7 +10,7 @@ import type {
   ToolDescriptor,
 } from '../tool/types';
 
-export const MCP_CAPABILITY_LEASE_STORAGE_KEY = 'glm_pp_mcp_capability_leases';
+export const MCP_CAPABILITY_LEASE_STORAGE_KEY = 'zai_pp_mcp_capability_leases';
 export const MCP_CAPABILITY_LEASE_TTL_MS = 15 * 60_000;
 
 const MCP_CAPABILITY_LEASE_STATE_VERSION = 1 as const;
@@ -278,7 +278,7 @@ function cloneCapabilityScope(scope: ToolCapabilityScope): ToolCapabilityScope {
 
 function normalizeSubject(subject: NonNullable<ToolCapabilityScope['subject']>): NonNullable<ToolCapabilityScope['subject']> {
   const documentSessionId = requireIdentity(subject.documentSessionId, 'Capability document session id');
-  if (!['glm_content', 'extension_context', 'background_workflow'].includes(subject.surface)) {
+  if (!['zai_content', 'extension_context', 'background_workflow'].includes(subject.surface)) {
     throw new McpCapabilityLeaseError('mcp_capability_scope_invalid', 'Capability subject surface is invalid.');
   }
   if (subject.tabId !== undefined && (!Number.isInteger(subject.tabId) || subject.tabId < 0)) {
@@ -408,7 +408,7 @@ function isStoredCapabilityScope(value: unknown): value is ToolCapabilityScope {
 function isStoredSubject(value: unknown): boolean {
   if (!isPlainRecord(value)) return false;
   return hasOnlyKeys(value, ['surface', 'documentSessionId', 'tabId', 'frameId', 'chatSessionId']) &&
-    ['glm_content', 'extension_context', 'background_workflow'].includes(String(value.surface)) &&
+    ['zai_content', 'extension_context', 'background_workflow'].includes(String(value.surface)) &&
     typeof value.documentSessionId === 'string' && value.documentSessionId.trim().length > 0 &&
     (value.tabId === undefined || (Number.isInteger(value.tabId) && (value.tabId as number) >= 0)) &&
     (value.frameId === undefined || (Number.isInteger(value.frameId) && (value.frameId as number) >= 0)) &&

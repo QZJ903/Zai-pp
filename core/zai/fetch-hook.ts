@@ -8,7 +8,7 @@
  * 3. 解析响应 SSE → 流式工具 XML 识别 → 通知 isolated 执行 → 字节透传。
  * 4. HTML 挑战页检测（completion 返回 text/html 时透传原响应，并通知内容脚本）。
  *
- * 与 glm 版 fetch-hook 最大区别：续跑不在这里直接 fetch（z.ai 有 captcha
+ * 与上游 fetch-hook 最大区别：续跑不在这里直接 fetch（z.ai 有 captcha
  * 墙），改由 DOM 注入让页面自己发。本文件只管「读流 + 识别 + 透传」。
  */
 

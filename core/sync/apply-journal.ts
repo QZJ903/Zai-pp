@@ -1,7 +1,7 @@
 import type { SyncLocalApplyJournalPort, SyncLocalApplyJournalV1 } from './local-apply';
 import { IndexedDb } from '../persistence/indexeddb';
 
-export const SYNC_RECOVERY_DATABASE_NAME = 'GlmPPSyncRecovery';
+export const SYNC_RECOVERY_DATABASE_NAME = 'ZaiPPSyncRecovery';
 export const SYNC_RECOVERY_DATABASE_VERSION = 1 as const;
 export const SYNC_RECOVERY_JOURNAL_TABLE_NAME = 'journal';
 export const SYNC_RECOVERY_JOURNAL_TABLE_SCHEMA = '&id';

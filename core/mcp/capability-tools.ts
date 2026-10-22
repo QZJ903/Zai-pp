@@ -216,7 +216,7 @@ function createCapabilityDescriptor(
 }
 
 function allocateCapabilityInvocationName(baseName: string, occupied: ReadonlySet<string>): string {
-  const qualifiedBase = `dpp_${baseName}`;
+  const qualifiedBase = `zpp_${baseName}`;
   if (!occupied.has(qualifiedBase)) return qualifiedBase;
   let suffix = 2;
   while (occupied.has(`${qualifiedBase}_${suffix}`)) suffix += 1;

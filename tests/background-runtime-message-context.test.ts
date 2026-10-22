@@ -6,9 +6,9 @@ import {
 import { requiresCurrentToolAuthorizationSubject } from '../core/messaging/tool-runtime-contracts';
 import { refreshRuntimeMessageContextFromBrowserTab } from '../entrypoints/background/runtime-message-context';
 
-const GLM_CONTEXT: RuntimeMessageContext = {
+const ZAI_CONTEXT: RuntimeMessageContext = {
   runtimeId: 'extension-id',
-  surface: 'glm_content',
+  surface: 'zai_content',
   senderUrl: 'https://chat.z.ai/',
   senderOrigin: 'https://chat.z.ai',
   tabId: 17,
@@ -35,9 +35,9 @@ describe('background runtime message context refresh', () => {
       url: 'https://chat.z.ai/c/current-session',
     }));
 
-    await expect(refreshRuntimeMessageContextFromBrowserTab(GLM_CONTEXT, {
+    await expect(refreshRuntimeMessageContextFromBrowserTab(ZAI_CONTEXT, {
       tabs: { get },
-      glmOrigin: 'https://chat.z.ai',
+      zaiOrigin: 'https://chat.z.ai',
     })).resolves.toMatchObject({
       tabUrl: 'https://chat.z.ai/c/current-session',
       chatSessionId: 'current-session',
@@ -49,7 +49,7 @@ describe('background runtime message context refresh', () => {
   it('does not look up a browser tab for an extension context', async () => {
     const get = vi.fn();
     const extensionContext: RuntimeMessageContext = {
-      ...GLM_CONTEXT,
+      ...ZAI_CONTEXT,
       surface: 'extension_context',
       senderUrl: 'chrome-extension://extension-id/sidepanel.html',
       senderOrigin: 'chrome-extension://extension-id',
@@ -62,15 +62,15 @@ describe('background runtime message context refresh', () => {
 
     await expect(refreshRuntimeMessageContextFromBrowserTab(extensionContext, {
       tabs: { get },
-      glmOrigin: 'https://chat.z.ai',
+      zaiOrigin: 'https://chat.z.ai',
     })).resolves.toBe(extensionContext);
     expect(get).not.toHaveBeenCalled();
   });
 
   it('fails closed when the receiving tab can no longer be read', async () => {
-    await expect(refreshRuntimeMessageContextFromBrowserTab(GLM_CONTEXT, {
+    await expect(refreshRuntimeMessageContextFromBrowserTab(ZAI_CONTEXT, {
       tabs: { get: vi.fn(async () => { throw new Error('No tab with id: 17'); }) },
-      glmOrigin: 'https://chat.z.ai',
+      zaiOrigin: 'https://chat.z.ai',
     })).rejects.toMatchObject({
       code: RUNTIME_BOUNDARY_ERROR_CODES.unauthorizedSender,
       message: 'Runtime content sender browser tab is unavailable.',

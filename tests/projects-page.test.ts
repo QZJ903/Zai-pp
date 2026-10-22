@@ -51,7 +51,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string; payload?: unknown }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: true, conversation: CURRENT_CONVERSATION };
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') return { ok: true, conversation: CURRENT_CONVERSATION };
       if (message.type === 'CREATE_PROJECT_CONTEXT') {
         state = {
           ...state,
@@ -78,7 +78,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return EMPTY_PROJECT_STATE;
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: false, error: 'no_active_glm_conversation' };
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') return { ok: false, error: 'no_active_zai_conversation' };
       if (message.type === 'CREATE_PROJECT_CONTEXT') return null;
       return { ok: true };
     });
@@ -103,7 +103,7 @@ describe('ProjectsPage', () => {
         };
       }
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: false };
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') return { ok: false };
       return { ok: true };
     });
 
@@ -121,7 +121,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
       if (message.type === 'GET_MEMORIES') return [{ name: 'corrupt' }];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: false };
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') return { ok: false };
       return { ok: true };
     });
 
@@ -144,7 +144,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
       if (message.type === 'GET_MEMORIES') return memoryResponse;
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') {
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') {
         return { ok: true, conversation: CURRENT_CONVERSATION };
       }
       if (message.type === 'UPDATE_PROJECT_CONTEXT') {
@@ -172,7 +172,7 @@ describe('ProjectsPage', () => {
     );
   });
 
-  it('adds the current GLM conversation to the selected project', async () => {
+  it('adds the current conversation to the selected project', async () => {
     const project = createProject('project-1', 'Alpha');
     let state: ProjectContextState = {
       ...EMPTY_PROJECT_STATE,
@@ -181,7 +181,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string; payload?: unknown }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: true, conversation: CURRENT_CONVERSATION };
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') return { ok: true, conversation: CURRENT_CONVERSATION };
       if (message.type === 'ADD_CONVERSATION_TO_PROJECT') {
         state = {
           ...state,
@@ -219,7 +219,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: true, conversation: CURRENT_CONVERSATION };
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') return { ok: true, conversation: CURRENT_CONVERSATION };
       if (message.type === 'UPDATE_PROJECT_CONTEXT') return { ok: false, error: 'update failed' };
       return { ok: true };
     });
@@ -243,7 +243,7 @@ describe('ProjectsPage', () => {
         return projectReads === 1 ? stale.promise : newestState;
       }
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: false, error: 'none' };
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') return { ok: false, error: 'none' };
       return { ok: true };
     });
 
@@ -271,7 +271,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return conversation;
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') return conversation;
       return { ok: true };
     });
 
@@ -311,7 +311,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: false, error: 'none' };
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') return { ok: false, error: 'none' };
       return { ok: true };
     });
 
@@ -342,7 +342,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') return { ok: false, error: 'none' };
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') return { ok: false, error: 'none' };
       return { ok: true };
     });
 
@@ -363,7 +363,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') {
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') {
         return { ok: true, conversation: CURRENT_CONVERSATION };
       }
       return { ok: true };
@@ -371,7 +371,7 @@ describe('ProjectsPage', () => {
 
     await renderProjectsPage(sendMessage);
     const before = sendMessage.mock.calls.filter(
-      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_GLM_CONVERSATION',
+      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_ZAI_CONVERSATION',
     ).length;
 
     await act(async () => {
@@ -382,7 +382,7 @@ describe('ProjectsPage', () => {
     await settle();
 
     const after = sendMessage.mock.calls.filter(
-      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_GLM_CONVERSATION',
+      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_ZAI_CONVERSATION',
     ).length;
     expect(after).toBe(before);
   });
@@ -395,7 +395,7 @@ describe('ProjectsPage', () => {
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === 'GET_PROJECT_CONTEXT_STATE') return state;
       if (message.type === 'GET_MEMORIES') return [];
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') {
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') {
         return { ok: true, conversation: CURRENT_CONVERSATION };
       }
       return { ok: true };
@@ -403,7 +403,7 @@ describe('ProjectsPage', () => {
 
     await renderProjectsPage(sendMessage);
     const before = sendMessage.mock.calls.filter(
-      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_GLM_CONVERSATION',
+      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_ZAI_CONVERSATION',
     ).length;
 
     await act(async () => {
@@ -412,7 +412,7 @@ describe('ProjectsPage', () => {
     await settle();
 
     const after = sendMessage.mock.calls.filter(
-      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_GLM_CONVERSATION',
+      (call) => (call[0] as { type: string }).type === 'GET_CURRENT_ZAI_CONVERSATION',
     ).length;
     expect(after).toBeGreaterThan(before);
   });
@@ -465,7 +465,7 @@ async function renderProjectsPage(sendMessage: ReturnType<typeof vi.fn>) {
 
 /** 设「最近活跃站」的值（侧边栏兜底拼链接时读它）。 */
 function stubActiveSite(origin: string) {
-  activeSiteStore.glm_pp_active_site = { origin, at: 1 };
+  activeSiteStore.zai_pp_active_site = { origin, at: 1 };
 }
 
 async function enterProjectName(value: string) {

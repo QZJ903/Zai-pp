@@ -2,7 +2,7 @@ import type { ToolCall, ToolCallHistoryRecord, ToolExecutionTrigger, ToolResult 
 import { decodeToolCallHistory, encodeToolCallHistory } from './history-codec';
 import { createCoalescingMutationQueue } from '../persistence/coalescing-mutation-queue';
 
-export const TOOL_HISTORY_STORAGE_KEY = 'glm_pp_tool_history';
+export const TOOL_HISTORY_STORAGE_KEY = 'zai_pp_tool_history';
 // Lowered from 200 → 100. Each record carries detail/output snapshots, and each
 // persisted burst replaces the whole key. 200 records of untrimmed MCP output
 // easily pushed the serialized payload past chrome.storage.local's QUOTA_BYTES

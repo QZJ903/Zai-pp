@@ -85,9 +85,9 @@ describe('automation failure persists the live session', () => {
 
     expect(completed?.status).toBe('cancelled');
     const stored = await getAutomationById(automation.id);
-    expect(stored?.glm.chatSessionId).toBe('session-created-then-paused');
+    expect(stored?.zai.chatSessionId).toBe('session-created-then-paused');
     // 会话 URL 必须一起写：侧边栏的「打开会话」按钮判的是 sessionUrl。
-    expect(stored?.glm.sessionUrl).toBe('https://chat.z.ai/c/session-created-then-paused');
+    expect(stored?.zai.sessionUrl).toBe('https://chat.z.ai/c/session-created-then-paused');
   });
 
   it('keeps the previous session when the failure carries no session id', async () => {
@@ -114,8 +114,8 @@ describe('automation failure persists the live session', () => {
 
     expect(completed?.status).toBe('failed');
     const stored = await getAutomationById(automation.id);
-    expect(stored?.glm.chatSessionId).toBeNull();
-    expect(stored?.glm.sessionUrl).toBeNull();
+    expect(stored?.zai.chatSessionId).toBeNull();
+    expect(stored?.zai.sessionUrl).toBeNull();
   });
 
   it('falls back to the request session id when no override is supplied', async () => {
@@ -145,7 +145,7 @@ describe('automation failure persists the live session', () => {
     const automation = await createTestAutomation();
     // 模拟运行期间 persistAutomationSession 已经把会话写进去了。
     await updateAutomationRuntime(automation.id, {
-      glm: {
+      zai: {
         chatSessionId: 'persisted-mid-run',
         sessionUrl: 'https://chat.z.ai/c/persisted-mid-run',
         siteOrigin: null,
@@ -174,15 +174,15 @@ describe('automation failure persists the live session', () => {
 
     expect(completed?.status).toBe('timeout');
     const stored = await getAutomationById(automation.id);
-    expect(stored?.glm.chatSessionId).toBe('persisted-mid-run');
-    expect(stored?.glm.sessionUrl).toBe('https://chat.z.ai/c/persisted-mid-run');
+    expect(stored?.zai.chatSessionId).toBe('persisted-mid-run');
+    expect(stored?.zai.sessionUrl).toBe('https://chat.z.ai/c/persisted-mid-run');
   });
 
   it('repairs a sessionUrl that does not match the stored session id', async () => {
     const automation = await createTestAutomation();
     // 早期版本留下的不一致记录：id 是新会话、url 指向上一次的会话。
     await updateAutomationRuntime(automation.id, {
-      glm: {
+      zai: {
         chatSessionId: 'new-session',
         sessionUrl: 'https://chat.z.ai/c/old-session',
         siteOrigin: null,
@@ -210,8 +210,8 @@ describe('automation failure persists the live session', () => {
     });
 
     const stored = await getAutomationById(automation.id);
-    expect(stored?.glm.chatSessionId).toBe('new-session');
+    expect(stored?.zai.chatSessionId).toBe('new-session');
     // 必须重写成与 id 一致的 URL，否则「打开会话」会跳到 old-session。
-    expect(stored?.glm.sessionUrl).toBe('https://chat.z.ai/c/new-session');
+    expect(stored?.zai.sessionUrl).toBe('https://chat.z.ai/c/new-session');
   });
 });

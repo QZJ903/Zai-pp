@@ -1,6 +1,6 @@
 import type {
   BackgroundConfig,
-  CurrentGLMConversation,
+  CurrentZaiConversation,
   GitHubSkillImportResult,
   GitHubSkillPreview,
   GitHubSkillSource,
@@ -209,9 +209,9 @@ export interface PersistenceRuntimeCommandContracts {
     request: DeclaredRuntimeRequest<'SET_PENDING_PROJECT_CONTEXT'>;
     response: Ack;
   };
-  GET_CURRENT_GLM_CONVERSATION: {
-    request: DeclaredRuntimeRequest<'GET_CURRENT_GLM_CONVERSATION'>;
-    response: { ok: true; conversation: CurrentGLMConversation } | DomainFailure;
+  GET_CURRENT_ZAI_CONVERSATION: {
+    request: DeclaredRuntimeRequest<'GET_CURRENT_ZAI_CONVERSATION'>;
+    response: { ok: true; conversation: CurrentZaiConversation } | DomainFailure;
   };
   GET_PROJECT_CONTEXT_FOR_CONVERSATION: {
     request: DeclaredRuntimeRequest<'GET_PROJECT_CONTEXT_FOR_CONVERSATION'>;

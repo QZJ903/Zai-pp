@@ -10,10 +10,10 @@ import {
 import type { ProjectContextState } from '../core/types';
 import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-source';
 
-const PANEL_ID = 'dpp-project-panel';
+const PANEL_ID = 'zpp-project-panel';
 /** 补名延时那次的时长（`BACKFILL_RETRY_DELAYS_MS` 的第二档）。 */
 const BACKFILL_ADVANCE_MS = 2_500;
-const MENU_ID = 'dpp-project-panel-menu';
+const MENU_ID = 'zpp-project-panel-menu';
 
 const LABELS: ProjectPanelLabels = {
   title: 'Projects',
@@ -119,7 +119,7 @@ async function flush(times = 3): Promise<void> {
 /** 项目行右侧的三个图标按钮：归属 / 新会话 / 待绑。 */
 function projectIconButtons(): HTMLButtonElement[] {
   return Array.from(
-    document.querySelectorAll<HTMLButtonElement>(`#${PANEL_ID} .dpp-project-panel__icon-button`),
+    document.querySelectorAll<HTMLButtonElement>(`#${PANEL_ID} .zpp-project-panel__icon-button`),
   );
 }
 
@@ -168,7 +168,7 @@ describe('zai project panel', () => {
     await flush();
 
     const titles = Array.from(
-      document.querySelectorAll(`#${PANEL_ID} .dpp-project-panel__conversation-title`),
+      document.querySelectorAll(`#${PANEL_ID} .zpp-project-panel__conversation-title`),
     ).map((node) => node.textContent);
     // lastSeenAt 倒序：最近打开的在前，不是 addedAt。
     expect(titles).toEqual(['Newer', 'Older']);
@@ -193,10 +193,10 @@ describe('zai project panel', () => {
     controller = startProjectPanel(createDependencies(state));
     await flush();
 
-    const visible = () => document.querySelectorAll(`#${PANEL_ID} .dpp-project-panel__conversation`);
+    const visible = () => document.querySelectorAll(`#${PANEL_ID} .zpp-project-panel__conversation`);
     expect(visible()).toHaveLength(5);
 
-    const more = document.querySelector<HTMLButtonElement>(`#${PANEL_ID} .dpp-project-panel__more`);
+    const more = document.querySelector<HTMLButtonElement>(`#${PANEL_ID} .zpp-project-panel__more`);
     expect(more?.textContent).toBe(LABELS.showMore);
     more!.click();
     await flush();
@@ -215,11 +215,11 @@ describe('zai project panel', () => {
     });
     controller = startProjectPanel(createDependencies(state));
     await flush();
-    expect(document.querySelectorAll(`#${PANEL_ID} .dpp-project-panel__conversation`)).toHaveLength(1);
+    expect(document.querySelectorAll(`#${PANEL_ID} .zpp-project-panel__conversation`)).toHaveLength(1);
 
-    document.querySelector<HTMLButtonElement>(`#${PANEL_ID} .dpp-project-panel__project-toggle`)!.click();
+    document.querySelector<HTMLButtonElement>(`#${PANEL_ID} .zpp-project-panel__project-toggle`)!.click();
     await flush();
-    expect(document.querySelectorAll(`#${PANEL_ID} .dpp-project-panel__conversation`)).toHaveLength(0);
+    expect(document.querySelectorAll(`#${PANEL_ID} .zpp-project-panel__conversation`)).toHaveLength(0);
   });
 
   it('exposes the upstream icon actions: move-current, new chat, pending toggle', async () => {
@@ -323,7 +323,7 @@ describe('zai project panel', () => {
     const button = iconButtonByLabel(LABELS.cancelNextConversation('Work'));
     expect(button).toBeDefined();
     expect(button!.dataset.active).toBe('true');
-    expect(document.querySelector(`#${PANEL_ID} .dpp-project-panel__pending`)?.textContent)
+    expect(document.querySelector(`#${PANEL_ID} .zpp-project-panel__pending`)?.textContent)
       .toBe(LABELS.pendingBadge);
 
     button!.click();
@@ -371,7 +371,7 @@ describe('zai project panel', () => {
     }), { openConversation }));
     await flush();
 
-    document.querySelector<HTMLButtonElement>(`#${PANEL_ID} .dpp-project-panel__conversation-title`)!
+    document.querySelector<HTMLButtonElement>(`#${PANEL_ID} .zpp-project-panel__conversation-title`)!
       .click();
     await flush();
 
@@ -396,7 +396,7 @@ describe('zai project panel', () => {
     await flush();
 
     const anchor = document.querySelector<HTMLButtonElement>(
-      `#${PANEL_ID} .dpp-project-panel__conversation-menu-button`,
+      `#${PANEL_ID} .zpp-project-panel__conversation-menu-button`,
     )!;
     // 给锚点一个真实矩形，positionMenu 才有东西可算。
     anchor.getBoundingClientRect = () => ({
@@ -409,7 +409,7 @@ describe('zai project panel', () => {
     const menu = document.getElementById(MENU_ID);
     expect(menu).not.toBeNull();
     const items = Array.from(
-      menu!.querySelectorAll<HTMLButtonElement>('.dpp-project-panel__menu-item'),
+      menu!.querySelectorAll<HTMLButtonElement>('.zpp-project-panel__menu-item'),
     );
     // 重命名 + 从项目移除（顺序固定）。
     expect(items.map((item) => item.textContent)).toEqual([
@@ -436,7 +436,7 @@ describe('zai project panel', () => {
     await flush();
 
     const anchor = document.querySelector<HTMLButtonElement>(
-      `#${PANEL_ID} .dpp-project-panel__conversation-menu-button`,
+      `#${PANEL_ID} .zpp-project-panel__conversation-menu-button`,
     )!;
     anchor.getBoundingClientRect = () => ({
       top: 700, bottom: 722, left: 200, right: 222, width: 22, height: 22,
@@ -468,7 +468,7 @@ describe('zai project panel', () => {
 
     const openMenu = () => {
       const anchor = document.querySelector<HTMLButtonElement>(
-        `#${PANEL_ID} .dpp-project-panel__conversation-menu-button`,
+        `#${PANEL_ID} .zpp-project-panel__conversation-menu-button`,
       )!;
       anchor.getBoundingClientRect = () => ({
         top: 700, bottom: 722, left: 200, right: 222, width: 22, height: 22,
@@ -480,25 +480,25 @@ describe('zai project panel', () => {
     // Esc 取消：不发请求，标题按钮还原。
     openMenu();
     await flush();
-    document.querySelector<HTMLButtonElement>(`#${MENU_ID} .dpp-project-panel__menu-item`)!.click();
+    document.querySelector<HTMLButtonElement>(`#${MENU_ID} .zpp-project-panel__menu-item`)!.click();
     await flush();
     const escapeInput = document.querySelector<HTMLInputElement>(
-      `#${PANEL_ID} .dpp-project-panel__rename-input`,
+      `#${PANEL_ID} .zpp-project-panel__rename-input`,
     )!;
     expect(escapeInput.value).toBe('Old name');
     escapeInput.value = 'Discarded';
     escapeInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await flush(4);
     expect(renameConversation).not.toHaveBeenCalled();
-    expect(document.querySelector(`#${PANEL_ID} .dpp-project-panel__rename-input`)).toBeNull();
+    expect(document.querySelector(`#${PANEL_ID} .zpp-project-panel__rename-input`)).toBeNull();
 
     // 回车确认：把项目 id 与会话 id 一起发过去。
     openMenu();
     await flush();
-    document.querySelector<HTMLButtonElement>(`#${MENU_ID} .dpp-project-panel__menu-item`)!.click();
+    document.querySelector<HTMLButtonElement>(`#${MENU_ID} .zpp-project-panel__menu-item`)!.click();
     await flush();
     const input = document.querySelector<HTMLInputElement>(
-      `#${PANEL_ID} .dpp-project-panel__rename-input`,
+      `#${PANEL_ID} .zpp-project-panel__rename-input`,
     )!;
     input.value = '  New name  ';
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
@@ -524,7 +524,7 @@ describe('zai project panel', () => {
     await flush();
 
     const anchor = document.querySelector<HTMLButtonElement>(
-      `#${PANEL_ID} .dpp-project-panel__conversation-menu-button`,
+      `#${PANEL_ID} .zpp-project-panel__conversation-menu-button`,
     )!;
     // 锚点贴着视口底部：下方放不下，浮层必须翻到上方而不是被截掉。
     anchor.getBoundingClientRect = () => ({
@@ -537,7 +537,7 @@ describe('zai project panel', () => {
     // ⚠️ 必须在打开之前装好：`positionMenu` 是同步跑的。
     const original = Element.prototype.getBoundingClientRect;
     Element.prototype.getBoundingClientRect = function patched(this: Element) {
-      if (this instanceof HTMLElement && this.classList.contains('dpp-project-panel__menu')) {
+      if (this instanceof HTMLElement && this.classList.contains('zpp-project-panel__menu')) {
         return {
           top: 0, bottom: 40, left: 0, right: 178, width: 178, height: 40,
           x: 0, y: 0, toJSON: () => ({}),
@@ -580,10 +580,10 @@ describe('zai project panel', () => {
     await flush(4);
 
     expect(onError).toHaveBeenCalled();
-    const status = document.querySelector(`#${PANEL_ID} .dpp-project-panel__status`);
+    const status = document.querySelector(`#${PANEL_ID} .zpp-project-panel__status`);
     expect(status?.textContent).toContain('backend down');
     // 失败不能把已渲染的列表清空。
-    expect(document.querySelectorAll(`#${PANEL_ID} .dpp-project-panel__conversation`)).toHaveLength(1);
+    expect(document.querySelectorAll(`#${PANEL_ID} .zpp-project-panel__conversation`)).toHaveLength(1);
   });
 
   it('keeps the last rendered state when a reload fails to decode', async () => {
@@ -597,13 +597,13 @@ describe('zai project panel', () => {
       loadState: async () => payload,
     }));
     await flush();
-    expect(document.querySelectorAll(`#${PANEL_ID} .dpp-project-panel__project`)).toHaveLength(1);
+    expect(document.querySelectorAll(`#${PANEL_ID} .zpp-project-panel__project`)).toHaveLength(1);
 
     payload = null;
     controller.refresh();
     await flush();
     // null 表示「读不到」，保留上一次的展示而不是清空。
-    expect(document.querySelectorAll(`#${PANEL_ID} .dpp-project-panel__project`)).toHaveLength(1);
+    expect(document.querySelectorAll(`#${PANEL_ID} .zpp-project-panel__project`)).toHaveLength(1);
   });
 
   it('re-mounts the panel when the page re-renders the sidebar around it', async () => {
@@ -640,7 +640,7 @@ describe('zai project panel', () => {
     })));
     await flush();
     document.querySelector<HTMLButtonElement>(
-      `#${PANEL_ID} .dpp-project-panel__conversation-menu-button`,
+      `#${PANEL_ID} .zpp-project-panel__conversation-menu-button`,
     )!.click();
     await flush();
     expect(document.getElementById(MENU_ID)).not.toBeNull();
@@ -665,7 +665,7 @@ describe('zai project panel', () => {
     })));
     await flush();
 
-    const bodyBefore = document.querySelector(`#${PANEL_ID} .dpp-project-panel__body`);
+    const bodyBefore = document.querySelector(`#${PANEL_ID} .zpp-project-panel__body`);
     expect(bodyBefore).not.toBeNull();
 
     // 模拟消息流式输出：页面 DOM 每秒变动几十次。这些变动**不能**触发重绘 ——
@@ -678,7 +678,7 @@ describe('zai project panel', () => {
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    expect(document.querySelector(`#${PANEL_ID} .dpp-project-panel__body`)).toBe(bodyBefore);
+    expect(document.querySelector(`#${PANEL_ID} .zpp-project-panel__body`)).toBe(bodyBefore);
   });
 
   it('carries the scroll position over when the content really does change', async () => {
@@ -694,7 +694,7 @@ describe('zai project panel', () => {
     controller = startProjectPanel(createDependencies(state));
     await flush();
 
-    const bodyBefore = document.querySelector<HTMLElement>(`#${PANEL_ID} .dpp-project-panel__body`)!;
+    const bodyBefore = document.querySelector<HTMLElement>(`#${PANEL_ID} .zpp-project-panel__body`)!;
     // jsdom 不做真实布局，scrollTop 需要手工声明。
     bodyBefore.scrollTop = 80;
 
@@ -705,7 +705,7 @@ describe('zai project panel', () => {
     controller.render();
     await flush();
 
-    const bodyAfter = document.querySelector<HTMLElement>(`#${PANEL_ID} .dpp-project-panel__body`)!;
+    const bodyAfter = document.querySelector<HTMLElement>(`#${PANEL_ID} .zpp-project-panel__body`)!;
     expect(bodyAfter).not.toBe(bodyBefore);
     expect(bodyAfter.scrollTop).toBe(80);
   });
@@ -718,7 +718,7 @@ describe('zai project panel', () => {
       ],
     })));
     await flush();
-    expect(document.querySelectorAll(`#${PANEL_ID} .dpp-project-panel__project`)).toHaveLength(1);
+    expect(document.querySelectorAll(`#${PANEL_ID} .zpp-project-panel__project`)).toHaveLength(1);
 
     // 把面板整个换掉，模拟 Svelte 重渲染 —— 新节点必须重新填充内容，
     // 不能因为「签名没变」而留空。
@@ -726,7 +726,7 @@ describe('zai project panel', () => {
     controller.render();
     await flush();
 
-    expect(document.querySelectorAll(`#${PANEL_ID} .dpp-project-panel__project`)).toHaveLength(1);
+    expect(document.querySelectorAll(`#${PANEL_ID} .zpp-project-panel__project`)).toHaveLength(1);
   });
 
   it('hides itself through the sidebar collapsed attribute rather than removing nodes', async () => {
@@ -736,7 +736,7 @@ describe('zai project panel', () => {
 
     const style = document.getElementById(`${PANEL_ID}-css`)?.textContent ?? '';
     // 收起态靠 CSS 规则隐藏，DOM 保持挂载（展开时无需重挂）。
-    expect(style).toContain('#sidebar[data-collapsed="true"] #dpp-project-panel');
+    expect(style).toContain('#sidebar[data-collapsed="true"] #zpp-project-panel');
   });
 
   it('keeps the action icons always visible instead of revealing them on hover', async () => {
@@ -754,8 +754,8 @@ describe('zai project panel', () => {
     const style = document.getElementById(`${PANEL_ID}-css`)?.textContent ?? '';
     // 图标组与会话菜单按钮都不再靠 hover 才显现。
     expect(style).not.toContain('opacity: 0;');
-    expect(style).not.toContain('project-row:hover .dpp-project-panel__project-actions');
-    expect(style).not.toContain('conversation:hover .dpp-project-panel__conversation-menu-button');
+    expect(style).not.toContain('project-row:hover .zpp-project-panel__project-actions');
+    expect(style).not.toContain('conversation:hover .zpp-project-panel__conversation-menu-button');
   });
 
   it('sizes the panel by its content so a short list never scrolls', async () => {
@@ -766,9 +766,9 @@ describe('zai project panel', () => {
     const style = document.getElementById(`${PANEL_ID}-css`)?.textContent ?? '';
     // 面板在 flex 列容器里必须 flex: none —— 默认的 flex-shrink:1 会把它压到
     // 内容高度以下，于是内容只有两行也照样顶出滚动条。
-    expect(style).toMatch(/#dpp-project-panel \{[^}]*flex: none;/);
+    expect(style).toMatch(/#zpp-project-panel \{[^}]*flex: none;/);
     // 内部滚动只留给真超过上限的情况。
-    expect(style).toMatch(/\.dpp-project-panel__body \{[^}]*overflow-y: auto;/);
+    expect(style).toMatch(/\.zpp-project-panel__body \{[^}]*overflow-y: auto;/);
   });
 
   it('does nothing when the sidebar is absent', async () => {
@@ -1300,7 +1300,7 @@ describe('zai project panel theme', () => {
   /**
    * 面板原先写死了浅色值（`#1f1f1f` 文字配 `#ffffff` 底），页面切深色后
    * 对比度掉到 1.10:1 —— 深色底上写深色字，等于看不见。
-   * 现在色值一律走 `--dpp-ui-*`，由 `core/ui/injected-theme.ts` 按页面主题切换。
+   * 现在色值一律走 `--zpp-ui-*`，由 `core/ui/injected-theme.ts` 按页面主题切换。
    *
    * ⚠️ 这组断言针对**注入后的样式文本**（不是源码字符串）—— 注释里的示例色值
    * 不该让断言变红，而运行时会真的生效的那些才该。
@@ -1328,32 +1328,32 @@ describe('zai project panel theme', () => {
     const menuBlock = blockOf(css, `#${MENU_ID} {`);
 
     // 正文色、分隔线、hover 叠加层 —— 这四处原先全是写死的。
-    expect(panelBlock).toContain('color: var(--dpp-ui-text)');
-    expect(panelBlock).toContain('border-top: 1px solid var(--dpp-ui-border)');
-    expect(css).toContain('.dpp-project-panel__project-row:hover {\n      background: var(--dpp-ui-overlay-hover)');
+    expect(panelBlock).toContain('color: var(--zpp-ui-text)');
+    expect(panelBlock).toContain('border-top: 1px solid var(--zpp-ui-border)');
+    expect(css).toContain('.zpp-project-panel__project-row:hover {\n      background: var(--zpp-ui-overlay-hover)');
     // 浮层（菜单、改名输入框）必须用 raised 面，不能与页面底色同值。
-    expect(menuBlock).toContain('background: var(--dpp-ui-surface-raised)');
-    expect(renameBlock(css)).toContain('background: var(--dpp-ui-surface-raised)');
+    expect(menuBlock).toContain('background: var(--zpp-ui-surface-raised)');
+    expect(renameBlock(css)).toContain('background: var(--zpp-ui-surface-raised)');
     // 状态行与激活态图标是语义色，不是装饰色。
-    expect(css).toContain('color: var(--dpp-ui-error)');
-    expect(css).toContain('color: var(--dpp-ui-accent-strong)');
+    expect(css).toContain('color: var(--zpp-ui-error)');
+    expect(css).toContain('color: var(--zpp-ui-accent-strong)');
   });
 
   it('references no theme variable that the theme does not define', async () => {
     // ⚠️⚠️ **这条比「有没有裸色值」更要紧** —— 裸色值正则会放过写错的变量名，
-    // 而 `var(--dpp-ui-accentt)` 这种拼错**不会报任何错**：声明在 computed-value
+    // 而 `var(--zpp-ui-accentt)` 这种拼错**不会报任何错**：声明在 computed-value
     // 阶段失效、颜色静默消失。逐名核对是唯一拦得住它的形态。
     mountSidebar();
     controller = startProjectPanel(createDependencies(createState()));
     await flush();
 
     const css = document.getElementById(`${PANEL_ID}-css`)?.textContent ?? '';
-    const referenced = new Set([...css.matchAll(/var\((--dpp-ui-[a-z-]+)\)/g)].map((m) => m[1]!));
+    const referenced = new Set([...css.matchAll(/var\((--zpp-ui-[a-z-]+)\)/g)].map((m) => m[1]!));
     expect(referenced.size).toBeGreaterThan(0);
 
     const defined = new Set(
-      [...(document.getElementById('dpp-injected-theme-css')?.textContent ?? '')
-        .matchAll(/(--dpp-ui-[a-z-]+)\s*:/g)].map((m) => m[1]!),
+      [...(document.getElementById('zpp-injected-theme-css')?.textContent ?? '')
+        .matchAll(/(--zpp-ui-[a-z-]+)\s*:/g)].map((m) => m[1]!),
     );
     expect([...referenced].filter((name) => !defined.has(name))).toEqual([]);
   });
@@ -1363,8 +1363,8 @@ describe('zai project panel theme', () => {
     controller = startProjectPanel(createDependencies(createState()));
     await flush();
 
-    // 变量块必须已经注入 —— 面板只写 `var(--dpp-ui-*)` 的话，没有变量就是全空。
-    expect(document.getElementById('dpp-injected-theme-css')).not.toBeNull();
+    // 变量块必须已经注入 —— 面板只写 `var(--zpp-ui-*)` 的话，没有变量就是全空。
+    expect(document.getElementById('zpp-injected-theme-css')).not.toBeNull();
   });
 
   it('calls the theme injection from inside injectStyles, not merely imports it', () => {
@@ -1415,7 +1415,7 @@ function blockOf(css: string, selector: string): string {
 
 /** 改名输入框那条规则块（它的选择器带 `#id .class` 前缀，单独取一次）。 */
 function renameBlock(css: string): string {
-  return blockOf(css, `#${PANEL_ID} .dpp-project-panel__rename-input {`);
+  return blockOf(css, `#${PANEL_ID} .zpp-project-panel__rename-input {`);
 }
 
 /** 顶层函数声明的函数体字符区间。 */

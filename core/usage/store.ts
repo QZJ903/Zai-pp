@@ -14,7 +14,7 @@ import { decodeUsageRecords, encodeUsageRecords } from './codec';
 import { createCoalescingMutationQueue } from '../persistence/coalescing-mutation-queue';
 import { normalizeUsageTurnInput } from './input-codec';
 
-export const USAGE_STORAGE_KEY = 'glm_pp_usage_turns_v1';
+export const USAGE_STORAGE_KEY = 'zai_pp_usage_turns_v1';
 const MAX_RECORDS = 5_000;
 const RETENTION_DAYS = 180;
 const DAY_MS = 24 * 60 * 60 * 1000;

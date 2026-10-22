@@ -66,7 +66,7 @@ describe('tool result renderer registry', () => {
     document.head.innerHTML = '';
     document.body.innerHTML = '';
     document.documentElement.classList.remove('dark', 'light');
-    document.body.classList.remove('dpp-theme-dark', 'dpp-theme-light');
+    document.body.classList.remove('zpp-theme-dark', 'zpp-theme-light');
   });
 
   it('renders a Skill draft card with a save action', () => {
@@ -80,11 +80,11 @@ describe('tool result renderer registry', () => {
     });
 
     expect(rendered).toBe(true);
-    expect(target.querySelector('.dpp-skill-draft-result')).not.toBeNull();
+    expect(target.querySelector('.zpp-skill-draft-result')).not.toBeNull();
     expect(target.textContent).toContain('/audit');
     expect(target.textContent).toContain('Review contrast-sensitive output.');
     expect(target.textContent).toContain('Save Skill');
-    expect(document.getElementById('dpp-injected-theme-css')).not.toBeNull();
+    expect(document.getElementById('zpp-injected-theme-css')).not.toBeNull();
   });
 
   it('renders a memory import preview card with an import action', () => {
@@ -98,7 +98,7 @@ describe('tool result renderer registry', () => {
     });
 
     expect(rendered).toBe(true);
-    expect(target.querySelector('.dpp-memory-import-result')).not.toBeNull();
+    expect(target.querySelector('.zpp-memory-import-result')).not.toBeNull();
     expect(target.textContent).toContain('2 memories · 1 duplicates');
     expect(target.textContent).toContain('- alpha');
     expect(target.textContent).toContain('- beta');
@@ -111,7 +111,7 @@ describe('tool result renderer registry', () => {
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
 
-    trustedClick(target.querySelector<HTMLButtonElement>('.dpp-result-action'));
+    trustedClick(target.querySelector<HTMLButtonElement>('.zpp-result-action'));
 
     expect(actions.saveSkill).toHaveBeenCalledTimes(1);
     expect(actions.saveSkill.mock.calls[0]?.[0]).toMatchObject({ name: 'audit' });
@@ -123,7 +123,7 @@ describe('tool result renderer registry', () => {
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: memoryImportResult(), locale: 'en' });
 
-    trustedClick(target.querySelector<HTMLButtonElement>('.dpp-result-action'));
+    trustedClick(target.querySelector<HTMLButtonElement>('.zpp-result-action'));
 
     expect(actions.importMemories).toHaveBeenCalledTimes(1);
     expect(actions.importMemories.mock.calls[0]?.[0]).toEqual([{ name: 'alpha' }, { name: 'beta' }]);
@@ -137,7 +137,7 @@ describe('tool result renderer registry', () => {
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
 
-    trustedClick(target.querySelector<HTMLButtonElement>('.dpp-result-action'));
+    trustedClick(target.querySelector<HTMLButtonElement>('.zpp-result-action'));
 
     expect(actions.saveSkill).not.toHaveBeenCalled();
   });
@@ -149,9 +149,9 @@ describe('tool result renderer registry', () => {
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
 
-    trustedClick(target.querySelector<HTMLButtonElement>('.dpp-result-action'));
+    trustedClick(target.querySelector<HTMLButtonElement>('.zpp-result-action'));
     await vi.waitFor(() => {
-      expect(target.querySelector<HTMLButtonElement>('.dpp-result-action')?.textContent)
+      expect(target.querySelector<HTMLButtonElement>('.zpp-result-action')?.textContent)
         .toBe('skill_exists');
     });
   });
@@ -161,7 +161,7 @@ describe('tool result renderer registry', () => {
     registerDefaultToolResultRenderers(actions);
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
-    const button = target.querySelector<HTMLButtonElement>('.dpp-result-action')!;
+    const button = target.querySelector<HTMLButtonElement>('.zpp-result-action')!;
 
     trustedClick(button);
     await vi.waitFor(() => expect(button.textContent).toBe('Saved'));
@@ -177,7 +177,7 @@ describe('tool result renderer registry', () => {
     registerDefaultToolResultRenderers(actions);
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: memoryImportResult(), locale: 'en' });
-    const button = target.querySelector<HTMLButtonElement>('.dpp-result-action')!;
+    const button = target.querySelector<HTMLButtonElement>('.zpp-result-action')!;
 
     trustedClick(button);
     await vi.waitFor(() => expect(button.textContent).toBe('Imported 2'));
@@ -195,7 +195,7 @@ describe('tool result renderer registry', () => {
     registerDefaultToolResultRenderers(actions);
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: memoryImportResult(), locale: 'en' });
-    const button = target.querySelector<HTMLButtonElement>('.dpp-result-action')!;
+    const button = target.querySelector<HTMLButtonElement>('.zpp-result-action')!;
 
     trustedClick(button);
     await vi.waitFor(() => expect(button.textContent).toBe('Import failed'));
@@ -210,7 +210,7 @@ describe('tool result renderer registry', () => {
     registerDefaultToolResultRenderers(actions);
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: memoryImportResult(), locale: 'en' });
-    const button = target.querySelector<HTMLButtonElement>('.dpp-result-action')!;
+    const button = target.querySelector<HTMLButtonElement>('.zpp-result-action')!;
 
     trustedClick(button);
     await vi.waitFor(() => expect(button.textContent).toBe('These drafts cannot be imported'));
@@ -222,7 +222,7 @@ describe('tool result renderer registry', () => {
     registerDefaultToolResultRenderers(actions);
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
-    const button = target.querySelector<HTMLButtonElement>('.dpp-result-action')!;
+    const button = target.querySelector<HTMLButtonElement>('.zpp-result-action')!;
 
     trustedClick(button);
     await vi.waitFor(() => expect(button.textContent).toBe('storage quota exceeded'));
@@ -234,7 +234,7 @@ describe('tool result renderer registry', () => {
     registerDefaultToolResultRenderers(actions);
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
-    const button = target.querySelector<HTMLButtonElement>('.dpp-result-action')!;
+    const button = target.querySelector<HTMLButtonElement>('.zpp-result-action')!;
 
     trustedClick(button);
     await vi.waitFor(() => expect(button.textContent).toBe('skill_exists'));
@@ -340,7 +340,7 @@ describe('tool result renderer registry', () => {
 
     renderToolResultWithRegistry({ target, result, locale: 'en' });
 
-    const list = target.querySelector('.dpp-result-text')!;
+    const list = target.querySelector('.zpp-result-text')!;
     expect(list.textContent).toBe('- alpha');
     expect(list.textContent).not.toContain('undefined');
   });
@@ -365,7 +365,7 @@ describe('tool result renderer registry', () => {
 
   it('syncs the theme class itself instead of relying on the global theme watch', () => {
     // 卡片路径不经过 `installInjectedThemeWatch()`：变量块注入了、但 `body` 上的
-    // `dpp-theme-*` 类没人写的话，`var(--dpp-ui-*)` 会落到浅色那一套 ——
+    // `zpp-theme-*` 类没人写的话，`var(--zpp-ui-*)` 会落到浅色那一套 ——
     // 深色页面上就是「深色底 + 深色字」。所以卡片必须自己同步一次。
     document.documentElement.classList.add('dark');
     registerDefaultToolResultRenderers(createActions());
@@ -373,20 +373,20 @@ describe('tool result renderer registry', () => {
 
     renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
 
-    expect(document.body.classList.contains('dpp-theme-dark')).toBe(true);
-    expect(document.body.classList.contains('dpp-theme-light')).toBe(false);
+    expect(document.body.classList.contains('zpp-theme-dark')).toBe(true);
+    expect(document.body.classList.contains('zpp-theme-light')).toBe(false);
   });
 
   it('leaves the theme class off when the page expresses no theme', () => {
     // 页面两个类都不在时要摘掉我们的类，交回 `prefers-color-scheme` 兜底；
     // 留着旧类会盖住媒体查询（两者特异度相同、后者在样式表后面）。
-    document.body.classList.add('dpp-theme-dark');
+    document.body.classList.add('zpp-theme-dark');
     registerDefaultToolResultRenderers(createActions());
     const target = document.createElement('div');
 
     renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
 
-    expect(document.body.classList.contains('dpp-theme-dark')).toBe(false);
+    expect(document.body.classList.contains('zpp-theme-dark')).toBe(false);
   });
 
   it('paints the card action label from the theme, never from a literal white', () => {
@@ -397,13 +397,13 @@ describe('tool result renderer registry', () => {
     const target = document.createElement('div');
     renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
 
-    const css = document.getElementById('dpp-result-css')?.textContent ?? '';
+    const css = document.getElementById('zpp-result-css')?.textContent ?? '';
     const actionBlock = css.slice(
-      css.indexOf('.dpp-result-action {'),
-      css.indexOf('.dpp-result-action:disabled'),
+      css.indexOf('.zpp-result-action {'),
+      css.indexOf('.zpp-result-action:disabled'),
     );
     expect(actionBlock.length).toBeGreaterThan(0);
-    expect(actionBlock).toContain('color: var(--dpp-ui-accent-contrast)');
+    expect(actionBlock).toContain('color: var(--zpp-ui-accent-contrast)');
     expect(actionBlock).not.toMatch(/color:\s*(white|#|rgb|hsl|oklch)/i);
   });
 });

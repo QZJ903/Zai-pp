@@ -1,7 +1,7 @@
 import type { ToolRiskLevel } from '../tool/types';
 
 export const SHELL_MCP_SERVER_NAME = 'Shell Local';
-export const SHELL_MCP_NATIVE_HOST = 'com.glm_pp.shell';
+export const SHELL_MCP_NATIVE_HOST = 'com.zai_pp.shell';
 
 export const SHELL_TOOL_NAMES = ['shell_exec', 'shell_status', 'python_status', 'python_exec', 'local_skill_preview', 'local_folder_pick', 'local_file_stat', 'local_file_read', 'local_file_write', 'shell_session_begin', 'shell_session_exec', 'shell_session_end'] as const;
 export type ShellToolName = typeof SHELL_TOOL_NAMES[number];

@@ -27,7 +27,7 @@ export default function AboutSubPage({ state }: { state: SettingsState }) {
           </div>
         </div>
         <a
-          href="https://github.com/"
+          href="https://github.com/QZJ903/Zai-pp"
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-1.5 text-[11px] mt-1 transition-colors hover:opacity-80"

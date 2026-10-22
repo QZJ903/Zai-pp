@@ -199,7 +199,7 @@ import {
 } from '../core/i18n/store';
 import type {
   BackgroundConfig,
-  CurrentGLMConversation,
+  CurrentZaiConversation,
   ToolCall,
   ToolDescriptor,
   ToolExecutionTrigger,
@@ -342,7 +342,7 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         getAllSavedItems,
         saveSavedItem,
         deleteSavedItem,
-        insertPromptIntoActiveGLMTab,
+        insertPromptIntoActiveZaiTab,
         broadcastStateUpdate,
         broadcastSavedItemsUpdate,
       },
@@ -354,7 +354,7 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         addConversationToProject,
         removeConversationFromProject,
         setPendingProjectContext,
-        getCurrentGLMConversation,
+        getCurrentZaiConversation,
         bindPendingProjectConversation,
         refreshProjectConversation,
         getProjectForConversation,
@@ -673,25 +673,25 @@ async function executeLocalSkillImporterToolCall(call: ToolCall): Promise<ToolRe
 /**
  * 内容脚本 / 标签页的信任策略。
  *
- * ⚠️⚠️ **`additionalWebOrigins` 必须带齐另一站** —— `glmOrigin` 只是**主站**（默认站），
+ * ⚠️⚠️ **`additionalWebOrigins` 必须带齐另一站** —— `zaiOrigin` 只是**主站**（默认站），
  * 少了这一项，另一站（如国际站）上开着的内容脚本发来的消息会被
  * `createRuntimeMessageContext` 判成「不受信的 web 顶层帧」而**全部拒绝**
  * （表现：那一站的页面看着正常，但项目面板、工具执行、自动化回传全部静默失效）。
  *
- * ⚠️ **`glmOrigin` 只取默认站**（不是「当前站」）—— 信任判定是**集合**语义，
+ * ⚠️ **`zaiOrigin` 只取默认站**（不是「当前站」）—— 信任判定是**集合**语义，
  * 两个站都该受信；把「当前站」塞进主位只会让判据多一个与信任无关的变量。
  */
 function createZaiTrustPolicy(): {
   runtimeId: string;
   extensionOrigin: string;
-  glmOrigin: string;
+  zaiOrigin: string;
   additionalWebOrigins: readonly string[];
 } {
   const primary = new URL(ZAI_HOME_URL).origin;
   return {
     runtimeId: chrome.runtime.id,
     extensionOrigin: chrome.runtime.getURL('/'),
-    glmOrigin: primary,
+    zaiOrigin: primary,
     additionalWebOrigins: ZAI_WEB_ORIGINS.filter((origin) => origin !== primary),
   };
 }
@@ -765,17 +765,17 @@ async function notifyCommittedProjectContextUpdate(excludeTabId?: number): Promi
   }
 }
 
-async function getCurrentGLMConversation(): Promise<
-  { ok: true; conversation: CurrentGLMConversation } | { ok: false; error: string }
+async function getCurrentZaiConversation(): Promise<
+  { ok: true; conversation: CurrentZaiConversation } | { ok: false; error: string }
 > {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const tab = tabs.find((item) => item.id != null && isChatConversationUrl(item.url));
-  if (!tab?.id) return { ok: false, error: 'no_active_glm_conversation' };
+  if (!tab?.id) return { ok: false, error: 'no_active_zai_conversation' };
 
   try {
-    const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_CURRENT_GLM_CONVERSATION' });
+    const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_CURRENT_ZAI_CONVERSATION' });
     if (response?.ok && response.conversation) {
-      return { ok: true, conversation: response.conversation as CurrentGLMConversation };
+      return { ok: true, conversation: response.conversation as CurrentZaiConversation };
     }
     return { ok: false, error: response?.error ?? 'no_current_conversation' };
   } catch (error) {
@@ -792,7 +792,7 @@ async function getCurrentGLMConversation(): Promise<
  * ⚠️ 也**不是**后缀匹配：站点自己有 `zcode.z.ai` 之类的同域子站，放宽会把信任
  * 范围从一个站放大到一个域。
  */
-function isGLMChatUrl(url: string | undefined): boolean {
+function isZaiChatUrl(url: string | undefined): boolean {
   if (!url) return false;
   try {
     const parsed = new URL(url);
@@ -804,10 +804,10 @@ function isGLMChatUrl(url: string | undefined): boolean {
 
 /** 当前活跃对话 URL（两个站都认，项目页据此抓当前对话）。 */
 function isChatConversationUrl(url: string | undefined): boolean {
-  return isGLMChatUrl(url);
+  return isZaiChatUrl(url);
 }
 
-async function insertPromptIntoActiveGLMTab(
+async function insertPromptIntoActiveZaiTab(
   text: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (text.length === 0) {
@@ -815,9 +815,9 @@ async function insertPromptIntoActiveGLMTab(
   }
 
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs.find((item) => item.id != null && isGLMPageUrl(item.url));
+  const tab = tabs.find((item) => item.id != null && isZaiPageUrl(item.url));
   if (!tab?.id) {
-    return { ok: false, error: backgroundT('background.auth.missingGLM') };
+    return { ok: false, error: backgroundT('background.auth.missingZai') };
   }
 
   try {
@@ -837,14 +837,14 @@ async function insertPromptIntoActiveGLMTab(
 
 function getPromptInsertionErrorMessage(error: unknown): string {
   if (error === 'empty_prompt_text') return 'empty_prompt_text';
-  if (error === 'prompt_input_not_found') return backgroundT('background.auth.missingGLM');
+  if (error === 'prompt_input_not_found') return backgroundT('background.auth.missingZai');
   return typeof error === 'string' && error.length > 0
     ? error
-    : backgroundT('background.auth.missingGLM');
+    : backgroundT('background.auth.missingZai');
 }
 
 /** 这个 URL 是不是某个站的页面（两个站都认，`INSERT_PROMPT_TEXT` 据此找 tab）。 */
-function isGLMPageUrl(url: string | undefined): boolean {
+function isZaiPageUrl(url: string | undefined): boolean {
   if (!url) return false;
   try {
     return isZaiSiteOrigin(new URL(url).origin);
@@ -946,7 +946,7 @@ async function executeAutomationWithContext(
   const model = request.promptOptions?.model ?? null;
   const chatSessionId = resolveAutomationReusableSessionId({
     promptOptions: request.promptOptions,
-    glm: { chatSessionId: request.chatSessionId, sessionUrl: null, siteOrigin: request.siteOrigin },
+    zai: { chatSessionId: request.chatSessionId, sessionUrl: null, siteOrigin: request.siteOrigin },
   });
 
   let outcome;
@@ -1057,21 +1057,21 @@ async function persistAutomationSession(
     // 兜底：调用方给的站点认不出时，退回「记录里已有的证据」（记录站点 → url 的 origin
     // → 默认站）。生产路径上不会走到 —— 协调器给的一定是站点集合里的一员。
     const resolvedSiteOrigin = resolveZaiSiteOrigin(siteOrigin)
-      ?? resolveZaiSiteOrigin(automation.glm.siteOrigin)
-      ?? resolveZaiSiteOrigin(automation.glm.sessionUrl)
+      ?? resolveZaiSiteOrigin(automation.zai.siteOrigin)
+      ?? resolveZaiSiteOrigin(automation.zai.sessionUrl)
       ?? ZAI_WEB_ORIGIN;
     const nextSessionUrl = buildZaiSessionUrl(chatSessionId, resolvedSiteOrigin);
     // 早退条件必须校验 URL 与 id 一致：早期版本可能留下「新 id + 旧 url」的记录，
     // 只判存在性会跳过修复，「打开会话」会一直跳到上一次的对话。
     if (
-      automation.glm.chatSessionId === chatSessionId &&
-      automation.glm.sessionUrl === nextSessionUrl
+      automation.zai.chatSessionId === chatSessionId &&
+      automation.zai.sessionUrl === nextSessionUrl
     ) {
       return;
     }
     await updateAutomationRuntime(automationId, {
-      glm: {
-        ...automation.glm,
+      zai: {
+        ...automation.zai,
         chatSessionId,
         sessionUrl: nextSessionUrl,
         siteOrigin: resolvedSiteOrigin,

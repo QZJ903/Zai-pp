@@ -40,7 +40,7 @@ const ZAI_NEW_CONVERSATION_PLACEHOLDERS = new Set([
 
 export const PROJECT_UNTITLED_CONVERSATION = 'Untitled conversation';
 
-export function isDefaultGLMConversationTitle(value: string): boolean {
+export function isDefaultZaiConversationTitle(value: string): boolean {
   return GLM_DEFAULT_TITLE.test(value.trim());
 }
 
@@ -57,7 +57,7 @@ export function isZaiNewConversationPlaceholderTitle(value: string): boolean {
 export function isPlaceholderProjectConversationTitle(value: string): boolean {
   const title = value.trim();
   return title === PROJECT_UNTITLED_CONVERSATION
-    || isDefaultGLMConversationTitle(title)
+    || isDefaultZaiConversationTitle(title)
     || isZaiSiteDefaultConversationTitle(title)
     || isZaiNewConversationPlaceholderTitle(title);
 }

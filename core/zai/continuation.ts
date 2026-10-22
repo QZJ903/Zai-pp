@@ -1,7 +1,7 @@
 /**
  * z.ai 续跑 prompt 构建。
  *
- * 与 glm 版 buildContinuationPrompt 的关键区别：**不重灌工具目录**。
+ * 与上游 buildContinuationPrompt 的关键区别：**不重灌工具目录**。
  * 续跑是 DOM 注入让页面自己发的（captcha 墙），工具目录只需要在首条消息注入一次，
  * 续跑 prompt 保持紧凑：original_task + tool_results + 一行工具名提醒。
  *

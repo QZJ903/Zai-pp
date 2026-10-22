@@ -15,9 +15,9 @@
  * 既有 import 路径（`from './visibility'` / `from '../core/prompt/visibility'`）不变。
  */
 
-export const VISIBLE_USER_PROMPT_START = '<!-- glm-visible-user-prompt:start -->';
-export const VISIBLE_USER_PROMPT_END = '<!-- glm-visible-user-prompt:end -->';
-export const VISIBLE_USER_PROMPT_METADATA_PREFIX = '<!-- glm-visible-user-prompt:value=';
+export const VISIBLE_USER_PROMPT_START = '<!-- zai-visible-user-prompt:start -->';
+export const VISIBLE_USER_PROMPT_END = '<!-- zai-visible-user-prompt:end -->';
+export const VISIBLE_USER_PROMPT_METADATA_PREFIX = '<!-- zai-visible-user-prompt:value=';
 export const VISIBLE_USER_PROMPT_METADATA_SUFFIX = ' -->';
 
 export function markVisibleUserPrompt(prompt: string): string {

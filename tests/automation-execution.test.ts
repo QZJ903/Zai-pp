@@ -94,7 +94,7 @@ describe('automation execution authority', () => {
     expect(completed?.error?.code).toBe('automation_run_timeout');
     expect(hasActiveAutomationRun(automation.id)).toBe(false);
     expect(executor).toHaveBeenCalledTimes(1);
-    expect((await getAutomationById(automation.id))?.glm.chatSessionId).toBeNull();
+    expect((await getAutomationById(automation.id))?.zai.chatSessionId).toBeNull();
   });
 
   it('does not let a concurrent alarm reconcile a timed-out executor before it settles', async () => {
@@ -420,7 +420,7 @@ describe('automation site hint and write-back', () => {
   it('does not pass the remembered site for a non-fixed session', async () => {
     const automation = await createTestAutomation();
     await updateAutomationRuntime(automation.id, {
-      glm: {
+      zai: {
         chatSessionId: null,
         sessionUrl: null,
         siteOrigin: 'https://zchat.z.ai',
@@ -447,7 +447,7 @@ describe('automation site hint and write-back', () => {
       promptOptions: { model: null, fixedSession: true },
     });
     await updateAutomationRuntime(automation.id, {
-      glm: {
+      zai: {
         chatSessionId: 'cn-session',
         sessionUrl: 'https://zchat.z.ai/c/cn-session',
         siteOrigin: 'https://zchat.z.ai',
@@ -478,7 +478,7 @@ describe('automation site hint and write-back', () => {
       promptOptions: { model: null, fixedSession: true },
     });
     await updateAutomationRuntime(automation.id, {
-      glm: {
+      zai: {
         chatSessionId: null,
         sessionUrl: null,
         siteOrigin: 'https://zchat.z.ai',
@@ -510,7 +510,7 @@ describe('automation site hint and write-back', () => {
     });
 
     // 旧行为：回退链收口到默认站（国区站）⇒ 下一次运行被钉死在那一站。
-    expect((await getAutomationById(automation.id))?.glm.siteOrigin).toBeNull();
+    expect((await getAutomationById(automation.id))?.zai.siteOrigin).toBeNull();
   });
 
   it('does not build a session URL from the default site when no site evidence exists', async () => {
@@ -530,9 +530,9 @@ describe('automation site hint and write-back', () => {
     });
 
     const stored = await getAutomationById(automation.id);
-    expect(stored?.glm.chatSessionId).toBe('session-without-site');
-    expect(stored?.glm.siteOrigin).toBeNull();
-    expect(stored?.glm.sessionUrl).toBeNull();
+    expect(stored?.zai.chatSessionId).toBe('session-without-site');
+    expect(stored?.zai.siteOrigin).toBeNull();
+    expect(stored?.zai.sessionUrl).toBeNull();
   });
 });
 

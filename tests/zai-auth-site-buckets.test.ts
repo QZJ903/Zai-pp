@@ -3,7 +3,6 @@ import {
   AUTH_READ_TIMEOUT_MS,
   ZAI_AUTH_SITE_STORAGE_KEY_PREFIX,
   ZAI_AUTH_STORAGE_KEY,
-  clearZaiAuthFromStorage,
   loadZaiAuthFromStorage,
   mergeZaiAuthFromCapture,
   normalizeZaiAuth,
@@ -276,18 +275,6 @@ describe('the legacy slot gates on the region claim', () => {
     await expect(loadZaiAuthFromStorage(undefined, CN_ORIGIN)).resolves.toMatchObject({
       token: 'not-a-jwt',
     });
-  });
-});
-
-describe('clearing wipes every bucket', () => {
-  it('removes both site buckets and the legacy slot', async () => {
-    store[CN_KEY] = authRecord('cn-token');
-    store[GLOBAL_KEY] = authRecord('global-token');
-    store[ZAI_AUTH_STORAGE_KEY] = authRecord('legacy-token');
-
-    await clearZaiAuthFromStorage();
-
-    expect(Object.keys(store)).toEqual([]);
   });
 });
 

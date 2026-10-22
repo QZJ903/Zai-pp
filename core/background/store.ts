@@ -1,7 +1,7 @@
 import type { BackgroundConfig } from '../types';
 import { normalizeBackgroundConfig } from './config';
 
-const STORAGE_KEY = 'glm_pp_background';
+const STORAGE_KEY = 'zai_pp_background';
 
 export async function getBackgroundConfig(): Promise<BackgroundConfig | null> {
   const data = await chrome.storage.local.get(STORAGE_KEY) as Record<string, Partial<BackgroundConfig> | undefined>;

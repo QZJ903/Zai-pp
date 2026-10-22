@@ -6,7 +6,7 @@ import type {
   McpToolCacheEntry,
 } from './types';
 
-export const MCP_STORAGE_KEY = 'glm_pp_mcp_servers';
+export const MCP_STORAGE_KEY = 'zai_pp_mcp_servers';
 export const MCP_SERVER_CONFIG_VERSION = 1 as const;
 export const MCP_LEGACY_STORAGE_VERSION = 1 as const;
 export const MCP_STORAGE_VERSION = 2 as const;

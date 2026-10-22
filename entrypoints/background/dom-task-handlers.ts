@@ -22,7 +22,7 @@ export interface DomTaskRuntimeHandlerDependencies {
  * content → 后台 DOM_TASK_* 事件 handler（方案 §4.3）。
  *
  * content（zai.content.ts）用 chrome.runtime.sendMessage 发顶层字段（不带 payload），
- * 所以这里不走 defineGLMPayloadRuntimeCommandHandler 的 payload 解码，而是直接读
+ * 所以这里不走 payload 解码那一层，而是直接读
  * envelope 顶层字段。契约登记为 payload-cast（list-only 语义），响应统一 ack。
  */
 export function createDomTaskRuntimeHandlers(

@@ -159,7 +159,7 @@ describe('automation durable lease and restart recovery', () => {
       status: 'succeeded',
       result: lateSuccess,
       runtimePatch: () => ({
-        glm: {
+        zai: {
           chatSessionId: lateSuccess.chatSessionId,
           sessionUrl: lateSuccess.sessionUrl,
           siteOrigin: lateSuccess.siteOrigin,
@@ -170,7 +170,7 @@ describe('automation durable lease and restart recovery', () => {
     expect(terminal?.status).toBe('timeout');
     expect(rejected).toBeNull();
     expect((await getAutomationRunById('run-fenced'))?.status).toBe('timeout');
-    expect((await getAutomationById(automation.id))?.glm.chatSessionId).toBeNull();
+    expect((await getAutomationById(automation.id))?.zai.chatSessionId).toBeNull();
   });
 
   it('repairs a stale occurrence without rolling back newer manual runtime state', async () => {
@@ -184,7 +184,7 @@ describe('automation durable lease and restart recovery', () => {
       nextRunAt: scheduledFor,
       lastRunAt: newerCompletedAt,
       lastError: null,
-      glm: {
+      zai: {
         chatSessionId: 'newer-chat',
         sessionUrl: 'https://chat.z.ai/a/chat/s/newer-chat',
         siteOrigin: null,
@@ -208,7 +208,7 @@ describe('automation durable lease and restart recovery', () => {
     expect(await getAutomationById(automation.id)).toMatchObject({
       lastRunAt: newerCompletedAt,
       lastError: null,
-      glm: {
+      zai: {
         chatSessionId: 'newer-chat',
       },
     });
@@ -226,7 +226,7 @@ describe('automation durable lease and restart recovery', () => {
     // 只写 url、`siteOrigin` 保持 null（模拟本字段之前落库的记录）。
     await updateAutomationRuntime(automation.id, {
       nextRunAt: now,
-      glm: {
+      zai: {
         chatSessionId: 'mid-run-session',
         sessionUrl: 'https://chat.z.ai/c/mid-run-session',
         siteOrigin: null,
@@ -244,7 +244,7 @@ describe('automation durable lease and restart recovery', () => {
     await scanDueAutomations(vi.fn(), now);
 
     // 站点从 `sessionUrl` 的 origin 反推出来 —— 这是回退链的第三级。
-    expect((await getAutomationById(automation.id))?.glm.siteOrigin)
+    expect((await getAutomationById(automation.id))?.zai.siteOrigin)
       .toBe('https://chat.z.ai');
   });
 
@@ -258,7 +258,7 @@ describe('automation durable lease and restart recovery', () => {
     await updateAutomationRuntime(automation.id, {
       nextRunAt: now,
       lastRunAt: newerCompletedAt,
-      glm: {
+      zai: {
         chatSessionId: 'mid-run-session',
         sessionUrl: 'https://zchat.z.ai/c/mid-run-session',
         siteOrigin: null,
@@ -275,7 +275,7 @@ describe('automation durable lease and restart recovery', () => {
 
     await scanDueAutomations(vi.fn(), now);
 
-    expect((await getAutomationById(automation.id))?.glm.siteOrigin)
+    expect((await getAutomationById(automation.id))?.zai.siteOrigin)
       .toBe('https://zchat.z.ai');
   });
 
@@ -287,7 +287,7 @@ describe('automation durable lease and restart recovery', () => {
     const automation = await createScheduledAutomation();
     await updateAutomationRuntime(automation.id, {
       nextRunAt: now,
-      glm: { chatSessionId: null, sessionUrl: null, siteOrigin: null },
+      zai: { chatSessionId: null, sessionUrl: null, siteOrigin: null },
     });
     await seedPersistedRun(makePersistedRun({
       id: 'orphan-no-site',
@@ -300,14 +300,14 @@ describe('automation durable lease and restart recovery', () => {
 
     await scanDueAutomations(vi.fn(), now);
 
-    expect((await getAutomationById(automation.id))?.glm.siteOrigin).toBeNull();
+    expect((await getAutomationById(automation.id))?.zai.siteOrigin).toBeNull();
   });
 
   it('normalizes historical runner requests that predate persisted deadlines', async () => {
     vi.stubGlobal('chrome', createChromeStub());
     const requestedAt = 8_000_000;
     await chrome.storage.local.set({
-      glm_pp_automations: {
+      zai_pp_automations: {
         version: 1,
         automations: [],
         runs: [{
@@ -417,7 +417,7 @@ function makePersistedRun(overrides: Partial<AutomationRun>): AutomationRun {
 }
 
 async function seedPersistedRun(run: AutomationRun): Promise<void> {
-  const key = 'glm_pp_automations';
+  const key = 'zai_pp_automations';
   const data = await chrome.storage.local.get(key) as Record<string, unknown>;
   const current = data[key] as { version: 1; automations: Automation[]; runs: AutomationRun[] } | undefined;
   await chrome.storage.local.set({

@@ -263,6 +263,60 @@ describe('composer mask: 注入期间让输入框「看起来空着」', () => {
       expect(guarded.length, `${fn} 的遮罩必须有一个带撤销的 finally 兜着`).toBeGreaterThan(0);
     }
   });
+
+  it('两处注入锁过的 disabled 也必须在 finally 里还回去', () => {
+    // ⚠️⚠️ **与遮罩同性质的一条**：注入期间把 `textarea.disabled` 置真，离开时必须还原。
+    // 正常出口在提交触发后就恢复了，但中间任何一处抛错（`setTextareaValue` 的
+    // `dispatchEvent`、`submitFormViaRequestSubmit`、证据等待）都会跳过它 ⇒
+    // **输入框永久停在 disabled**，用户只能刷新页面。
+    //
+    // 判据走三件事：① 函数里有一个 `lockedTextarea` 变量；② 赋值处与 finally 在同一个
+    // try 里；③ finally 里对 `lockedTextarea.disabled` 有赋值。
+    const { program } = context();
+    for (const fn of [FORM_PATH_FN, DOM_PATH_FN]) {
+      const body = findFunctionBody(program, fn);
+
+      // ① 声明 `lockedTextarea`
+      let declared = false;
+      let assigned: t.Node | null = null;
+      t.traverseFast(body, (node) => {
+        if (!t.isVariableDeclarator(node) || !t.isIdentifier(node.id)) return;
+        if (node.id.name !== 'lockedTextarea') return;
+        declared = true;
+      });
+      expect(declared, `${fn} 应当声明 lockedTextarea`).toBe(true);
+
+      // ② 找 `lockedTextarea = textarea` 的赋值位置
+      t.traverseFast(body, (node) => {
+        if (!t.isAssignmentExpression(node)) return;
+        const left = node.left;
+        if (t.isIdentifier(left, { name: 'lockedTextarea' })) assigned = node;
+      });
+      expect(assigned, `${fn} 应当把锁过的输入框记进 lockedTextarea`).toBeTruthy();
+
+      // ③ 那个 finally 覆盖赋值点，且里面给 `lockedTextarea.disabled` 写过值
+      const tries: t.TryStatement[] = [];
+      t.traverseFast(body, (node) => {
+        if (t.isTryStatement(node)) tries.push(node);
+      });
+      const guarded = tries.filter((node) => {
+        if (!node.finalizer) return false;
+        if (!within(assigned!, node)) return false;
+        let restores = false;
+        t.traverseFast(node.finalizer, (child) => {
+          if (!t.isAssignmentExpression(child)) return;
+          const left = child.left;
+          if (!t.isMemberExpression(left)) return;
+          if (t.isIdentifier(left.object, { name: 'lockedTextarea' })
+            && t.isIdentifier(left.property, { name: 'disabled' })) {
+            restores = true;
+          }
+        });
+        return restores;
+      });
+      expect(guarded.length, `${fn} 的 lockedTextarea 必须有一个 finally 把 disabled 还回去`).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe('composer mask: 撤得够早', () => {

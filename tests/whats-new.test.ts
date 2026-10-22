@@ -7,8 +7,8 @@ import {
   shouldShowWhatsNew,
 } from '../core/whats-new';
 
-const LAST_SEEN_VERSION_KEY = 'glm_pp_whats_new_dismissed_version';
-const PENDING_UPDATE_VERSION_KEY = 'glm_pp_whats_new_pending_version';
+const LAST_SEEN_VERSION_KEY = 'zai_pp_whats_new_dismissed_version';
+const PENDING_UPDATE_VERSION_KEY = 'zai_pp_whats_new_pending_version';
 
 let storage: Record<string, unknown>;
 

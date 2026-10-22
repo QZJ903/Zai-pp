@@ -60,7 +60,12 @@ export function createShellMcpPresetInput(
       toolNames: [...DEFAULT_SHELL_MCP_ALLOWLIST_TOOL_NAMES],
     },
     execution: {
-      enabled: options.executionEnabled ?? false,
+      // ⚠️ **默认开启「自动执行」** —— 关着的时候这三个开关任一为假，`isMcpToolEnabled`
+      // 就返回 false，工具列表整列显示为「未启用」（`{active}/{total} 自动` 会显示 0/12），
+      // 而面板上没有任何一处解释「是这一项在挡」。用户装完 host、连上了、也看到工具列表了，
+      // 却一个都用不了。Shell 是本项目的一等能力（提示词与内置 skill 都按它写），
+      // 默认值就该是「能用」。
+      enabled: options.executionEnabled ?? true,
       mode: 'auto',
     },
   };

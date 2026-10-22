@@ -29,7 +29,7 @@ import {
 import { createMcpDescriptorId, createMcpInvocationName } from './descriptor-identity';
 import { isShellMcpServer } from '../shell/policy';
 
-const CLIENT_NAME = 'GLM++';
+const CLIENT_NAME = 'Zai++';
 
 export class McpProtocolError extends Error {
   readonly code: string;
@@ -71,7 +71,7 @@ export async function initializeMcpServer(
     createMcpRequest('initialize', {
       protocolVersion: MCP_PROTOCOL_VERSION,
       // Client capabilities are not the server's advertised tool capabilities.
-      // Keep this empty until GLM++ implements a client-side MCP capability
+      // Keep this empty until Zai++ implements a client-side MCP capability
       // such as roots, sampling, or elicitation. Strict servers reject unknown
       // client capability keys during initialize.
       capabilities: {},

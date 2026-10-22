@@ -1,5 +1,5 @@
 /**
- * GLM++ isolated-world content script（chat.z.ai）。
+ * Zai++ isolated-world content script（chat.z.ai）。
  *
  * 职责：
  * 1. 运行时状态同步：从后台拉记忆/技能/预设/工具描述符，推给 MAIN world 的 hook。
@@ -455,7 +455,6 @@ interface ContinuationLoop {
 }
 
 let continuationLoop: ContinuationLoop | null = null;
-let continuationMarkerCount = 0;
 const activeToolAuthorizations = new Map<string, ToolAuthorizationGrantSummary>();
 
 // ---------------------------------------------------------------------------
@@ -1058,7 +1057,7 @@ function isContinuableExecution(execution: ToolExecutionRecord): boolean {
   // `ToolExecutionRecord` 上是可选字段（工具历史编解码明确允许缺省），
   // 只认 provider 会在那种记录上恒 false。
   // ⚠️ `web` 那几条对应的扩展自带联网工具已删除，留下是为了**老会话里的历史记录**
-  // 仍按「可续跑」处理 —— 它们可能出现在 `glm_pp_tool_history` 与页面历史里。
+  // 仍按「可续跑」处理 —— 它们可能出现在 `zai_pp_tool_history` 与页面历史里。
   return Boolean(
     !execution.pending &&
       (execution.provider?.kind === 'mcp' ||
@@ -1247,7 +1246,7 @@ function augmentPrompt(
  *
  * ⚠️ **此刻地址栏还没有 `/c/<id>`** —— `resolveProjectContextForRequest` 第一条就是
  * `if (!chatSessionId) return null`，所以那条路在首条必然空转。唯一已知的是**待绑项目**
- * （`glm_pp_project_context` 的 `pendingProjectId`，「下一条新会话使用此项目」与面板的
+ * （`zai_pp_project_context` 的 `pendingProjectId`，「下一条新会话使用此项目」与面板的
  * 「在项目下开启新会话」都会先置它）。
  *
  * 漏了这一步的后果是**静默的**：首条没有项目指令、且 `projectId` 为 null 会把
@@ -1852,16 +1851,23 @@ async function executeDetectedFromDetected(
  * 「最新一次同步生效」落地，而本次同步完全可能被一条更新的同步顶掉；那时去读模块状态
  * 会拿到别的东西（可能还是旧清单），重试就白做了，且失败是静默的（第二次照样报同一个错）。
  * 这条重试在串行队列内，它要的是「我这次拿到的这一份」。
+ *
+ * ⚠️ `localSkillDir` 由调用方给 —— 它决定后台的 cwd 门禁要不要把这个 grant 的 shell 调用
+ * 归一到 Skill 目录（见 `core/tool/local-skill-cwd.ts`）。传 `undefined` 等于「这一轮没有
+ * 激活本地 Skill」，`enforceLocalSkillCwd` 会原样放行 cwd。**别在这里凭空兜底一个值**：
+ * 来源只有两个（本轮激活结果 / 续跑循环记下的），拿不到就是真的没有。
  */
 async function requestToolAuthorization(
   requestId: string,
   chatSessionId: string | null,
+  localSkillDir: string | undefined,
 ): Promise<ToolAuthorizationGrantSummary> {
   try {
     return await createToolAuthorization({
       requestId,
       chatSessionId,
       descriptorIds: currentToolDescriptors.map((d) => d.id),
+      localSkillDir,
     });
   } catch (error) {
     if (!(error instanceof ToolAuthorizationRequestError)
@@ -1881,6 +1887,7 @@ async function requestToolAuthorization(
       requestId,
       chatSessionId,
       descriptorIds: descriptors.map((d) => d.id),
+      localSkillDir,
     });
   }
 }
@@ -1906,7 +1913,16 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
     const chatSessionId =
       chatSessionIdByRequestId.get(requestId) ?? getCurrentChatSessionId();
     try {
-      authorization = await requestToolAuthorization(requestId, chatSessionId);
+      // ⚠️ `localSkillDir` **只从 `localSkillDirByRequestId` 取**（completion 轮增广成功时记下的）：
+      // 走到懒建说明这一轮增广没跑完，此刻没有任何别的来源能给出「本轮激活了哪个 Skill」。
+      // 拿不到就传 `undefined` —— 后台的 cwd 门禁会原样放行 cwd，与改动前一致。
+      // ⚠️ **chatNew 轮不写那个 Map**（它没有终态事件，刻意不碰任何请求级状态）⇒ 那一档
+      // 仍然拿不到 dir。这属已知残余，补它需要另找来源，代价高于收益。
+      authorization = await requestToolAuthorization(
+        requestId,
+        chatSessionId,
+        localSkillDirByRequestId.get(requestId),
+      );
       activeToolAuthorizations.set(requestId, authorization);
       // 懒建路径也记一份（走的是 `currentToolDescriptors`，那是此刻唯一可得的目录）。
       //
@@ -2010,7 +2026,7 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
  * 重复写入由后台按 id 合并）。中断的轮次也记 —— 消耗已经发生。
  *
  * ⚠️ `RECORD_USAGE_TURN` 必须写成**内联的对象字面量**：`tests/runtime-boundary.test.ts`
- * 用 AST 从本文件抓「content 实际发出的命令字面量」，再与 `GLM_CONTENT_RUNTIME_COMMANDS`
+ * 用 AST 从本文件抓「content 实际发出的命令字面量」，再与 `ZAI_CONTENT_RUNTIME_COMMANDS`
  * 做双向比对。抽成变量会让它抓不到 → 白名单不变式红。
  */
 async function handleUsageSnapshot(raw: unknown): Promise<void> {
@@ -2533,7 +2549,7 @@ async function submitDomTaskPrompt(taskId: string, prompt: string): Promise<bool
  *   3. 短稳定期后 form.requestSubmit()（页面自己发 /chats/new → 跳 /c/<id>）。
  * 关键：**不 disable 输入框、不等 send 按钮 enabled**。disable 会让首页的 Svelte 把
  * bound-value 判空 → send 按钮恒 disabled、requestSubmit 变空提交 → 不跳转。
- * 归属自检（waitForDomTaskRecognized）是 GLM++ 自己加的「成功判据」，取代不可信的
+ * 归属自检（waitForDomTaskRecognized）是 Zai++ 自己加的「成功判据」，取代不可信的
  * 「输入框是否清空」。
  */
 async function submitAutomationPromptViaPage(
@@ -2745,28 +2761,6 @@ const AUTOMATION_RECOGNIZE_TIMEOUT_MS = 5_000;
 const AUTOMATION_SEND_RETRY_DELAY_MS = 800;
 
 /**
- * 派发一次真人风格的 Enter 按键（只发 keydown，不三连发）。
- * 关键：真人按 Enter 时页面只在 on:keydown 触发一次发送；此前同时派发
- * keydown+keypress+keyup 导致 z.ai 在多个 key 事件上都绑定发送 → 一次注入
- * 变成两条 /chats/new（双提交）→ 第二条覆盖第一条、SPA 不跳 /c/<id>。
- * 所以这里只发 keydown 一个事件，requestSubmit/点按钮作为后续兜底。
- */
-function dispatchEnterKey(target: HTMLTextAreaElement): void {
-  try {
-    target.dispatchEvent(new KeyboardEvent('keydown', {
-      key: 'Enter',
-      code: 'Enter',
-      keyCode: 13,
-      which: 13,
-      bubbles: true,
-      cancelable: true,
-    }));
-  } catch {
-    /* ignore */
-  }
-}
-
-/**
  * RUN_DOM_TASK onMessage 分支的处理体。
  * - busy 判定：续跑循环在跑 / DOM 注入在飞 / 任一后台任务非终态，一律 `busy` 拒绝。
  * - 会话一致性：后台指定的 chatSessionId 与当前页面会话不符 → `wrong_conversation` 拒绝。
@@ -2827,6 +2821,16 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<ZaiSendEvi
   domSendInFlight = true;
   /** 注入期间对输入框做的那层「看不见」的撤销函数（任何出口都要走 finally 还原）。 */
   let restoreComposerAppearance: (() => void) | null = null;
+  /**
+   * 我们锁过的那个输入框与它原来的 `disabled`。
+   *
+   * ⚠️⚠️ **必须在 `finally` 里恢复** —— 中间任何一处抛错（`setTextareaValue` 的
+   * `dispatchEvent`、`submitFormViaRequestSubmit`、证据等待）都会跳过正常出口的恢复，
+   * 输入框会**永久停在 `disabled = true`**，用户只能刷新页面。这条与遮罩那条同性质：
+   * 都是「注入期间改了页面状态、离开时必须还回去」。
+   */
+  let lockedTextarea: HTMLTextAreaElement | null = null;
+  let wasDisabled = false;
   try {
     await waitForComposerReady();
     const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
@@ -2838,8 +2842,9 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<ZaiSendEvi
     }
 
     // 注入期间锁定输入框，避免用户打字与注入交错。
-    const wasDisabled = textarea.disabled;
+    wasDisabled = textarea.disabled;
     textarea.disabled = true;
+    lockedTextarea = textarea;
 
     // ⚠️ 注入这段文本期间让它「看起来空着」（文字透明 + 高度冻住）—— 见
     // `maskComposerForInjection`：那段文本**必须**存在于 DOM 里（页面读的状态就是从它来的），
@@ -2883,6 +2888,8 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<ZaiSendEvi
   } finally {
     // ⚠️ **任何出口都要撤销那层「看不见」** —— 漏一次，用户的输入框会一直是透明的。
     restoreComposerAppearance?.();
+    // ⚠️ **输入框的 `disabled` 同理** —— 正常出口在提交触发后就恢复了，但中间抛错会跳过它。
+    if (lockedTextarea) lockedTextarea.disabled = wasDisabled;
     domSendInFlight = false;
   }
 }
@@ -3092,7 +3099,7 @@ const TOOL_PANEL_HISTORY_LIMIT = 100;
 
 /**
  * 注入 UI 的主题跟随：把 z.ai 页面的 `html.light` / `html.dark` 投影成
- * `body.dpp-theme-dark` / `dpp-theme-light`。
+ * `body.zpp-theme-dark` / `zpp-theme-light`。
  *
  * ⚠️ **不能只靠 `prefers-color-scheme`** —— 页面主题与系统主题会分叉（页面深色 +
  * 系统浅色是最常见的一种）。此时若走浅色变量块，卡片用近黑的字配近透明的底，
@@ -3584,6 +3591,13 @@ async function sendPromptPrimitive(prompt: string): Promise<ZaiSendEvidence> {
   domSendInFlight = true;
   /** 注入期间对输入框做的那层「看不见」的撤销函数（任何出口都要走 finally 还原）。 */
   let restoreComposerAppearance: (() => void) | null = null;
+  /**
+   * 我们锁过的那个输入框与它原来的 `disabled` —— **必须在 `finally` 里恢复**。
+   * 理由同 `trySubmitViaFormRequestSubmit` 的同名变量：中间抛错会跳过正常出口的恢复，
+   * 输入框永久停在 `disabled = true`，用户只能刷新页面。
+   */
+  let lockedTextarea: HTMLTextAreaElement | null = null;
+  let wasDisabled = false;
   try {
     await waitForComposerReady();
     const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
@@ -3594,8 +3608,9 @@ async function sendPromptPrimitive(prompt: string): Promise<ZaiSendEvidence> {
       return 'unsent';
     }
 
-    const wasDisabled = textarea.disabled;
+    wasDisabled = textarea.disabled;
     textarea.disabled = true;
+    lockedTextarea = textarea;
 
     // 与表单主路同一层「看不见」（见 `maskComposerForInjection`）—— 它只动外观，
     // 不碰任何读写语义，所以这条路也照用；撤销走本函数的 `finally`。
@@ -3627,6 +3642,8 @@ async function sendPromptPrimitive(prompt: string): Promise<ZaiSendEvidence> {
   } finally {
     // ⚠️ **任何出口都要撤销那层「看不见」** —— 漏一次，用户的输入框会一直是透明的。
     restoreComposerAppearance?.();
+    // ⚠️ **输入框的 `disabled` 同理** —— 正常出口在证据等待之后才恢复，中间抛错会跳过它。
+    if (lockedTextarea) lockedTextarea.disabled = wasDisabled;
     domSendInFlight = false;
   }
 }
@@ -4002,7 +4019,7 @@ export default defineContentScript({
           );
         return true;
       }
-      if (message.type === 'GET_CURRENT_GLM_CONVERSATION') {
+      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') {
         const conversationId = getCurrentChatSessionId();
         if (!conversationId) {
           sendResponse({ ok: false, error: 'no_current_conversation' });

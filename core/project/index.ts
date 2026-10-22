@@ -1,5 +1,5 @@
 export type {
-  CurrentGLMConversation,
+  CurrentZaiConversation,
   ProjectContext,
   ProjectContextCreateInput,
   ProjectContextState,
@@ -13,7 +13,7 @@ export { PROJECT_CONTEXT_SCHEMA_VERSION } from './types';
 
 export {
   createEmptyProjectContextState,
-  decodeCurrentGLMConversation,
+  decodeCurrentZaiConversation,
   decodeProjectContext,
   decodeProjectContextState,
   decodeProjectConversation,

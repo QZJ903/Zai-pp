@@ -712,7 +712,18 @@ function ServerRow({
   onDelete: () => void;
   t: Translator;
 }) {
-  const status = statusMeta(cache?.health.status ?? server.status, t);
+  /**
+   * ⚠️⚠️ **服务被关掉时必须以 `disabled` 收口，不能读缓存里的 `ready`。**
+   *
+   * 缓存（`health.status`）记的是「上次发现成不成功」，**关掉开关不会清缓存** ——
+   * 指纹只含连接相关字段、不含 `enabled`。所以关掉之后缓存仍是 `ready`，
+   * 只看缓存就会显示「已连接」，而实际上这个服务的工具一个都不会被提供。
+   * 判据落在 `server.enabled` 上：它才是「此刻用不用」的唯一真源。
+   */
+  const status = statusMeta(
+    server.enabled ? (cache?.health.status ?? server.status) : 'disabled',
+    t,
+  );
   const activeTools = countEnabledMcpTools(server, cache?.descriptors ?? []);
 
   return (
@@ -817,7 +828,7 @@ function ServerDetail({
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-[11px]">
-        <Metric label={t('sidepanel.mcpPage.detail.status')} value={statusMeta(cache?.health.status ?? server.status, t).label} />
+        <Metric label={t('sidepanel.mcpPage.detail.status')} value={statusMeta(server.enabled ? (cache?.health.status ?? server.status) : 'disabled', t).label} />
         <Metric label={t('sidepanel.mcpPage.detail.latency')} value={formatMs(cache?.health.latencyMs ?? null)} />
         <Metric label={t('sidepanel.mcpPage.detail.lastConnected')} value={formatTime(server.lastConnectedAt ?? cache?.health.checkedAt ?? null, locale)} />
         <Metric label={t('sidepanel.mcpPage.detail.transport')} value={transportLabel(server.transport.kind)} />
@@ -1337,7 +1348,9 @@ function ShellSetupHint({
       // ② `health.status === 'ready'` —— 只看 `!isError` 会把 `disabled`（已建未启用）
       //    与 `installFirst`（请先安装）这两档也一起折叠掉，而那正是**首次使用、
       //    最该看见安装命令**的时刻；首帧 `cache` 为 null 时还会永久折叠（惰性初始化不再重算）。
-      ready={!isError && cache?.health.status === 'ready'}
+      // ③ `server.enabled` —— 关掉服务时缓存仍是 `ready`（关开关不清缓存），
+      //    不判它就会把「已停用」那一档也折叠掉，用户看不到「服务已创建但尚未启用」。
+      ready={!isError && server.enabled && cache?.health.status === 'ready'}
       installSteps={(<>
         <div style={{ color: 'var(--ds-text-tertiary)' }}>
           {t('sidepanel.mcpPage.shellSetup.localIntro')}
@@ -1453,6 +1466,13 @@ export function shellSetupMessage(
   t: Translator,
 ): { message: string; isError: boolean } {
   const setupKey = 'sidepanel.mcpPage.shellSetup';
+  // ⚠️⚠️ **关掉服务这一档必须排在所有缓存判据之前。**
+  // 缓存记的是「上次发现成不成功」，**关开关不清缓存**（指纹只看连接字段、不含 `enabled`）
+  // ⇒ 关掉之后 `health.status` 仍是 `ready`，后面那条 `ready` 分支会继续报「已连接，发现 12 个工具」，
+  // 而实际上这个服务的工具一个都不会被提供。**「此刻用不用」的唯一真源是 `server.enabled`。**
+  if (!server.enabled) {
+    return { message: t(`${setupKey}.disabled` as LocaleMessageKey), isError: false };
+  }
   const error = `${cache?.health.error ?? ''} ${server.lastError ?? ''}`.toLowerCase();
   if (error.includes('forbidden')) {
     return { message: t(`${setupKey}.forbidden` as LocaleMessageKey), isError: true };
@@ -1503,9 +1523,6 @@ export function shellSetupMessage(
       };
     }
     return { message: t(`${setupKey}.ready` as LocaleMessageKey, { count: cache.health.toolCount }), isError: false };
-  }
-  if (!server.enabled) {
-    return { message: t(`${setupKey}.disabled` as LocaleMessageKey), isError: false };
   }
   return { message: t(`${setupKey}.installFirst` as LocaleMessageKey), isError: false };
 }

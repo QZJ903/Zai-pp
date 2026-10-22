@@ -7,7 +7,7 @@ import {
   type ResolvedLocaleState,
 } from './runtime';
 
-export const LOCALE_PREFERENCE_STORAGE_KEY = 'glm_pp_locale_preference';
+export const LOCALE_PREFERENCE_STORAGE_KEY = 'zai_pp_locale_preference';
 
 /**
  * 读存储的上界（**可选**，由调用方显式传入才生效）。

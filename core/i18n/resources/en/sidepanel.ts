@@ -189,7 +189,7 @@ export const sidepanel = {
   },
   whatsNew: {
     title: "What's new",
-    subtitle: 'Turns Zai from a chat window into an assistant that remembers context, calls tools, and acts on its own.',
+    subtitle: 'Extends the Zai web app into an AI agent workbench where GLM remembers context, calls tools, and works through tasks on its own.',
     versionBadge: 'v{version}',
     dismiss: 'Got it',
     items: {

@@ -12,7 +12,7 @@
 // stored in chrome.storage.local, read via background's GET/SAVE commands,
 // broadcast via STATE_UPDATED to content scripts, finally entering the request-augmentation state.
 
-const STORAGE_KEY = 'glm_pp_skill_auto_activation';
+const STORAGE_KEY = 'zai_pp_skill_auto_activation';
 
 export interface SkillAutoActivationSettings {
   firstMessage: boolean;

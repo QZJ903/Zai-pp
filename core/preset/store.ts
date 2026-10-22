@@ -12,8 +12,8 @@ import {
   presetCollectionCodec,
 } from './codec';
 
-export const PRESETS_STORAGE_KEY = 'glm_pp_presets';
-export const ACTIVE_PRESET_STORAGE_KEY = 'glm_pp_active_preset_id';
+export const PRESETS_STORAGE_KEY = 'zai_pp_presets';
+export const ACTIVE_PRESET_STORAGE_KEY = 'zai_pp_active_preset_id';
 
 const presetRepository = createVersionedRepository({
   label: 'presets',

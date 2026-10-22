@@ -65,9 +65,9 @@ async function pickLocalFolderOnWindows(title, defaultPath) {
     WINDOWS_POWERSHELL_UTF8_PREAMBLE,
     'Add-Type -AssemblyName System.Windows.Forms',
     '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
-    '$dialog.Description = [Environment]::GetEnvironmentVariable("DPP_FOLDER_PICK_TITLE", "Process")',
+    '$dialog.Description = [Environment]::GetEnvironmentVariable("ZPP_FOLDER_PICK_TITLE", "Process")',
     '$dialog.ShowNewFolderButton = $false',
-    '$defaultPath = [Environment]::GetEnvironmentVariable("DPP_FOLDER_PICK_DEFAULT_PATH", "Process")',
+    '$defaultPath = [Environment]::GetEnvironmentVariable("ZPP_FOLDER_PICK_DEFAULT_PATH", "Process")',
     'if ($defaultPath) { $dialog.SelectedPath = $defaultPath }',
     'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {',
     '  [Console]::Out.Write($dialog.SelectedPath)',
@@ -77,7 +77,7 @@ async function pickLocalFolderOnWindows(title, defaultPath) {
   ].join('; ');
   const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-STA', '-EncodedCommand', encodePowerShellCommand(script)], {
     encoding: 'utf8',
-    env: { ...process.env, DPP_FOLDER_PICK_TITLE: title, DPP_FOLDER_PICK_DEFAULT_PATH: defaultPath || '' },
+    env: { ...process.env, ZPP_FOLDER_PICK_TITLE: title, ZPP_FOLDER_PICK_DEFAULT_PATH: defaultPath || '' },
     timeout: DEFAULT_TIMEOUT_MS,
     windowsHide: false,
   });

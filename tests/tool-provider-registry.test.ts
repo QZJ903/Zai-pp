@@ -69,8 +69,8 @@ describe('ToolProviderRegistry', () => {
 
     expect(discover).toMatchObject({
       id: controls[0]?.id,
-      name: 'dpp_mcp_discover',
-      invocationName: 'dpp_mcp_discover',
+      name: 'zpp_mcp_discover',
+      invocationName: 'zpp_mcp_discover',
     });
     expect(descriptors.find((descriptor) => descriptor.id === remote.id)).toBe(remote);
   });

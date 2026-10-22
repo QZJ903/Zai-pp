@@ -51,7 +51,7 @@ export function createNativeEnvelopeDispatcher({
 }
 
 function isToolCallEnvelope(envelope) {
-  return envelope?.protocol === 'glm-pp-mcp-native'
+  return envelope?.protocol === 'zai-pp-mcp-native'
     && envelope?.version === 1
     && envelope?.message?.jsonrpc === '2.0'
     && envelope?.message?.method === 'tools/call';

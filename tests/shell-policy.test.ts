@@ -9,12 +9,16 @@ import {
 import { SHELL_TOOL_NAMES } from '../core/shell/contracts';
 
 describe('createShellMcpPresetInput', () => {
-  it('defaults Shell MCP to auto execution while disabled by default', () => {
+  it('defaults Shell MCP to auto execution while the server itself stays disabled', () => {
     const preset = createShellMcpPresetInput();
 
+    // 服务本身仍默认停用（要用户先装 host 再启用）。
     expect(preset.enabled).toBe(false);
     expect(preset.allowlist).toEqual({ mode: 'allow', toolNames: [...DEFAULT_SHELL_MCP_ALLOWLIST_TOOL_NAMES] });
-    expect(preset.execution).toEqual({ enabled: false, mode: 'auto' });
+    // ⚠️ **「自动执行」默认开启。** 关着的时候 `isMcpToolEnabled` 恒假 ⇒ 工具列表
+    // 整列显示 0/N，而面板上没有任何一处解释「是这一项在挡」。Shell 是本项目的一等能力，
+    // 默认值就该是「能用」。
+    expect(preset.execution).toEqual({ enabled: true, mode: 'auto' });
   });
 
   it('keeps shell_exec and the persistent session tools out of the default allowlist', () => {
@@ -105,7 +109,7 @@ describe('createShellMcpPresetInput', () => {
     })).toBe(true);
     expect(isShellMcpServer({
       displayName: 'Anything',
-      transport: { kind: 'native_messaging', nativeHost: 'com.glm_pp.shell' },
+      transport: { kind: 'native_messaging', nativeHost: 'com.zai_pp.shell' },
     })).toBe(true);
     expect(isShellMcpServer({
       displayName: 'Anything',

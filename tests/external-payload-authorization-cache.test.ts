@@ -56,7 +56,7 @@ describe('external payload authorization cache', () => {
 
 function makeSubject(): ToolAuthorizationSubject {
   return {
-    surface: 'glm_content',
+    surface: 'zai_content',
     documentSessionId: 'document-1',
     tabId: 7,
     frameId: 0,

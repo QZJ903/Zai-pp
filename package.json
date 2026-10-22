@@ -1,9 +1,9 @@
 {
-  "name": "glm-plus-plus",
+  "name": "zai-plus-plus",
   "description": "Agentic memory, skills, agentic execution, automation, and MCP tools for Z.ai",
   "private": true,
   "license": "Apache-2.0",
-  "version": "2.15.54",
+  "version": "2.15.55",
   "type": "module",
   "workspaces": [
     "packages/*"

@@ -189,7 +189,7 @@ export const sidepanel = {
   },
   whatsNew: {
     title: '版本更新内容',
-    subtitle: '把 Zai 从对话窗口变成能记住上下文、调用工具、自己动手的助手。',
+    subtitle: '把 Zai 网页版扩展成 AI Agent 工作台，让 GLM 记住上下文、调用工具、自己动手完成任务。',
     versionBadge: 'v{version}',
     dismiss: '知道了',
     items: {
@@ -409,7 +409,7 @@ export const sidepanel = {
     summary: '{servers} 个服务，{enabled} 个启用，{tools} 个自动工具',
     loading: '正在加载 MCP 配置',
     empty: '暂无 MCP 服务',
-    emptyHint: '连接远程 MCP 服务，或一键安装本机 Shell / 多模态预设。',
+    emptyHint: '连接远程 MCP 服务，或一键安装本机 Shell 预设。',
     emptyCreateAction: '新增 MCP 服务',
     emptyInstallShell: '安装 Shell 预设',
     shell: 'Shell',

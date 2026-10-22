@@ -49,7 +49,7 @@ import {
   type ToolBlockTitleFormatter,
 } from './tool-block-adapter';
 
-/** 一条存储腿记录的来源形状（`glm_pp_tool_history` 的 `ToolCallHistoryRecord`）。 */
+/** 一条存储腿记录的来源形状（`zai_pp_tool_history` 的 `ToolCallHistoryRecord`）。 */
 export interface ToolHistoryRecordLike {
   id: string;
   call: {
@@ -222,7 +222,7 @@ export function createToolPanelController(
     getMessageOwnText: getZaiMessageOwnText,
     resolveHost: resolveZaiResponseHost,
     render: (record, message) => renderRecord(record, message),
-    ownUiSelector: `${ZAI_INJECTED_UI_SELECTOR}, .dpp-tool-block`,
+    ownUiSelector: `${ZAI_INJECTED_UI_SELECTOR}, .zpp-tool-block`,
     // ⚠️ **「比锚点」与「抽锚点」同源**（见 `messageCarriesAnchorId` 的说明）。
     messageCarriesAnchorId: messageCarriesZaiAnchorId,
     // ⚠️ **observer 的另一半**：重试预算耗尽后靠「消息刚被建出来」把记录救回来

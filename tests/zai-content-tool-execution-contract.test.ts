@@ -971,9 +971,15 @@ describe('tool tag recognition uses the descriptors injected into this request',
     // 事件（`fetch-hook` 只在 completion 路由发 `onRequestTerminal`），与随后的 completion 是
     // 两个不同 requestId ⇒ 写了既**无人释放**（孤儿泄漏）、也**无人读**（Map 的读点读的都是
     // completion 的 requestId）。这条钉住「别把 chatNew 那行加回来」。
-    const source = readFileSync(CONTENT_SOURCE, 'utf8');
-    const setCalls = source.match(/requestToolDescriptorsByRequestId\.set\(/g) ?? [];
-    expect(setCalls.length, '写入点必须恰好 3 个（chatNew 刻意不写，见注释）').toBe(3);
+    // ⚠️ 判据走 AST 而不是正则数字面量：`?.set(` 与 `.set(` 语义等价，按字面形状数会把
+    // 一次无害的可选链改写判成「少了一个写入点」。
+    // ⚠️ 用 `walkSourceAst`（**全深度**）而不是 `countReachableMethodCalls` —— 后者把
+    // 函数声明当遍历边界，而三个写入点全在函数体内，用它数出来是 0。
+    let setCalls = 0;
+    walkSourceAst(program, (node) => {
+      if (isMethodCallTo(node, 'requestToolDescriptorsByRequestId', 'set')) setCalls += 1;
+    });
+    expect(setCalls, '写入点必须恰好 3 个（chatNew 刻意不写，见注释）').toBe(3);
   });
 
   /**

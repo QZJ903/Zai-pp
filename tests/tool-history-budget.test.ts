@@ -60,7 +60,7 @@ describe('tool history budget trimming', () => {
   it('clearToolCallHistory removes the storage key', async () => {
     await appendToolCallHistory(sampleCall(0), sampleResult(0), 'manual_chat');
     await clearToolCallHistory();
-    expect(storage['glm_pp_tool_history']).toBeUndefined();
+    expect(storage['zai_pp_tool_history']).toBeUndefined();
   });
 });
 

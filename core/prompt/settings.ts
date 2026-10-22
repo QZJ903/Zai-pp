@@ -18,7 +18,7 @@ export const DEFAULT_PROMPT_INJECTION_SETTINGS: PromptInjectionSettings = {
   forceResponseLanguage: 'auto',
 };
 
-const STORAGE_KEY = 'glm_pp_prompt_injection_settings';
+const STORAGE_KEY = 'zai_pp_prompt_injection_settings';
 
 export async function getPromptInjectionSettings(): Promise<PromptInjectionSettings> {
   const data = await chrome.storage.local.get(STORAGE_KEY) as Record<string, unknown>;

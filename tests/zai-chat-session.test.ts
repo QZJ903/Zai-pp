@@ -11,7 +11,7 @@ import {
  * ⚠️ **这是会话 id 的读入口，两个生产消费者都在授权链上** ——
  * `core/messaging/runtime-boundary.ts` 用它从**浏览器持有的 tab URL** 派生
  * `context.chatSessionId`（`createRuntimeMessageContext` 与
- * `refreshGLMContentRuntimeContext` 各一处），而这个值决定 grant 绑给哪个会话。
+ * `refreshZaiContentRuntimeContext` 各一处），而这个值决定 grant 绑给哪个会话。
  * 读错的表现是 `tool_session_mismatch`（工具静默不可用），不是崩溃 —— 所以要有守卫。
  *
  * ⚠️ **它刻意不校验 origin**（`/c/<id>` 只按 pathname 认）。传入的值由调用方保证是

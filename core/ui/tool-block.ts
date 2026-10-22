@@ -17,7 +17,7 @@
  *
  * ① **挂载** —— 往 `resolveHost`（z.ai 上是 `#response-content-container`）末尾追加；
  * ② **更新** —— 同一轮里每多一个工具就往列表里加一行，不重建整块；
- * ③ **查找/移除** —— 靠 `data-dpp-tool-key` 上的 **restore id**（见 `resolveKey`），
+ * ③ **查找/移除** —— 靠 `data-zpp-tool-key` 上的 **restore id**（见 `resolveKey`），
  *    它是「这一块属于哪一条回答」的唯一标识。
  *
  * ## ⚠️ 依赖全部注入，本模块不 import 任何 runtime / i18n / 站点模块
@@ -34,19 +34,19 @@ import type { ToolCardResult, ToolExecutionRecord } from '../types';
 import { injectInjectedThemeStyles, syncInjectedTheme } from './injected-theme';
 
 /** 块根节点的类名（样式与查找都锚在它上面）。 */
-const BLOCK_CLASS = 'dpp-tool-block';
+const BLOCK_CLASS = 'zpp-tool-block';
 
 /** 块根节点的 id —— 只给**当前这块**用，页面上同一时刻只有一块带 id。 */
-export const TOOL_BLOCK_ELEMENT_ID = 'dpp-tool-block';
+export const TOOL_BLOCK_ELEMENT_ID = 'zpp-tool-block';
 
 /** 样式节点 id（幂等注入的判据）。 */
-const STYLE_ID = 'dpp-tool-block-css';
+const STYLE_ID = 'zpp-tool-block-css';
 
 /** 折叠状态属性。 */
 const COLLAPSED_ATTR = 'data-collapsed';
 
 /** 恢复标识属性 —— 「这一块属于哪条回答」的唯一真源。 */
-const RESTORE_KEY_ATTR = 'data-dpp-tool-key';
+const RESTORE_KEY_ATTR = 'data-zpp-tool-key';
 
 /**
  * 行级展开标记 —— 与 DOM 上的 `aria-expanded` 同义，用于测试与断言。
@@ -54,14 +54,14 @@ const RESTORE_KEY_ATTR = 'data-dpp-tool-key';
  * ⚠️ **真源是 `aria-expanded`（无障碍属性），这个 data 属性只是镜像** ——
  * 两者不一致时以 `aria-expanded` 为准（它是屏幕阅读器读的那个）。
  */
-const ROW_EXPANDED_ATTR = 'data-dpp-tool-expanded';
+const ROW_EXPANDED_ATTR = 'data-zpp-tool-expanded';
 
 /**
  * 行标识属性 —— **只用于「整块重画时保住展开态」**（见 `rowKeyOf`）。
  *
- * ⚠️ 它**不是**恢复锚点（那是块级的 `data-dpp-tool-key`），不落库、不进桥。
+ * ⚠️ 它**不是**恢复锚点（那是块级的 `data-zpp-tool-key`），不落库、不进桥。
  */
-const ROW_KEY_ATTR = 'data-dpp-tool-row';
+const ROW_KEY_ATTR = 'data-zpp-tool-row';
 
 /**
  * DOM 焦点标记 —— 让**连续两轮**落到不同的块上。
@@ -70,7 +70,7 @@ const ROW_KEY_ATTR = 'data-dpp-tool-row';
  * `getElementById` 只能找到带 id 的那个 ⇒ **写 id 之前必须先把上一个的 id 摘掉**。
  * 摘 id 不能靠 `querySelector` 扫全页（每一轮都要扫一遍，白费），靠这个属性 O(1) 定位。
  */
-const ACTIVE_ATTR = 'data-dpp-tool-active';
+const ACTIVE_ATTR = 'data-zpp-tool-active';
 
 export interface ToolBlockDependencies {
   /**
@@ -330,9 +330,9 @@ export function appendToolBlockToMessage(
 /** 把块从它所在的消息里摘掉（换会话 / 记录失效时用）。 */
 export function removeToolBlock(block: HTMLElement): void {
   // ⚠️ **摘块之前先摘 id 与焦点标记** —— 块可能已被页面摘掉（脱连），
-  // 而 `appendToolBlockToMessage` 摘「上一个带 `data-dpp-tool-active` 的块」
+  // 而 `appendToolBlockToMessage` 摘「上一个带 `data-zpp-tool-active` 的块」
   // 时用的是 `querySelector`（只看**在文档里**的节点）⇒ 脱连块上残留的
-  // `id="dpp-tool-block"` 会让 `getElementById` 在那之后返回 null
+  // `id="zpp-tool-block"` 会让 `getElementById` 在那之后返回 null
   // （页面上明明有一块，id 却查不到）。两行的事，别留给下一个读代码的人。
   block.removeAttribute('id');
   block.removeAttribute(ACTIVE_ATTR);
@@ -348,7 +348,7 @@ export function removeToolBlock(block: HTMLElement): void {
  * 所以三段式会让同一份数据以两种形态各出现一次 —— 而这个高度把 `output:` 那段
  * 压到滚动区之外（真机截图里 shell_status 就是被 160px 切在第 9 行）。
  * **调高它 = 把那份重复放出来。** 取值与上游 `inline-agent/renderer.ts` 的
- * `.dpp-agent-tool-summary` 同值。
+ * `.zpp-agent-tool-summary` 同值。
  *
  * ⚠️ **样式模板串里不能写中文注释** —— `scripts/i18n-coverage-audit.mjs` 会把
  * 模板串里的中文当成「硬编码文案」报出来（实测踩过）。说明写在这里。
@@ -369,23 +369,23 @@ export function injectToolBlockStyles(dependencies: ToolBlockDependencies): void
   gap: 4px;
   cursor: pointer;
   user-select: none;
-  color: var(--dpp-ui-text-muted);
+  color: var(--zpp-ui-text-muted);
   font-size: 12px;
   line-height: 18px;
 }
 .${BLOCK_CLASS}-header:hover,
 .${BLOCK_CLASS}-header:focus-visible {
-  color: var(--dpp-ui-text);
+  color: var(--zpp-ui-text);
 }
 .${BLOCK_CLASS}-header:focus-visible {
-  outline: 2px solid var(--dpp-ui-accent);
+  outline: 2px solid var(--zpp-ui-accent);
   outline-offset: 2px;
   border-radius: 4px;
 }
 .${BLOCK_CLASS}-icon {
   width: 16px;
   height: 16px;
-  color: var(--dpp-ui-accent);
+  color: var(--zpp-ui-accent);
   flex-shrink: 0;
 }
 .${BLOCK_CLASS}-title {
@@ -418,11 +418,11 @@ export function injectToolBlockStyles(dependencies: ToolBlockDependencies): void
 .${BLOCK_CLASS}-item {
   padding: 5px 8px;
   margin: 2px 0;
-  border: 1px solid var(--dpp-ui-border-muted);
+  border: 1px solid var(--zpp-ui-border-muted);
   border-radius: 8px;
-  background: var(--dpp-ui-surface-muted);
+  background: var(--zpp-ui-surface-muted);
   font-size: 13px;
-  color: var(--dpp-ui-text);
+  color: var(--zpp-ui-text);
   line-height: 1.5;
 }
 .${BLOCK_CLASS}-item-toggle {
@@ -433,7 +433,7 @@ export function injectToolBlockStyles(dependencies: ToolBlockDependencies): void
   user-select: none;
 }
 .${BLOCK_CLASS}-item-toggle:focus-visible {
-  outline: 2px solid var(--dpp-ui-accent);
+  outline: 2px solid var(--zpp-ui-accent);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -442,13 +442,13 @@ export function injectToolBlockStyles(dependencies: ToolBlockDependencies): void
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--dpp-ui-accent);
+  background: var(--zpp-ui-accent);
 }
 .${BLOCK_CLASS}-item-name {
   flex: none;
   font-family: 'SF Mono', Monaco, Menlo, Consolas, monospace;
   font-size: 12px;
-  color: var(--dpp-ui-accent);
+  color: var(--zpp-ui-accent);
   overflow-wrap: anywhere;
 }
 .${BLOCK_CLASS}-item-summary {
@@ -457,21 +457,21 @@ export function injectToolBlockStyles(dependencies: ToolBlockDependencies): void
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--dpp-ui-text-muted);
+  color: var(--zpp-ui-text-muted);
 }
 .${BLOCK_CLASS}-item-status {
   flex: none;
-  color: var(--dpp-ui-success);
+  color: var(--zpp-ui-success);
   margin-left: 6px;
 }
 .${BLOCK_CLASS}-item-status.error {
-  color: var(--dpp-ui-error);
+  color: var(--zpp-ui-error);
 }
 .${BLOCK_CLASS}-item-chevron {
   flex: none;
   width: 10px;
   height: 10px;
-  color: var(--dpp-ui-text-subtle);
+  color: var(--zpp-ui-text-subtle);
   transition: transform 0.15s ease;
 }
 .${BLOCK_CLASS}-item-chevron svg {
@@ -487,8 +487,8 @@ export function injectToolBlockStyles(dependencies: ToolBlockDependencies): void
   padding: 6px 8px;
   max-height: 160px;
   border-radius: 8px;
-  background: var(--dpp-ui-accent-panel);
-  color: var(--dpp-ui-text-muted);
+  background: var(--zpp-ui-accent-panel);
+  color: var(--zpp-ui-text-muted);
   font-family: 'SF Mono', Monaco, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.45;

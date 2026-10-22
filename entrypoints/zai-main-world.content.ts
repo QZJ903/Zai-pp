@@ -1,5 +1,5 @@
 /**
- * GLM++ MAIN world content script（z.ai：国区站 / 国际站两站共用）。
+ * Zai++ MAIN world content script（z.ai：国区站 / 国际站两站共用）。
  *
  * 在页面主世界里安装 fetch/XHR hook，把 z.ai 的 completion + /chats/new 请求
  * 交给隔离世界增广，并把隔离世界回传的结果、以及响应流里识别出的本地工具

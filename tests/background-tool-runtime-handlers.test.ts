@@ -52,9 +52,9 @@ const extensionContext: RuntimeMessageContext = {
   documentSessionId: 'extension-document-1',
 };
 
-const glmContext: RuntimeMessageContext = {
+const zaiContext: RuntimeMessageContext = {
   runtimeId: 'extension-id',
-  surface: 'glm_content',
+  surface: 'zai_content',
   senderUrl: 'https://chat.z.ai/a/chat/s/chat-1',
   senderOrigin: 'https://chat.z.ai',
   tabId: 7,
@@ -365,7 +365,7 @@ describe('tool execution runtime handlers', () => {
     await expect(dispatch(handlers, {
       type: 'CREATE_TOOL_AUTHORIZATION',
       payload: { requestId: 7, trigger: 'manual_chat' },
-    }, glmContext)).resolves.toEqual({
+    }, zaiContext)).resolves.toEqual({
       ok: false,
       error: 'invalid_tool_authorization_request',
     });
@@ -380,7 +380,7 @@ describe('tool execution runtime handlers', () => {
     await dispatch(handlers, {
       type: 'CREATE_TOOL_AUTHORIZATION',
       payload: { requestId: 'request-all', trigger: 'manual_chat', chatSessionId: 'chat-1' },
-    }, glmContext);
+    }, zaiContext);
     expect(dependencies.createToolAuthorization).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({ descriptors: [descriptor] }),
@@ -394,7 +394,7 @@ describe('tool execution runtime handlers', () => {
         chatSessionId: 'chat-1',
         descriptorIds: [],
       },
-    }, glmContext);
+    }, zaiContext);
     expect(dependencies.createToolAuthorization).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ descriptors: [] }),
@@ -419,7 +419,7 @@ describe('tool execution runtime handlers', () => {
         chatSessionId: 'chat-1',
         toolIntent: 'discover a workspace capability',
       },
-    }, glmContext);
+    }, zaiContext);
     expect(dependencies.getPromptToolDescriptors).toHaveBeenCalledWith(
       'en',
       'discover a workspace capability',
@@ -436,7 +436,7 @@ describe('tool execution runtime handlers', () => {
         chatSessionId: 'chat-1',
         descriptorIds: [discover.id],
       },
-    }, glmContext);
+    }, zaiContext);
     expect(dependencies.createToolAuthorization).toHaveBeenLastCalledWith(
       expect.objectContaining({ descriptors: [discover] }),
     );
@@ -444,14 +444,14 @@ describe('tool execution runtime handlers', () => {
 
   it('keeps grant identity stable when MessageSender.documentId is unavailable', () => {
     const subject = createToolAuthorizationSubject({
-      ...glmContext,
+      ...zaiContext,
       documentId: undefined,
-      documentSessionId: 'glm_content:7:0:https://chat.z.ai/a/chat/s/chat-1',
+      documentSessionId: 'zai_content:7:0:https://chat.z.ai/a/chat/s/chat-1',
     });
 
     expect(subject).toEqual({
-      surface: 'glm_content',
-      documentSessionId: 'glm_content:7:0',
+      surface: 'zai_content',
+      documentSessionId: 'zai_content:7:0',
       tabId: 7,
       frameId: 0,
       chatSessionId: 'chat-1',
@@ -495,7 +495,7 @@ describe('tool execution runtime handlers', () => {
     });
     const handlers = createToolExecutionRuntimeHandlers(dependencies);
 
-    await expect(dispatch(handlers, createAppendMessage(), glmContext))
+    await expect(dispatch(handlers, createAppendMessage(), zaiContext))
       .resolves.toEqual({ ok: true });
     expect(events).toEqual([
       'cache:has',
@@ -513,14 +513,14 @@ describe('tool execution runtime handlers', () => {
     );
     const handlers = createToolExecutionRuntimeHandlers(dependencies);
 
-    await expect(dispatch(handlers, createAppendMessage(), glmContext)).resolves.toMatchObject({
+    await expect(dispatch(handlers, createAppendMessage(), zaiContext)).resolves.toMatchObject({
       ok: false,
       error: { code: 'tool_authorization_missing' },
     });
     expect(dependencies.appendExternalizedToolPayloadChunk).not.toHaveBeenCalled();
 
     vi.mocked(dependencies.externalPayloadAuthorizationCache.has).mockReturnValueOnce(true);
-    await expect(dispatch(handlers, createAppendMessage(), glmContext))
+    await expect(dispatch(handlers, createAppendMessage(), zaiContext))
       .resolves.toEqual({ ok: true });
     expect(dependencies.getAuthorizationDescriptors).toHaveBeenCalledTimes(1);
     expect(dependencies.authorizeExternalToolPayloadChunk).toHaveBeenCalledTimes(1);
@@ -545,7 +545,7 @@ describe('tool execution runtime handlers', () => {
     await dispatch(handlers, {
       type: 'EXECUTE_TOOL_CALL',
       payload: { ...call, authorizationId: 'grant-1' },
-    }, glmContext);
+    }, zaiContext);
     expect(events).toEqual(['cache:delete-call', 'execute:grant', 'history:broadcast']);
     expect(dependencies.executeToolCall).toHaveBeenNthCalledWith(
       1,
@@ -553,13 +553,13 @@ describe('tool execution runtime handlers', () => {
       {
         kind: 'grant',
         grantId: 'grant-1',
-        subject: createToolAuthorizationSubject(glmContext),
+        subject: createToolAuthorizationSubject(zaiContext),
       },
       'en',
     );
 
     events.length = 0;
-    await dispatch(handlers, { type: 'EXECUTE_TOOL_CALL', payload: call }, glmContext);
+    await dispatch(handlers, { type: 'EXECUTE_TOOL_CALL', payload: call }, zaiContext);
     expect(dependencies.executeToolCall).toHaveBeenNthCalledWith(
       2,
       call,
@@ -609,7 +609,7 @@ describe('tool execution runtime handlers', () => {
     await expect(dispatch(handlers, {
       type: 'EXECUTE_TOOL_CALL',
       payload,
-    }, glmContext)).resolves.toBe(invalidResult);
+    }, zaiContext)).resolves.toBe(invalidResult);
     expect(dependencies.externalPayloadAuthorizationCache.deleteCall).not.toHaveBeenCalled();
     expect(dependencies.executeToolCall).not.toHaveBeenCalled();
     expect(dependencies.broadcastToolCallHistoryUpdate).not.toHaveBeenCalled();
@@ -632,7 +632,7 @@ describe('tool execution runtime handlers', () => {
     await expect(dispatch(handlers, {
       type: 'CLOSE_TOOL_AUTHORIZATION',
       payload: { authorizationId: 'grant-1' },
-    }, glmContext)).resolves.toEqual({ ok: true });
+    }, zaiContext)).resolves.toEqual({ ok: true });
     expect(events).toEqual(['close', 'cache:delete-grant', 'payload:clear']);
   });
 

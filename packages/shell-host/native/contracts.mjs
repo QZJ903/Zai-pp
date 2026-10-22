@@ -52,7 +52,7 @@ const HOST_FEATURES = {
 // Pure child_process + sentinel is the established pattern for this constraint.
 const SESSION_IDLE_TIMEOUT_MS = 300_000; // 5min; aligns with resident-tool idle windows
 const SESSION_MAX_OUTPUT_BYTES = MAX_OUTPUT_BYTES;
-const SESSION_MARKER_PREFIX = '__DPP_SESSION_END__';
+const SESSION_MARKER_PREFIX = '__ZPP_SESSION_END__';
 
 const TOOL_DEFINITIONS = [
   {
@@ -230,7 +230,7 @@ const TOOL_DEFINITIONS = [
 
 // --- Logging ---
 //
-// Chrome does not surface native-host stderr to users. When DPP_LOG_FILE is set
+// Chrome does not surface native-host stderr to users. When ZPP_LOG_FILE is set
 // (written into the wrapper script by the installer's --log-file option), every
 // log line is also appended to that file so users can capture a diagnostic
 

@@ -29,9 +29,9 @@ import {
   type ToolExecutionRuntimeHandlerDependencies,
 } from '../entrypoints/background/tool-execution-handlers';
 
-const glmContext: RuntimeMessageContext = {
+const zaiContext: RuntimeMessageContext = {
   runtimeId: 'extension-id',
-  surface: 'glm_content',
+  surface: 'zai_content',
   senderUrl: 'https://chat.z.ai/a/chat/s/chat-1',
   senderOrigin: 'https://chat.z.ai',
   tabId: 7,
@@ -265,7 +265,7 @@ function dispatch(
 ): Promise<unknown> {
   const handler = handlers.find((candidate) => candidate.type === message.type);
   if (!handler) throw new Error(`Handler not found: ${message.type}`);
-  return handler.handle(message, glmContext);
+  return handler.handle(message, zaiContext);
 }
 
 function createStorageArea(

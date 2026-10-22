@@ -93,7 +93,7 @@ export function createToolExecutionRuntimeHandlers(
       return tools;
     }),
     defineToolPayloadRuntimeCommandHandler('CREATE_TOOL_AUTHORIZATION', async (decoded, context) => {
-      if (context.surface !== 'glm_content') {
+      if (context.surface !== 'zai_content') {
         return { ok: false as const, error: 'tool_authorization_requires_content_runtime' };
       }
       if (decoded.ok === false) {
@@ -194,7 +194,7 @@ export function createToolExecutionRuntimeHandlers(
       if (authorizationId && call.id) {
         dependencies.externalPayloadAuthorizationCache.deleteCall(authorizationId, call.id);
       }
-      const authorization: RuntimeToolAuthorizationContext = context.surface === 'glm_content'
+      const authorization: RuntimeToolAuthorizationContext = context.surface === 'zai_content'
         ? {
           kind: 'grant',
           grantId: authorizationId ?? '',
@@ -236,7 +236,7 @@ export function createToolAuthorizationSubject(
   context: RuntimeMessageContext,
 ): ToolAuthorizationSubject {
   // Some browsers may omit MessageSender.documentId. Keep the receiver-owned
-  // tab/frame identity stable across GLM SPA route changes; a full
+  // tab/frame identity stable across same-origin SPA route changes; a full
   // navigation destroys the content runtime and revokes its in-memory grant.
   const documentSessionId = context.documentId
     ? context.documentSessionId

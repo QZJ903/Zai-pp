@@ -1,5 +1,5 @@
 /**
- * 注入到 z.ai 页面的 UI 主题变量（`--dpp-ui-*`）。
+ * 注入到 z.ai 页面的 UI 主题变量（`--zpp-ui-*`）。
  *
  * 与侧边栏共用同一套冷调色相与层级手法（`--ds-*`，见 `entrypoints/sidepanel/style.css`），
  * 让注入的卡片和面板看起来是同一个产品，而不是外挂的中性灰块。层级靠描边与
@@ -7,28 +7,28 @@
  *
  * ⚠️ **深浅两套色板都要有** —— 侧边栏永远浅色，但 z.ai 页面本身有深色模式
  * （标记是 `html` 上的 `light` / `dark` 类），卡片挂在页面里必须跟着走。
- * 主题切换由 `syncInjectedTheme()` 写 `body.dpp-theme-dark` / `dpp-theme-light`。
+ * 主题切换由 `syncInjectedTheme()` 写 `body.zpp-theme-dark` / `zpp-theme-light`。
  *
  * ⚠️ **两套变量块必须键名完全一致** —— 少一个键不会报错，只会在那一套主题下
  * 静默回落到继承值（表现为某处文字或底色不跟随主题）。`tests/injected-theme-contrast.test.ts`
  * 有键名集合比对。
  *
  * 三组容易混用的「面」：
- * - `--dpp-ui-surface`：页面内的普通面（默认底色，与页面底色几乎同值）。
- * - `--dpp-ui-surface-raised`：**浮在页面之上**的面（菜单、输入框）—— 深色下必须
+ * - `--zpp-ui-surface`：页面内的普通面（默认底色，与页面底色几乎同值）。
+ * - `--zpp-ui-surface-raised`：**浮在页面之上**的面（菜单、输入框）—— 深色下必须
  *   比 `surface` 亮一档，否则浮层与页底糊在一起；浅色下就是白。
  *   ⚠️ 深色取 `0.32` 而不是更暗的值：浮层真正压在**侧边栏**底色上，而侧边栏比
  *   `#app` 的 `#161616` 亮（页面层级越深越亮）。取值时按「压到 `#2a2a2a` 仍看得出」
  *   留了余量 —— 用 `0.28` 的话压到 `#2a2a2a` 只有 1.017，菜单会「陷进去」。
- * - `--dpp-ui-overlay-hover` / `-active`：盖在**任意面**上的低透明度叠加层。用文字色
+ * - `--zpp-ui-overlay-hover` / `-active`：盖在**任意面**上的低透明度叠加层。用文字色
  *   配低透明度，方向随主题自动反转，因此不能拿它当底色、也不能在深色下继续用
  *   `rgba(0, 0, 0, …)`（黑叠黑等于没有）。
  *
- * ⚠️ `--dpp-ui-error` / `--dpp-ui-accent-strong` 是**当文字用**的（状态行、激活态图标），
+ * ⚠️ `--zpp-ui-error` / `--zpp-ui-accent-strong` 是**当文字用**的（状态行、激活态图标），
  * 不是装饰色 —— 浅色下要压在页面底色上还能读。取值时按「小字 ≥ 4.5:1」核过，
  * 别为了好看调浅。
  *
- * ⚠️ **实心 accent 底上的字要用 `--dpp-ui-accent-contrast`，不能写 `white`** ——
+ * ⚠️ **实心 accent 底上的字要用 `--zpp-ui-accent-contrast`，不能写 `white`** ——
  * 两套主题的 accent 都偏亮（浅色 `#497ef7` / 深色 `#80acff`），白字压上去分别只有
  * 3.74:1 与 2.27:1。这条 token 两边同值（都比 accent 暗），跟着主题走不会变。
  *
@@ -38,59 +38,59 @@
  * 不是漏同步。
  */
 
-const STYLE_ID = 'dpp-injected-theme-css';
+const STYLE_ID = 'zpp-injected-theme-css';
 
 /** 侧边栏浅色与深色变量块之间需要保持同步的调色对应关系（改一处要改两处）。 */
 const LIGHT_VARS = `
-  --dpp-ui-surface:      oklch(0.998 0.002 264);
-  --dpp-ui-surface-muted: oklch(0.965 0.005 264);
-  --dpp-ui-surface-hover: oklch(0.95 0.006 264);
-  --dpp-ui-text:         oklch(0.24 0.018 264);
-  --dpp-ui-text-muted:   oklch(0.52 0.020 264);
-  --dpp-ui-text-subtle:  oklch(0.70 0.015 264);
-  --dpp-ui-border:       oklch(0.90 0.008 264);
-  --dpp-ui-border-muted: oklch(0.94 0.006 264);
-  --dpp-ui-accent:       oklch(0.62 0.19 264);
-  --dpp-ui-accent-strong: oklch(0.54 0.20 266);
-  --dpp-ui-accent-soft:  oklch(0.96 0.025 264);
-  --dpp-ui-accent-panel: oklch(0.62 0.19 264 / 0.06);
-  --dpp-ui-code-bg:      oklch(0.30 0.02 264 / 0.06);
-  --dpp-ui-danger-panel: oklch(0.64 0.22 25 / 0.08);
-  --dpp-ui-success:      oklch(0.70 0.15 162);
-  --dpp-ui-warning:      oklch(0.75 0.15 75);
-  --dpp-ui-error:        oklch(0.56 0.20 25);
-  --dpp-ui-shadow:       0 0 0 1px var(--dpp-ui-border), inset 0 1px 0 oklch(1 0 0 / 0.05);
-  --dpp-ui-surface-raised: oklch(0.998 0.002 264);
-  --dpp-ui-overlay-hover:  oklch(0.30 0.02 264 / 0.06);
-  --dpp-ui-overlay-active: oklch(0.30 0.02 264 / 0.10);
-  --dpp-ui-shadow-lg:      0 10px 28px oklch(0.25 0.04 264 / 0.18);
-  --dpp-ui-accent-contrast: oklch(0.20 0.014 264);
+  --zpp-ui-surface:      oklch(0.998 0.002 264);
+  --zpp-ui-surface-muted: oklch(0.965 0.005 264);
+  --zpp-ui-surface-hover: oklch(0.95 0.006 264);
+  --zpp-ui-text:         oklch(0.24 0.018 264);
+  --zpp-ui-text-muted:   oklch(0.52 0.020 264);
+  --zpp-ui-text-subtle:  oklch(0.70 0.015 264);
+  --zpp-ui-border:       oklch(0.90 0.008 264);
+  --zpp-ui-border-muted: oklch(0.94 0.006 264);
+  --zpp-ui-accent:       oklch(0.62 0.19 264);
+  --zpp-ui-accent-strong: oklch(0.54 0.20 266);
+  --zpp-ui-accent-soft:  oklch(0.96 0.025 264);
+  --zpp-ui-accent-panel: oklch(0.62 0.19 264 / 0.06);
+  --zpp-ui-code-bg:      oklch(0.30 0.02 264 / 0.06);
+  --zpp-ui-danger-panel: oklch(0.64 0.22 25 / 0.08);
+  --zpp-ui-success:      oklch(0.70 0.15 162);
+  --zpp-ui-warning:      oklch(0.75 0.15 75);
+  --zpp-ui-error:        oklch(0.56 0.20 25);
+  --zpp-ui-shadow:       0 0 0 1px var(--zpp-ui-border), inset 0 1px 0 oklch(1 0 0 / 0.05);
+  --zpp-ui-surface-raised: oklch(0.998 0.002 264);
+  --zpp-ui-overlay-hover:  oklch(0.30 0.02 264 / 0.06);
+  --zpp-ui-overlay-active: oklch(0.30 0.02 264 / 0.10);
+  --zpp-ui-shadow-lg:      0 10px 28px oklch(0.25 0.04 264 / 0.18);
+  --zpp-ui-accent-contrast: oklch(0.20 0.014 264);
 `;
 
 const DARK_VARS = `
-  --dpp-ui-surface:      oklch(0.22 0.014 264);
-  --dpp-ui-surface-muted: oklch(0.25 0.014 264);
-  --dpp-ui-surface-hover: oklch(0.29 0.015 264);
-  --dpp-ui-text:         oklch(0.93 0.012 264);
-  --dpp-ui-text-muted:   oklch(0.76 0.015 264);
-  --dpp-ui-text-subtle:  oklch(0.60 0.015 264);
-  --dpp-ui-border:       oklch(0.32 0.014 264);
-  --dpp-ui-border-muted: oklch(0.28 0.014 264);
-  --dpp-ui-accent:       oklch(0.75 0.14 264);
-  --dpp-ui-accent-strong: oklch(0.82 0.12 264);
-  --dpp-ui-accent-soft:  oklch(0.30 0.06 264 / 0.55);
-  --dpp-ui-accent-panel: oklch(0.75 0.14 264 / 0.12);
-  --dpp-ui-code-bg:      oklch(1 0 0 / 0.08);
-  --dpp-ui-danger-panel: oklch(0.30 0.06 25 / 0.22);
-  --dpp-ui-success:      oklch(0.78 0.14 162);
-  --dpp-ui-warning:      oklch(0.80 0.14 75);
-  --dpp-ui-error:        oklch(0.72 0.18 25);
-  --dpp-ui-shadow:       0 0 0 1px var(--dpp-ui-border), inset 0 1px 0 oklch(1 0 0 / 0.04);
-  --dpp-ui-surface-raised: oklch(0.32 0.014 264);
-  --dpp-ui-overlay-hover:  oklch(1 0 0 / 0.08);
-  --dpp-ui-overlay-active: oklch(1 0 0 / 0.13);
-  --dpp-ui-shadow-lg:      0 10px 28px oklch(0 0 0 / 0.55);
-  --dpp-ui-accent-contrast: oklch(0.20 0.014 264);
+  --zpp-ui-surface:      oklch(0.22 0.014 264);
+  --zpp-ui-surface-muted: oklch(0.25 0.014 264);
+  --zpp-ui-surface-hover: oklch(0.29 0.015 264);
+  --zpp-ui-text:         oklch(0.93 0.012 264);
+  --zpp-ui-text-muted:   oklch(0.76 0.015 264);
+  --zpp-ui-text-subtle:  oklch(0.60 0.015 264);
+  --zpp-ui-border:       oklch(0.32 0.014 264);
+  --zpp-ui-border-muted: oklch(0.28 0.014 264);
+  --zpp-ui-accent:       oklch(0.75 0.14 264);
+  --zpp-ui-accent-strong: oklch(0.82 0.12 264);
+  --zpp-ui-accent-soft:  oklch(0.30 0.06 264 / 0.55);
+  --zpp-ui-accent-panel: oklch(0.75 0.14 264 / 0.12);
+  --zpp-ui-code-bg:      oklch(1 0 0 / 0.08);
+  --zpp-ui-danger-panel: oklch(0.30 0.06 25 / 0.22);
+  --zpp-ui-success:      oklch(0.78 0.14 162);
+  --zpp-ui-warning:      oklch(0.80 0.14 75);
+  --zpp-ui-error:        oklch(0.72 0.18 25);
+  --zpp-ui-shadow:       0 0 0 1px var(--zpp-ui-border), inset 0 1px 0 oklch(1 0 0 / 0.04);
+  --zpp-ui-surface-raised: oklch(0.32 0.014 264);
+  --zpp-ui-overlay-hover:  oklch(1 0 0 / 0.08);
+  --zpp-ui-overlay-active: oklch(1 0 0 / 0.13);
+  --zpp-ui-shadow-lg:      0 10px 28px oklch(0 0 0 / 0.55);
+  --zpp-ui-accent-contrast: oklch(0.20 0.014 264);
 `;
 
 export function injectInjectedThemeStyles(): void {
@@ -102,11 +102,11 @@ export function injectInjectedThemeStyles(): void {
 body {
 ${LIGHT_VARS}}
 
-body.dpp-theme-dark {
+body.zpp-theme-dark {
 ${DARK_VARS}}
 
 @media (prefers-color-scheme: dark) {
-  body:not(.dpp-theme-light) {
+  body:not(.zpp-theme-light) {
 ${DARK_VARS.replace(/^ {2}/gm, '    ')}}
 }
 `;
@@ -114,14 +114,14 @@ ${DARK_VARS.replace(/^ {2}/gm, '    ')}}
 }
 
 /**
- * 把 z.ai 页面的当前主题投影成 `body` 上的 `dpp-theme-*` 类。
+ * 把 z.ai 页面的当前主题投影成 `body` 上的 `zpp-theme-*` 类。
  *
  * 页面用 `html` 的 `light` / `dark` 类表达主题（Tailwind class 策略），
  * 注入的 UI 在 `body` 上，所以要搬一层。
  *
  * ⚠️⚠️ **两个类都不在时必须把我们的类也摘掉**，不能「保持现状」——
- * 此时应当由 `prefers-color-scheme` 那条媒体查询决定，而它只在**没有** `dpp-theme-*`
- * 类时才生效（`body.dpp-theme-dark` 与媒体查询里的 `body:not(.dpp-theme-light)`
+ * 此时应当由 `prefers-color-scheme` 那条媒体查询决定，而它只在**没有** `zpp-theme-*`
+ * 类时才生效（`body.zpp-theme-dark` 与媒体查询里的 `body:not(.zpp-theme-light)`
  * 特异度相同、后者在样式表后面，所以旧类留着会盖住兜底）。
  * 「页面深色 → 跟随系统且系统浅色」正好走这条路：页面移除 `dark` 而不加 `light`。
  */
@@ -131,15 +131,15 @@ export function syncInjectedTheme(): void {
   const body = document.body;
   if (!body) return;
   if (root.classList.contains('dark')) {
-    body.classList.add('dpp-theme-dark');
-    body.classList.remove('dpp-theme-light');
+    body.classList.add('zpp-theme-dark');
+    body.classList.remove('zpp-theme-light');
     return;
   }
   if (root.classList.contains('light')) {
-    body.classList.add('dpp-theme-light');
-    body.classList.remove('dpp-theme-dark');
+    body.classList.add('zpp-theme-light');
+    body.classList.remove('zpp-theme-dark');
     return;
   }
   // 页面没表态 → 交回给媒体查询（先摘掉我们的类，否则它盖住兜底）。
-  body.classList.remove('dpp-theme-dark', 'dpp-theme-light');
+  body.classList.remove('zpp-theme-dark', 'zpp-theme-light');
 }

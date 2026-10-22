@@ -33,7 +33,7 @@ export interface RuntimeBrowserTabLike {
   url?: string;
 }
 
-export type RuntimeMessageSurface = 'extension_context' | 'glm_content';
+export type RuntimeMessageSurface = 'extension_context' | 'zai_content';
 
 export interface RuntimeMessageContext {
   runtimeId: string;
@@ -52,12 +52,12 @@ export interface RuntimeMessageContext {
 export interface RuntimeTrustPolicy {
   runtimeId: string;
   extensionOrigin: string;
-  glmOrigin?: string;
-  /** 除 glmOrigin 外，额外信任的 web origin。 */
+  zaiOrigin?: string;
+  /** 除 zaiOrigin 外，额外信任的 web origin。 */
   additionalWebOrigins?: readonly string[];
 }
 
-export const GLM_CONTENT_RUNTIME_COMMANDS: ReadonlySet<string> = new Set([
+export const ZAI_CONTENT_RUNTIME_COMMANDS: ReadonlySet<string> = new Set([
   'ADD_CONVERSATION_TO_PROJECT',
   'CLOSE_TOOL_AUTHORIZATION',
   'CREATE_TOOL_AUTHORIZATION',
@@ -74,7 +74,7 @@ export const GLM_CONTENT_RUNTIME_COMMANDS: ReadonlySet<string> = new Set([
   'GET_SKILL_AUTO_ACTIVATION_SETTINGS',
   'GET_SKILLS',
   // 工具面板的存储腿（L2）：读回本会话最近执行过的工具，补上「真实结果」。
-  // ⚠️ 它**只读不写**，与侧边栏 MCP 页读同一份历史（`glm_pp_tool_history`）。
+  // ⚠️ 它**只读不写**，与侧边栏 MCP 页读同一份历史（`zai_pp_tool_history`）。
   'GET_TOOL_CALL_HISTORY',
   'GET_TOOL_DESCRIPTORS',
   'IMPORT_MEMORY_DRAFTS',
@@ -145,10 +145,10 @@ export function createRuntimeMessageContext(
     };
   }
 
-  if (!policy.glmOrigin) {
+  if (!policy.zaiOrigin) {
     throwUnauthorized('Runtime sender is not an extension context.');
   }
-  const glmOrigin = normalizeOrigin(policy.glmOrigin);
+  const zaiOrigin = normalizeOrigin(policy.zaiOrigin);
   const acceptedWebOrigins = resolveAcceptedWebOrigins(policy);
   const tabId = validTabId(sender.tab?.id);
   const frameId = validOptionalFrameId(sender.frameId);
@@ -164,7 +164,7 @@ export function createRuntimeMessageContext(
 
   return {
     runtimeId: policy.runtimeId,
-    surface: 'glm_content',
+    surface: 'zai_content',
     senderUrl,
     senderOrigin,
     tabId,
@@ -172,7 +172,7 @@ export function createRuntimeMessageContext(
     frameId: frameId ?? 0,
     documentId: validDocumentId(sender.documentId),
     documentLifecycle: sender.documentLifecycle,
-    documentSessionId: createDocumentSessionId('glm_content', sender, senderUrl, frameId ?? 0),
+    documentSessionId: createDocumentSessionId('zai_content', sender, senderUrl, frameId ?? 0),
     // sender.url identifies the content document and may retain the initial
     // URL across SPA navigation. The browser-owned tab URL is the current
     // route after the origin check above, so it owns chat binding.
@@ -185,24 +185,24 @@ export function createRuntimeMessageContext(
  * message arrives. `MessageSender.tab` can retain a pre-navigation URL for a
  * same-document SPA navigation, so it is not sufficient for grant binding.
  */
-export function refreshGLMContentRuntimeContext(
+export function refreshZaiContentRuntimeContext(
   context: RuntimeMessageContext,
   tab: RuntimeBrowserTabLike,
-  policy: Pick<RuntimeTrustPolicy, 'glmOrigin'> & { additionalWebOrigins?: readonly string[] },
+  policy: Pick<RuntimeTrustPolicy, 'zaiOrigin'> & { additionalWebOrigins?: readonly string[] },
 ): RuntimeMessageContext {
-  if (context.surface !== 'glm_content') return context;
+  if (context.surface !== 'zai_content') return context;
   if (context.tabId === undefined || validTabId(tab.id) !== context.tabId) {
     throwUnauthorized('Runtime sender browser tab does not match its receiving tab.');
   }
-  if (!policy.glmOrigin) {
-    throwUnauthorized('Runtime trust policy is missing the GLM origin.');
+  if (!policy.zaiOrigin) {
+    throwUnauthorized('Runtime trust policy is missing the site origin.');
   }
 
   const tabUrl = requiredBrowserTabUrl(tab.url);
   const acceptedWebOrigins = resolveAcceptedWebOrigins({
     runtimeId: context.runtimeId,
-    extensionOrigin: policy.glmOrigin,
-    glmOrigin: policy.glmOrigin,
+    extensionOrigin: policy.zaiOrigin,
+    zaiOrigin: policy.zaiOrigin,
     additionalWebOrigins: policy.additionalWebOrigins,
   });
   if (!acceptedWebOrigins.includes(readUrlOrigin(tabUrl))) {
@@ -240,8 +240,8 @@ export function authorizeRuntimeMessage(
   context: RuntimeMessageContext,
 ): void {
   if (context.surface === 'extension_context') return;
-  if (GLM_CONTENT_RUNTIME_COMMANDS.has(envelope.type)) return;
-  throwUnauthorized(`Runtime command ${envelope.type} is not authorized for GLM content.`);
+  if (ZAI_CONTENT_RUNTIME_COMMANDS.has(envelope.type)) return;
+  throwUnauthorized(`Runtime command ${envelope.type} is not authorized for content runtime.`);
 }
 
 export function createRuntimeBoundaryErrorResponse(
@@ -309,7 +309,7 @@ function normalizeOrigin(value: string): string {
 
 function resolveAcceptedWebOrigins(policy: RuntimeTrustPolicy): string[] {
   const origins: string[] = [];
-  if (policy.glmOrigin) origins.push(normalizeOrigin(policy.glmOrigin));
+  if (policy.zaiOrigin) origins.push(normalizeOrigin(policy.zaiOrigin));
   for (const origin of policy.additionalWebOrigins ?? []) {
     const normalized = normalizeOrigin(origin);
     if (!origins.includes(normalized)) origins.push(normalized);

@@ -204,7 +204,7 @@ async function executePythonTool(args) {
     };
   }
 
-  const cwd = mkdtempSync(join(tmpdir(), 'glm-pp-python-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'zai-pp-python-'));
   try {
     const result = await execPythonProcess(status.command, status.commandArgs ?? [], {
       code,
@@ -309,7 +309,7 @@ function getPythonCandidates() {
 
 function getPythonEnvCandidates() {
   const names = [
-    'GLM_PP_PYTHON',
+    'ZAI_PP_PYTHON',
     'PYTHON_EXECUTABLE',
     'PYTHON',
     'PYTHON3',

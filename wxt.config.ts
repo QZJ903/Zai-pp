@@ -39,7 +39,7 @@ export function createManifest(env: ConfigEnv): UserManifest {
       ? [...chromiumPermissions, 'sidePanel']
       : basePermissions,
     host_permissions: [
-      // GLM++ (z.ai) hosts：国区站 + 国际站。两站跑同一份前端产物，
+      // Zai++ (z.ai) hosts：国区站 + 国际站。两站跑同一份前端产物，
       // 内容脚本与 host 权限都要覆盖到（只声明一个会让另一站整块失效）。
       // ⚠️ **必须是精确模式，不能写成 `*://*.z.ai/*`** —— 站点自己有
       // `zcode.z.ai` 之类的同域子站，通配会把权限范围放大到一个域。
@@ -72,7 +72,7 @@ export function createManifest(env: ConfigEnv): UserManifest {
 
 function asciiJavaScriptOutputPlugin(): Plugin {
   return {
-    name: 'glm-pp-ascii-js-output',
+    name: 'zai-pp-ascii-js-output',
     enforce: 'post',
     generateBundle(_, bundle) {
       for (const item of Object.values(bundle)) {

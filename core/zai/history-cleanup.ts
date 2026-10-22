@@ -162,7 +162,7 @@ function cleanMessage(
   // ① 用户消息：续跑模板换占位符；普通增广文本还原成用户原文。
   if (typeof record.content === 'string' && isUserRole(record)) {
     // ⚠️⚠️ **续跑 / nudge 模板要先认出来** —— 它是**我们自己注入的**（DOM 注入让页面
-    // 发出去），内容里带完整工具结果 JSON，而且**不含** `glm-visible-user-prompt` 标记
+    // 发出去），内容里带完整工具结果 JSON，而且**不含** `zai-visible-user-prompt` 标记
     // （续跑轮走的是「透传 body」那条分支，不经过 `augmentPrompt`）。
     // ⇒ 不单独处理的话，刷新会话时它会作为一条**用户消息**原样显示出来。
     //

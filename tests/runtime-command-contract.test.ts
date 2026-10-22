@@ -35,7 +35,7 @@ const COMMAND_GROUP_SECTIONS = [
   ['Group A — Typed seam bootstrap (2)', 2],
   ['Group B — Persistence, library, and local preferences (50)', 50],
   ['Group C — MCP, tool, browser control, and sandbox (27)', 27],
-  ['Group D — GLM and export (3)', 3],
+  ['Group D — DOM task lifecycle (3)', 3],
   ['Group E — Automation, usage, models, and lifecycle closure (13)', 13],
 ] as const;
 

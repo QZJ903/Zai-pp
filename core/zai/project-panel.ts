@@ -23,9 +23,9 @@ import { injectInjectedThemeStyles, syncInjectedTheme } from '../ui/injected-the
 import { ZAI_PROJECT_PANEL_ATTR } from './contracts';
 
 /** 面板、样式与浮层的注入标记。 */
-const PANEL_ID = 'dpp-project-panel';
-const PANEL_STYLE_ID = 'dpp-project-panel-css';
-const MENU_ID = 'dpp-project-panel-menu';
+const PANEL_ID = 'zpp-project-panel';
+const PANEL_STYLE_ID = 'zpp-project-panel-css';
+const MENU_ID = 'zpp-project-panel-menu';
 /**
  * 面板根节点与项目 section 的标记属性。真源在 `contracts.ts`。
  * 用途：重挂时先认出并卸掉旧面板，避免叠出两份。
@@ -406,24 +406,24 @@ export function startProjectPanel(
 
     // 重绘会重建 body 节点，而新节点的 scrollTop 恒为 0 —— 把用户滚到的位置带过去。
     const previousScrollTop = panel
-      .querySelector<HTMLElement>('.dpp-project-panel__body')?.scrollTop ?? 0;
+      .querySelector<HTMLElement>('.zpp-project-panel__body')?.scrollTop ?? 0;
     panel.textContent = '';
 
     const header = document.createElement('div');
-    header.className = 'dpp-project-panel__header';
+    header.className = 'zpp-project-panel__header';
     const heading = document.createElement('span');
-    heading.className = 'dpp-project-panel__heading';
+    heading.className = 'zpp-project-panel__heading';
     heading.textContent = labels.title;
     header.append(heading);
     panel.append(header);
 
     const body = document.createElement('div');
-    body.className = 'dpp-project-panel__body';
+    body.className = 'zpp-project-panel__body';
     panel.append(body);
 
     if (!state || state.projects.length === 0) {
       const empty = document.createElement('div');
-      empty.className = 'dpp-project-panel__empty';
+      empty.className = 'zpp-project-panel__empty';
       empty.textContent = labels.empty;
       body.append(empty);
     } else {
@@ -434,7 +434,7 @@ export function startProjectPanel(
 
     if (statusMessage) {
       const status = document.createElement('div');
-      status.className = 'dpp-project-panel__status';
+      status.className = 'zpp-project-panel__status';
       status.textContent = statusMessage;
       panel.append(status);
     }
@@ -459,27 +459,27 @@ export function startProjectPanel(
       : null;
 
     const section = document.createElement('div');
-    section.className = 'dpp-project-panel__project';
+    section.className = 'zpp-project-panel__project';
     section.setAttribute(PANEL_BOUND_ATTR, 'true');
 
     const row = document.createElement('div');
-    row.className = 'dpp-project-panel__project-row';
+    row.className = 'zpp-project-panel__project-row';
 
     const toggle = document.createElement('button');
     toggle.type = 'button';
-    toggle.className = 'dpp-project-panel__project-toggle';
+    toggle.className = 'zpp-project-panel__project-toggle';
     toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
     toggle.title = expanded ? labels.collapseProject(project.name) : labels.expandProject(project.name);
     toggle.setAttribute('aria-label', toggle.title);
 
     const caret = document.createElement('span');
-    caret.className = 'dpp-project-panel__caret';
+    caret.className = 'zpp-project-panel__caret';
     caret.textContent = expanded ? '▾' : '▸';
     const name = document.createElement('span');
-    name.className = 'dpp-project-panel__project-name';
+    name.className = 'zpp-project-panel__project-name';
     name.textContent = project.name;
     const count = document.createElement('span');
-    count.className = 'dpp-project-panel__project-count';
+    count.className = 'zpp-project-panel__project-count';
     count.textContent = labels.conversationCount(conversations.length);
     toggle.append(caret, name, count);
     toggle.addEventListener('click', () => {
@@ -491,7 +491,7 @@ export function startProjectPanel(
     // 项目行右侧的图标按钮组（hover / 聚焦时显现）：
     // 当前对话的归属操作 + 新会话 + 待绑开关。
     const actions = document.createElement('div');
-    actions.className = 'dpp-project-panel__project-actions';
+    actions.className = 'zpp-project-panel__project-actions';
 
     if (current) {
       const sameProject = currentMembership?.projectId === project.id;
@@ -536,17 +536,17 @@ export function startProjectPanel(
 
     if (isPending) {
       const badge = document.createElement('div');
-      badge.className = 'dpp-project-panel__pending';
+      badge.className = 'zpp-project-panel__pending';
       badge.textContent = labels.pendingBadge;
       section.append(badge);
     }
 
     if (expanded) {
       const list = document.createElement('div');
-      list.className = 'dpp-project-panel__conversations';
+      list.className = 'zpp-project-panel__conversations';
       if (conversations.length === 0) {
         const empty = document.createElement('div');
-        empty.className = 'dpp-project-panel__empty';
+        empty.className = 'zpp-project-panel__empty';
         empty.textContent = labels.empty;
         list.append(empty);
       } else {
@@ -558,7 +558,7 @@ export function startProjectPanel(
         if (conversations.length > CONVERSATION_LIMIT) {
           const more = document.createElement('button');
           more.type = 'button';
-          more.className = 'dpp-project-panel__more';
+          more.className = 'zpp-project-panel__more';
           more.textContent = showAll ? labels.showLess : labels.showMore;
           more.addEventListener('click', () => {
             if (showAllProjectIds.has(project.id)) showAllProjectIds.delete(project.id);
@@ -580,11 +580,11 @@ export function startProjectPanel(
   ): HTMLElement => {
     const labels = dependencies.getLabels();
     const row = document.createElement('div');
-    row.className = 'dpp-project-panel__conversation';
+    row.className = 'zpp-project-panel__conversation';
 
     const open = document.createElement('button');
     open.type = 'button';
-    open.className = 'dpp-project-panel__conversation-title';
+    open.className = 'zpp-project-panel__conversation-title';
     open.textContent = conversation.title;
     open.title = conversation.title;
     open.addEventListener('click', () => {
@@ -596,12 +596,12 @@ export function startProjectPanel(
     });
 
     const age = document.createElement('span');
-    age.className = 'dpp-project-panel__conversation-age';
+    age.className = 'zpp-project-panel__conversation-age';
     age.textContent = labels.age(conversation.lastSeenAt);
 
     const menuButton = document.createElement('button');
     menuButton.type = 'button';
-    menuButton.className = 'dpp-project-panel__conversation-menu-button';
+    menuButton.className = 'zpp-project-panel__conversation-menu-button';
     menuButton.title = labels.conversationActions;
     menuButton.setAttribute('aria-label', labels.conversationActions);
     menuButton.innerHTML = ICON_MORE;
@@ -611,7 +611,7 @@ export function startProjectPanel(
     });
 
     row.append(open, age, menuButton);
-    row.dataset.dppConversationId = conversation.conversationId;
+    row.dataset.zppConversationId = conversation.conversationId;
     return row;
   };
 
@@ -626,7 +626,7 @@ export function startProjectPanel(
   ): void => {
     const input = document.createElement('input');
     input.type = 'text';
-    input.className = 'dpp-project-panel__rename-input';
+    input.className = 'zpp-project-panel__rename-input';
     input.value = conversation.title;
     input.setAttribute('aria-label', dependencies.getLabels().renameConversation);
     titleButton.replaceWith(input);
@@ -669,7 +669,7 @@ export function startProjectPanel(
   }): HTMLButtonElement => {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'dpp-project-panel__icon-button';
+    button.className = 'zpp-project-panel__icon-button';
     button.title = options.label;
     button.setAttribute('aria-label', options.label);
     if (options.active) button.dataset.active = 'true';
@@ -712,19 +712,19 @@ export function startProjectPanel(
 
     const menu = document.createElement('div');
     menu.id = MENU_ID;
-    menu.className = 'dpp-project-panel__menu';
+    menu.className = 'zpp-project-panel__menu';
     menu.setAttribute('role', 'menu');
 
     const rename = document.createElement('button');
     rename.type = 'button';
-    rename.className = 'dpp-project-panel__menu-item';
+    rename.className = 'zpp-project-panel__menu-item';
     rename.setAttribute('role', 'menuitem');
     rename.innerHTML = `${ICON_RENAME}<span></span>`;
     rename.querySelector('span')!.textContent = labels.renameConversation;
     rename.addEventListener('click', () => {
       closeConversationMenu();
       const titleButton = document.querySelector<HTMLButtonElement>(
-        `#${PANEL_ID} [data-dpp-conversation-id="${cssEscape(conversation.conversationId)}"] .dpp-project-panel__conversation-title`,
+        `#${PANEL_ID} [data-zpp-conversation-id="${cssEscape(conversation.conversationId)}"] .zpp-project-panel__conversation-title`,
       );
       if (titleButton) beginRename(project, conversation, titleButton);
     });
@@ -732,7 +732,7 @@ export function startProjectPanel(
 
     const remove = document.createElement('button');
     remove.type = 'button';
-    remove.className = 'dpp-project-panel__menu-item';
+    remove.className = 'zpp-project-panel__menu-item';
     remove.setAttribute('role', 'menuitem');
     remove.innerHTML = `${ICON_UNLINK}<span></span>`;
     remove.querySelector('span')!.textContent = labels.removeFromProjectNamed(project.name);
@@ -863,7 +863,7 @@ function ensurePanel(accountRow: HTMLElement): { panel: HTMLElement; created: bo
 
   const panel = document.createElement('div');
   panel.id = PANEL_ID;
-  panel.className = 'dpp-project-panel';
+  panel.className = 'zpp-project-panel';
   panel.setAttribute(PANEL_BOUND_ATTR, 'true');
   container.insertBefore(panel, accountRow);
   return { panel, created: true };
@@ -895,23 +895,23 @@ const ICON_MORE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const ICON_RENAME = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 20h4l10-10a2.83 2.83 0 0 0-4-4L4 16v4ZM13.5 6.5l4 4"/></svg>';
 
 /**
- * 面板样式。刻意全部自包含（`dpp-project-panel__*` 前缀 + 自己的 style 节点），
+ * 面板样式。刻意全部自包含（`zpp-project-panel__*` 前缀 + 自己的 style 节点），
  * 不继承页面 Tailwind 类，免得 z.ai 改版时样式跟着漂。
  *
- * ⚠️ **色值一律走 `--dpp-ui-*`，不写死颜色** —— 页面有深色模式，写死浅色值
+ * ⚠️ **色值一律走 `--zpp-ui-*`，不写死颜色** —— 页面有深色模式，写死浅色值
  * （原来的 `#1f1f1f` 文字配 `#ffffff` 底）在深色页面上就是「深色底 + 深色字」，
  * 对比度 1.10:1，等于看不见。变量由 `core/ui/injected-theme.ts` 按页面主题切换，
  * 这里只消费。
  *
  * ⚠️ **深色下不能继续用 `rgba(0, 0, 0, …)` 表达 hover** —— 黑叠黑不产生任何变化。
- * 所以 hover / active 走 `--dpp-ui-overlay-*`（用文字色配低透明度，方向随主题反转）。
+ * 所以 hover / active 走 `--zpp-ui-overlay-*`（用文字色配低透明度，方向随主题反转）。
  *
- * ⚠️ **浮层（菜单、改名输入框）要用 `--dpp-ui-surface-raised`，不是 `surface`** ——
+ * ⚠️ **浮层（菜单、改名输入框）要用 `--zpp-ui-surface-raised`，不是 `surface`** ——
  * 深色下 `surface` 与页面底色几乎同值，浮层会糊在页面上；`raised` 亮一档才立得起来。
  *
  * ⚠️ **变量块与主题同步都要在这里自己调一次**，不能只依赖内容脚本启动时的
  * `installInjectedThemeWatch()` —— 那样面板就隐式依赖「谁先谁后」，一旦顺序变了
- * （或面板在测试里单独起）所有 `var(--dpp-ui-*)` 都会解析成空值。两处调用都是
+ * （或面板在测试里单独起）所有 `var(--zpp-ui-*)` 都会解析成空值。两处调用都是
  * 幂等的（样式节点按 id 去重、同步是纯赋值），重复调用没有代价。
  *
  * ⚠️ **这两次调用依赖「`document.body` 已存在」** —— `syncInjectedTheme()` 在 body
@@ -936,9 +936,9 @@ function injectStyles(): void {
       max-height: ${PANEL_MAX_HEIGHT_PX}px;
       margin: 0 6px 4px;
       padding: 4px 0;
-      border-top: 1px solid var(--dpp-ui-border);
+      border-top: 1px solid var(--zpp-ui-border);
       font-size: 12px;
-      color: var(--dpp-ui-text);
+      color: var(--zpp-ui-text);
     }
 
     /* 侧边栏收起时整块隐藏，避免溢出。 */
@@ -946,37 +946,37 @@ function injectStyles(): void {
       display: none !important;
     }
 
-    #${PANEL_ID} .dpp-project-panel__header {
+    #${PANEL_ID} .zpp-project-panel__header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 2px 8px 4px;
     }
 
-    #${PANEL_ID} .dpp-project-panel__heading {
+    #${PANEL_ID} .zpp-project-panel__heading {
       font-size: 11px;
       font-weight: 600;
       opacity: 0.55;
     }
 
-    #${PANEL_ID} .dpp-project-panel__body {
+    #${PANEL_ID} .zpp-project-panel__body {
       flex: 1 1 auto;
       min-height: 0;
       overflow-y: auto;
       overscroll-behavior: contain;
     }
 
-    #${PANEL_ID} .dpp-project-panel__empty {
+    #${PANEL_ID} .zpp-project-panel__empty {
       padding: 6px 8px;
       font-size: 11px;
       opacity: 0.5;
     }
 
-    #${PANEL_ID} .dpp-project-panel__project {
+    #${PANEL_ID} .zpp-project-panel__project {
       margin-bottom: 1px;
     }
 
-    #${PANEL_ID} .dpp-project-panel__project-row {
+    #${PANEL_ID} .zpp-project-panel__project-row {
       display: flex;
       align-items: center;
       gap: 2px;
@@ -984,11 +984,11 @@ function injectStyles(): void {
       border-radius: 8px;
     }
 
-    #${PANEL_ID} .dpp-project-panel__project-row:hover {
-      background: var(--dpp-ui-overlay-hover);
+    #${PANEL_ID} .zpp-project-panel__project-row:hover {
+      background: var(--zpp-ui-overlay-hover);
     }
 
-    #${PANEL_ID} .dpp-project-panel__project-toggle {
+    #${PANEL_ID} .zpp-project-panel__project-toggle {
       flex: 1 1 auto;
       min-width: 0;
       display: flex;
@@ -1004,14 +1004,14 @@ function injectStyles(): void {
       cursor: pointer;
     }
 
-    #${PANEL_ID} .dpp-project-panel__caret {
+    #${PANEL_ID} .zpp-project-panel__caret {
       flex: none;
       width: 9px;
       opacity: 0.5;
       font-size: 9px;
     }
 
-    #${PANEL_ID} .dpp-project-panel__project-name {
+    #${PANEL_ID} .zpp-project-panel__project-name {
       flex: 1 1 auto;
       min-width: 0;
       overflow: hidden;
@@ -1022,7 +1022,7 @@ function injectStyles(): void {
       font-weight: 700;
     }
 
-    #${PANEL_ID} .dpp-project-panel__project-count {
+    #${PANEL_ID} .zpp-project-panel__project-count {
       flex: none;
       font-size: 10px;
       opacity: 0.45;
@@ -1030,7 +1030,7 @@ function injectStyles(): void {
 
     /* 图标按钮组：**常显**，不做 hover 才显现。
        面板本身有高度上限，hover 显现会让用户先要「找到」按钮才能操作。 */
-    #${PANEL_ID} .dpp-project-panel__project-actions {
+    #${PANEL_ID} .zpp-project-panel__project-actions {
       flex: none;
       display: flex;
       align-items: center;
@@ -1038,7 +1038,7 @@ function injectStyles(): void {
       padding-right: 3px;
     }
 
-    #${PANEL_ID} .dpp-project-panel__icon-button {
+    #${PANEL_ID} .zpp-project-panel__icon-button {
       display: inline-grid;
       place-items: center;
       width: 24px;
@@ -1052,35 +1052,35 @@ function injectStyles(): void {
       cursor: pointer;
     }
 
-    #${PANEL_ID} .dpp-project-panel__icon-button:hover,
-    #${PANEL_ID} .dpp-project-panel__icon-button[data-active="true"] {
-      background: var(--dpp-ui-overlay-active);
+    #${PANEL_ID} .zpp-project-panel__icon-button:hover,
+    #${PANEL_ID} .zpp-project-panel__icon-button[data-active="true"] {
+      background: var(--zpp-ui-overlay-active);
       opacity: 1;
     }
 
-    #${PANEL_ID} .dpp-project-panel__icon-button[data-active="true"] {
-      color: var(--dpp-ui-accent-strong);
+    #${PANEL_ID} .zpp-project-panel__icon-button[data-active="true"] {
+      color: var(--zpp-ui-accent-strong);
     }
 
-    #${PANEL_ID} .dpp-project-panel__icon-button svg {
+    #${PANEL_ID} .zpp-project-panel__icon-button svg {
       width: 15px;
       height: 15px;
     }
 
-    #${PANEL_ID} .dpp-project-panel__pending {
+    #${PANEL_ID} .zpp-project-panel__pending {
       margin: 1px 8px 3px;
       padding: 2px 6px;
       border-radius: 5px;
-      background: var(--dpp-ui-accent-soft);
-      color: var(--dpp-ui-accent-strong);
+      background: var(--zpp-ui-accent-soft);
+      color: var(--zpp-ui-accent-strong);
       font-size: 10px;
     }
 
-    #${PANEL_ID} .dpp-project-panel__conversations {
+    #${PANEL_ID} .zpp-project-panel__conversations {
       padding: 1px 0 3px 13px;
     }
 
-    #${PANEL_ID} .dpp-project-panel__conversation {
+    #${PANEL_ID} .zpp-project-panel__conversation {
       display: flex;
       align-items: center;
       gap: 4px;
@@ -1088,11 +1088,11 @@ function injectStyles(): void {
       border-radius: 6px;
     }
 
-    #${PANEL_ID} .dpp-project-panel__conversation:hover {
-      background: var(--dpp-ui-overlay-hover);
+    #${PANEL_ID} .zpp-project-panel__conversation:hover {
+      background: var(--zpp-ui-overlay-hover);
     }
 
-    #${PANEL_ID} .dpp-project-panel__conversation-title {
+    #${PANEL_ID} .zpp-project-panel__conversation-title {
       flex: 1 1 auto;
       min-width: 0;
       overflow: hidden;
@@ -1108,14 +1108,14 @@ function injectStyles(): void {
       cursor: pointer;
     }
 
-    #${PANEL_ID} .dpp-project-panel__conversation-age {
+    #${PANEL_ID} .zpp-project-panel__conversation-age {
       flex: none;
       font-size: 10px;
       opacity: 0.4;
     }
 
     /* 会话行的菜单按钮同样常显（与项目行图标一致）。 */
-    #${PANEL_ID} .dpp-project-panel__conversation-menu-button {
+    #${PANEL_ID} .zpp-project-panel__conversation-menu-button {
       flex: none;
       display: inline-grid;
       place-items: center;
@@ -1133,30 +1133,30 @@ function injectStyles(): void {
       cursor: pointer;
     }
 
-    #${PANEL_ID} .dpp-project-panel__conversation-menu-button:hover {
-      background: var(--dpp-ui-overlay-active);
+    #${PANEL_ID} .zpp-project-panel__conversation-menu-button:hover {
+      background: var(--zpp-ui-overlay-active);
       opacity: 1;
     }
 
-    #${PANEL_ID} .dpp-project-panel__conversation-menu-button svg {
+    #${PANEL_ID} .zpp-project-panel__conversation-menu-button svg {
       width: 14px;
       height: 14px;
     }
 
-    #${PANEL_ID} .dpp-project-panel__rename-input {
+    #${PANEL_ID} .zpp-project-panel__rename-input {
       flex: 1 1 auto;
       min-width: 0;
       margin: 1px 0;
       padding: 3px 5px;
-      border: 1px solid var(--dpp-ui-accent);
+      border: 1px solid var(--zpp-ui-accent);
       border-radius: 6px;
-      background: var(--dpp-ui-surface-raised);
+      background: var(--zpp-ui-surface-raised);
       font: inherit;
       color: inherit;
       outline: none;
     }
 
-    #${PANEL_ID} .dpp-project-panel__more {
+    #${PANEL_ID} .zpp-project-panel__more {
       display: block;
       width: calc(100% - 6px);
       margin: 1px 3px;
@@ -1172,15 +1172,15 @@ function injectStyles(): void {
       cursor: pointer;
     }
 
-    #${PANEL_ID} .dpp-project-panel__more:hover {
-      background: var(--dpp-ui-overlay-hover);
+    #${PANEL_ID} .zpp-project-panel__more:hover {
+      background: var(--zpp-ui-overlay-hover);
       opacity: 0.9;
     }
 
-    #${PANEL_ID} .dpp-project-panel__status {
+    #${PANEL_ID} .zpp-project-panel__status {
       padding: 3px 8px 1px;
       font-size: 10px;
-      color: var(--dpp-ui-error);
+      color: var(--zpp-ui-error);
     }
 
     #${MENU_ID} {
@@ -1190,14 +1190,14 @@ function injectStyles(): void {
       min-width: 178px;
       padding: 4px;
       border-radius: 10px;
-      border: 1px solid var(--dpp-ui-border);
-      background: var(--dpp-ui-surface-raised);
-      box-shadow: var(--dpp-ui-shadow-lg);
+      border: 1px solid var(--zpp-ui-border);
+      background: var(--zpp-ui-surface-raised);
+      box-shadow: var(--zpp-ui-shadow-lg);
       font-size: 12px;
-      color: var(--dpp-ui-text);
+      color: var(--zpp-ui-text);
     }
 
-    #${MENU_ID} .dpp-project-panel__menu-item {
+    #${MENU_ID} .zpp-project-panel__menu-item {
       display: grid;
       grid-template-columns: 16px minmax(0, 1fr);
       align-items: center;
@@ -1213,11 +1213,11 @@ function injectStyles(): void {
       cursor: pointer;
     }
 
-    #${MENU_ID} .dpp-project-panel__menu-item:hover {
-      background: var(--dpp-ui-overlay-hover);
+    #${MENU_ID} .zpp-project-panel__menu-item:hover {
+      background: var(--zpp-ui-overlay-hover);
     }
 
-    #${MENU_ID} .dpp-project-panel__menu-item svg {
+    #${MENU_ID} .zpp-project-panel__menu-item svg {
       width: 15px;
       height: 15px;
       opacity: 0.6;

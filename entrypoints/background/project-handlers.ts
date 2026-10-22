@@ -3,7 +3,7 @@ import {
   type RuntimeCommandHandler,
 } from '../../core/messaging/runtime-command-registry';
 import type {
-  CurrentGLMConversation,
+  CurrentZaiConversation,
   ProjectContext,
   ProjectContextCreateInput,
   ProjectContextState,
@@ -16,7 +16,7 @@ import type { SupportedLocale } from '../../core/i18n/background';
 import { definePersistencePayloadRuntimeCommandHandler } from './runtime-handler';
 
 type CurrentConversationResponse =
-  | { ok: true; conversation: CurrentGLMConversation }
+  | { ok: true; conversation: CurrentZaiConversation }
   | { ok: false; error: string };
 
 export interface ProjectRuntimeHandlerDependencies {
@@ -30,7 +30,7 @@ export interface ProjectRuntimeHandlerDependencies {
   ): Promise<ProjectConversation>;
   removeConversationFromProject(conversationId: string): Promise<void>;
   setPendingProjectContext(projectId: string | null): Promise<void>;
-  getCurrentGLMConversation(): Promise<CurrentConversationResponse>;
+  getCurrentZaiConversation(): Promise<CurrentConversationResponse>;
   bindPendingProjectConversation(conversation: ProjectConversationInput): Promise<ProjectConversation | null>;
   refreshProjectConversation(conversation: ProjectConversationInput): Promise<ProjectConversation | null>;
   getProjectForConversation(conversationId: string): Promise<ProjectContext | null>;
@@ -88,8 +88,8 @@ export function createProjectRuntimeHandlers(
       await dependencies.notifyCommittedProjectContextUpdate(context.tabId);
       return { ok: true as const };
     }),
-    definePayloadlessRuntimeCommandHandler('GET_CURRENT_GLM_CONVERSATION', () => (
-      dependencies.getCurrentGLMConversation()
+    definePayloadlessRuntimeCommandHandler('GET_CURRENT_ZAI_CONVERSATION', () => (
+      dependencies.getCurrentZaiConversation()
     )),
     definePersistencePayloadRuntimeCommandHandler('GET_PROJECT_CONTEXT_FOR_CONVERSATION', async (payload, context) => {
       const changed = payload.bindPendingProject === true

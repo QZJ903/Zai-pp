@@ -20,9 +20,17 @@ export const MCP_SERVER_IDS = {
   shell: 'contract-shell',
 } as const;
 
+/**
+ * Shell 服务器样本。`nativeHost` 取生产常量值（与 `SHELL_MCP_NATIVE_HOST` 相等），
+ * 所以它会被 `isShellMcpServer` 认作 Shell 服务器 —— 本 fixture 的 id / allowlist /
+ * 缓存描述符都与 Shell 对应。
+ *
+ * ⚠️ **要「是 native_messaging、但不是 Shell host」的样本请单独新增一个命名清楚的 fixture**，
+ * 不要靠改这里的值来兼得两者。
+ */
 const shellServer = createServer(MCP_SERVER_IDS.shell, {
   kind: 'native_messaging',
-  nativeHost: 'com.glm.pp.shell',
+  nativeHost: 'com.zai_pp.shell',
 }, {
   headers: [{ name: 'X-Contract', value: 'preserve' }],
   secrets: [{

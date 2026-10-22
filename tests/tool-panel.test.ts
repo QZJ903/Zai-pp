@@ -130,7 +130,7 @@ function makePanel(overrides: Partial<ToolPanelDependencies> = {}) {
 afterEach(() => {
   while (livePanels.length > 0) livePanels.pop()!.dispose();
   document.body.innerHTML = '';
-  document.getElementById('dpp-tool-block-css')?.remove();
+  document.getElementById('zpp-tool-block-css')?.remove();
   vi.restoreAllMocks();
 });
 
@@ -191,7 +191,7 @@ describe('zai adapter: site facts', () => {
     const bubble = buildRealisticMessage(UUID_A, '真正的正文');
     const host = resolveZaiResponseHost(bubble)!;
     const panel = document.createElement('div');
-    panel.className = 'dpp-tool-block';
+    panel.className = 'zpp-tool-block';
     panel.textContent = 'shell_exec 已执行 详情内容';
     host.appendChild(panel);
 
@@ -239,8 +239,8 @@ describe('zai adapter: site facts', () => {
   it('appends detail and output after the summary (three-part formula)', () => {
     // ⚠️ 口径来自上游 inline-agent 控制台的 `getToolResultDetailText`：
     // summary + detail + `output: JSON` 三段**无条件拼接**。
-    // 旧口径（`.dpp-tool-block` 的「有 detail 就不看 output」）下
-    // `web_fetch` 的正文永远进不了面板 —— 它的 detail 只是「页面长度 N 字符」。
+    // 旧口径（`.zpp-tool-block` 的「有 detail 就不看 output」）下，正文放在
+    // `output` 而 `detail` 只有一句概述的工具，正文永远进不了面板。
     expect(formatZaiToolDetail({
       ok: true, summary: '已获取 url', detail: '页面长度 3323 字符',
       output: { url: 'u', content: '正文' },
@@ -269,7 +269,7 @@ describe('zai adapter: site facts', () => {
   });
 
   it('truncates the detail and output segments with an explicit marker', () => {
-    // ⚠️ `web_fetch` 的 output.content 上限 50_000 字符 —— 不截就是一条把面板撑爆。
+    // ⚠️ 第三方 MCP 的 `output.content` 可达数万字符 —— 不截就是一条把面板撑爆。
     const formatted = formatZaiToolDetail({
       ok: true,
       summary: 's',
@@ -311,9 +311,9 @@ describe('tool panel: live leg (L1)', () => {
     await settle();
     expect(panel.snapshot().livePending).toBe(0);
 
-    const names = [...document.querySelectorAll('.dpp-tool-block-item-name')].map((el) => el.textContent);
+    const names = [...document.querySelectorAll('.zpp-tool-block-item-name')].map((el) => el.textContent);
     expect(names).toEqual(['shell_exec']);
-    const statuses = [...document.querySelectorAll('.dpp-tool-block-item-status')].map((el) => el.textContent);
+    const statuses = [...document.querySelectorAll('.zpp-tool-block-item-status')].map((el) => el.textContent);
     expect(statuses).toEqual(['EXECUTED']);
   });
 
@@ -328,7 +328,7 @@ describe('tool panel: live leg (L1)', () => {
     panel.completeToolCall('req-1', execution({ callId: 'xml:from-parser' }));
     await settle();
 
-    expect(document.querySelectorAll('.dpp-tool-block-item')).toHaveLength(1);
+    expect(document.querySelectorAll('.zpp-tool-block-item')).toHaveLength(1);
     expect(panel.snapshot().livePending).toBe(0);
   });
 
@@ -341,7 +341,7 @@ describe('tool panel: live leg (L1)', () => {
     panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
     panel.completeToolCall('req-1', execution());
     await settle();
-    expect(document.querySelectorAll('.dpp-tool-block-item')).toHaveLength(1);
+    expect(document.querySelectorAll('.zpp-tool-block-item')).toHaveLength(1);
   });
 
   it('keeps pending rows that the final result does not cover', async () => {
@@ -356,7 +356,7 @@ describe('tool panel: live leg (L1)', () => {
     await settle();
 
     expect(panel.snapshot().livePending).toBe(1);
-    const statuses = [...document.querySelectorAll('.dpp-tool-block-item-status')].map((el) => el.textContent);
+    const statuses = [...document.querySelectorAll('.zpp-tool-block-item-status')].map((el) => el.textContent);
     expect(statuses).toContain('RUNNING');
     expect(statuses).toContain('EXECUTED');
   });
@@ -373,10 +373,10 @@ describe('tool panel: pending finalize (todo 64)', () => {
     await settle();
 
     expect(panel.snapshot().livePending).toBe(0);
-    const status = document.querySelector('.dpp-tool-block-item-status');
+    const status = document.querySelector('.zpp-tool-block-item-status');
     expect(status?.textContent).toBe('FAILED');
     expect(status?.className).toContain('error');
-    const detail = document.querySelector('.dpp-tool-block-item-detail');
+    const detail = document.querySelector('.zpp-tool-block-item-detail');
     // 三段式：summary + 原因 + `error: JSON`（详情框默认收起，但文本已在 DOM 里）。
     expect(detail?.textContent).toContain('FAILED');
     expect(detail?.textContent).toContain('未完成（回答被中断）');
@@ -391,7 +391,7 @@ describe('tool panel: pending finalize (todo 64)', () => {
 
     // 绝大多数轮次都没有 pending —— 不该为这种情况产生任何写入。
     panel.finalizePending('req-unknown', 'FAILED', 'x');
-    expect(document.querySelector('.dpp-tool-block')).toBeNull();
+    expect(document.querySelector('.zpp-tool-block')).toBeNull();
   });
 
   it('drains every session on dispose', async () => {
@@ -410,7 +410,7 @@ describe('tool panel: pending finalize (todo 64)', () => {
 
 describe('tool panel: block collapse state', () => {
   function blockOf(): HTMLElement | null {
-    return document.querySelector<HTMLElement>('.dpp-tool-block');
+    return document.querySelector<HTMLElement>('.zpp-tool-block');
   }
 
   it('expands the block while the turn is in flight', async () => {
@@ -510,13 +510,13 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     // 编排层有自己的调度，手动跑一轮。
     await settle();
 
-    const names = [...document.querySelectorAll('.dpp-tool-block-item-name')].map((el) => el.textContent);
+    const names = [...document.querySelectorAll('.zpp-tool-block-item-name')].map((el) => el.textContent);
     expect(names).toEqual(['shell_exec']);
     // ⚠️ 历史腿没有真实结果 ⇒ 只给「已执行」，不假装有结果。
-    expect(document.querySelector('.dpp-tool-block-item-status')?.textContent).toBe('EXECUTED');
+    expect(document.querySelector('.zpp-tool-block-item-status')?.textContent).toBe('EXECUTED');
     // ⚠️ **没有详情的行不给开关**（死控件）—— 详情框在 DOM 里都不该出现。
-    expect(document.querySelector('.dpp-tool-block-item-chevron')).toBeNull();
-    expect(document.querySelector('.dpp-tool-block-item-detail')).toBeNull();
+    expect(document.querySelector('.zpp-tool-block-item-chevron')).toBeNull();
+    expect(document.querySelector('.zpp-tool-block-item-detail')).toBeNull();
   });
 
   it('drops storage records from other conversations', async () => {
@@ -585,13 +585,13 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
 
     // 合流后只剩一条记录（不是两条），且**详情来自 storage 腿** ——
     // history 腿合成的摘要没有 detail，所以出现 detail 就证明真结果接上了。
-    expect(document.querySelectorAll('.dpp-tool-block-item')).toHaveLength(1);
-    const detail = document.querySelector('.dpp-tool-block-item-detail');
+    expect(document.querySelectorAll('.zpp-tool-block-item')).toHaveLength(1);
+    const detail = document.querySelector('.zpp-tool-block-item-detail');
     expect(detail?.textContent).toContain('ls 的真实输出');
     // ⚠️ **整块重画保住展开态**：storage 腿的合流会再画一次，默认收起。
     expect((detail as HTMLElement)?.hidden).toBe(true);
     // 行内同时给出结果摘要（三段式的第一段就是它）。
-    expect(document.querySelector('.dpp-tool-block-item-summary')?.textContent).toBe('真实结果');
+    expect(document.querySelector('.zpp-tool-block-item-summary')?.textContent).toBe('真实结果');
   });
 
   it('mounts a storage record through its own anchor, without waiting for the history leg', async () => {
@@ -619,8 +619,8 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     await settle();
 
     // 没有历史腿也画出来了，而且行里是那条真结果。
-    expect(document.querySelectorAll('.dpp-tool-block-item')).toHaveLength(1);
-    expect(document.querySelector('.dpp-tool-block-item-summary')?.textContent).toBe('真实结果');
+    expect(document.querySelectorAll('.zpp-tool-block-item')).toHaveLength(1);
+    expect(document.querySelector('.zpp-tool-block-item-summary')?.textContent).toBe('真实结果');
   });
 
   it('keeps every execution of a multi-call turn from the storage leg', async () => {
@@ -662,7 +662,7 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     await settle();
 
     // 三次调用 ⇒ 三行（不是一行）。
-    expect(document.querySelectorAll('.dpp-tool-block-item')).toHaveLength(3);
+    expect(document.querySelectorAll('.zpp-tool-block-item')).toHaveLength(3);
   });
 
   it('registers a raw without drawing a running row', async () => {
@@ -688,13 +688,13 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     await settle();
 
     // ⚠️ **不画行**（这是那条路径的语义）——连块都不该出现。
-    expect(document.querySelectorAll('.dpp-tool-block-item')).toHaveLength(0);
+    expect(document.querySelectorAll('.zpp-tool-block-item')).toHaveLength(0);
     expect(panel.snapshot().livePending).toBe(0);
 
     // 但它登记到了会话里：随后 `completeToolCall` 投出去的记录**带 raw**。
     panel.completeToolCall('req-1', execution());
     await settle();
-    expect(document.querySelectorAll('.dpp-tool-block-item')).toHaveLength(1);
+    expect(document.querySelectorAll('.zpp-tool-block-item')).toHaveLength(1);
 
     // 拿历史腿来验签名能配上（同一条 raw ⇒ 并成一块）。
     panel.rememberHistoryRecords([{
@@ -705,7 +705,7 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     }], 'chat-1');
     await settle();
     expect(panel.snapshot().records, '两条腿必须按签名合成一条（没合上 = 2）').toBe(1);
-    expect(document.querySelectorAll('.dpp-tool-block')).toHaveLength(1);
+    expect(document.querySelectorAll('.zpp-tool-block')).toHaveLength(1);
   });
 
   it('carries the tool call raw into the live record so the legs can merge', async () => {
@@ -737,6 +737,6 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     await settle();
 
     // ⚠️ 两块并成一块（不是「一块有结果 + 一块没有」）⇒ 证明 raw 真的带上了。
-    expect(document.querySelectorAll('.dpp-tool-block')).toHaveLength(1);
+    expect(document.querySelectorAll('.zpp-tool-block')).toHaveLength(1);
   });
 });

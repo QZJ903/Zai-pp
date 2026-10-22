@@ -56,10 +56,20 @@ export function zaiAuthStorageKeyForSite(siteOrigin: string): string {
 export interface ZaiAuth {
   token: string;
   userId: string | null;
+  /**
+   * 页面 `prod-fe` 版本。**当前只有写侧**（捕获时存、merge 时保留旧值），没有地方读它：
+   * 真正要用 fe 版本的地方走 `readFeVersion()`（从 `performance.getEntriesByType` 现读）。
+   * 留着是因为它是捕获链的原始记录，且与上游 `ZaiAuth` 同构。
+   */
   feVersion: string | null;
+  /** 页面 `x-device-id`。同样只有写侧，理由见 `feVersion`。 */
   deviceId: string | null;
   /** 记录时间（ms）。 */
   capturedAt: number;
+  /**
+   * token 过期时间。**当前没有消费者** —— 缓存里有 token 就一直用，没有「拿它做过期判断」
+   * 这一步（上游同构）。⚠️ 所以 token 失效时的表现是「请求被服务端拒」，不是「提前刷新」。
+   */
   expiresAt: number | null;
 }
 
@@ -166,23 +176,6 @@ export async function saveZaiAuthToStorage(
     return true;
   } catch {
     return false;
-  }
-}
-
-/**
- * 清掉全部登录态（两站的桶 + 单槽）。
- *
- * 语义是「auth 生命周期结束」而不是「清掉某一站」—— 所以不接收站点参数。
- */
-export async function clearZaiAuthFromStorage(): Promise<void> {
-  try {
-    const keys = [
-      ...Object.values(ZAI_SITES).map((site) => `${ZAI_AUTH_SITE_STORAGE_KEY_PREFIX}${site.id}`),
-      ZAI_AUTH_STORAGE_KEY,
-    ];
-    await chrome.storage.local.remove(keys);
-  } catch {
-    /* ignore */
   }
 }
 

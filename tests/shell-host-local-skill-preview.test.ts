@@ -59,8 +59,8 @@ describe('shell native host local_folder_pick', () => {
     expect(source).toContain("import { execFile } from 'node:child_process';");
     expect(source).not.toContain('execFileSync');
     expect(source).toContain("'-EncodedCommand', encodePowerShellCommand(script)");
-    expect(source).toContain('DPP_FOLDER_PICK_TITLE');
-    expect(source).toContain('DPP_FOLDER_PICK_DEFAULT_PATH');
+    expect(source).toContain('ZPP_FOLDER_PICK_TITLE');
+    expect(source).toContain('ZPP_FOLDER_PICK_DEFAULT_PATH');
     expect(source).not.toContain("'-Command', script, title");
   });
 });
@@ -80,7 +80,7 @@ describe('shell native host startup', () => {
 
 describe('shell native host local_file_* tools', () => {
   it('writes and reads large UTF-8 text without shell escaping', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'glm-pp-local-file-'));
+    const root = mkdtempSync(join(tmpdir(), 'zai-pp-local-file-'));
     tempRoots.push(root);
     const filePath = join(root, 'nested/report.txt');
     const content = `标题：生态治理\n${'段落-中文-特殊字符-{}[]<>&"\n'.repeat(4000)}`;
@@ -133,11 +133,11 @@ describe('shell native host local_file_* tools', () => {
 
 describe('shell native host logLine resilience', () => {
   it('creates the configured log file parent directory and writes diagnostics', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'glm-pp-host-log-'));
+    const root = mkdtempSync(join(tmpdir(), 'zai-pp-host-log-'));
     tempRoots.push(root);
     const logFile = join(root, 'logs', 'host.log');
 
-    const response = await callNativeHost('shell_status', {}, { DPP_LOG_FILE: logFile });
+    const response = await callNativeHost('shell_status', {}, { ZPP_LOG_FILE: logFile });
 
     expect(response.error).toBeUndefined();
     expect(existsSync(logFile)).toBe(true);
@@ -146,17 +146,17 @@ describe('shell native host logLine resilience', () => {
     expect(log).toContain('tools/call name=shell_status');
   });
 
-  it('returns a normal response when DPP_LOG_FILE points to an unwritable path', async () => {
+  it('returns a normal response when ZPP_LOG_FILE points to an unwritable path', async () => {
     const response = await callNativeHost('shell_status', {}, {
-      DPP_LOG_FILE: '/nonexistent-dir-dpp-test-xyz/unwritable.log',
+      ZPP_LOG_FILE: '/nonexistent-dir-zpp-test-xyz/unwritable.log',
     });
     expect(response.error).toBeUndefined();
     expect(response.result?.structuredContent?.data?.platform).toBeTruthy();
   });
 
-  it('writes a stderr diagnostic when DPP_LOG_FILE cannot be initialized', async () => {
+  it('writes a stderr diagnostic when ZPP_LOG_FILE cannot be initialized', async () => {
     const { response, stderr } = await callNativeHostWithStderr('shell_status', {}, {
-      DPP_LOG_FILE: '/nonexistent-dir-dpp-test-xyz/unwritable.log',
+      ZPP_LOG_FILE: '/nonexistent-dir-zpp-test-xyz/unwritable.log',
     });
     expect(response.error).toBeUndefined();
     expect(stderr).toContain('failed to initialize log file');
@@ -164,7 +164,7 @@ describe('shell native host logLine resilience', () => {
 });
 
 function createNestedSkillFixture(): string {
-  const root = mkdtempSync(join(tmpdir(), 'glm-pp-local-skill-'));
+  const root = mkdtempSync(join(tmpdir(), 'zai-pp-local-skill-'));
   tempRoots.push(root);
 
   mkdirSync(join(root, 'references'), { recursive: true });
@@ -196,7 +196,7 @@ function createNestedSkillFixture(): string {
 }
 
 function createLargeResourceSkillFixture(): string {
-  const root = mkdtempSync(join(tmpdir(), 'glm-pp-local-skill-large-'));
+  const root = mkdtempSync(join(tmpdir(), 'zai-pp-local-skill-large-'));
   tempRoots.push(root);
   mkdirSync(join(root, 'references'), { recursive: true });
   writeFileSync(join(root, 'SKILL.md'), [
@@ -257,7 +257,7 @@ async function callNativeHost(name: string, args: Record<string, unknown>, env?:
     });
 
     child.stdin.end(createNativeFrame({
-      protocol: 'glm-pp-mcp-native',
+      protocol: 'zai-pp-mcp-native',
       version: 1,
       message: {
         jsonrpc: '2.0',
@@ -316,7 +316,7 @@ async function callNativeHostWithStderr(name: string, args: Record<string, unkno
     });
 
     child.stdin.end(createNativeFrame({
-      protocol: 'glm-pp-mcp-native',
+      protocol: 'zai-pp-mcp-native',
       version: 1,
       message: {
         jsonrpc: '2.0',

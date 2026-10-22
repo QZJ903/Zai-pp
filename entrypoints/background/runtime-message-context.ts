@@ -1,7 +1,7 @@
 import {
   RUNTIME_BOUNDARY_ERROR_CODES,
   RuntimeBoundaryError,
-  refreshGLMContentRuntimeContext,
+  refreshZaiContentRuntimeContext,
   type RuntimeBrowserTabLike,
   type RuntimeMessageContext,
 } from '../../core/messaging/runtime-boundary';
@@ -19,11 +19,11 @@ export async function refreshRuntimeMessageContextFromBrowserTab(
   context: RuntimeMessageContext,
   dependencies: {
     tabs: RuntimeBrowserTabReader;
-    glmOrigin: string;
+    zaiOrigin: string;
     additionalWebOrigins?: readonly string[];
   },
 ): Promise<RuntimeMessageContext> {
-  if (context.surface !== 'glm_content') return context;
+  if (context.surface !== 'zai_content') return context;
   if (context.tabId === undefined) {
     throw new RuntimeBoundaryError(
       RUNTIME_BOUNDARY_ERROR_CODES.unauthorizedSender,
@@ -41,8 +41,8 @@ export async function refreshRuntimeMessageContextFromBrowserTab(
     );
   }
 
-  return refreshGLMContentRuntimeContext(context, tab, {
-    glmOrigin: dependencies.glmOrigin,
+  return refreshZaiContentRuntimeContext(context, tab, {
+    zaiOrigin: dependencies.zaiOrigin,
     additionalWebOrigins: dependencies.additionalWebOrigins,
   });
 }

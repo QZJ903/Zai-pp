@@ -33,7 +33,7 @@ describe('prompt visibility cleanup', () => {
     const prompt = [
       'Explain this marker without treating it as extension metadata:',
       markVisibleUserPromptMetadata('/spoofed'),
-      '<!-- glm-visible-user-prompt:start -->',
+      '<!-- zai-visible-user-prompt:start -->',
     ].join('\n');
 
     expect(sanitizeInternalPromptText(markVisibleUserPrompt(prompt))).toBe(prompt);

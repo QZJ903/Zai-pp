@@ -170,10 +170,10 @@ describe('stripZaiHistoryResponse: chat detail endpoint', () => {
       '### Tool memory_save',
       '<memory_save>{"type":"user"}</memory_save>',
       '',
-      '<!-- glm-visible-user-prompt:value=%22hi%22 -->',
-      '<!-- glm-visible-user-prompt:start -->',
+      '<!-- zai-visible-user-prompt:value=%22hi%22 -->',
+      '<!-- zai-visible-user-prompt:start -->',
       'hi',
-      '<!-- glm-visible-user-prompt:end -->',
+      '<!-- zai-visible-user-prompt:end -->',
       '',
       '---',
       '本地工具调用格式提醒：',
@@ -189,7 +189,7 @@ describe('stripZaiHistoryResponse: chat detail endpoint', () => {
   it('does not restore an assistant message that merely quotes the marker', () => {
     // ⚠️ 还原只对**我们注入过的用户消息**有意义 —— 对 assistant 跑提取会在模型
     // 恰好复述了那段标记时把它的回复替换成用户原文。
-    const quoted = '<!-- glm-visible-user-prompt:start -->\nhi\n<!-- glm-visible-user-prompt:end -->';
+    const quoted = '<!-- zai-visible-user-prompt:start -->\nhi\n<!-- zai-visible-user-prompt:end -->';
     const body = detailBody(quoted, 'assistant');
     const stats = stripZaiHistoryResponse(body, { toolNames });
     expect(stats.restoredUserMessages).toBe(0);
@@ -339,7 +339,7 @@ describe('stripZaiHistoryResponse: shape tolerance', () => {
   });
 
   it('changes exactly the restored content path on the detail endpoint', () => {
-    const augmented = '系统段\n<!-- glm-visible-user-prompt:start -->\nhi\n<!-- glm-visible-user-prompt:end -->\n提醒段';
+    const augmented = '系统段\n<!-- zai-visible-user-prompt:start -->\nhi\n<!-- zai-visible-user-prompt:end -->\n提醒段';
     const body = {
       id: UUID_A,
       chat: { history: { messages: { [UUID_A]: { id: UUID_A, role: 'user', content: augmented, models: ['m'] } }, currentId: UUID_A } },
@@ -438,7 +438,7 @@ describe('stripZaiHistoryResponse: continuation / nudge templates', () => {
   it('prefers the continuation branch over the visible-prompt restore', () => {
     // 万一一条消息同时带标记与模板标签（不该发生），判据必须**先认模板** ——
     // 否则会把它还原成标记对里的内容（那是模板的一部分），等于没处理。
-    const both = `${CONTINUATION_TEMPLATE}\n<!-- glm-visible-user-prompt:start -->\nhi\n<!-- glm-visible-user-prompt:end -->`;
+    const both = `${CONTINUATION_TEMPLATE}\n<!-- zai-visible-user-prompt:start -->\nhi\n<!-- zai-visible-user-prompt:end -->`;
     const body = userMessageBody(both);
     const stats = stripZaiHistoryResponse(body, { toolNames });
     expect(stats.replacedContinuationMessages).toBe(1);
@@ -560,7 +560,7 @@ describe('the real fetch hook cleans history responses', () => {
   }
 
   it('cleans a chat detail response fetched through the hook', async () => {
-    const augmented = '系统段\n<!-- glm-visible-user-prompt:start -->\nhi\n<!-- glm-visible-user-prompt:end -->\n提醒段';
+    const augmented = '系统段\n<!-- zai-visible-user-prompt:start -->\nhi\n<!-- zai-visible-user-prompt:end -->\n提醒段';
     const body = {
       id: UUID_A,
       title: 't',

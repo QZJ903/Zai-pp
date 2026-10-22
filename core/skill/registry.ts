@@ -15,8 +15,8 @@ import {
   userSkillCollectionCodec,
 } from './codec';
 
-export const SKILLS_STORAGE_KEY = 'glm_pp_skills';
-export const SKILL_SOURCES_STORAGE_KEY = 'glm_pp_skill_sources';
+export const SKILLS_STORAGE_KEY = 'zai_pp_skills';
+export const SKILL_SOURCES_STORAGE_KEY = 'zai_pp_skill_sources';
 
 const userSkillRepository = createVersionedRepository({
   label: 'skills',

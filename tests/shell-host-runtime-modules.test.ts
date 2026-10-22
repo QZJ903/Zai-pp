@@ -68,7 +68,7 @@ describe('Shell Host modular runtime ownership', () => {
   });
 
   it('copies the complete modular runtime and executes the installed entrypoint', async () => {
-    const installDir = mkdtempSync(join(tmpdir(), 'glm-pp-shell-runtime-'));
+    const installDir = mkdtempSync(join(tmpdir(), 'zai-pp-shell-runtime-'));
     tempRoots.push(installDir);
     const hostPath = copyHostRuntime(resolve('packages/shell-host/native'), installDir);
 
@@ -78,7 +78,7 @@ describe('Shell Host modular runtime ownership', () => {
     }
 
     await expect(callHost(hostPath, {
-      protocol: 'glm-pp-mcp-native',
+      protocol: 'zai-pp-mcp-native',
       version: 1,
       server: { id: 'installed-runtime' },
       message: {
@@ -90,7 +90,7 @@ describe('Shell Host modular runtime ownership', () => {
     })).resolves.toMatchObject({
       jsonrpc: '2.0',
       id: 'initialize',
-      result: { serverInfo: { name: 'glm-pp-shell', version: shellPackage.version } },
+      result: { serverInfo: { name: 'zai-pp-shell', version: shellPackage.version } },
     });
 
     rmSync(join(installDir, 'router.mjs'));
@@ -98,7 +98,7 @@ describe('Shell Host modular runtime ownership', () => {
   });
 
   it('reads package metadata from an installed npm package layout', async () => {
-    const tempRoot = mkdtempSync(join(tmpdir(), 'glm-pp-shell-npm-layout-'));
+    const tempRoot = mkdtempSync(join(tmpdir(), 'zai-pp-shell-npm-layout-'));
     tempRoots.push(tempRoot);
     const packDir = tempRoot;
     const installDir = join(tempRoot, 'installed');
@@ -131,7 +131,7 @@ describe('Shell Host modular runtime ownership', () => {
     expect(existsSync(hostPath)).toBe(true);
 
     await expect(callHost(hostPath, {
-      protocol: 'glm-pp-mcp-native',
+      protocol: 'zai-pp-mcp-native',
       version: 1,
       server: { id: 'npm-layout' },
       message: {
@@ -143,14 +143,14 @@ describe('Shell Host modular runtime ownership', () => {
     })).resolves.toMatchObject({
       jsonrpc: '2.0',
       id: 'initialize',
-      result: { serverInfo: { name: 'glm-pp-shell', version: installedPackage.version } },
+      result: { serverInfo: { name: 'zai-pp-shell', version: installedPackage.version } },
     });
   });
 
   it('preserves the explicit shell timeout result through the process provider', async () => {
     const command = process.platform === 'win32' ? 'Start-Sleep -Seconds 3' : 'sleep 3';
     const response = await callHost(resolve('packages/shell-host/native/shell-mcp-host.mjs'), {
-      protocol: 'glm-pp-mcp-native',
+      protocol: 'zai-pp-mcp-native',
       version: 1,
       server: { id: 'timeout-runtime' },
       message: {
@@ -175,7 +175,7 @@ describe('Shell Host modular runtime ownership', () => {
     const command = process.platform === 'win32' ? 'Start-Sleep -Milliseconds 1200' : 'sleep 1.2';
     const responses = await callHostResponses(resolve('packages/shell-host/native/shell-mcp-host.mjs'), [
       {
-        protocol: 'glm-pp-mcp-native',
+        protocol: 'zai-pp-mcp-native',
         version: 1,
         server: { id: 'concurrent-runtime' },
         message: {
@@ -186,7 +186,7 @@ describe('Shell Host modular runtime ownership', () => {
         },
       },
       {
-        protocol: 'glm-pp-mcp-native',
+        protocol: 'zai-pp-mcp-native',
         version: 1,
         server: { id: 'concurrent-runtime' },
         message: { jsonrpc: '2.0', id: 'tools', method: 'tools/list' },
@@ -237,7 +237,7 @@ describe('Shell Host modular runtime ownership', () => {
 
 function createHostEnvelope(id: string, method: string) {
   return {
-    protocol: 'glm-pp-mcp-native',
+    protocol: 'zai-pp-mcp-native',
     version: 1,
     server: { id: 'readiness-runtime' },
     message: { jsonrpc: '2.0', id, method },

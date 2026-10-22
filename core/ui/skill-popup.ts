@@ -53,14 +53,14 @@ const POPUP_WIDTH_RATIO = 0.5;
 /** 浮层高度上限（超出滚动，见样式里的 `overflow-y: auto`）。 */
 const MAX_VISIBLE_ITEMS_PX = 220;
 
-const STYLE_ID = 'dpp-skill-popup-css';
+const STYLE_ID = 'zpp-skill-popup-css';
 
-const POPUP_CLASS = 'dpp-skill-popup';
-const ITEM_CLASS = 'dpp-skill-item';
-const ACTIVE_CLASS = 'dpp-active';
-const TRIGGER_CLASS = 'dpp-skill-trigger';
-const DESC_CLASS = 'dpp-skill-desc';
-const HINT_CLASS = 'dpp-skill-hint';
+const POPUP_CLASS = 'zpp-skill-popup';
+const ITEM_CLASS = 'zpp-skill-item';
+const ACTIVE_CLASS = 'zpp-active';
+const TRIGGER_CLASS = 'zpp-skill-trigger';
+const DESC_CLASS = 'zpp-skill-desc';
+const HINT_CLASS = 'zpp-skill-hint';
 
 /**
  * 会触发浮层行为的按键。
@@ -274,9 +274,8 @@ function onKeydown(event: KeyboardEvent): void {
   if (compositionGuard.isComposing(event)) return;
 
   // ⚠️ **不可信的合成按键一律放行（不掐）**。这条是**纯防御**，当前没有已知生产者：
-  // 全仓（含 `packages/` / `scripts/`）唯一一处合成键盘事件是 `zai.content.ts` 的
-  // `dispatchEnterKey`，而它**只有定义、零调用点**（自动化发送链走的是
-  // `form.requestSubmit()` 与点 `#send-message-button` 两条路，都不经过键盘）。
+  // 全仓（含 `packages/` / `scripts/`）没有任何合成键盘事件的发送方 —— 自动化发送链
+  // 走的是 `form.requestSubmit()` 与点 `#send-message-button` 两条路，都不经过键盘。
   // 留着是挡「将来某个合成键盘事件的发送方」被我们误掐 ——
   // 补全若把别人的 Enter 吃掉，那条链会**静默失效**（表现是「点了运行、什么都没发生」）。
   // 真人按键 `isTrusted` 恒为 true，所以这条守卫只挡我们自己或页面派发的。
@@ -371,7 +370,7 @@ function rebuildItems(): void {
     row.className = index === activeIdx ? `${ITEM_CLASS} ${ACTIVE_CLASS}` : ITEM_CLASS;
 
     const head = doc().createElement('div');
-    head.className = 'dpp-skill-head';
+    head.className = 'zpp-skill-head';
     const trigger = doc().createElement('code');
     trigger.className = TRIGGER_CLASS;
     trigger.textContent = `/${item.name}`;
@@ -424,11 +423,11 @@ function isVisible(): boolean {
 /**
  * 注入浮层样式。
  *
- * ⚠️ **配色复用共享主题变量（`--dpp-ui-*`），不自带一套色板** ——
+ * ⚠️ **配色复用共享主题变量（`--zpp-ui-*`），不自带一套色板** ——
  * 页面里已有两块注入 UI 用着同一套变量，自带色板会让三处的深浅色各自漂移。
  * 变量块与主题同步在这里各调一次，**不依赖「谁先谁后」**（同
  * `core/ui/tool-result-renderer.ts` 的处理）—— 否则一旦顺序变了，
- * 所有 `var(--dpp-ui-*)` 会解析成空值（深色页面上表现为浮层整体看不见）。
+ * 所有 `var(--zpp-ui-*)` 会解析成空值（深色页面上表现为浮层整体看不见）。
  */
 function injectStyles(): void {
   injectInjectedThemeStyles();
@@ -443,11 +442,11 @@ function injectStyles(): void {
   display: none;
   box-sizing: border-box;
   padding: 4px;
-  border: 1px solid var(--dpp-ui-border);
+  border: 1px solid var(--zpp-ui-border);
   border-radius: 12px;
-  background: var(--dpp-ui-surface);
-  box-shadow: var(--dpp-ui-shadow-lg, 0 10px 28px oklch(0 0 0 / 0.2));
-  color: var(--dpp-ui-text);
+  background: var(--zpp-ui-surface);
+  box-shadow: var(--zpp-ui-shadow-lg, 0 10px 28px oklch(0 0 0 / 0.2));
+  color: var(--zpp-ui-text);
   font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI', sans-serif;
   max-height: ${MAX_VISIBLE_ITEMS_PX}px;
   overflow-y: auto;
@@ -459,9 +458,9 @@ function injectStyles(): void {
   cursor: pointer;
 }
 .${ITEM_CLASS}.${ACTIVE_CLASS} {
-  background: var(--dpp-ui-surface-muted);
+  background: var(--zpp-ui-surface-muted);
 }
-.dpp-skill-head {
+.zpp-skill-head {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -469,15 +468,15 @@ function injectStyles(): void {
 .${TRIGGER_CLASS} {
   padding: 1px 6px;
   border-radius: 4px;
-  background: var(--dpp-ui-accent-soft);
-  color: var(--dpp-ui-accent);
+  background: var(--zpp-ui-accent-soft);
+  color: var(--zpp-ui-accent);
   font-family: 'SF Mono', Monaco, Consolas, monospace;
   font-size: 13px;
   font-weight: 600;
 }
 .${DESC_CLASS} {
   margin-top: 2px;
-  color: var(--dpp-ui-text-subtle);
+  color: var(--zpp-ui-text-subtle);
   font-size: 11px;
   /* Descriptions come from user-imported SKILL.md files and have no length bound,
      so clamp them to one line — a single long description would otherwise eat the
@@ -489,8 +488,8 @@ function injectStyles(): void {
 .${HINT_CLASS} {
   margin-top: 4px;
   padding: 4px 0 2px;
-  border-top: 1px solid var(--dpp-ui-border-muted);
-  color: var(--dpp-ui-text-subtle);
+  border-top: 1px solid var(--zpp-ui-border-muted);
+  color: var(--zpp-ui-text-subtle);
   font-size: 10px;
   text-align: center;
 }

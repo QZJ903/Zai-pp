@@ -48,7 +48,7 @@ export function createWrapper(hostPath, logFile) {
 
   if (platform() === 'win32') {
     const wrapperPath = resolve(installDir, 'shell-mcp-host.bat');
-    const setLine = logFile ? `set "DPP_LOG_FILE=${logFile.replaceAll('%', '%%')}"\r\n` : '';
+    const setLine = logFile ? `set "ZPP_LOG_FILE=${logFile.replaceAll('%', '%%')}"\r\n` : '';
     const content = `@echo off\r\n${setLine}"${nodePath}" "${hostPath}" %*\r\n`;
     writeFileSync(wrapperPath, content);
     writeLogMeta(metaPath, logFile);
@@ -56,7 +56,7 @@ export function createWrapper(hostPath, logFile) {
   }
 
   const wrapperPath = resolve(installDir, 'shell-mcp-host');
-  const envPrefix = logFile ? `DPP_LOG_FILE=${escapeShellValue(logFile)} ` : '';
+  const envPrefix = logFile ? `ZPP_LOG_FILE=${escapeShellValue(logFile)} ` : '';
   const content = `#!/bin/sh\n${envPrefix}exec "${nodePath}" "${hostPath}" "$@"\n`;
   writeFileSync(wrapperPath, content, { mode: 0o755 });
   writeLogMeta(metaPath, logFile);

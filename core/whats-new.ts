@@ -21,8 +21,8 @@ export const WHATS_NEW_ITEMS: WhatsNewItem[] = [
   { id: 'project', titleKey: 'sidepanel.whatsNew.items.project' },
 ];
 
-const LAST_SEEN_VERSION_KEY = 'glm_pp_whats_new_dismissed_version';
-const PENDING_UPDATE_VERSION_KEY = 'glm_pp_whats_new_pending_version';
+const LAST_SEEN_VERSION_KEY = 'zai_pp_whats_new_dismissed_version';
+const PENDING_UPDATE_VERSION_KEY = 'zai_pp_whats_new_pending_version';
 
 export async function shouldShowWhatsNew(): Promise<boolean> {
   return (await getWhatsNewState()).visible;

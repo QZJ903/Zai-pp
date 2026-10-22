@@ -184,7 +184,7 @@ export interface ToolCallHistoryRecord {
 }
 
 export type ToolAuthorizationSurface =
-  | 'glm_content'
+  | 'zai_content'
   | 'extension_context'
   | 'background_workflow';
 

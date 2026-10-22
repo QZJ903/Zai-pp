@@ -3,7 +3,7 @@ import type {
   McpJsonRpcRequest,
 } from './types';
 
-export const MCP_NATIVE_ENVELOPE_PROTOCOL = 'glm-pp-mcp-native';
+export const MCP_NATIVE_ENVELOPE_PROTOCOL = 'zai-pp-mcp-native';
 export const MCP_NATIVE_ENVELOPE_VERSION = 1;
 
 export interface McpNativeEnvelope {

@@ -27,7 +27,7 @@ import type { LocalSkillImportResponse, LocalSkillImportResult } from '../core/t
 import type { LocalStateMutationStage } from '../core/persistence/local-state-mutation';
 import type { ToolCall, ToolResult } from '../core/types';
 
-const SKILL_STORAGE_KEY = 'glm_pp_skills';
+const SKILL_STORAGE_KEY = 'zai_pp_skills';
 
 let storage: Record<string, unknown>;
 

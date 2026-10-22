@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 
 const LOG_PREFIX = '[shell-mcp-host]';
 
-export function createHostLogger(logFile = process.env.DPP_LOG_FILE || '') {
+export function createHostLogger(logFile = process.env.ZPP_LOG_FILE || '') {
   let logWriteFailureReported = false;
 
   if (logFile) {

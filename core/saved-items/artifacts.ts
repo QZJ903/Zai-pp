@@ -44,7 +44,7 @@ export function createSavedItemsJsonArtifact(items: readonly SavedItem[]): Saved
     filename: `zai-saved-items-${new Date().toISOString().slice(0, 10)}.json`,
     mimeType: 'application/json;charset=utf-8',
     content: JSON.stringify({
-      schemaVersion: 'glm-pp.saved-items-export.v1',
+      schemaVersion: 'zai-pp.saved-items-export.v1',
       exportedAt: new Date().toISOString(),
       items,
     }, null, 2),

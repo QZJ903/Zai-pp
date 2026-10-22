@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WhatsNewPanel from '../entrypoints/sidepanel/components/WhatsNewPanel';
 import { WHATS_NEW_ITEMS } from '../core/whats-new';
 
-const LAST_SEEN_VERSION_KEY = 'glm_pp_whats_new_dismissed_version';
-const PENDING_UPDATE_VERSION_KEY = 'glm_pp_whats_new_pending_version';
+const LAST_SEEN_VERSION_KEY = 'zai_pp_whats_new_dismissed_version';
+const PENDING_UPDATE_VERSION_KEY = 'zai_pp_whats_new_pending_version';
 
 let container: HTMLDivElement;
 let root: Root | null;

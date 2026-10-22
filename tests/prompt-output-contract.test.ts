@@ -89,7 +89,7 @@ function expectUtf8Golden(relativePath: string, value: string): void {
   expect(value).not.toContain('\uFEFF');
   expect(Buffer.from(value, 'utf8').toString('utf8')).toBe(value);
 
-  if (process.env.GLM_PP_UPDATE_PROMPT_GOLDENS === '1') {
+  if (process.env.ZAI_PP_UPDATE_PROMPT_GOLDENS === '1') {
     mkdirSync(dirname(goldenPath), { recursive: true });
     writeFileSync(goldenPath, value, 'utf8');
   }
@@ -161,7 +161,7 @@ function mcpServer(
     displayName,
     enabled: true,
     transport: transportKind === 'native_messaging'
-      ? { kind: transportKind, nativeHost: 'com.glm_pp.shell' }
+      ? { kind: transportKind, nativeHost: 'com.zai_pp.shell' }
       : { kind: transportKind, url: 'https://example.test/mcp' },
     headers: [],
     secrets: [],

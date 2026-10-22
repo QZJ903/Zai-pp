@@ -176,7 +176,7 @@ describe('failure phase tolerant read-back', () => {
         status: 'active',
         schedule: { kind: 'manual', expression: null, timezone: 'UTC', enabled: false, minimumIntervalMinutes: 0 },
         promptOptions: { model: null, fixedSession: false },
-        glm: { chatSessionId: null, sessionUrl: null },
+        zai: { chatSessionId: null, sessionUrl: null },
         createdAt: 1,
         updatedAt: 1,
         lastRunAt: null,

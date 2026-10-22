@@ -74,7 +74,7 @@ describe('tool record compatibility contract', () => {
     // 所以「新增字段忘了加校验」这个变异**不会让任何用例变红**（实测：删掉那行，
     // `tsc` 与全量 1622 条用例全绿）。
     // 这一条把**类型约束**钉住：`assistantMessageId` 必须是字符串 ——
-    // 它由内容脚本从 DOM 读出、要过桥存进 `glm_pp_tool_history`，
+    // 它由内容脚本从 DOM 读出、要过桥存进 `zai_pp_tool_history`，
     // 类型不对时下游会按「有锚点」处理并拿它去比消息 id（永远不相等 ⇒ 静默不挂）。
     expect(isToolCallRecord({
       ...CONTRACT_TOOL_CALL,

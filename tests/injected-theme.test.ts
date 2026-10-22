@@ -29,8 +29,8 @@ describe('injected theme projection', () => {
 
     syncInjectedTheme();
 
-    expect(document.body.classList.contains('dpp-theme-dark')).toBe(true);
-    expect(document.body.classList.contains('dpp-theme-light')).toBe(false);
+    expect(document.body.classList.contains('zpp-theme-dark')).toBe(true);
+    expect(document.body.classList.contains('zpp-theme-light')).toBe(false);
   });
 
   it('projects a light page and clears a previously applied dark class', () => {
@@ -40,37 +40,37 @@ describe('injected theme projection', () => {
     setPageTheme('light');
     syncInjectedTheme();
 
-    expect(document.body.classList.contains('dpp-theme-light')).toBe(true);
-    expect(document.body.classList.contains('dpp-theme-dark')).toBe(false);
+    expect(document.body.classList.contains('zpp-theme-light')).toBe(true);
+    expect(document.body.classList.contains('zpp-theme-dark')).toBe(false);
   });
 
   it('clears our classes when the page declares no theme class, so the media query decides', () => {
-    // ⚠️ 「保持现状」是错的：`body.dpp-theme-dark` 与媒体查询里的
-    // `body:not(.dpp-theme-light)` 特异度相同、后者在样式表后面 —— 旧类留着会盖住兜底。
+    // ⚠️ 「保持现状」是错的：`body.zpp-theme-dark` 与媒体查询里的
+    // `body:not(.zpp-theme-light)` 特异度相同、后者在样式表后面 —— 旧类留着会盖住兜底。
     // 「页面深色 → 跟随系统且系统浅色」正好走这条路（移除 `dark` 而不加 `light`）。
     setPageTheme(null);
-    document.body.classList.add('dpp-theme-dark');
+    document.body.classList.add('zpp-theme-dark');
 
     syncInjectedTheme();
 
-    expect(document.body.classList.contains('dpp-theme-dark')).toBe(false);
-    expect(document.body.classList.contains('dpp-theme-light')).toBe(false);
+    expect(document.body.classList.contains('zpp-theme-dark')).toBe(false);
+    expect(document.body.classList.contains('zpp-theme-light')).toBe(false);
   });
 
   it('injects the variable block exactly once', () => {
     injectInjectedThemeStyles();
     injectInjectedThemeStyles();
 
-    expect(document.querySelectorAll('#dpp-injected-theme-css')).toHaveLength(1);
+    expect(document.querySelectorAll('#zpp-injected-theme-css')).toHaveLength(1);
   });
 
   it('ships both a dark class block and a prefers-color-scheme fallback', () => {
     injectInjectedThemeStyles();
-    const css = document.getElementById('dpp-injected-theme-css')!.textContent ?? '';
+    const css = document.getElementById('zpp-injected-theme-css')!.textContent ?? '';
 
-    expect(css).toContain('body.dpp-theme-dark');
+    expect(css).toContain('body.zpp-theme-dark');
     expect(css).toContain('prefers-color-scheme: dark');
-    expect(css).toContain('--dpp-ui-text');
+    expect(css).toContain('--zpp-ui-text');
   });
 
   it('is actually wired into the content script main(), not just exported', () => {

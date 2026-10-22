@@ -111,17 +111,17 @@ describe('zai continuation bubble hider', () => {
     const prompt = buildZaiContinuationPrompt('任务', [execution()], ['shell_exec']);
     const { root, elements } = fakeRoot([{ text: '普通用户消息' }, { text: prompt }]);
     expect(hideContinuationBubbles({ root })).toBe(1);
-    expect(elements[1]!.attrs.get('data-dpp-hidden-continuation')).toBe('true');
+    expect(elements[1]!.attrs.get('data-zpp-hidden-continuation')).toBe('true');
     expect(elements[1]!.style.props.get('display')).toBe('none|important');
     // 普通消息不受影响。
-    expect(elements[0]!.attrs.get('data-dpp-hidden-continuation')).toBeUndefined();
+    expect(elements[0]!.attrs.get('data-zpp-hidden-continuation')).toBeUndefined();
   });
 
   it('hides the nudge bubble too', () => {
     const prompt = buildZaiNudgePrompt('任务', '正文', [execution()], 1, ['shell_exec']);
     const { root, elements } = fakeRoot([{ text: prompt }]);
     expect(hideContinuationBubbles({ root })).toBe(1);
-    expect(elements[0]!.attrs.get('data-dpp-hidden-continuation')).toBe('true');
+    expect(elements[0]!.attrs.get('data-zpp-hidden-continuation')).toBe('true');
   });
 
   it('hides a very long template bubble (no length guard)', () => {
@@ -154,7 +154,7 @@ describe('zai continuation bubble hider', () => {
     expect(huge.length).toBeGreaterThan(20_000);
     const { root, elements } = fakeRoot([{ text: huge }]);
     expect(hideContinuationBubbles({ root })).toBe(1);
-    expect(elements[0]!.attrs.get('data-dpp-hidden-continuation')).toBe('true');
+    expect(elements[0]!.attrs.get('data-zpp-hidden-continuation')).toBe('true');
   });
 
   it('hides the placeholder bubble left behind by a history refetch', () => {
@@ -167,8 +167,8 @@ describe('zai continuation bubble hider', () => {
     const refetched = `${ZAI_CONTINUATION_PLACEHOLDER}${' '.repeat(14)}`;
     const { root, elements } = fakeRoot([{ text: '普通用户消息' }, { text: refetched }]);
     expect(hideContinuationBubbles({ root })).toBe(1);
-    expect(elements[1]!.attrs.get('data-dpp-hidden-continuation')).toBe('true');
-    expect(elements[0]!.attrs.get('data-dpp-hidden-continuation')).toBeUndefined();
+    expect(elements[1]!.attrs.get('data-zpp-hidden-continuation')).toBe('true');
+    expect(elements[0]!.attrs.get('data-zpp-hidden-continuation')).toBeUndefined();
   });
 
   it('still hides the placeholder bubble when the page chrome is not plain whitespace', () => {
@@ -183,7 +183,7 @@ describe('zai continuation bubble hider', () => {
 
     const { root, elements } = fakeRoot([{ text: withVisibleChrome }]);
     expect(hideContinuationBubbles({ root })).toBe(1);
-    expect(elements[0]!.attrs.get('data-dpp-hidden-continuation')).toBe('true');
+    expect(elements[0]!.attrs.get('data-zpp-hidden-continuation')).toBe('true');
   });
 
   it('does not hide an ordinary short message', () => {
@@ -194,7 +194,7 @@ describe('zai continuation bubble hider', () => {
       { text: '在沙箱写一个简单html文件，再放到桌面上' },
     ]);
     expect(hideContinuationBubbles({ root })).toBe(0);
-    expect(elements.every((el) => el.attrs.get('data-dpp-hidden-continuation') === undefined)).toBe(true);
+    expect(elements.every((el) => el.attrs.get('data-zpp-hidden-continuation') === undefined)).toBe(true);
   });
 
   it('is idempotent (a second scan hides nothing)', () => {
@@ -208,7 +208,7 @@ describe('zai continuation bubble hider', () => {
     // ⚠️ 性能相关：每次扫描都要对候选跑 `textContent`（O(消息长度)），
     // 而扫描是每帧合流触发的。已隐藏的条目必须在读文本**之前**跳过。
     const prompt = buildZaiContinuationPrompt('任务', [execution()], ['shell_exec']);
-    const { root, elements } = fakeRoot([{ text: prompt, attrs: { 'data-dpp-hidden-continuation': 'true' } }]);
+    const { root, elements } = fakeRoot([{ text: prompt, attrs: { 'data-zpp-hidden-continuation': 'true' } }]);
     // 把 textContent 换成 getter：被读就抛 —— 用来证明它真的没被读。
     let read = false;
     Object.defineProperty(elements[0]!, 'textContent', {
@@ -277,9 +277,9 @@ describe('zai continuation bubble hider', () => {
     try {
       uninstall = installContinuationBubbleHider({ onHidden: (count) => hiddenCounts.push(count) });
       // 立刻那一次是排进 rAF 的，不是同步执行。
-      expect(bubble.getAttribute('data-dpp-hidden-continuation')).toBeNull();
+      expect(bubble.getAttribute('data-zpp-hidden-continuation')).toBeNull();
       for (const frame of frames.splice(0)) frame();
-      expect(bubble.getAttribute('data-dpp-hidden-continuation')).toBe('true');
+      expect(bubble.getAttribute('data-zpp-hidden-continuation')).toBe('true');
       expect(bubble.style.getPropertyValue('display')).toBe('none');
       expect(hiddenCounts).toEqual([1]);
     } finally {
@@ -317,7 +317,7 @@ describe('zai continuation bubble hider', () => {
       // ⚠️ MutationObserver 的回调是**微任务**，要等一拍。
       return Promise.resolve().then(() => {
         for (const frame of frames.splice(0)) frame();
-        expect(bubble.getAttribute('data-dpp-hidden-continuation')).toBe('true');
+        expect(bubble.getAttribute('data-zpp-hidden-continuation')).toBe('true');
       }).finally(() => {
         uninstall?.();
         globalThis.requestAnimationFrame = originalRaf;

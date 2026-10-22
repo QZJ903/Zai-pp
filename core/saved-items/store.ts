@@ -11,7 +11,7 @@ import {
 } from '../persistence/versioned-repository';
 import { createEmptySavedItemsState, savedItemsCodec } from './codec';
 
-export const SAVED_ITEMS_STORAGE_KEY = 'glm_pp_saved_items';
+export const SAVED_ITEMS_STORAGE_KEY = 'zai_pp_saved_items';
 
 const savedItemsRepository = createVersionedRepository({
   label: 'savedItems',

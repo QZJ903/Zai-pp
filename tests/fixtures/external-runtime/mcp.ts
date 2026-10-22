@@ -2,7 +2,7 @@ export const MCP_PROTOCOL_CONTRACT = {
   requestVersion: '2025-06-18',
   supportedVersions: ['2024-11-05', '2025-03-26', '2025-06-18'],
   clientCapabilities: {},
-  nativeEnvelopeProtocol: 'glm-pp-mcp-native',
+  nativeEnvelopeProtocol: 'zai-pp-mcp-native',
   nativeEnvelopeVersion: 1,
   transportKinds: ['http', 'sse', 'streamable_http', 'stdio_bridge', 'native_messaging'],
   handshakeMethods: ['initialize', 'notifications/initialized', 'tools/list'],
@@ -71,7 +71,7 @@ export const MCP_PROTOCOL_NEGOTIATION_FIXTURES = [
 ] as const;
 
 export const MCP_NATIVE_ENVELOPE_FIXTURE = {
-  protocol: 'glm-pp-mcp-native',
+  protocol: 'zai-pp-mcp-native',
   version: 1,
   server: {
     id: 'native-contract',

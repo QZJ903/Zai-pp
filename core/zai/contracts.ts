@@ -1,7 +1,6 @@
 /**
- * GLM++ (glm-plus-plus → z.ai) 协议常量。
+ * Zai++ (zai-plus-plus → z.ai) 协议常量。
  *
- * 这些常量是把 glm-pp 骨架对接到 z.ai 的「协议翻译层」的地基：
  * 站点定义、路由、签名密钥、时间窗、SSE envelope/phase 命名，以及 agent 模式的
  * 标志位。所有值均来自真机抓包。
  */
@@ -157,6 +156,11 @@ export type ZaiHistoryWebRoute = (typeof ZAI_HISTORY_WEB_ROUTES)[number];
 /**
  * 签名密钥（intl-sign.js == zai.go，测试向量已交叉验证）。
  * 第二层 HMAC 的 key 是 wKey 的 hex 字符串本身（UTF-8 字节），不是解码字节。
+ *
+ * ⚠️ **它不是本项目的凭据** —— 这个值是站点前端硬编码的常量，公开的参照实现里
+ * 同值（zhipu-ai-proxy 的 `intl-sign.js`、GLM-Free-API 的 `zai.go`）。
+ * 它随扩展下发给页面是**架构必然**：签名发生在页面主世界（`fetch-hook` 要给页面
+ * 自己发出的请求补 `X-Signature`），任何在浏览器内代签的方案都避不开。
  */
 export const ZAI_SIGNATURE_SECRET = 'key-@@@@)))()((9))-xxxx&&&%%%%%';
 
@@ -205,7 +209,7 @@ export const ZAI_MSG_SOURCE = 'zai-pp';
  * 也写 `data-active`）。**那个用途已随模式判定一起删掉**（站点只剩 agent，
  * 见 `core/zai/mode.ts`）—— 但属性本身仍承重，**不能删**。
  */
-export const ZAI_PROJECT_PANEL_ATTR = 'data-dpp-project-panel';
+export const ZAI_PROJECT_PANEL_ATTR = 'data-zpp-project-panel';
 
 /**
  * 内容脚本用 `DOM_TASK_FAILED` 回传「用户主动停止」时带的错误码。

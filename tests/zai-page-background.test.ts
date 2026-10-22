@@ -60,21 +60,21 @@ describe('zai page background', () => {
     mountZaiShell();
     applyBackground(config());
 
-    const bg = document.getElementById('dpp-bg');
+    const bg = document.getElementById('zpp-bg');
     expect(bg).not.toBeNull();
     expect(bg!.style.position).toBe('fixed');
     expect(bg!.style.zIndex).toBe('-1');
     expect(bg!.style.backgroundImage).toContain(IMAGE_DATA);
 
-    expect(document.body.classList.contains('dpp-bg-active')).toBe(true);
+    expect(document.body.classList.contains('zpp-bg-active')).toBe(true);
     expect(isBackgroundActive()).toBe(true);
 
-    const style = document.getElementById('dpp-bg-style');
-    expect(style?.textContent).toContain('html.dark #dpp-bg::after');
+    const style = document.getElementById('zpp-bg-style');
+    expect(style?.textContent).toContain('html.dark #zpp-bg::after');
     // 遮罩透明度 = 1 - opacity，模糊 = (1 - opacity) * 8
-    expect(document.body.style.getPropertyValue('--dpp-overlay-light'))
+    expect(document.body.style.getPropertyValue('--zpp-overlay-light'))
       .toBe('rgba(255, 255, 255, 0.700)');
-    expect(document.body.style.getPropertyValue('--dpp-blur')).toBe('blur(5.6px)');
+    expect(document.body.style.getPropertyValue('--zpp-blur')).toBe('blur(5.6px)');
   });
 
   it('marks the container chain above the composer as transparent', () => {
@@ -82,7 +82,7 @@ describe('zai page background', () => {
     applyBackground(config());
 
     // 输入框外壳之上那条链里有可见背景的容器都该被标透明（#page 是代表）
-    const marked = Array.from(document.querySelectorAll('[data-dpp-transparent]'));
+    const marked = Array.from(document.querySelectorAll('[data-zpp-transparent]'));
     expect(marked.length).toBeGreaterThan(0);
     expect(marked.map((el) => el.id)).toContain('page');
   });
@@ -95,7 +95,7 @@ describe('zai page background', () => {
       imageData: '',
     }));
 
-    const bg = document.getElementById('dpp-bg')!;
+    const bg = document.getElementById('zpp-bg')!;
     expect(bg.style.backgroundImage).toContain('https://example.com/a');
     // 引号与括号被转义，URL 不会被提前截断
     expect(bg.style.backgroundImage).toContain('\\"');
@@ -104,15 +104,15 @@ describe('zai page background', () => {
   it('cleans every trace when the config is disabled or empty', () => {
     mountZaiShell();
     applyBackground(config());
-    expect(document.getElementById('dpp-bg')).not.toBeNull();
+    expect(document.getElementById('zpp-bg')).not.toBeNull();
 
     applyBackground(config({ enabled: false }));
 
-    expect(document.getElementById('dpp-bg')).toBeNull();
-    expect(document.getElementById('dpp-bg-style')).toBeNull();
-    expect(document.body.classList.contains('dpp-bg-active')).toBe(false);
-    expect(document.body.style.getPropertyValue('--dpp-blur')).toBe('');
-    expect(document.querySelectorAll('[data-dpp-transparent]').length).toBe(0);
+    expect(document.getElementById('zpp-bg')).toBeNull();
+    expect(document.getElementById('zpp-bg-style')).toBeNull();
+    expect(document.body.classList.contains('zpp-bg-active')).toBe(false);
+    expect(document.body.style.getPropertyValue('--zpp-blur')).toBe('');
+    expect(document.querySelectorAll('[data-zpp-transparent]').length).toBe(0);
     expect(isBackgroundActive()).toBe(false);
   });
 
@@ -120,7 +120,7 @@ describe('zai page background', () => {
     mountZaiShell();
     applyBackground(config());
     applyBackground(null);
-    expect(document.getElementById('dpp-bg')).toBeNull();
+    expect(document.getElementById('zpp-bg')).toBeNull();
   });
 
   it('does nothing when the composer is absent', () => {
@@ -131,8 +131,8 @@ describe('zai page background', () => {
 
     expect(() => applyBackground(config())).not.toThrow();
     // 图片层仍然注入（用户开了背景），只是没有可标透明的容器链
-    expect(document.getElementById('dpp-bg')).not.toBeNull();
-    expect(document.querySelectorAll('[data-dpp-transparent]').length).toBe(0);
+    expect(document.getElementById('zpp-bg')).not.toBeNull();
+    expect(document.querySelectorAll('[data-zpp-transparent]').length).toBe(0);
   });
 
   it('re-applies in place instead of stacking duplicate layers', () => {
@@ -140,9 +140,9 @@ describe('zai page background', () => {
     applyBackground(config());
     applyBackground(config({ opacity: 0.8 }));
 
-    expect(document.querySelectorAll('#dpp-bg').length).toBe(1);
-    expect(document.querySelectorAll('#dpp-bg-style').length).toBe(1);
-    expect(document.body.style.getPropertyValue('--dpp-overlay-light'))
+    expect(document.querySelectorAll('#zpp-bg').length).toBe(1);
+    expect(document.querySelectorAll('#zpp-bg-style').length).toBe(1);
+    expect(document.body.style.getPropertyValue('--zpp-overlay-light'))
       .toBe('rgba(255, 255, 255, 0.200)');
   });
 });

@@ -16,7 +16,7 @@ import {
   TOOL_TRANSPORT_KINDS,
 } from './types';
 
-export const TOOL_AUTHORIZATION_STORAGE_KEY = 'glm_pp_tool_authorizations';
+export const TOOL_AUTHORIZATION_STORAGE_KEY = 'zai_pp_tool_authorizations';
 const TOOL_AUTHORIZATION_STATE_VERSION = 1 as const;
 export const TOOL_AUTHORIZATION_TTL_MS = 30 * 60_000;
 const MAX_ACTIVE_GRANTS = 32;
@@ -792,7 +792,7 @@ function isStoredSubject(value: unknown): value is ToolAuthorizationSubject {
   const subject = value as Partial<ToolAuthorizationSubject>;
   return hasOnlyKeys(value, ['surface', 'documentSessionId', 'tabId', 'frameId', 'chatSessionId']) &&
     (
-    subject.surface === 'glm_content' ||
+    subject.surface === 'zai_content' ||
     subject.surface === 'extension_context' ||
     subject.surface === 'background_workflow'
   ) &&

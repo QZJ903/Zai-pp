@@ -15,7 +15,7 @@ export interface PromptAugmentationOptions {
   memories?: readonly Memory[];
   identityOnly?: boolean;
   visibleUserPrompt?: string;
-  /** @deprecated glm 遗留字段，z.ai 不使用也不参与任何逻辑（systemThinking 切换已移除）。 */
+  /** @deprecated 上游遗留字段，z.ai 不使用也不参与任何逻辑。 */
   thinkingEnabled?: boolean;
   // System context for local indexed skills ("activation instruction + index"): injected into the
   // system-instruction region (like the ## Tools section), fixing the issue where implicit matches were

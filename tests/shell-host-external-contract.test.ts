@@ -137,11 +137,11 @@ describe('Shell Native Host external contract', () => {
     await expect(callHost(futureEnvelope)).resolves.toEqual({
       jsonrpc: '2.0',
       id: null,
-      error: { code: -32600, message: 'Invalid envelope: expected glm-pp-mcp-native v1' },
+      error: { code: -32600, message: 'Invalid envelope: expected zai-pp-mcp-native v1' },
     });
 
     await expect(callHost({
-      protocol: 'glm-pp-mcp-native',
+      protocol: 'zai-pp-mcp-native',
       version: 1,
       server: { id: 'contract' },
       message: { jsonrpc: '1.0', id: 'bad', method: 'initialize' },
@@ -196,7 +196,7 @@ describe('Shell Host installer external contract', () => {
       expect(createNativeHostManifest({ browser, extensionId: 'extension-contract' }, wrapperPath))
         .toEqual({
           name: SHELL_HOST_CONTRACT.nativeHost,
-          description: 'GLM++ Shell MCP - General purpose shell execution via Native Messaging',
+          description: 'Zai++ Shell MCP - General purpose shell execution via Native Messaging',
           path: wrapperPath,
           type: 'stdio',
           allowed_origins: ['chrome-extension://extension-contract/'],
@@ -224,7 +224,7 @@ describe('Shell Host installer external contract', () => {
 
 function nativeEnvelope(method: string, params: unknown, id: string) {
   return {
-    protocol: 'glm-pp-mcp-native',
+    protocol: 'zai-pp-mcp-native',
     version: 1,
     server: { id: 'contract-shell' },
     message: {

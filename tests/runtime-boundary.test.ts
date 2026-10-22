@@ -8,8 +8,8 @@ import {
   createRuntimeBoundaryErrorResponse,
   createRuntimeMessageContext,
   decodeRuntimeMessageEnvelope,
-  GLM_CONTENT_RUNTIME_COMMANDS,
-  refreshGLMContentRuntimeContext,
+  ZAI_CONTENT_RUNTIME_COMMANDS,
+  refreshZaiContentRuntimeContext,
   RUNTIME_BOUNDARY_ERROR_CODES,
   type RuntimeMessageSenderLike,
 } from '../core/messaging/runtime-boundary';
@@ -18,7 +18,7 @@ import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-sourc
 const POLICY = {
   runtimeId: 'runtime-contract',
   extensionOrigin: 'chrome-extension://runtime-contract/',
-  glmOrigin: 'https://chat.z.ai',
+  zaiOrigin: 'https://chat.z.ai',
 } as const;
 
 const EXTENSION_SENDER: RuntimeMessageSenderLike = {
@@ -29,7 +29,7 @@ const EXTENSION_SENDER: RuntimeMessageSenderLike = {
   documentLifecycle: 'active',
 };
 
-const GLM_SENDER: RuntimeMessageSenderLike = {
+const ZAI_SENDER: RuntimeMessageSenderLike = {
   id: POLICY.runtimeId,
   url: 'https://chat.z.ai/c/session-contract',
   origin: 'https://chat.z.ai',
@@ -58,7 +58,7 @@ describe('runtime sender and envelope boundary', () => {
     });
     expect(createExtensionRuntimeMessageContext(EXTENSION_SENDER, POLICY).surface)
       .toBe('extension_context');
-    expect(() => createExtensionRuntimeMessageContext(GLM_SENDER, POLICY))
+    expect(() => createExtensionRuntimeMessageContext(ZAI_SENDER, POLICY))
       .toThrow('not an extension context');
     expect(() => createExtensionRuntimeMessageContext(EXTENSION_SENDER, {
       ...POLICY,
@@ -75,10 +75,10 @@ describe('runtime sender and envelope boundary', () => {
     }).senderUrl).toBe('moz-extension://runtime-contract/_generated_background_page.html');
   });
 
-  it('preserves a legal GLM top-frame sender and derives its route session', () => {
-    expect(createRuntimeMessageContext(GLM_SENDER, POLICY)).toEqual({
+  it('preserves a legal top-frame sender and derives its route session', () => {
+    expect(createRuntimeMessageContext(ZAI_SENDER, POLICY)).toEqual({
       runtimeId: POLICY.runtimeId,
-      surface: 'glm_content',
+      surface: 'zai_content',
       senderUrl: 'https://chat.z.ai/c/session-contract',
       senderOrigin: 'https://chat.z.ai',
       tabId: 17,
@@ -91,9 +91,9 @@ describe('runtime sender and envelope boundary', () => {
     });
   });
 
-  it('uses the browser-owned current tab route across a same-origin GLM SPA navigation', () => {
+  it('uses the browser-owned current tab route across a same-origin SPA navigation', () => {
     const context = createRuntimeMessageContext({
-      ...GLM_SENDER,
+      ...ZAI_SENDER,
       url: 'https://chat.z.ai/',
       tab: {
         id: 17,
@@ -102,7 +102,7 @@ describe('runtime sender and envelope boundary', () => {
     }, POLICY);
 
     expect(context).toMatchObject({
-      surface: 'glm_content',
+      surface: 'zai_content',
       senderUrl: 'https://chat.z.ai/',
       tabUrl: 'https://chat.z.ai/c/new-session',
       documentSessionId: 'zai-document-1',
@@ -112,7 +112,7 @@ describe('runtime sender and envelope boundary', () => {
 
   it('refreshes a stale sender tab snapshot from the current browser tab before grant binding', () => {
     const staleContext = createRuntimeMessageContext({
-      ...GLM_SENDER,
+      ...ZAI_SENDER,
       url: 'https://chat.z.ai/',
       tab: {
         id: 17,
@@ -120,7 +120,7 @@ describe('runtime sender and envelope boundary', () => {
       },
     }, POLICY);
 
-    const context = refreshGLMContentRuntimeContext(staleContext, {
+    const context = refreshZaiContentRuntimeContext(staleContext, {
       id: 17,
       url: 'https://chat.z.ai/c/live-session',
     }, POLICY);
@@ -138,15 +138,15 @@ describe('runtime sender and envelope boundary', () => {
     ['another origin', { id: 17, url: 'https://example.test/c/live-session' }],
     ['missing URL', { id: 17 }],
   ])('rejects a refreshed browser tab from %s', (_name, tab) => {
-    const context = createRuntimeMessageContext(GLM_SENDER, POLICY);
-    expect(() => refreshGLMContentRuntimeContext(context, tab, POLICY)).toThrow();
+    const context = createRuntimeMessageContext(ZAI_SENDER, POLICY);
+    expect(() => refreshZaiContentRuntimeContext(context, tab, POLICY)).toThrow();
   });
 
   it('accepts a missing frameId only with matching top-level tab evidence', () => {
-    const context = createRuntimeMessageContext({ ...GLM_SENDER, frameId: undefined }, POLICY);
+    const context = createRuntimeMessageContext({ ...ZAI_SENDER, frameId: undefined }, POLICY);
     expect(context.frameId).toBe(0);
     expect(() => createRuntimeMessageContext({
-      ...GLM_SENDER,
+      ...ZAI_SENDER,
       frameId: undefined,
       tab: { id: 17 },
     }, POLICY)).toThrow('no top-level frame evidence');
@@ -160,8 +160,8 @@ describe('runtime sender and envelope boundary', () => {
     ['invalid document id', { ...EXTENSION_SENDER, documentId: '' }],
     ['invalid extension tab id', { ...EXTENSION_SENDER, tab: { id: -1 } }],
     ['web origin', { ...EXTENSION_SENDER, url: 'https://example.test/sidepanel.html', origin: 'https://example.test' }],
-    ['GLM child frame', { ...GLM_SENDER, frameId: 2 }],
-    ['GLM non-GLM tab', { ...GLM_SENDER, tab: { id: 17, url: 'https://example.test/a/chat/s/other' } }],
+    ['child frame', { ...ZAI_SENDER, frameId: 2 }],
+    ['non-z.ai tab', { ...ZAI_SENDER, tab: { id: 17, url: 'https://example.test/a/chat/s/other' } }],
   ] as const)('rejects unauthorized sender context: %s', (_name, sender) => {
     expect(() => createRuntimeMessageContext(sender, POLICY)).toThrow();
   });
@@ -181,25 +181,25 @@ describe('runtime sender and envelope boundary', () => {
 
   it('authorizes only the frozen content command surface before routing', () => {
     const extensionContext = createRuntimeMessageContext(EXTENSION_SENDER, POLICY);
-    const contentContext = createRuntimeMessageContext(GLM_SENDER, POLICY);
-    expect(GLM_CONTENT_RUNTIME_COMMANDS.size).toBe(23);
+    const contentContext = createRuntimeMessageContext(ZAI_SENDER, POLICY);
+    expect(ZAI_CONTENT_RUNTIME_COMMANDS.size).toBe(23);
     expect(() => authorizeRuntimeMessage({ type: 'GET_MEMORIES' }, contentContext)).not.toThrow();
     expect(() => authorizeRuntimeMessage({ type: 'GET_SYNC_CONFIG' }, contentContext))
-      .toThrow('not authorized for GLM content');
+      .toThrow('not authorized for content runtime');
     expect(() => authorizeRuntimeMessage({ type: 'GET_SYNC_CONFIG' }, extensionContext)).not.toThrow();
   });
 
-  it('matches the exact command literals emitted by GLM content producers', () => {
+  it('matches the exact command literals emitted by content producers', () => {
     const producerFiles = [
       'entrypoints/zai.content.ts',
     ];
     const produced = new Set(producerFiles.flatMap(extractContentRuntimeCommands));
 
-    expect([...produced].sort()).toEqual([...GLM_CONTENT_RUNTIME_COMMANDS].sort());
+    expect([...produced].sort()).toEqual([...ZAI_CONTENT_RUNTIME_COMMANDS].sort());
   });
 
   it('returns a non-retryable ToolResult-shaped boundary rejection for execution commands', () => {
-    const context = createRuntimeMessageContext(GLM_SENDER, POLICY);
+    const context = createRuntimeMessageContext(ZAI_SENDER, POLICY);
     let error: unknown;
     try {
       authorizeRuntimeMessage({ type: 'GET_SYNC_CONFIG' }, context);
@@ -209,10 +209,10 @@ describe('runtime sender and envelope boundary', () => {
     expect(createRuntimeBoundaryErrorResponse(error, { type: 'EXECUTE_TOOL_CALL' })).toEqual({
       ok: false,
       summary: 'Runtime request rejected',
-      detail: 'Runtime command GET_SYNC_CONFIG is not authorized for GLM content.',
+      detail: 'Runtime command GET_SYNC_CONFIG is not authorized for content runtime.',
       error: {
         code: RUNTIME_BOUNDARY_ERROR_CODES.unauthorizedSender,
-        message: 'Runtime command GET_SYNC_CONFIG is not authorized for GLM content.',
+        message: 'Runtime command GET_SYNC_CONFIG is not authorized for content runtime.',
         retryable: false,
       },
     });
@@ -268,7 +268,7 @@ describe('runtime sender and envelope boundary', () => {
     })).toThrow('path is not authorized');
 
     // 内容脚本自己（网页来源）也不是后台 ⇒ 必须拒。
-    expect(() => createExtensionRuntimeMessageContext(GLM_SENDER, {
+    expect(() => createExtensionRuntimeMessageContext(ZAI_SENDER, {
       runtimeId: POLICY.runtimeId,
       extensionOrigin: POLICY.extensionOrigin,
       allowedPathnames: BACKGROUND_RUNTIME_PATHNAMES,

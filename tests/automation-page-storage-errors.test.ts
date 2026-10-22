@@ -9,7 +9,7 @@ import AutomationPage from '../entrypoints/sidepanel/pages/AutomationPage';
  * 保留最后一次已确认列表，广播是**失效信号**而不是权威数据，过期重载要丢弃。
  *
  * 从上游 `automation-page-storage-errors.test.ts` 移植，改动集中在 fixture：
- *  - `deepseek: {...}` → `glm: {...}`（本项目是 `AutomationGLMSession`）
+ *  - 会话块改名为 `zai: {...}`（本项目是 `AutomationZaiSession`）
  *  - `promptOptions: { modelType, thinkingEnabled, refFileIds }` →
  *    `{ model, fixedSession }`
  *  - mock 里补 `GET_ZAI_MODELS`（本项目页面挂载时会拉模型清单，上游没有这一步）
@@ -162,7 +162,7 @@ const automation: Automation = {
     model: null,
     fixedSession: false,
   },
-  glm: {
+  zai: {
     chatSessionId: null,
     sessionUrl: null,
     siteOrigin: null,

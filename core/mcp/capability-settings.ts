@@ -8,7 +8,7 @@ import {
   type McpCapabilitySettingsPatch,
 } from './capability-types';
 
-export const MCP_CAPABILITY_SETTINGS_STORAGE_KEY = 'glm_pp_mcp_capability_settings';
+export const MCP_CAPABILITY_SETTINGS_STORAGE_KEY = 'zai_pp_mcp_capability_settings';
 
 export const DEFAULT_MCP_CAPABILITY_SETTINGS: McpCapabilitySettings = Object.freeze({
   version: MCP_CAPABILITY_SETTINGS_VERSION,

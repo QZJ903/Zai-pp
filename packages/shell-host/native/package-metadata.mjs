@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SHELL_HOST_PACKAGE_NAME = 'glm-pp-shell-host';
+const SHELL_HOST_PACKAGE_NAME = 'zai-pp-shell-host';
 
 export function readShellHostPackageMetadata(moduleUrl = import.meta.url) {
   const runtimeDir = dirname(fileURLToPath(moduleUrl));

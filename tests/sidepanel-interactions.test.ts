@@ -68,7 +68,7 @@ describe('sidepanel interactions', () => {
     expect(inputByPlaceholder('标题').value).toBe('');
   });
 
-  it('requests insertion into the active GLM chat when a saved item is clicked', async () => {
+  it('requests insertion into the active chat when a saved item is clicked', async () => {
     const sendMessage = vi.fn(async (message: { type: string; payload?: unknown }) => {
       if (message.type === 'GET_SAVED_ITEMS') {
         return [{
@@ -98,7 +98,7 @@ describe('sidepanel interactions', () => {
     expect(container.textContent).toContain('已插入当前 Zai 对话');
   });
 
-  it('shows insertion failures from the active GLM chat route', async () => {
+  it('shows insertion failures from the active chat route', async () => {
     const sendMessage = vi.fn(async (message: { type: string; payload?: unknown }) => {
       if (message.type === 'GET_SAVED_ITEMS') {
         return [{

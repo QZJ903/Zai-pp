@@ -11,9 +11,9 @@ const distDir = resolve(root, 'dist');
 const failures = [];
 const extensionZips = ['chrome', 'edge'].map((browser) => ({
   browser,
-  path: resolve(distDir, `glm-plus-plus-${version}-${browser}.zip`),
+  path: resolve(distDir, `zai-plus-plus-${version}-${browser}.zip`),
 }));
-const sourceZip = resolve(distDir, `glm-plus-plus-${version}-sources.zip`);
+const sourceZip = resolve(distDir, `zai-plus-plus-${version}-sources.zip`);
 
 for (const zip of extensionZips) {
   assertFile(zip.path, `${zip.browser} zip`);

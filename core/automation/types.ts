@@ -60,7 +60,7 @@ export interface AutomationPromptOptions {
   fixedSession: boolean;
 }
 
-export interface AutomationGLMSession {
+export interface AutomationZaiSession {
   chatSessionId: string | null;
   sessionUrl: string | null;
   /**
@@ -94,7 +94,7 @@ export interface Automation {
   status: AutomationStatus;
   schedule: AutomationSchedule;
   promptOptions: AutomationPromptOptions;
-  glm: AutomationGLMSession;
+  zai: AutomationZaiSession;
   createdAt: number;
   updatedAt: number;
   lastRunAt: number | null;
@@ -110,7 +110,7 @@ export type AutomationUpdateInput = Partial<
 >;
 
 export type AutomationRuntimeUpdate = Partial<
-  Pick<Automation, 'glm' | 'lastRunAt' | 'nextRunAt' | 'lastError' | 'status'>
+  Pick<Automation, 'zai' | 'lastRunAt' | 'nextRunAt' | 'lastError' | 'status'>
 >;
 
 export interface AutomationRunnerRequest {

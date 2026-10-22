@@ -1,6 +1,6 @@
 import type { ToolProviderIdentity } from '../tool/types';
 
-export const BROWSER_CONTROL_STORAGE_KEY = 'glm_pp_browser_control_settings';
+export const BROWSER_CONTROL_STORAGE_KEY = 'zai_pp_browser_control_settings';
 
 export const BROWSER_CONTROL_TOOL_PROVIDER_ID = 'browser_control';
 

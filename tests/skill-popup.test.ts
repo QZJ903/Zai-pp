@@ -15,7 +15,7 @@ import { resolveZaiComposerInput, resolveZaiComposerShell } from '../core/zai/co
  * 所以这里既验了模块本身，也顺带验了「生产注入的那几个实现」确实能满足它的契约。
  */
 
-const STYLE_ID = 'dpp-skill-popup-css';
+const STYLE_ID = 'zpp-skill-popup-css';
 
 /** 造一个「像 z.ai 输入区」的 DOM：外壳（圆角+背景）> 裁切层 > textarea。 */
 function buildComposer(): HTMLTextAreaElement {
@@ -66,7 +66,7 @@ function typeInto(textarea: HTMLTextAreaElement, value: string): void {
 
 /** 当前浮层的 `display` —— 可直接断言的字符串（'' 表示可见：样式表在 jsdom 里不生效）。 */
 function popupDisplay(): string {
-  return document.querySelector<HTMLElement>('.dpp-skill-popup')!.style.display;
+  return document.querySelector<HTMLElement>('.zpp-skill-popup')!.style.display;
 }
 
 /**
@@ -77,7 +77,7 @@ function popupDisplay(): string {
  * 只断言后者会把「一直不显示」误判成失败。
  */
 function popupVisible(): boolean {
-  const popup = document.querySelector<HTMLElement>('.dpp-skill-popup');
+  const popup = document.querySelector<HTMLElement>('.zpp-skill-popup');
   return popup !== null && popup.style.display !== 'none';
 }
 
@@ -145,7 +145,7 @@ describe('skill popup lifecycle', () => {
     expect(removeListener.mock.calls.filter(([type]) => type === 'keydown')).toHaveLength(1);
     expect(removeListener.mock.calls.filter(([type]) => type === 'mousedown')).toHaveLength(1);
     expect(disconnect).toHaveBeenCalledOnce();
-    expect(document.querySelector('.dpp-skill-popup')).toBeNull();
+    expect(document.querySelector('.zpp-skill-popup')).toBeNull();
     expect(document.getElementById(STYLE_ID)).toBeNull();
   });
 
@@ -155,13 +155,13 @@ describe('skill popup lifecycle', () => {
 
     initSkillPopup(SKILLS, {}, deps);
     typeInto(textarea, '/');
-    expect(document.querySelector('.dpp-skill-popup')).not.toBeNull();
+    expect(document.querySelector('.zpp-skill-popup')).not.toBeNull();
 
     stopSkillPopup();
     initSkillPopup([{ name: 'test', description: 'Run tests' }], {}, deps);
     typeInto(textarea, '/t');
 
-    expect(document.querySelector('.dpp-skill-trigger')?.textContent).toBe('/test');
+    expect(document.querySelector('.zpp-skill-trigger')?.textContent).toBe('/test');
   });
 
   it('refreshes the rendered list on every call, including while it is open', () => {
@@ -175,7 +175,7 @@ describe('skill popup lifecycle', () => {
     expect(popupVisible()).toBe(true);
 
     initSkillPopup([{ name: 'zzz', description: 'later' }], {}, deps);
-    const names = [...document.querySelectorAll('.dpp-skill-trigger')].map((el) => el.textContent);
+    const names = [...document.querySelectorAll('.zpp-skill-trigger')].map((el) => el.textContent);
 
     expect(names).toEqual(['/zzz']);
   });
@@ -187,7 +187,7 @@ describe('skill popup filtering and selection', () => {
     initSkillPopup(SKILLS, {}, productionDeps().deps);
 
     typeInto(textarea, '/re');
-    expect([...document.querySelectorAll('.dpp-skill-trigger')].map((el) => el.textContent))
+    expect([...document.querySelectorAll('.zpp-skill-trigger')].map((el) => el.textContent))
       .toEqual(['/review']);
   });
 
@@ -259,7 +259,7 @@ describe('skill popup filtering and selection', () => {
     );
 
     typeInto(textarea, '/');
-    const description = document.querySelector('.dpp-skill-desc')!;
+    const description = document.querySelector('.zpp-skill-desc')!;
 
     expect(description.textContent).toBe('<img src=x onerror="boom()">');
     expect(description.querySelector('img')).toBeNull();
@@ -357,7 +357,7 @@ describe('skill popup anchoring', () => {
     initSkillPopup(SKILLS, {}, productionDeps().deps);
 
     typeInto(textarea, '/');
-    const popup = document.querySelector<HTMLElement>('.dpp-skill-popup')!;
+    const popup = document.querySelector<HTMLElement>('.zpp-skill-popup')!;
 
     // 外壳 left 17 / top 497（textarea 是 29 / 509）⇒ 取错锚点这两个数就对不上。
     expect(popup.style.left).toBe('17px');
@@ -373,7 +373,7 @@ describe('skill popup anchoring', () => {
     initSkillPopup(SKILLS, {}, productionDeps().deps);
 
     typeInto(textarea, '/');
-    const popup = document.querySelector<HTMLElement>('.dpp-skill-popup')!;
+    const popup = document.querySelector<HTMLElement>('.zpp-skill-popup')!;
 
     expect(popup.style.left).toBe('29px');
   });

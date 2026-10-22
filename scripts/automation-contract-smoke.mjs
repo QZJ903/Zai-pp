@@ -62,7 +62,7 @@ assertNotContains('entrypoints/background.ts', "case 'RUN_AUTOMATION_NOW'");
 assertContains('core/shell/index.ts', 'createShellMcpPresetInput');
 assertContains('scripts/shell-mcp-host.mjs', '../packages/shell-host/native/shell-mcp-host.mjs');
 assertContains('scripts/install-shell-host.mjs', '../packages/shell-host/lib/installer.mjs');
-assertContains('packages/shell-host/package.json', 'glm-pp-shell-host');
+assertContains('packages/shell-host/package.json', 'zai-pp-shell-host');
 assertContains('packages/shell-host/native/contracts.mjs', "name: 'shell_exec'");
 assertContains('packages/shell-host/native/contracts.mjs', 'WINDOWS_POWERSHELL_UTF8_PREAMBLE');
 assertContains('packages/shell-host/native/os-adapter.mjs', 'readWindowsUserMachinePathDirs');

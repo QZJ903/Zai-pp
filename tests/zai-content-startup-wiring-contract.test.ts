@@ -233,14 +233,7 @@ describe('no orphan top-level functions in the content script', () => {
    * ⚠️ **加进来必须写清「为什么留着」** —— 这份名单是唯一的例外出口，
    * 一行不加说明的条目会让下一个人以为「孤儿是被允许的」。
    */
-  const ORPHAN_ALLOWLIST = new Map<string, string>([
-    [
-      'dispatchEnterKey',
-      '合成 Enter 的旧实现，已被 form.requestSubmit() 取代；'
-      + '保留是因为 core/ui/skill-popup.ts 的 isTrusted 守卫在注释里按它描述'
-      + '「唯一的合成键盘事件生产者」这一前提（见该文件的 keydownTrustGuard 说明）。',
-    ],
-  ]);
+  const ORPHAN_ALLOWLIST = new Map<string, string>([]);
 
   it('has no unexpected orphans', () => {
     // ⚠️⚠️ **这是唯一能抓住「真身改名 + 末尾补同名函数」的判据** —— 那种写法下

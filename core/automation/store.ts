@@ -74,7 +74,7 @@ export async function createAutomation(input: AutomationCreateInput): Promise<Au
       ...input,
       id: crypto.randomUUID(),
       status: 'active',
-      glm: {
+      zai: {
         chatSessionId: null,
         sessionUrl: null,
         // 新记录没有「上次跑的站点」⇒ null = 不知道（协调器据此走 A 兜底/默认站）。

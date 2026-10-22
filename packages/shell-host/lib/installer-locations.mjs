@@ -1,7 +1,7 @@
 import { homedir, platform } from 'node:os';
 import { posix, resolve, win32 } from 'node:path';
 
-export const HOST_NAME = 'com.glm_pp.shell';
+export const HOST_NAME = 'com.zai_pp.shell';
 export const SUPPORTED_BROWSER_NAMES = ['chrome', 'chromium', 'edge'];
 
 const SUPPORTED_BROWSERS = new Set(SUPPORTED_BROWSER_NAMES);
@@ -17,7 +17,7 @@ export function resolveNativeHostLocations({ os, browser, home, localAppData }) 
   let manifestDir;
 
   if (os === 'darwin') {
-    appDataRoot = path.resolve(home, 'Library', 'Application Support', 'GLM++');
+    appDataRoot = path.resolve(home, 'Library', 'Application Support', 'Zai++');
     const manifestSegments = {
       chrome: ['Google', 'Chrome', 'NativeMessagingHosts'],
       chromium: ['Chromium', 'NativeMessagingHosts'],
@@ -25,7 +25,7 @@ export function resolveNativeHostLocations({ os, browser, home, localAppData }) 
     }[browser];
     manifestDir = path.resolve(home, 'Library', 'Application Support', ...manifestSegments);
   } else if (os === 'linux') {
-    appDataRoot = path.resolve(home, '.local', 'share', 'glm-pp');
+    appDataRoot = path.resolve(home, '.local', 'share', 'zai-pp');
     const manifestSegments = {
       chrome: ['.config', 'google-chrome', 'NativeMessagingHosts'],
       chromium: ['.config', 'chromium', 'NativeMessagingHosts'],
@@ -34,7 +34,7 @@ export function resolveNativeHostLocations({ os, browser, home, localAppData }) 
     manifestDir = path.resolve(home, ...manifestSegments);
   } else if (os === 'win32') {
     const appData = localAppData || path.resolve(home, 'AppData', 'Local');
-    appDataRoot = path.resolve(appData, 'GLM++');
+    appDataRoot = path.resolve(appData, 'Zai++');
     manifestDir = path.resolve(appDataRoot, 'NativeMessagingHosts');
   } else {
     throw new Error(`Unsupported platform: ${os}`);
@@ -79,7 +79,7 @@ export function getRegistryKey(browser) {
 export function createNativeHostManifest(args, wrapperPath) {
   const manifest = {
     name: HOST_NAME,
-    description: 'GLM++ Shell MCP - General purpose shell execution via Native Messaging',
+    description: 'Zai++ Shell MCP - General purpose shell execution via Native Messaging',
     path: wrapperPath,
     type: 'stdio',
   };
