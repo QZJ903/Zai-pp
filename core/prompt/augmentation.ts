@@ -191,7 +191,7 @@ function renderToolSchema(descriptor: ToolDescriptor, catalog: ToolInvocationCat
     `<${preferredName}>`,
     JSON.stringify(examplePayload, null, 2),
     `</${preferredName}>`,
-    `Invalid formats: <invoke name="${preferredName}">...</invoke>, <tool_call>...</tool_call>`,
+    `Call it as a direct XML tag in the answer body — not as a native tool_call.`,
     `Parameters JSON Schema: ${JSON.stringify(descriptor.inputSchema)}`,
   ];
   return lines.filter(Boolean).join('\n');

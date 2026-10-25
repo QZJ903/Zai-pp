@@ -318,7 +318,7 @@ async function completeAuthorizationAfterProvider(
     // The executing reservation was persisted before provider I/O, so a failed
     // completion write remains fail-closed for replay. Preserve the real
     // provider result and history instead of replacing it with a storage error.
-    console.error('[Zai++] tool authorization completion persistence failed', error);
+    console.log('[Zai++] tool authorization completion persistence failed', error);
   }
 }
 
@@ -331,7 +331,9 @@ async function appendRuntimeToolHistory(
     await appendToolCallHistory(call, result, source);
   } catch (error) {
     if (!isRecoverableToolHistoryError(error)) throw error;
-    console.warn('[Zai++] tool history persistence failed', error);
+    // ⚠️ 只覆盖「配额类」可恢复错误。**配额耗尽是持续性状态** —— 此后每次工具调用都走这里，
+    // 表现是「刷新后工具详情只剩摘要」而不报错。降成 log 的代价就是这种长期退化不再亮红。
+    console.log('[Zai++] tool history persistence failed', error);
   }
 }
 

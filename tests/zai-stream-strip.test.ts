@@ -7,7 +7,7 @@ import { installZaiFetchHook, updateZaiHookState } from '../core/zai/fetch-hook'
 import { ZAI_BUILTIN_HISTORY_TOOL_NAMES } from '../core/zai/history-tool-names';
 
 /**
- * **流式工具 XML 剥离**（待办 34 的流式侧）。
+ * **流式工具 XML 剥离**（流式侧）。
  *
  * 两层结构：文本层（`createZaiToolXmlTextFilter`）管「跨帧扣尾巴」，
  * wire 层（`createZaiCompletionStreamRewriter`）管「按行拆 SSE、只改正文」。

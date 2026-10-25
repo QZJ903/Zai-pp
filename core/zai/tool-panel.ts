@@ -23,8 +23,11 @@
 import type { ToolCardResult, ToolExecutionRecord } from '../types';
 import {
   appendToolBlockToMessage,
+  applyBlockCollapseDefault,
   createToolBlockShell,
   findToolBlock,
+  findToolBlockInMessage,
+  retargetToolBlockKey,
   injectToolBlockStyles,
   removeToolBlock,
   updateToolBlockContent,
@@ -35,6 +38,7 @@ import {
   type ToolBlockRestoreController,
   type ToolBlockRestoreRecord,
 } from '../ui/tool-block-restore';
+import { hasPendingAction } from '../ui/tool-result-renderer';
 import {
   ZAI_ASSISTANT_MESSAGE_SELECTOR,
   ZAI_INJECTED_UI_SELECTOR,
@@ -208,12 +212,35 @@ interface LiveSession {
 export function createToolPanelController(
   dependencies: ToolPanelDependencies,
 ): ToolPanelController {
+  /**
+   * 「这一块画的是**真实结果**，不是按工具名合成的摘要」标记。
+   *
+   * ⚠️⚠️ **没有它，刷新后面板会退化成只有「已执行」** —— 历史腿的记录 `executions`
+   * 恒空、且重投递远比存储腿频繁（每次 `messages/batch` 一批），
+   * 用它的空结果重画就会把存储腿带进来的真结果覆盖掉。
+   */
+  const RICH_CONTENT_ATTR = 'data-zpp-tool-rich';
+
+  /**
+   * **本页面会话内收尾过的记录 id** —— 「有按钮就保持展开」只对这些生效。
+   *
+   * ⚠️⚠️ **它是「刷新后不展开」的关键**：刷新页面 / 切会话时这个 Set 是空的，
+   * 从历史 / 存储恢复的记录一个都不在里面 ⇒ 一律按 `collapsedByDefault` 收起；
+   * 而「刚刚跑完那一轮」的记录在里面 ⇒ 若还有没点过的按钮就保持展开（用户口径）。
+   * ⚠️ **不落库、不进桥** —— 页面重载即归零，这正是想要的语义。
+   * ⚠️ 换会话要清（见 `handleSessionChange`），否则旧会话的 id 会误命中。
+   */
+  const sealedThisSessionIds = new Set<string>();
+
   const blockDeps: ToolBlockDependencies = {
     resolveHost: resolveZaiResponseHost,
     listMessages: () => listZaiAssistantMessages(dependencies.document ?? document),
     formatStatus: (execution) => formatZaiToolStatus(execution, dependencies.statusLabels()),
     formatDetail: formatZaiToolDetail,
     renderDetail: dependencies.renderDetail,
+    // ⚠️ **「还有没点过的按钮」由渲染层回答**（本模块不认识任何渲染器）——
+    // 它是「有按钮就保持展开、点过就收起」那条口径的判据。
+    detailHasAction: hasPendingAction,
     document: dependencies.document,
   };
 
@@ -386,30 +413,59 @@ export function createToolPanelController(
    * 而「这条记录在页面上有没有块、块还连着没」是 DOM 知识，属于本模块。
    */
   function renderRecord(record: ToolBlockRestoreRecord, message: Element): boolean {
-    const existing = findToolBlock(record.id, blockDeps);
+    // ⚠️⚠️ **块的 DOM 键按「锚点」归一，不按记录 id** —— 两条腿的 id 天生不同
+    // （`history:<uuid>` / `storage:<hash>`），合流失败时用各自的 id 去找块必然
+    // 都找不到 ⇒ 在同一个宿主里**叠出两块面板**（真机症状：同一条回答上下两个
+    // 「已调用工具」，上面那块只有工具名、下面那块才有真结果）。
+    // 有锚点时统一用 `history:<uuid>`（历史腿的天然 id）当块键 ⇒ 两条腿落到同一块。
+    const blockKey = record.messageId ? `history:${record.messageId}` : record.id;
+    // ① 按块键找（两条腿共用一个键 ⇒ 正常合流后的重复投递都能命中）
+    // ② 退回按记录 id 找（块键归一之前的旧块）
+    // ③ 🔴 **最后按「这条消息里有没有我们一块」兜底** —— ①② 都按 key 找，而合流失败时
+    //    两条腿的 key 就是不同 ⇒ 都命中不了，于是往同一个宿主里追加第二块
+    //    （真机症状：同一条回答上下两个「已调用工具」）。
+    const existing = findToolBlock(blockKey, blockDeps)
+      ?? findToolBlock(record.id, blockDeps)
+      ?? findToolBlockInMessage(message, blockDeps);
     const executions = record.executions.length > 0
       ? record.executions
       : summarizeCalls(record);
     if (executions.length === 0) return true;
 
     if (existing && existing.isConnected) {
+      // ⚠️ **块键要跟着归一，且必须排在下那个早退之前** —— 兜底命中的那一块带着
+      // 另一条腿的 key（`live:<requestId>` / `storage:<hash>`）。不归一的话
+      // 「谁接管了这块」这件事在 DOM 上永远看不出来，且每次投递都要重新走兜底。
+      retargetToolBlockKey(existing, blockKey);
+      // ⚠️⚠️ **没有真实结果的一方不许覆盖已有内容** —— 历史腿的记录 `executions` 恒空
+      // （只有工具名），而它的重投递比存储腿更频繁（每次 `messages/batch` 一批）。
+      // 覆盖回去的表现是「刷新后面板又退回只有『已执行』、真结果没了」。
+      if (record.executions.length === 0 && existing.getAttribute(RICH_CONTENT_ATTR) === 'true') {
+        applyBlockCollapseDefault(existing, record.live !== true, sealedThisSessionIds.has(record.id));
+        return true;
+      }
       // ⚠️ **已挂过的块也要跟着 `live` 走** —— 收尾（`sealLive`）之后重画，
       // 这一步就是把「展开」改成「收起」的地方。不在这里同步的话，
       // 块会一直保持第一次挂上去时的折叠态（`sealLive` 就白调了）。
-      existing.setAttribute('data-collapsed', record.live === true ? 'false' : 'true');
       updateToolBlockContent(existing, executions, blockDeps, dependencies.formatTitle);
+      existing.setAttribute(RICH_CONTENT_ATTR, record.executions.length > 0 ? 'true' : 'false');
+      applyBlockCollapseDefault(existing, record.live !== true, sealedThisSessionIds.has(record.id));
       return true;
     }
     if (existing) removeToolBlock(existing);
 
-    // ⚠️⚠️ **折叠态由 `record.live` 决定**（上游口径）：这一轮还在飞 ⇒ 展开；
-    // 已收尾 / 刷新后恢复 ⇒ 收起。写死 `false` 是 2.15.39 的缺陷 ——
-    // 一轮跑完那一大块一直摊着，跑 N 轮就是 N 大块全展开。
+    // ⚠️⚠️ **块级折叠态三条判据见 `applyBlockCollapseDefault`**：用户亲手开合过 >
+    // （本页面会话内刚收尾**且**还有没点过的按钮）> 「在飞展开、收尾 / 恢复收起」。
+    // ⚠️ 只按 `live` 是 2.15.39 的缺陷 —— 一轮跑完那一大块一直摊着，跑 N 轮就是 N 大块全展开。
+    // ⚠️ 第二档靠 `sealedThisSessionIds`：它只装「**本页面会话内**收尾过」的记录 ⇒
+    // **刷新页面 / 切会话后是空集**，那时带按钮的块也一律收起（用户口径）。
     const block = createToolBlockShell(blockDeps, {
-      restoreKey: record.id,
+      restoreKey: blockKey,
       collapsed: record.live !== true,
     });
     updateToolBlockContent(block, executions, blockDeps, dependencies.formatTitle);
+    block.setAttribute(RICH_CONTENT_ATTR, record.executions.length > 0 ? 'true' : 'false');
+    applyBlockCollapseDefault(block, record.live !== true, sealedThisSessionIds.has(record.id));
     const appended = appendToolBlockToMessage(message, block, blockDeps);
     if (!appended) {
       // 宿主还没渲染出来 ⇒ 把壳撤掉，让编排层下一轮重试（留着会变成游离节点）。
@@ -610,6 +666,9 @@ export function createToolPanelController(
   function handleSessionChange(): void {
     restore.clearAll();
     liveSessions.clear();
+    // ⚠️ **切会话等于「刷新页面」** —— 那个会话的块不该再保持展开（用户口径：
+    // 只有「刚刚在这一次页面会话里跑完的那一轮」才可能因为按钮而展开）。
+    sealedThisSessionIds.clear();
     void loadStorageLeg();
   }
 
@@ -627,6 +686,10 @@ export function createToolPanelController(
   function sealTurn(requestId: string): void {
     const session = liveSessions.get(requestId);
     if (!session || session.recordIds.size === 0) return;
+    // ⚠️ **先登记「这一轮在本页面会话内收尾过」**，再让编排层重画 ——
+    // 重画时 `applyBlockCollapseDefault` 会按这个集合决定「还有没点过的按钮就保持展开」
+    // （见 `sealedThisSessionIds`）。顺序反了的话那一刻集合还是空的，块会先收起。
+    for (const id of session.recordIds) sealedThisSessionIds.add(id);
     restore.sealLive([...session.recordIds]);
   }
 

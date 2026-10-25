@@ -29,7 +29,7 @@ describe('runtime command registry', () => {
       ...CLIENT_ONLY_RUNTIME_COMMAND_TYPES,
     ];
 
-    expect(TYPED_RUNTIME_COMMAND_TYPES).toHaveLength(95);
+    expect(TYPED_RUNTIME_COMMAND_TYPES).toHaveLength(97);
     expect(TYPED_RUNTIME_COMMAND_TYPES).toEqual(expect.arrayContaining([
       'GET_MEMORIES',
       'GET_CONFIG',
@@ -46,7 +46,7 @@ describe('runtime command registry', () => {
       'DOM_TASK_FAILED',
     ]));
     expect(CLIENT_ONLY_RUNTIME_COMMAND_TYPES).toEqual(['TOOL_CALL_EXECUTED', 'MEMORIES_UPDATED']);
-    expect(new Set(allTypes).size).toBe(97);
+    expect(new Set(allTypes).size).toBe(99);
     for (const type of TYPED_RUNTIME_COMMAND_TYPES) {
       expect(getRuntimeCommandOwner(type)).toBe('typed-handler');
     }

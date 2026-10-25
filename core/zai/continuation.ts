@@ -18,7 +18,12 @@
  * 同一条规则，将来必然漂移。续跑与 nudge 只需要**不否定它**。
  */
 
-import type { ToolError, ToolExecutionRecord } from '../types';
+import type {
+  ToolDescriptor,
+  ToolDescriptorSchema,
+  ToolError,
+  ToolExecutionRecord,
+} from '../types';
 // 续跑轮识别与占位符在**零依赖**的 `continuation-marker.ts` 里 —— 页面主世界
 // （历史清洗 + 气泡隐藏）也要用同一份判据，而本文件带着一条约 1.5 KB 的待办话术
 // 大正则，不该被拖进主世界。这里原样转出，**既有 import 路径全部不变**。
@@ -95,6 +100,102 @@ function renderContinueInstruction(): string {
 function renderToolReminder(toolNames: readonly string[]): string {
   if (toolNames.length === 0) return '';
   return `本轮可输出的本地工具标签：${toolNames.join(', ')}`;
+}
+
+/**
+ * 构建**误用纠错** nudge：上一轮把本地工具写进了 agent 原生 `tool_call`。
+ *
+ * 与 `buildZaiNudgePrompt` 治的不是同一件事，所以文案不共用：
+ * - 那个治「**一个工具都没吐**」，要它「给出下一步调用」；
+ * - 这个治「**吐了，但吐错通道**」—— 模型已经想清楚要调什么，只是格式错了，
+ *   所以**不该让它重新思考**，只要它换个壳重发。
+ *
+ * ⚠️ **不带 `arguments`**（用户拍板）：流中断时 `delta_arguments` 是半截 JSON，
+ * 喂回去是垃圾；即使完整，重发一遍那段长参数也比让它自己重写慢。
+ * ⚠️ **示例由该工具真实的 `inputSchema` 生成** —— 通用占位符它未必填得对。
+ * ⚠️ **不是说「服务端不认识这个工具」之外的话**：真机上服务端确实回了
+ * `tool_response { status: 'error', content: 'tool call failed: <名>' }`。
+ * ⚠️⚠️ **`<tool_results_so_far>` 必须无条件带上（空也要带 `[]`）** ——
+ * 它是 `isZaiContinuationPrompt` 的结构判据之一（要 `<original_task>` **且**
+ * `<tool_results>` 或 `<tool_results_so_far>`）。首轮误用时 `executions` 是空的，
+ * 少这一段会让下一轮被判成**原生轮** ⇒ 新建一个 taskId 为 null 的循环覆盖掉它，
+ * 后台任务再也收不到终态。
+ * ⚠️ **`<previous_assistant_text>` 不带** —— 误用轮的 `assistantText` 恒为空
+ * （`tool_call` / `tool_response` 两个相位都被挖掉），带上只是噪音。
+ */
+export function buildZaiMisuseNudgePrompt(
+  originalTask: string,
+  misusedToolName: string,
+  descriptor: ToolDescriptor | undefined,
+  executions: readonly ToolExecutionRecord[],
+): string {
+  const example = descriptor
+    ? JSON.stringify(createSchemaExamplePayload(descriptor.inputSchema), null, 2)
+    : '{"参数名": "参数值"}';
+  return [
+    `上一轮你把本地工具 ${misusedToolName} 写进了 agent 原生的 tool_call 通道。`
+      + '服务端不认识这个工具，那一轮没有执行任何东西。',
+    '',
+    '本地工具只能通过 XML 标签调用，不能走 tool_call / tool_use / function_call 等任何原生通道。'
+      + '请把要传的参数包成下面这个形状，直接输出在最终回复正文里：',
+    '',
+    `<${misusedToolName}>`,
+    example,
+    `</${misusedToolName}>`,
+    '',
+    '要求：',
+    '- 标签名与工具名完全一致，开标签不带任何属性',
+    '- 标签体只放一个 JSON 对象，前后不加文字、不加代码围栏',
+    '- 不要再用 tool_call 重发',
+    '- 不要解释、不要道歉，直接重发这一条',
+    '',
+    '<original_task>',
+    clamp(originalTask, ORIGINAL_TASK_MAX_CHARS),
+    '</original_task>',
+    '',
+    '<tool_results_so_far>',
+    // 与续跑轮共用同一个渲染 —— 两处各写一份会让窗口化只在一半链路上生效。
+    JSON.stringify(renderWindowedToolResults(executions), null, 2),
+    '</tool_results_so_far>',
+  ].join('\n');
+}
+
+/**
+ * 由工具的真实 `inputSchema` 生成一份示例载荷（只列必填字段）。
+ *
+ * ⚠️ **与 `core/prompt/augmentation.ts` 的 `createExamplePayload` 是同一条规则的两个落点** ——
+ * 那边渲染系统提示词里的工具清单、这边渲染纠错轮的示例。两处若给出不同的形状，
+ * 模型会按其中一份填、而另一份才是它认定的「正确格式」。
+ */
+function createSchemaExamplePayload(schema: ToolDescriptorSchema): Record<string, unknown> {
+  const properties = schema.properties ?? {};
+  const required = schema.required ?? Object.keys(properties);
+  const payload: Record<string, unknown> = {};
+  for (const key of required) {
+    payload[key] = exampleValueForSchema(properties[key]);
+  }
+  return payload;
+}
+
+function exampleValueForSchema(schema: unknown): unknown {
+  if (!schema || typeof schema !== 'object') return 'value';
+  const value = schema as Record<string, unknown>;
+  const type = value.type;
+  if (Array.isArray(type)) return exampleValueForSchema({ ...value, type: type[0] });
+  if (Array.isArray(value.enum) && value.enum.length > 0) return value.enum[0];
+  switch (type) {
+    case 'number':
+    case 'integer':
+      return 0;
+    case 'boolean':
+      return false;
+    case 'array':
+      return [];
+    case 'object':
+      return {};
+    default:
+      return 'value';
+  }
 }
 
 function renderFailureRecovery(): string {
@@ -174,10 +275,10 @@ function clamp(value: string | undefined, maxLength: number): string | undefined
  *  - 文本为空 → 需要 nudge。
  *  - 末尾有「待办话术」且后面没有跟渲染产物 → 需要 nudge。
  *
- * ## 为什么按「主语」分三级（2026-10-19 重写）
+ * ## 为什么按「主语」分三级
  *
- * 原实现只有一条正则，把「接下来」这类**无主语引导词**与「我将…」一视同仁。
- * 真机反馈：任务完成时模型写「报告已生成。**接下来你可以**打开它查看。」——
+ * 一条正则把「接下来」这类**无主语引导词**与「我将…」一视同仁时，会把建议当成待办：
+ * 任务完成时模型常写「报告已生成。**接下来你可以**打开它查看。」——
  * 主语是**用户**、是建议、不是待办，却照样命中 ⇒ 弹 nudge。
  *
  * ⇒ 拆成三级，**方向是「宁可多 nudge，不可漏 nudge」**（漏判 = 任务提前收尾，

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LocaleMessageKey, MessageParams } from '../../../core/i18n';
 import type { Memory, NewMemory } from '../../../core/types';
 import { createRequestGenerationFence } from '../async-state';
-import { getRuntimeErrorMessage } from '../runtime-response';
+import { formatRuntimeError } from '../runtime-response';
 import { decodeMemoryList, libraryController } from './library-controller';
 
 type Translator = (key: LocaleMessageKey, params?: MessageParams) => string;
@@ -31,7 +31,7 @@ export function useMemoryPageController(t: Translator, confirm: Confirm, feedbac
 
   const showOperationError = useCallback((error: unknown) => {
     feedbackRef.current.error(translatorRef.current('sidepanel.memoryPage.operationFailed', {
-      error: getRuntimeErrorMessage(error),
+      error: formatRuntimeError(error, translatorRef.current, { bare: true }),
     }));
   }, []);
 

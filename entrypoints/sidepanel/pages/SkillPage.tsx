@@ -12,7 +12,7 @@ import { SkeletonList, ToggleRow, useBanner, useConfirm } from '../components/se
 import { requestGitHubApiPermission } from '../github-permission';
 import { useI18n } from '../i18n';
 import { createRequestGenerationFence } from '../async-state';
-import { getRuntimeErrorMessage } from '../runtime-response';
+import { formatRuntimeError } from '../runtime-response';
 import { sidepanelRuntimeClient } from '../runtime-client';
 
 interface SkillSectionProps {
@@ -78,7 +78,7 @@ export default function SkillPage() {
 
   const showOperationError = (error: unknown) => {
     banner.show('error', t('sidepanel.skillPage.operationFailed', {
-      error: getRuntimeErrorMessage(error),
+      error: formatRuntimeError(error, t, { bare: true }),
     }));
   };
 

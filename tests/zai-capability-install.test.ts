@@ -305,19 +305,19 @@ describe('installZaiSessionWatch: every source feeds the same handler', () => {
   );
 
   it('keeps the other sources alive when the wxt listener is unavailable', () => {
-    // ⚠️ `wxt:locationchange` 拿不到时会抛 —— 只该 warn，不该让整条链不装
+    // ⚠️ `wxt:locationchange` 拿不到时会抛 —— 只该记一行日志，不该让整条链不装
     //（popstate / hashchange / 轮询仍是有效兜底）。
     const harness = buildWatch();
     harness.addLocationChangeListener.mockImplementation(() => {
       throw new Error('locationchange unavailable');
     });
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const quiet = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
       installZaiSessionWatch(harness.deps);
       expect([...harness.registered.keys()].sort()).toEqual(['hashchange', 'popstate']);
       expect(harness.intervals).toHaveLength(1);
     } finally {
-      warn.mockRestore();
+      quiet.mockRestore();
     }
   });
 });
@@ -366,12 +366,12 @@ describe('notifyZaiSessionChange: dedupe and isolation', () => {
     const healthy = vi.fn();
     harness.listeners.add(broken);
     harness.listeners.add(healthy);
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const quiet = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
       notifyZaiSessionChange(harness.deps);
       expect(healthy).toHaveBeenCalledTimes(1);
     } finally {
-      warn.mockRestore();
+      quiet.mockRestore();
     }
   });
 });

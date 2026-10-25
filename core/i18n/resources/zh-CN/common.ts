@@ -12,6 +12,12 @@ export const common = {
   enabled: '已启用',
   loading: '加载中...',
   none: '无',
+  /**
+   * 侧边栏统一的失败兜底：**只有裸错误码时才用它**，把壳留给中文、码放进括号。
+   *
+   * ⚠️ 自然语言的 `error.message` 不走这条 —— 它本身就有信息量（见 `runtime-response.ts`）。
+   */
+  operationFailedWithCode: '操作失败（{code}）',
   preview: '预览',
   refresh: '刷新',
   remove: '移除',

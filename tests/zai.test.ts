@@ -250,7 +250,7 @@ describe('zai request codec', () => {
   const pathOf = (route: ZaiWebRouteName) => ZAI_WEB_ROUTES[route].replace('{id}', SAMPLE_CHAT_ID);
   const otherMethodOf = (route: ZaiWebRouteName) => (ROUTE_METHOD[route] === 'POST' ? 'GET' : 'POST');
   // ⚠️ **从站点表派生**（而不是手抄两串域名）—— 但下表另有一条**字面量钉真值**的断言，
-  // 否则「表本身写错」时派生的用例会跟着一起错（守则 B9/B16：全派生 = 同义反复）。
+  // 否则「表本身写错」时派生的用例会跟着一起错（全派生 = 同义反复）。
   const SITE_ORIGINS = ZAI_WEB_ORIGINS;
   const encodedPath = (path: string) => `https://chat.z.ai/${path.split('/').slice(1).join('%2F')}`;
 
@@ -405,7 +405,7 @@ describe('zai request codec', () => {
 
 describe('zai site table', () => {
   it('pins the two sites to literal values', () => {
-    // ⚠️⚠️ **这是那张「按站点派生」的用例表的**外部真值**（守则 B16）。
+    // ⚠️⚠️ **这是那张「按站点派生」的用例表的**外部真值**。
     // 少了它，`SITE_ORIGINS` 从 `ZAI_WEB_ORIGINS` 派生 ⇒ 表本身写错时
     // 路由用例会跟着一起错、全绿（同义反复）。
     expect(ZAI_SITES.cn.origin).toBe('https://zchat.z.ai');

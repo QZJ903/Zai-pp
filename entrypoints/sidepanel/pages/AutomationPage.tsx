@@ -31,7 +31,7 @@ import {
 } from '../components/settings/primitives';
 import { useI18n } from '../i18n';
 import { isSidepanelRuntimeEvent } from '../runtime-event-codec';
-import { getRuntimeErrorMessage } from '../runtime-response';
+import { formatRuntimeError } from '../runtime-response';
 import { sidepanelRuntimeClient } from '../runtime-client';
 
 const DEFAULT_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai';
@@ -145,7 +145,7 @@ export default function AutomationPage() {
     } catch (error) {
       if (!loadFence.current.isCurrent(generation)) return;
       setLoadError(
-        getRuntimeErrorMessage(error) || t('sidepanel.automationPage.loadFailed'),
+        formatRuntimeError(error, t) || t('sidepanel.automationPage.loadFailed'),
       );
     } finally {
       if (loadFence.current.isCurrent(generation)) setLoading(false);
@@ -239,7 +239,7 @@ export default function AutomationPage() {
       setEditing(null);
       await load();
     } catch (error) {
-      banner.show('error', getRuntimeErrorMessage(error));
+      banner.show('error', formatRuntimeError(error, t));
     }
   };
 
@@ -262,7 +262,7 @@ export default function AutomationPage() {
         );
       }
     } catch (error) {
-      banner.show('error', getRuntimeErrorMessage(error));
+      banner.show('error', formatRuntimeError(error, t));
     } finally {
       setRunningIds((prev) => {
         const next = new Set(prev);
@@ -281,7 +281,7 @@ export default function AutomationPage() {
       });
       await load();
     } catch (error) {
-      banner.show('error', getRuntimeErrorMessage(error));
+      banner.show('error', formatRuntimeError(error, t));
     }
   };
 
@@ -300,7 +300,7 @@ export default function AutomationPage() {
       });
       await load();
     } catch (error) {
-      banner.show('error', getRuntimeErrorMessage(error));
+      banner.show('error', formatRuntimeError(error, t));
     }
   };
 
@@ -319,7 +319,7 @@ export default function AutomationPage() {
       });
       await load();
     } catch (error) {
-      banner.show('error', getRuntimeErrorMessage(error));
+      banner.show('error', formatRuntimeError(error, t));
     }
   };
 

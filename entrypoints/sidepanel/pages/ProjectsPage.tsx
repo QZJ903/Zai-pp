@@ -24,7 +24,7 @@ import { SkeletonList, StatusBadge, useBanner, useConfirm } from '../components/
 import { useI18n } from '../i18n';
 import { decodeMemoryList } from '../controllers/library-controller';
 import { isSidepanelRuntimeEvent } from '../runtime-event-codec';
-import { getRuntimeErrorMessage } from '../runtime-response';
+import { formatRuntimeError } from '../runtime-response';
 import {
   sidepanelRuntimeClient,
   type AnyTypedRuntimeCommandRequest,
@@ -374,7 +374,7 @@ export default function ProjectsPage() {
   }
 
   function showProjectError(error: unknown) {
-    banner.show('error', t('sidepanel.projectsPage.operationFailed', { error: getRuntimeErrorMessage(error) }));
+    banner.show('error', t('sidepanel.projectsPage.operationFailed', { error: formatRuntimeError(error, t, { bare: true }) }));
   }
 
   async function runProjectMutation(message: ProjectMutationRequest): Promise<void> {

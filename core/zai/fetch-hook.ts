@@ -90,6 +90,16 @@ export interface ZaiResponseCompletePayload {
   originalPrompt: string;
   agentTaskPrompt: string;
   assistantText: string;
+  /**
+   * 本轮模型**用错通道**调用的本地工具名（把本地工具写进 agent 原生 `tool_call`）。
+   *
+   * ⚠️ **判据是 `delta_name` 落在本请求的模型可见目录里** —— 服务端自己的 tool_call
+   * （`delta_name: "Bash"` 这类沙箱工具）是正常流量，**不能按「出现 tool_call」判**。
+   * ⚠️ **误用轮的 `assistantText` 是空串** —— `tool_call` 与 `tool_response` 两个相位
+   * 都在 `NON_ANSWER_PHASES` 里被挖掉，所以这一轮没有任何可执行内容。
+   * 缺省（不误用）时是空数组，调用方按「这一轮正常」处理。
+   */
+  misusedNativeToolNames?: string[];
 }
 
 interface ZaiRequestContext {
@@ -469,7 +479,10 @@ function hookXHR(): () => void {
       void prepareRequest(body, route).then((prepared) => {
         return origSend.call(xhr, prepared.requestBody);
       }).catch((error: unknown) => {
-        console.error('[Zai++] XHR augmentation failed; sending original', error);
+        // ⚠️ **降成 log 是刻意的，只因为这是休眠通道**（真机两轮实测 `xhrApiRequests: []`）。
+        // 语义上与 fetch 那条「增广失败、原样放行」完全等价 —— 一旦哪天真的出现 XHR 流量，
+        // 这里就是「模型以为有工具、实际一个都不执行」而界面无感，应当改回 `console.error`。
+        console.log('[Zai++] XHR augmentation failed; sending original', error);
         return origSend.call(xhr, body);
       });
       return;
@@ -518,6 +531,26 @@ async function interceptCompletionResponse(
     requestToolNames ?? hookState.toolDescriptorNames,
   ));
 
+  /**
+   * 本轮「用错通道」的本地工具名（把本地工具写进了 agent 原生 `tool_call`）。
+   *
+   * ⚠️ **判据是 `delta_name` 落在本请求的模型可见目录里** —— 服务端自己的 tool_call
+   * （`delta_name: "Bash"` 这类沙箱工具）是正常流量，不能按「出现 tool_call 相位」判。
+   * ⚠️ **`requestToolNames` 为 `undefined`（未增广）时不判** —— 那时拿不到「本轮注入了
+   * 哪些本地工具」，判下去会把沙箱工具误报成本地工具。
+   */
+  const misusedNativeToolNames = new Set<string>();
+  const observeToolCallPhases = (parsed: ZaiSseParseResult) => {
+    if (requestToolNames === undefined) return;
+    for (const event of parsed.events) {
+      if (event.phase !== 'tool_call') continue;
+      const raw = event.parsed.delta_name;
+      const name = typeof raw === 'string' ? raw.trim() : '';
+      if (!name || !requestToolNames.includes(name)) continue;
+      misusedNativeToolNames.add(name);
+    }
+  };
+
   const observeUsageFrames = (parsed: ZaiSseParseResult) => {
     for (const event of parsed.events) usageTracker.observeEvent(event);
     if (parsed.appendedText) usageTracker.appendText(parsed.appendedText);
@@ -534,7 +567,7 @@ async function interceptCompletionResponse(
       const snapshot = usageTracker.finish(accumulator.assistantText);
       if (snapshot) hookState.onUsageSnapshot(snapshot);
     } catch (error) {
-      console.error('[Zai++] usage snapshot failed', error);
+      console.log('[Zai++] usage snapshot failed', error);
     }
     hookState.onRequestTerminal({ requestId: context.requestId });
   };
@@ -546,7 +579,9 @@ async function interceptCompletionResponse(
         if (done) {
           decoder.decode();
           // flush 掉最后一行未完结的 data: 行，补进累积文本。
-          observeUsageFrames(accumulator.finish());
+          const flushedFrames = accumulator.finish();
+          observeUsageFrames(flushedFrames);
+          observeToolCallPhases(flushedFrames);
           const text = accumulator.assistantText;
           extractAndNotifyToolCalls(accumulator, context.requestId, requestToolNames);
           hookState.onResponseComplete({
@@ -554,6 +589,9 @@ async function interceptCompletionResponse(
             originalPrompt: context.originalPrompt,
             agentTaskPrompt: context.agentTaskPrompt,
             assistantText: text,
+            ...(misusedNativeToolNames.size > 0
+              ? { misusedNativeToolNames: [...misusedNativeToolNames] }
+              : {}),
           });
           // 流结束：把扣住的尾巴（未闭合的块也一并删掉）放行给页面。
           const flushed = rewriter.finish();
@@ -569,7 +607,9 @@ async function interceptCompletionResponse(
         const rewritten = rewriter.push(chunk);
         controller.enqueue(rewritten.unchanged ? value : encodeZaiStreamText(rewritten.text));
         // 增量解析 SSE 做工具识别（输入是**原始** wire，与剥离无关）。
-        observeUsageFrames(accumulator.push(chunk));
+        const parsed = accumulator.push(chunk);
+        observeUsageFrames(parsed);
+        observeToolCallPhases(parsed);
       } catch (error) {
         controller.error(error);
         notifyTerminal();

@@ -11,7 +11,7 @@ import { createZaiModelLabelLookup, decodeZaiModelListResponse } from '../../../
 import { createRequestGenerationFence } from '../../async-state';
 import { usageController } from '../../controllers/usage-controller';
 import { useI18n } from '../../i18n';
-import { getRuntimeErrorMessage } from '../../runtime-response';
+import { formatRuntimeError } from '../../runtime-response';
 import { SidepanelRuntimeError, sidepanelRuntimeClient } from '../../runtime-client';
 import {
   EmptyState,
@@ -70,7 +70,7 @@ export default function UsageSubPage() {
       setError(
         err instanceof SidepanelRuntimeError && err.kind === 'protocol'
           ? t('sidepanel.settings.usage.loadFailed')
-          : getRuntimeErrorMessage(err) || t('sidepanel.settings.usage.loadFailed'),
+          : formatRuntimeError(err, t) || t('sidepanel.settings.usage.loadFailed'),
       );
     } finally {
       if (requestGeneration.current.isCurrent(generation)) setLoading(false);
@@ -121,7 +121,7 @@ export default function UsageSubPage() {
       banner.show('success', t('sidepanel.settings.usage.clearSuccess'));
       await load(rangeKeyRef.current);
     } catch (err) {
-      banner.show('error', getRuntimeErrorMessage(err) || t('sidepanel.settings.usage.clearFailed'));
+      banner.show('error', formatRuntimeError(err, t) || t('sidepanel.settings.usage.clearFailed'));
     }
   };
 

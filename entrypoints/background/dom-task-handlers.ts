@@ -19,7 +19,7 @@ export interface DomTaskRuntimeHandlerDependencies {
 }
 
 /**
- * content → 后台 DOM_TASK_* 事件 handler（方案 §4.3）。
+ * content → 后台 DOM_TASK_* 事件 handler。
  *
  * content（zai.content.ts）用 chrome.runtime.sendMessage 发顶层字段（不带 payload），
  * 所以这里不走 payload 解码那一层，而是直接读

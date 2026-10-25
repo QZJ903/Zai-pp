@@ -99,11 +99,11 @@ describe('tool runtime handler ownership', () => {
     });
     const types = handlers.map((handler) => handler.type);
     const expected = readInventoryCommands(
-      'Group C — MCP, tool, browser control, and sandbox (27)',
+      'Group C — MCP, tool, browser control, and sandbox (29)',
     );
 
-    expect(types).toHaveLength(27);
-    expect(new Set(types).size).toBe(27);
+    expect(types).toHaveLength(29);
+    expect(new Set(types).size).toBe(29);
     expect([...types].sort()).toEqual([...expected].sort());
     for (const type of types) expect(getRuntimeCommandOwner(type)).toBe('typed-handler');
 
@@ -712,6 +712,8 @@ function createBrowserDependencies(): BrowserToolRuntimeHandlerDependencies {
     getBrowserControlState: vi.fn(async () => createBrowserState()),
     setBrowserControlTarget: vi.fn(async () => createBrowserTarget()),
     detachBrowserControl: vi.fn(async () => undefined),
+    startTabKeepAlive: vi.fn(async () => undefined),
+    stopTabKeepAlive: vi.fn(async () => undefined),
     broadcastToolDescriptorsUpdate: vi.fn(async () => undefined),
     broadcastBrowserControlUpdate: vi.fn(async () => undefined),
   };

@@ -15,8 +15,7 @@ import { installZaiFetchHook, updateZaiHookState } from '../core/zai/fetch-hook'
  * 触发 `armManualStopDetection` 的另一个入口。
  *
  * ⚠️ **它不守什么**：页面收到 HTML 之后怎么渲染（弹不弹错误卡片、Stop 按钮闪不闪）
- * 是 DOM 行为，**只有真机能验** —— 见记忆 `zai-build` §4.26 的真机探针结论。
- * 本文件只钉 hook 这一层。
+ * 是 DOM 行为，**只有真机能验**。本文件只钉 hook 这一层。
  */
 describe('the fetch hook treats an HTML completion response as a challenge page', () => {
   const COMPLETION_URL = 'https://chat.z.ai/api/v2/chat/completions?requestId=r1&user_id=u1';

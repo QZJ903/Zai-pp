@@ -108,6 +108,8 @@ export const RUNTIME_COMMAND_CONTRACTS = {
   GET_BROWSER_CONTROL_STATE: typedCommand('none', 'value', 'background-error', 'live-only'),
   SET_BROWSER_CONTROL_TARGET: typedCommand('payload-decoded', 'status', 'background-error', 'live-only'),
   DETACH_BROWSER_CONTROL: typedCommand('none', 'ack', 'background-error', 'live-only'),
+  START_TAB_KEEPALIVE: typedCommand('none', 'ack', 'background-error', 'live-only'),
+  STOP_TAB_KEEPALIVE: typedCommand('none', 'ack', 'background-error', 'live-only'),
   GET_TOOL_DESCRIPTORS: typedCommand('none', 'value'),
   REFRESH_TOOL_DESCRIPTORS: typedCommand('none', 'value'),
   CREATE_TOOL_AUTHORIZATION: typedCommand('payload-decoded', 'value-or-domain-error'),

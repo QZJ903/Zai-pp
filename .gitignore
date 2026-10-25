@@ -15,6 +15,9 @@ stats.html
 stats-*.json
 .wxt
 
+# Local AI assistant working directories
+.zcode
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

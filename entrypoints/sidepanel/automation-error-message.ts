@@ -1,5 +1,6 @@
 import type { AutomationErrorState } from '../../core/automation/types';
 import type { LocaleMessageKey, MessageParams } from '../../core/i18n';
+import { looksLikeErrorCode } from '../../core/messaging/error-code';
 
 /**
  * 自动化失败的**错误码 → 用户文案**映射。
@@ -86,18 +87,6 @@ const AUTOMATION_ERROR_KEYS: Readonly<Record<string, LocaleMessageKey>> = Object
 });
 
 /**
- * 「这个字符串是一个错误码」而不是自然语言句子。
- *
- * 判据刻意收得很紧：**全小写、无空格、无标点**。
- * ⚠️ **单个小写词也算码**（`busy` / `cancelled` 就是本仓真实存在的单码）——
- * 不能要求「必须含下划线」。
- * ⚠️ **英文句子必须原样放行** —— `message` 里那批人写的句子
- * （`Automation run exceeded 300 seconds.`）比任何通用兜底文案都有信息量。
- * 句子带大写首字母与空格，天然不匹配这条正则。
- */
-const LOOKS_LIKE_ERROR_CODE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
-
-/**
  * 取这条失败的 i18n 键。**没有覆盖时返回 `null`**（不是返一个通用键）——
  * 调用方据此判断「该翻译」还是「该用 `message` 兜底」。
  */
@@ -121,6 +110,6 @@ export function formatAutomationError(
 ): string {
   const key = automationErrorKey(error.code);
   if (key) return t(key);
-  if (!LOOKS_LIKE_ERROR_CODE.test(error.message)) return error.message;
+  if (!looksLikeErrorCode(error.message)) return error.message;
   return t('sidepanel.automationPage.error.runFailedWithCode', { code: error.message });
 }

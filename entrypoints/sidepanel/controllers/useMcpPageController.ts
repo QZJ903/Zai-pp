@@ -12,7 +12,7 @@ import type {
   ToolDescriptor,
 } from '../../../core/types';
 import { createRequestGenerationFence } from '../async-state';
-import { getRuntimeErrorMessage } from '../runtime-response';
+import { formatRuntimeError } from '../runtime-response';
 import {
   McpPermissionError,
   countEnabledMcpTools,
@@ -86,7 +86,7 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
       });
     } catch (error) {
       if (requestFence.current.isCurrent(generation)) {
-        showBanner('error', getRuntimeErrorMessage(error) || t('sidepanel.mcpPage.messages.loadFailed'));
+        showBanner('error', formatRuntimeError(error, t) || t('sidepanel.mcpPage.messages.loadFailed'));
       }
     } finally {
       if (requestFence.current.isCurrent(generation)) setLoading(false);
@@ -195,7 +195,7 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
       setSelectedId((current) => current === server.id ? null : current);
       await load();
     } catch (error) {
-      showBanner('error', getRuntimeErrorMessage(error));
+      showBanner('error', formatRuntimeError(error, t));
     }
   }, [confirm, load, showBanner, t]);
 
@@ -208,9 +208,9 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
       if (!saved) throw new Error('MCP server no longer exists.');
       await load();
     } catch (error) {
-      showBanner('error', getRuntimeErrorMessage(error));
+      showBanner('error', formatRuntimeError(error, t));
     }
-  }, [load, showBanner]);
+  }, [load, showBanner, t]);
 
   const setBusyState = useCallback((serverId: string, action: BusyAction | null) => {
     setBusy((current) => ({ ...current, [serverId]: action }));
@@ -242,7 +242,7 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
             origin: error.origin ?? 'MCP Host',
           }));
       } else {
-        showBanner('error', getRuntimeErrorMessage(error));
+        showBanner('error', formatRuntimeError(error, t));
       }
     } finally {
       setBusyState(server.id, null);
@@ -269,18 +269,18 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
       });
       setCapabilitySettings(settings);
     } catch (error) {
-      showBanner('error', getRuntimeErrorMessage(error));
+      showBanner('error', formatRuntimeError(error, t));
     }
-  }, [showBanner]);
+  }, [showBanner, t]);
 
   const updateCapabilitySettings = useCallback(async (patch: McpCapabilitySettingsPatch) => {
     try {
       const settings = await mcpToolsController.updateCapabilitySettings(patch);
       setCapabilitySettings(settings);
     } catch (error) {
-      showBanner('error', getRuntimeErrorMessage(error));
+      showBanner('error', formatRuntimeError(error, t));
     }
-  }, [showBanner]);
+  }, [showBanner, t]);
 
   const togglePinnedTool = useCallback(async (server: McpServerConfig, tool: ToolDescriptor) => {
     const configured = capabilitySettings?.servers[server.id];

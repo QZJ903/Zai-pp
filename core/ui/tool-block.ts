@@ -4,10 +4,16 @@
  * ## 两层折叠（与上游 inline-agent 控制台同构）
  *
  * ① **块级** —— 折叠头「已调用工具（N 次）」开合整块；
- * ② **行级** —— 每行自己是按钮（`aria-expanded` + `hidden` 详情），**默认收起**。
+ * ② **行级** —— 每行自己是按钮（`aria-expanded` + `hidden` 详情）。
  *    上游 `createAgentToolRow` 就是这么做的，两层缺一不可：
  *    只有块级折叠时，块一展开所有行的详情会一次性全铺出来，长正文
  *    （例如 `shell_exec` 的长输出）会把后面的工具行冲散。
+ *
+ * ⚠️ **行级的默认态按「详情是不是可操作的卡片」分档** —— 详情由注入的
+ * `renderDetail` 画成卡片（Skill 起草 / 记忆导入预览，带「保存」「导入」按钮）时
+ * **默认展开**：那是一整轮里唯一要用户动手的地方，藏在折叠里等于没交付；
+ * 其余行（纯文本详情）**默认收起**，理由同上（长正文会把后面的行冲散）。
+ * ⚠️ **用户手动改过的行以用户的为准**（整块重画时按行标识恢复，见 `collectRowExpandedStates`）。
  *
  * 每行 = 圆点 + 工具名 + **结果摘要**（`result.summary`）+ 状态，展开看详情。
  * 摘要与详情由调用方注入（`formatStatus` / `formatDetail`），本模块只管
@@ -44,6 +50,23 @@ const STYLE_ID = 'zpp-tool-block-css';
 
 /** 折叠状态属性。 */
 const COLLAPSED_ATTR = 'data-collapsed';
+
+/**
+ * 「用户亲手开合过这一块」标记 —— 有它时**块级默认态不再生效**。
+ *
+ * ⚠️ 少了它，用户收起一个块之后，下一次重画（实时链路每执行一步一次）会把它弹开。
+ */
+const USER_TOGGLED_ATTR = 'data-zpp-tool-user-toggled';
+
+/**
+ * 行级的「用户亲手开合过」标记 —— 与块级同名属性同义（按元素区分，不会混）。
+ *
+ * ⚠️⚠️ **不能拿「上一次渲染后的有效态」当用户意愿**：一行若首次渲染时
+ * `rendered === false`（渲染器那一刻没认出来、或依赖尚未注入）而被默认收起，
+ * 之后即使变成卡片行也会一直保持收起 —— **用户永远看不到「保存 Skill」**。
+ * 只有**真点击**才置位；重画时 `userToggled ? 上次态 : 默认态`。
+ */
+const ROW_USER_TOGGLED_ATTR = 'data-zpp-tool-row-user-toggled';
 
 /** 恢复标识属性 —— 「这一块属于哪条回答」的唯一真源。 */
 const RESTORE_KEY_ATTR = 'data-zpp-tool-key';
@@ -88,6 +111,14 @@ export interface ToolBlockDependencies {
   formatDetail: (result: ToolCardResult) => string;
   /** 详情优先交给它渲染（能画成卡片就画）；返回 false 时退回纯文本。 */
   renderDetail?: (target: HTMLElement, result: ToolCardResult) => boolean;
+  /**
+   * 这块详情里**还有没有没点过的动作按钮**（Skill 草稿的「保存」/ 记忆导入的「导入」）。
+   *
+   * ⚠️ **由调用方注入** —— 本模块不认识任何渲染器，也不该认识；
+   * 「什么算一个可点的动作」是渲染层的知识（见 `core/ui/tool-result-renderer.ts` 的
+   * `hasPendingAction`）。不注入时按「没有动作」处理，退化成「收尾就收起」。
+   */
+  detailHasAction?: (detail: HTMLElement) => boolean;
   /** 注入 `document`（测试用）。 */
   document?: Document;
 }
@@ -125,6 +156,9 @@ export function createToolBlockShell(
   const toggle = (): void => {
     const collapsed = block.getAttribute(COLLAPSED_ATTR) === 'true';
     block.setAttribute(COLLAPSED_ATTR, collapsed ? 'false' : 'true');
+    // ⚠️ **用户亲手开合过，就别再按默认态重画了** —— 否则下一次重画会把它掰回默认值，
+    // 用户收起来的块又弹开。见 `USER_TOGGLED_ATTR` 的说明。
+    block.setAttribute(USER_TOGGLED_ATTR, 'true');
   };
   header.addEventListener('click', toggle);
   header.addEventListener('keydown', (event) => {
@@ -146,11 +180,14 @@ export function createToolBlockShell(
  * ⚠️ **整块重画而不是增量插入**：一轮里最多几个工具，重画的代价可以忽略，
  * 而增量插入要维护「哪一行对应哪条执行」的映射 —— 那个映射一旦漂移就是
  * 「状态串到别的工具上」这种很难查的表现。
- * ⚠️⚠️ **但重画必须保住行级展开态**（`collectExpandedRowKeys` / `rowKey`）——
+ * ⚠️⚠️ **但重画必须保住行级展开态**（`collectRowExpandedStates` / `rowKey`）——
  * 实时链路上每执行一步就会重画一次（`publishLiveSession` → `renderRecord` →
  * 本函数），不保住的话**用户刚点开的那一行会被下一次重画收起来**。
  * 上游没有这个问题，因为它的实时路径是增量 append + 原地 `setAgentToolRowResult`。
  * ⚠️ **行数取 `title` 的文案由调用方给**（`formatTitle`），本模块只知道「有几行」。
+ * ⚠️ **本函数不返回任何值**，但它会**把「这一块里还有没有没点过的动作按钮」落到
+ * `HAS_ACTION_ATTR` 上**（`applyBlockCollapseDefault` 读它，见那里的三档优先级）。
+ * 行级默认态是另一回事，在下面按每一行自己的 `rendered` 算。
  */
 export function updateToolBlockContent(
   block: HTMLElement,
@@ -167,8 +204,12 @@ export function updateToolBlockContent(
   if (!body) return;
 
   // ⚠️ **在清空之前**读一遍展开态（下面要整块重画）。
-  const expandedKeys = collectExpandedRowKeys(body);
+  const previousRowStates = collectRowExpandedStates(body);
+  const previousUserToggled = collectRowUserToggledKeys(body);
   body.textContent = '';
+
+  /** 这一块里还有没有「没点过的动作按钮」（见 `HAS_ACTION_ATTR`）。 */
+  let hasAction = false;
 
   executions.forEach((execution, index) => {
     const item = root.createElement('div');
@@ -228,25 +269,37 @@ export function updateToolBlockContent(
 
     item.appendChild(toggle);
 
+    // ⚠️ **`rendered === true` 表示详情被画成了卡片**（不是纯文本）—— 行级默认态由它决定，
+    // 见模块头注释。它在 `if (hasDetail)` 里算、但下面判默认态要用，所以提到外面。
+    let rendered = false;
     if (hasDetail) {
       const detailEl = root.createElement('div');
       detailEl.className = `${BLOCK_CLASS}-item-detail`;
       detailEl.id = detailId;
       toggle.setAttribute('aria-controls', detailId);
-      const rendered = dependencies.renderDetail?.(detailEl, execution.result) ?? false;
+      rendered = dependencies.renderDetail?.(detailEl, execution.result) ?? false;
       // ⚠️ 渲染器返回 false 表示「它不认识这个结果」—— 那时才退回纯文本，
       // 否则会出现「卡片画好了又被文本盖住」。
       if (!rendered) detailEl.textContent = detail;
       item.appendChild(detailEl);
+      // ⚠️ **「还有没点过的按钮」记在块上**（见 `HAS_ACTION_ATTR`）—— 它决定
+      // 「本页面会话内收尾时要不要保持展开」。点过之后按钮换成状态行 ⇒ 这里变假。
+      if (rendered && dependencies.detailHasAction?.(detailEl) === true) hasAction = true;
     }
 
-    // ⚠️ **默认收起**（上游 `createAgentToolRow`：`aria-expanded="false"` + `hidden`）——
-    // 展开后长正文（例如 `shell_exec` 的长输出）会把后面的工具行冲散。
-    const expanded = hasDetail && expandedKeys.has(rowKey);
+    // ⚠️ **默认态分两档**（见模块头注释）：详情是可操作的卡片 ⇒ 展开；纯文本 ⇒ 收起
+    // （上游 `createAgentToolRow` 的口径，展开后长正文会把后面的工具行冲散）。
+    // ⚠️⚠️ **只有「用户亲手开合过」的行才用上一次的状态** —— 拿「上次有效态」当用户意愿的话，
+    // 一行若首次渲染时 `rendered === false`（渲染器那一刻没认出来）被默认收起，之后就永远收着。
+    const userToggled = previousUserToggled.has(rowKey);
+    const expanded = hasDetail && (userToggled ? previousRowStates.get(rowKey) === true : rendered);
     setRowExpanded(item, toggle, hasDetail ? detailId : '', expanded);
+    if (userToggled) item.setAttribute(ROW_USER_TOGGLED_ATTR, 'true');
 
     if (hasDetail) {
       const flip = (): void => {
+        // ⚠️ **这里是唯一置位点** —— 只有真点击（或键盘等价动作）才算用户意愿。
+        item.setAttribute(ROW_USER_TOGGLED_ATTR, 'true');
         setRowExpanded(item, toggle, detailId, toggle.getAttribute('aria-expanded') !== 'true');
       };
       toggle.addEventListener('click', flip);
@@ -259,6 +312,45 @@ export function updateToolBlockContent(
 
     body.appendChild(item);
   });
+
+  // ⚠️ 记下「还有没点过的按钮」—— 块级默认态的第二档判据（见 `HAS_ACTION_ATTR`）。
+  block.setAttribute(HAS_ACTION_ATTR, hasAction ? 'true' : 'false');
+}
+
+/**
+ * 「这一块里有**还没点过的**动作按钮」标记 —— 块级默认态的第二档判据。
+ *
+ * ⚠️⚠️ **它是「有按钮就主动展开一次」的落点**（用户口径）：Skill 草稿 / 记忆导入预览
+ * 那种卡片是**整轮里唯一要用户动手的地方**，块收起来等于没交付（用户不知道按钮在哪）。
+ * ⚠️ **点过之后按钮换成状态行 ⇒ 标记变假 ⇒ 下次重画不再展开** ——
+ * 这就是「展开一次」里的「一次」：不是按时间，而是按「还有没有东西可点」。
+ * ⚠️ **刷新后不展开由上层保证**（恢复的记录一律传 `collapsedByDefault = true`，
+ * 见 `tool-panel.ts` 的 `record.live`）—— 那一档排在本判据之后？
+ * 不，**排在它之前**：见 `applyBlockCollapseDefault` 的优先级说明。
+ */
+const HAS_ACTION_ATTR = 'data-zpp-tool-has-action';
+
+/**
+ * 按「这一块该不该展开」重算块级折叠态。
+ *
+ * 判据三条，按优先级：
+ * ① **用户亲手开合过** ⇒ 保持用户的选择（见 `USER_TOGGLED_ATTR`）；
+ * ② **本页面会话内刚收尾、且还有没点过的按钮** ⇒ 展开（见 `HAS_ACTION_ATTR`）；
+ * ③ 其余 ⇒ 按调用方给的 `collapsedByDefault`（在飞展开、收尾 / 恢复收起）。
+ *
+ * ⚠️⚠️ **② 的「本页面会话内」是承重的**（用户口径）：**刷新页面 / 切会话之后一律收起**，
+ * 哪怕按钮还在 —— 那时的记录是从历史/存储恢复的，不是「刚刚跑完那一次」。
+ * 判据由调用方给（`sealedThisSession`），不在这里猜。
+ * ⚠️ **必须排在 `updateToolBlockContent` 之后** —— 「有没有未点按钮」由它写进属性。
+ */
+export function applyBlockCollapseDefault(
+  block: HTMLElement,
+  collapsedByDefault: boolean,
+  sealedThisSession = false,
+): void {
+  if (block.getAttribute(USER_TOGGLED_ATTR) === 'true') return;
+  const hasAction = sealedThisSession && block.getAttribute(HAS_ACTION_ATTR) === 'true';
+  block.setAttribute(COLLAPSED_ATTR, collapsedByDefault && !hasAction ? 'true' : 'false');
 }
 
 /**
@@ -272,11 +364,34 @@ function rowKeyOf(execution: ToolExecutionRecord, index: number): string {
   return execution.callId ? `id:${execution.callId}` : `at:${execution.name}:${index}`;
 }
 
-/** 读当前已展开的行（整块重画前调用）。 */
-function collectExpandedRowKeys(body: Element): Set<string> {
+/**
+ * 读当前每一行的展开态（整块重画前调用）。
+ *
+ * ⚠️ **返回的是「展开 / 收起」两档，不是「已展开的集合」** —— 重画后要能区分
+ * 「用户把它收起来了」与「这一行还没出现过」，两者的默认值不同（见模块头注释）。
+ * 只收「已展开」的话，收起这个动作在重画后会丢失、卡片行被重新展开。
+ */
+function collectRowExpandedStates(body: Element): Map<string, boolean> {
+  const states = new Map<string, boolean>();
+  for (const item of body.querySelectorAll<HTMLElement>(`.${BLOCK_CLASS}-item`)) {
+    const key = item.getAttribute(ROW_KEY_ATTR);
+    if (!key) continue;
+    states.set(key, item.getAttribute(ROW_EXPANDED_ATTR) === 'true');
+  }
+  return states;
+}
+
+/**
+ * 读「用户亲手开合过」的那些行（整块重画前调用）。
+ *
+ * ⚠️ 与 `collectRowExpandedStates` 分开读、分开用：前者是**用户意愿**（只有真点击才置位），
+ * 后者是**上一次渲染后的有效态**（含默认值）。拿后者当用户意愿会让「首次渲染时没认出来的行」
+ * 永远停在收起的默认态上（见 `ROW_USER_TOGGLED_ATTR` 的说明）。
+ */
+function collectRowUserToggledKeys(body: Element): Set<string> {
   const keys = new Set<string>();
   for (const item of body.querySelectorAll<HTMLElement>(`.${BLOCK_CLASS}-item`)) {
-    if (item.getAttribute(ROW_EXPANDED_ATTR) !== 'true') continue;
+    if (item.getAttribute(ROW_USER_TOGGLED_ATTR) !== 'true') continue;
     const key = item.getAttribute(ROW_KEY_ATTR);
     if (key) keys.add(key);
   }
@@ -305,6 +420,37 @@ function setRowExpanded(
 export function findToolBlock(restoreKey: string, dependencies: ToolBlockDependencies): HTMLElement | null {
   const root = doc(dependencies);
   return root.querySelector<HTMLElement>(`.${BLOCK_CLASS}[${RESTORE_KEY_ATTR}="${cssEscape(restoreKey)}"]`);
+}
+
+/**
+ * 改写一块的 restore key。
+ *
+ * ⚠️ **用在「按宿主命中」之后**：那一块可能带着另一条记录的 key（`live:<requestId>` /
+ * `storage:<hash>`），归一成当前记录该有的那个（`history:<uuid>`）——
+ * 否则它永远只靠兜底腿被命中，排查时也看不出这块属于哪条回答。
+ */
+export function retargetToolBlockKey(block: HTMLElement, restoreKey: string): void {
+  if (block.getAttribute(RESTORE_KEY_ATTR) === restoreKey) return;
+  block.setAttribute(RESTORE_KEY_ATTR, restoreKey);
+}
+
+/**
+ * 找**这条消息里**已经挂着的块（不管它属于哪条记录）。
+ *
+ * ⚠️⚠️ **判「同一条消息里只许有一块」的唯一入口**：`findToolBlock` 按 restore key 找，
+ * 而两条腿的 key 可以不同 —— **实时腿拿不到锚点时是 `live:<requestId>`，历史腿恒为
+ * `history:<uuid>`**。两者落在同一条消息上时按 key 谁都找不到对方
+ * ⇒ 后到的那条再挂一块（真机症状：同一条回答上下叠两个「已调用工具」，
+ * 上面那个多半是实时腿合成的摘要、点不开详情）。
+ * 这里按**宿主**找，与 key 无关。
+ */
+export function findToolBlockInMessage(
+  message: Element,
+  dependencies: ToolBlockDependencies,
+): HTMLElement | null {
+  const host = dependencies.resolveHost(message);
+  if (!host) return null;
+  return host.querySelector<HTMLElement>(`.${BLOCK_CLASS}`);
 }
 
 /** 把块挂到某条消息里。宿主找不到时返回 false（由调用方决定是否重试）。 */

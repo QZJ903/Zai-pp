@@ -237,7 +237,7 @@ export interface ZaiSessionWatchDeps {
  * ⚠️ **为什么不用手包 `history.pushState`**：内容脚本跑在隔离世界，
  * 包不到页面自己那个 `history` 对象。
  * ⚠️ **1s 轮询留着**：地址切换发生在「模型开始回答前后」，远早于用户能按暂停。
- * ⚠️ **`wxt:locationchange` 拿不到时只 warn** —— 还有 popstate / hashchange / 轮询兜底，
+ * ⚠️ **`wxt:locationchange` 拿不到时只记一行日志** —— 还有 popstate / hashchange / 轮询兜底，
  * 不该因为一个可选监听器不可用就整条链不装。
  */
 export function installZaiSessionWatch(deps: ZaiSessionWatchDeps): void {
@@ -250,7 +250,7 @@ export function installZaiSessionWatch(deps: ZaiSessionWatchDeps): void {
   try {
     deps.addLocationChangeListener(onLocationMaybeChanged);
   } catch (error) {
-    console.warn('[Zai++] locationchange listener unavailable', error);
+    console.log('[Zai++] locationchange listener unavailable', error);
   }
   target.addEventListener('popstate', onLocationMaybeChanged);
   target.addEventListener('hashchange', onLocationMaybeChanged);
@@ -273,7 +273,7 @@ export interface ZaiSessionNotifyDeps {
  *
  * ⚠️⚠️ **先比对会话 id，没真变就不打扰订阅者** —— 1s 轮询会每秒调到这里，
  * 不去重的话项目面板会被每秒重绘一次。
- * ⚠️ **单个 listener 抛错只 warn、不中断其余** —— 一个消费者的 bug 不该让
+ * ⚠️ **单个 listener 抛错只记日志、不中断其余** —— 一个消费者的 bug 不该让
  * 另一个消费者收不到通知（`sessionChangeListeners` 里同时有面板与项目面板）。
  */
 export function notifyZaiSessionChange(deps: ZaiSessionNotifyDeps): void {
@@ -284,7 +284,7 @@ export function notifyZaiSessionChange(deps: ZaiSessionNotifyDeps): void {
     try {
       listener();
     } catch (error) {
-      console.warn('[Zai++] session change listener failed', error);
+      console.log('[Zai++] session change listener failed', error);
     }
   }
 }

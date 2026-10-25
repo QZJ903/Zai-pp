@@ -46,6 +46,10 @@ const TOOL_REMINDER_FRAGMENT_PREFIXES = [
   'To call a',
   'For MCP tools, prefer the short tag name',
   'For local file paths, use forward slashes',
+  // ⚠️ **这一条当前匹配不到任何文案**（`toolFormatReminder` 里那句负例清单已经删了）。
+  // **刻意保留**：`isToolReminderOnly` 也用来判**服务端历史里存着的旧提醒段**
+  // （那些是旧措辞发出去的），删掉它会让历史里的老提醒剥不干净。
+  // 下一次怀疑「提醒段剥不掉」时，先确认是不是这一档，别急着删。
   'Do not use <invoke name="...">',
   'Do not put executable tool XML',
 ];

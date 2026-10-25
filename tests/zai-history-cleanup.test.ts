@@ -19,11 +19,12 @@ import { createDefaultToolDescriptors } from '../core/tool/invocation';
 import { SHELL_TOOL_NAMES } from '../core/shell/contracts';
 import { createSkillCreatorToolDescriptors } from '../core/skill/creator-tool';
 import { createMemoryImportToolDescriptors } from '../core/memory/import-tool';
+import { BROWSER_CONTROL_TOOL_NAMES } from '../core/browser-control/types';
 
 /**
- * **历史剥离**（待办 34 的历史侧）。
+ * **历史剥离**（历史侧）。
  *
- * ⚠️ 真机实测的形状（2026-10）：
+ * ⚠️ 真机实测的形状：
  * - `GET /api/v1/chats/{id}` → `chat.history.messages.<uuid>`，**只有 user 有 `content`**
  * - `POST /api/v1/chats/{id}/messages/batch` → `data.<uuid>`，user 在 `content`、
  *   assistant 在 `content_blocks[].content`（`type ∈ {reasoning, text}`）
@@ -45,6 +46,11 @@ describe('zai history tool name baseline', () => {
     for (const name of SHELL_TOOL_NAMES) derived.add(name);
     for (const descriptor of createSkillCreatorToolDescriptors('en')) derived.add(descriptor.name);
     for (const descriptor of createMemoryImportToolDescriptors('en')) derived.add(descriptor.name);
+    // ⚠️⚠️ **浏览器控制的 18 个名字曾经漏在这份派生清单之外** —— 于是基线也没收它们，
+    // 而动态快照在页面加载早期是空集 ⇒ 历史侧请求早于同步时**浏览器工具的 XML 剥不掉**
+    // （症状：XML 与面板一起显示，而 shell / memory / skill 的都正常）。
+    // 这条守卫的价值就在于：漏一个，这里立刻红。
+    for (const name of BROWSER_CONTROL_TOOL_NAMES) derived.add(name);
 
     // 基线 = 真工厂派生集合 ∪ 已退役工具名（后者只为剥离老会话里残留的 XML）。
     for (const name of ZAI_RETIRED_TOOL_NAMES) derived.add(name);
@@ -312,7 +318,7 @@ describe('stripZaiHistoryResponse: shape tolerance', () => {
     expect(() => stripZaiHistoryResponse(body, { toolNames })).not.toThrow();
   });
 
-  // ⚠️⚠️ **「除落点外全部不变」用路径级 diff**（守则 B14）——
+  // ⚠️⚠️ **「除落点外全部不变」用路径级 diff** ——
   // 逐字段抽查只覆盖「想到并写下来」的那几个，而契约是「其余一律不动」，
   // 含**将来服务端新加的、我们不认识的字段**。
   it('changes exactly the content paths and nothing else', () => {
@@ -516,7 +522,7 @@ function changedPaths(
 }
 
 /**
- * **接线守卫**：纯函数测试全绿**不构成「这条链被验证过」**（守则 B15）——
+ * **接线守卫**：纯函数测试全绿**不构成「这条链被验证过」** ——
  * 上面那些断言喂的是 `stripZaiHistoryResponse`，而真正决定「用户看不看得见」
  * 的是 `fetch-hook` 有没有把它**接在历史路由上**。这一组走**真 hook**。
  *

@@ -5,7 +5,7 @@
  * 分工：本模块管「站点事实」（选择器、正文提取、会话归属），
  * `core/ui/` 那两个只管「结构与调度」。
  *
- * ⚠️ **本模块跑在内容脚本（隔离世界）** —— 与 `core/ui/tool-result-cards.ts` 同环境。
+ * ⚠️ **本模块跑在内容脚本（隔离世界）**。
  */
 
 import type { ToolCardResult, ToolExecutionRecord } from '../types';
@@ -13,14 +13,14 @@ import type { ToolCardResult, ToolExecutionRecord } from '../types';
 /**
  * 面板的挂载宿主：**响应内容容器**。
  *
- * ⚠️ **用这个稳定 id，不要用 `.markdown-prose`** —— 真机实测（探针 9 第二轮）：
+ * ⚠️ **用这个稳定 id，不要用 `.markdown-prose`** —— 真机实测：
  * `.chat-assistant` **自己就带 `markdown-prose` 类**，而 `querySelector` 返回第一个匹配，
  * 于是会挑到「只有一个子元素的外层」；`#response-content-container` 是语义 id
  * （不是构建哈希），每条助手消息**恰好一个**（实测 5/5），且 `overflow: visible`。
  */
 export const ZAI_RESPONSE_HOST_SELECTOR = '#response-content-container';
 
-/** 助手消息容器（与 `core/ui/tool-result-cards.ts` 同口径，已真机验证）。 */
+/** 助手消息容器（真机验证过）。 */
 export const ZAI_ASSISTANT_MESSAGE_SELECTOR = '.chat-assistant';
 
 /**
@@ -32,7 +32,6 @@ export const ZAI_ASSISTANT_MESSAGE_SELECTOR = '.chat-assistant';
  */
 export const ZAI_INJECTED_UI_SELECTOR = [
   '.zpp-tool-block',
-  '[data-zpp-result-cards]',
   '[data-zpp-hidden-continuation]',
   '.zpp-project-panel',
 ].join(', ');
@@ -184,14 +183,14 @@ export function formatZaiToolDetail(result: ToolCardResult): string {
     // ⚠️ **失败分支保留「从 JSON detail 里抽可读错误」**（`looksLikeJson` +
     // `extractReadableError`）—— 那两个函数是上游 `.dpp-tool-block` 自己的，
     // 我们面板的祖先行为，不是本项目新加的。
-    // 为什么保留：抽取只在一种场景命中 —— 第三方 MCP 服务把 JSON 塞进 content 文本
+    // ⚠️ **抽取只在一种场景命中**：第三方 MCP 服务把 JSON 塞进 content 文本
     // （`{"error":{"message":"…"}}`）。而我们自己的工具失败时 detail 全是纯文本
     // （memory 是译文、creator/import 是 `error.message`、browser 是
     // `normalized.message`、runtime 边界是 `message`）⇒ **成本为零，收益落在唯一
     // 一个我们无法自测的场景上**。
-    // ⚠️ **不丢信息**：MCP 失败时 `error.message` 恰好等于 detail 那段原文
-    // （`normalizeMcpToolResult` 里 `message: detail || …`）⇒ 抽出来的可读句在
-    // detail 段、原文仍在下面的 `error:` 段，两份都在，只是详略分开。
+    // ⚠️⚠️ **原文不再单独列一段**：`error.message` 与 detail 同源时（MCP 失败即如此，
+    // `normalizeMcpToolResult` 里 `message: detail || …`）下面的去重会跳过 `error:` 段。
+    // 早期版本的注释写着「两份都在」，那是 `JSON.stringify(result.error)` 时期的行为，已过时。
     // ⇒ **这是与上游控制台公式唯一有意的分叉**，出处写明在此。
     const reason = readFailureReason(result).trim()
       || (result.error?.message ?? '').trim();
@@ -200,8 +199,24 @@ export function formatZaiToolDetail(result: ToolCardResult): string {
     } else {
       lines.push(`${result.summary}\n${reason}`);
     }
-    if (result.error) {
-      lines.push(`error: ${clampDetailText(JSON.stringify(result.error), DETAIL_MAX_CHARS)}`);
+    // ⚠️⚠️ **只显示 `error.message`，不再 `JSON.stringify(result.error)`** ——
+    // 整对象序列化会把 `{code, message, retryable, details}` 原样摊在面板里，
+    // 那串东西对用户没有信息量、还占掉详情框（160px）的大半。
+    // `code` 与 `details` 仍留在**落库的工具历史里**（`core/tool/history.ts` 保留整份 error），
+    // 排查时从 `chrome.storage.local` 查得到 —— 但**页面 console 里没有**，这里不打印。
+    // ⚠️ `message` 可能等于已显示过的那句（MCP 失败时它与 `detail` 同源）⇒ 去一次重，
+    // 否则同一句话在面板里出现两遍。
+    const failureMessage = (result.error?.message ?? '').trim();
+    const detailText = (result.detail ?? '').trim();
+    // ⚠️ **按归一后的文本比**，不是字面比：`extractReadableError` 抽出的句子可能少一个句号、
+    // 或与 `message` 差在空白上（实测样例：`权限不足` vs `权限不足。`）——
+    // 字面比较会让同一句话在面板里出现两遍，正是这次要消掉的那种噪音。
+    if (
+      failureMessage
+      && !sameDisplayText(failureMessage, reason)
+      && !sameDisplayText(failureMessage, detailText)
+    ) {
+      lines.push(`error: ${clampDetailText(failureMessage, DETAIL_MAX_CHARS)}`);
     }
   }
   if (result.output !== undefined) {
@@ -238,6 +253,20 @@ function readFailureReason(result: ToolCardResult): string {
     if (extracted) return extracted;
   }
   return detail;
+}
+
+/**
+ * 两段文本「显示上是不是同一句」。
+ *
+ * ⚠️ **只做归一、不做语义判断** —— 去首尾标点与空白、压缩内部空白。
+ * 判据刻意保守：归一后仍不同就当作两句分别显示（宁可多一行，也不吞掉有差异的信息）。
+ */
+function sameDisplayText(a: string, b: string): boolean {
+  const normalize = (value: string): string =>
+    value.replace(/\s+/g, ' ').replace(/^[\s。．.、,:：;；!！?？]+|[\s。．.、,:：;；!！?？]+$/g, '');
+  const left = normalize(a);
+  const right = normalize(b);
+  return left !== '' && left === right;
 }
 
 function looksLikeJson(value: string): boolean {

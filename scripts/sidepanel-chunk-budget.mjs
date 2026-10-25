@@ -69,7 +69,7 @@ const BASELINE = Object.freeze({
   // ⚠️⚠️ **2026-10-20 十测（删工具页 + 自动化回归能力页）**：删掉整个 `toolsPage` i18n 段
   // （中英各 24 键，含 web 那批与 python 那批）后实测 raw 327153 / gzip 102570
   // —— **−3326 raw / −671 gzip**。
-  // ⚠️ **2026-10-20 十一测（评审收口）**：加 `sidepanel.mcpPage.shellSetup.listSeparator`
+  // ⚠️ **2026-10-20 十一测**：加 `sidepanel.mcpPage.shellSetup.listSeparator`
   // （中英各 1 键）后实测 raw 327195 / gzip 102595 —— **+42 raw / +25 gzip**。
   // ⚠️⚠️ **2026-10-21 十二测（MCP 页工具卡片改人话）**：新增
   // `sidepanel.mcpPage.detail.toolInfo`（12 个 Shell 工具各一组 label/summary
@@ -92,7 +92,16 @@ const BASELINE = Object.freeze({
   // 新增 `memory` / `skill` / `mcp` / `automation` / `project`，中英各净增 3 键）后
   // 实测 raw **332879** / gzip **103981** —— **+886 raw / −13 gzip**。
   // ⚠️ **gzip 反而降了** —— 中文条目压得更狠，同上面第七条注释的规律。
-  initialShell: { raw: 332_879, gzip: 103_981 },
+  // ⚠️ **同日十六测（系统提示词重构：两套工具改按通道区分）**：`sandboxHostSection`
+  // 加判定表 + 口诀，删掉 `systemChat` 里重复的「关键：本地工具调用的确切格式」整段
+  // 与全部包装格式负例清单后，实测 raw **331040** / gzip **103652**
+  // —— **−1839 raw / −329 gzip**。
+  // ⚠️ **2.15.56 实测**：`common.operationFailedWithCode` +1 键、`sidepanel.browserControlPage.messages.zaiTabBlocked`
+  // +1 键（中英各一份），`BrowserControlPage` 新增对 `core/zai/contracts` 的静态 import
+  // ⇒ 初始 shell 实测 raw **331527** / gzip **103943**（+487 raw / +291 gzip）。
+  // 同批 `runtime-response.ts` 让产物从 43 文件涨到 **45**（两个同名 chunk 互相 import，
+  // 共享模块被提成独立 chunk，属「entrypoint 数量决定切分」那类）。
+  initialShell: { raw: 331_527, gzip: 103_943 },
   // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
   // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
   // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，

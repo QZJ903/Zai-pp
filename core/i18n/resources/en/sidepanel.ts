@@ -401,6 +401,7 @@ export const sidepanel = {
       detached: 'Detached from the current target.',
       targetFailed: 'Failed to select target tab.',
       targetSelected: 'Selected tab {id}.',
+      zaiTabBlocked: 'A z.ai tab cannot be a control target: the continuation keep-alive session holds its debug session.',
     },
   },
   mcpPage: {

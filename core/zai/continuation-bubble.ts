@@ -9,7 +9,6 @@
  * （它是 Svelte 渲染的，重渲染会把我们的改动冲掉）。隐藏是幂等的、且不参与它的状态。
  *
  * ⚠️ **站点假设集中在这一个常量上**（`CONTINUATION_BUBBLE_SELECTOR`）。
- * 与 `core/ui/tool-result-cards.ts` 的 `ASSISTANT_MESSAGE_SELECTOR` 同一处理方式：
  * 选择器错了的表现是**静默的**（气泡照旧可见，其余功能不受影响），
  * 所以它是「可观测但无害」的失效，而不是会连累主流程的那种。
  */
@@ -19,7 +18,7 @@ import { containsZaiContinuationPlaceholder, isZaiContinuationPrompt } from './c
 /**
  * 用户消息容器。
  *
- * ⚠️ **已由真机探针验证**：4 条用户消息里
+ * ⚠️ **已真机验证**：4 条用户消息里
  * 2 条是续跑模板，命中准确。⚠️ **别换成更宽的写法**：`[class*="user-message"]` 计数是 **8**
  * （页面上还有个 `edit-user-message-button` 也含这个子串）⇒ 子串匹配会多抓一倍元素。
  * ⚠️ 它错了的表现是**静默的**（气泡照旧可见，其余功能不受影响）。
@@ -124,7 +123,7 @@ export function installContinuationBubbleHider(options?: {
       const hidden = hideContinuationBubbles({ root: doc });
       if (hidden > 0) options?.onHidden?.(hidden);
     } catch (error) {
-      console.warn('[Zai++] continuation bubble hide failed', error);
+      console.log('[Zai++] continuation bubble hide failed', error);
     }
   };
   const schedule = () => {
@@ -150,7 +149,7 @@ export function installContinuationBubbleHider(options?: {
       observer = new MutationObserver(schedule);
       observer.observe(observeTarget, { childList: true, subtree: true });
     } catch (error) {
-      console.warn('[Zai++] continuation bubble observer unavailable', error);
+      console.log('[Zai++] continuation bubble observer unavailable', error);
     }
   }
 

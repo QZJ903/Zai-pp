@@ -130,6 +130,21 @@ export interface ToolRuntimeCommandContracts {
     request: { type: 'DETACH_BROWSER_CONTROL' };
     response: Ack;
   };
+  /**
+   * 让内容脚本所在的标签**留在后台也能正常跑**（续跑链活在页面里，见
+   * `core/browser-control/tab-keepalive.ts`）。
+   *
+   * ⚠️ 标签 id 取自 `context.tabId`，**不由调用方传** —— 内容脚本自己报的 id 可以被伪造，
+   * 而 sender 是浏览器给的。
+   */
+  START_TAB_KEEPALIVE: {
+    request: { type: 'START_TAB_KEEPALIVE' };
+    response: Ack;
+  };
+  STOP_TAB_KEEPALIVE: {
+    request: { type: 'STOP_TAB_KEEPALIVE' };
+    response: Ack;
+  };
   GET_TOOL_DESCRIPTORS: {
     request: DeclaredRuntimeRequest<'GET_TOOL_DESCRIPTORS'>;
     response: ToolDescriptor[];

@@ -17,12 +17,12 @@ import * as t from '@babel/types';
  * ## 为什么是源码级断言
  *
  * `zai.content.ts` 加载即执行 `defineContentScript(...)`，**不能被测试 import**
- * ⇒ 这三处调用点没有行为测试可写。按 [[zai-code-guardrails]] B21：能写行为测试就写，
+ * ⇒ 这三处调用点没有行为测试可写。原则是**能写行为测试就写**，
  * 写不了才退回 AST；这里属于后者，且断言对象是**语法位置**（调用点有没有被 if 包住），
  * 不是「名字有没有出现过」。
  *
  * ⚠️ 它拦不住「把门挪进别的形式」（例如先算一个布尔再包一层）——
- * 那类绕过由 `zai-code-guardrails` B21 的六族绕过清单覆盖，这里只钉最常见的一种。
+ * 那类绕过不在本文件的射程内，这里只钉最常见的一种。
  */
 
 const SOURCE = readFileSync('entrypoints/zai.content.ts', 'utf8');
@@ -84,7 +84,7 @@ function collectModelOverrideCalls(root: t.Node | null): t.CallExpression[] {
  *
  * ⚠️⚠️ **不能把所有 `if` 都算成门** —— 第一版就是这么写的，结果把
  * `if (route === 'chatNew') { … }`（路由分支）与 `if (parsedBody) { … }`
- * （解析成功才写）也算成违规 ⇒ **基线就红**，是假红（守则 B11 同族）。
+ * （解析成功才写）也算成违规 ⇒ **基线就红**，是假红。
  * 真正的缺陷形态只有一种：`if (!isAgentTurn) { apply… }`。
  *
  * 三种包裹形态都要认：
@@ -151,7 +151,7 @@ describe('model override call sites are not gated by mode', () => {
   });
 
   it('does not reintroduce the disproven "agent assembles its own model" comment', () => {
-    // 注释里那个前提已被真机推翻，别再写回去（`zai-code-guardrails` C2：作废要留痕，
+    // 注释里那个前提已被真机推翻，别再写回去（作废要留痕，
     // 但留痕指的是「记录它作废了」，不是把结论原样贴回来）。
     expect(SOURCE.includes('agent 轮不碰')).toBe(false);
     expect(SOURCE.includes('agent 模式不碰')).toBe(false);

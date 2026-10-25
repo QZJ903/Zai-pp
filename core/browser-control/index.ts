@@ -1,5 +1,6 @@
 export {
   browserControlService,
+  tabKeepAliveSession,
   createBrowserControlToolDescriptors,
   executeBrowserControlToolCall,
   getBrowserControlState,

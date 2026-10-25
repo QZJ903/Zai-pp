@@ -228,7 +228,7 @@ describe('no host-literal judgements outside the site table', () => {
   });
 
   it('keeps the site table as the only place that spells out the origins', () => {
-    // 只允许 `contracts.ts` 出现裸 origin 字面量（i18n 文案与探针不算生产判据）。
+    // 只允许 `contracts.ts` 出现裸 origin 字面量（i18n 文案不算生产判据）。
     const contracts = read('core/zai/contracts.ts');
     for (const origin of ZAI_WEB_ORIGINS) {
       expect(contracts, `站点表应当写着 ${origin}`).toContain(origin);

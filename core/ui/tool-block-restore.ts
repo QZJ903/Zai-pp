@@ -352,8 +352,7 @@ export function createToolBlockRestoreController(
    *
    * ⚠️ **去重键优先 `callId`**（`executeDetected` 算的 `xml:<hash>`，存储腿带着它），
    * 拿不到时退回「名字 + 摘要」—— 两者都拿不到就按「每次都不同」处理，
-   * 宁可多留一行也不静默吞掉一次执行（与 `tool-result-cards.ts` 的 `executionKey`
-   * 同一取舍）。
+   * 宁可多留一行也不静默吞掉一次执行。
    */
   function unionExecutions(
     left: readonly ToolExecutionRecord[],
@@ -476,8 +475,12 @@ export function createToolBlockRestoreController(
   /**
    * 跑一轮渲染，返回**还没成功的条数**。
    *
-   * ⚠️ **`usedMessages` 必须在这里创建、整轮共享** —— 它是「一条消息只被一块占用」
+   * ⚠️ **`usedMessages` 必须在这里创建、整轮共享** —— 它是「一轮之内不互相抢目标」
    * 的唯一保证。放到循环里每次新建就等于没有。
+   * ⚠️⚠️ **但它只活一轮，而两条腿是分两批到达的**（存储腿先、历史腿后）——
+   * 「同一条回答里叠两块面板」就出在这里。本模块**不**用跨轮占用去挡（那会让后到的
+   * 那条永久不渲染、真结果丢掉），而是靠 ``render`` 侧按**宿主**找块并合并
+   * （`findToolBlockInMessage`）：后到的那条照常交给它，由它并进已有的块。
    * ⚠️ **成功的那一轮要把 `attempts` 归零**（由 `schedule` 的收尾做）——
    * 否则「先失败 20 次、之后又来一条新记录」时，新记录会被旧计数卡住直接放弃。
    */
@@ -589,7 +592,7 @@ export function createToolBlockRestoreController(
 
     if (record.source === 'storage') return null;
 
-    // ⚠️⚠️ **有锚点的记录不许用兜底腿**（P0-1）—— 它本该挂在**某一条具体的消息**上，
+    // ⚠️⚠️ **有锚点的记录不许用兜底腿** —— 它本该挂在**某一条具体的消息**上，
     // 那一条不在（还没渲染 / 已被占用）时**应该等**，而不是「随便找一条还没被占用的」。
     //
     // 真机形状的失效：同一轮里 `readZaiMessageId` 先返回 null、后返回 uuid

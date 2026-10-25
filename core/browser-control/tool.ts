@@ -2,7 +2,7 @@ import { translate, type LocaleMessageKey, type SupportedLocale } from '../i18n/
 import type { ToolCall, ToolDescriptor, ToolProviderIdentity, ToolResult } from '../tool/types';
 import { getCurrentPlatformEnvironment, isCapabilitySupported } from '../platform';
 import { getBrowserControlSettings } from './settings';
-import { browserControlService } from './service';
+import { browserControlService, tabKeepAliveSession } from './service';
 import {
   BROWSER_CONTROL_PROVIDER,
   BROWSER_CONTROL_TOOL_NAMES,
@@ -11,7 +11,7 @@ import {
   type BrowserControlToolName,
 } from './types';
 
-export { browserControlService };
+export { browserControlService, tabKeepAliveSession };
 export {
   BROWSER_CONTROL_PROVIDER,
   BROWSER_CONTROL_TOOL_NAMES,
@@ -189,7 +189,10 @@ function schemaForTool(name: BrowserControlToolName): ToolDescriptor['inputSchem
   switch (name) {
     case 'browser_navigate':
       return objectSchema({
-        url: { type: 'string', description: 'Absolute http(s) or file URL.' },
+        // ⚠️ **不能写「或 file URL」** —— `normalizeUrl` 明确拒绝非 http(s)，
+        // 因为 AX 快照会把本地文件内容整段吐出来。描述与实现不一致时，
+        // 读代码的人会以为护栏是漏的、把 `file:` 加回去。
+        url: { type: 'string', description: 'Absolute http(s) URL.' },
         newTab: {
           type: 'boolean',
           default: true,

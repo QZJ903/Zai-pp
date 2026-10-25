@@ -401,6 +401,7 @@ export const sidepanel = {
       detached: '已从当前目标断开。',
       targetFailed: '选择目标标签页失败。',
       targetSelected: '已选择标签页 {id}。',
+      zaiTabBlocked: 'z.ai 标签页不能作为控制目标：续跑保活需要独占该标签的调试会话。',
     },
   },
   mcpPage: {

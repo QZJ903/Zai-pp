@@ -6,7 +6,7 @@
 // 文件头），不覆盖本地 Skill 真实 SKILL.md 正文及其 references 文件内容。真实正文相对引用依赖 Agent 遵循
 // 执行边界软提示的「double-base rule」自行解析。本文件末尾的 describe 显式锚定这一声明边界。
 //
-// 设计来源：local-skill-import-design.md §2.5。算法（双基探测）：
+// 设计来源：本地 Skill 导入的相对引用改写。算法（双基探测）：
 //   1) 先 join(thisFileDir, rel)，fileExists 存在 → 用；
 //   2) 否则 join(skillDir, rel)，fileExists 存在 → 用；
 //   3) 都不存在 → 保留原样（不误伤 URL / 绝对路径 / 占位 / `..` 越界）。

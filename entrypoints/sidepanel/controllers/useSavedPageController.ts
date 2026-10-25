@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LocaleMessageKey, MessageParams } from '../../../core/i18n';
 import type { SavedItem, SavedItemInput } from '../../../core/saved-items/types';
 import { createRequestGenerationFence } from '../async-state';
-import { getRuntimeErrorMessage } from '../runtime-response';
+import { formatRuntimeError } from '../runtime-response';
 import { decodeSavedItemList, libraryController } from './library-controller';
 
 type Translator = (key: LocaleMessageKey, params?: MessageParams) => string;
@@ -30,7 +30,7 @@ export function useSavedPageController(t: Translator, confirm: Confirm, feedback
 
   const operationError = useCallback((error: unknown) => {
     feedbackRef.current.error(translatorRef.current('sidepanel.savedPage.operationFailed', {
-      error: getRuntimeErrorMessage(error),
+      error: formatRuntimeError(error, translatorRef.current, { bare: true }),
     }));
   }, []);
 
@@ -108,7 +108,7 @@ export function useSavedPageController(t: Translator, confirm: Confirm, feedback
       feedback.success(t('sidepanel.savedPage.inserted'));
     } catch (error) {
       feedback.error(t('sidepanel.savedPage.insertFailed', {
-        error: getRuntimeErrorMessage(error),
+        error: formatRuntimeError(error, t, { bare: true }),
       }));
     }
   }, [feedback, t]);

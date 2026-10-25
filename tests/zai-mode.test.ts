@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ZAI_AGENT_HOME_PATH } from '../core/zai/mode';
 
 /**
- * **新会话落点**（2026-10-19 收成常量）。
+ * **新会话落点**（收成一个常量）。
  *
  * ## 为什么只剩这一条
  *

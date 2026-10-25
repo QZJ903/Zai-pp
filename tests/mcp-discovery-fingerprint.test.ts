@@ -259,7 +259,7 @@ describe('MCP 配置指纹：改用等价路径写回时不该误判', () => {
   });
 
   it('storage 里那台真机的字段形状能被正确读回', async () => {
-    // 真机 `servers[0]` 的实际形状（2026-10-22 从 chrome.storage 导出）：
+    // 真机 `servers[0]` 的实际形状（从 chrome.storage 导出）：
     // `timeouts` 是字母序，`transport` 的键也是字母序。
     const { id } = await seedDiscoveredServer();
     const raw = storage[MCP_STORAGE_KEY] as Record<string, unknown>;

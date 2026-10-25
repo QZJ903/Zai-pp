@@ -10,6 +10,7 @@ import {
   decodeBrowserControlTarget,
 } from '../../../core/browser-control/codec';
 import { DEFAULT_BROWSER_CONTROL_SETTINGS } from '../../../core/browser-control/settings';
+import { isZaiSiteOrigin } from '../../../core/zai/contracts';
 import { createRequestGenerationFence } from '../async-state';
 import PageIntro from '../components/PageIntro';
 import {
@@ -297,7 +298,14 @@ function TargetRow({
           )}
           {!target.controllable && (
             <div className="text-[10px] mt-1" style={{ color: 'var(--ds-danger)' }}>
-              {target.reason}
+              {/*
+               * z.ai 那一条走本地化文案 —— 后台给的 reason 是英文技术串
+               * （core/browser-control 不在 i18n 豁免名单里，写不了中文）。
+               * 判据是 URL 而不是 reason 文本：那是后台排除它的同一条规则。
+               */}
+              {isZaiTargetUrl(target.url)
+                ? t('sidepanel.browserControlPage.messages.zaiTabBlocked')
+                : target.reason}
             </div>
           )}
         </div>
@@ -310,4 +318,14 @@ function TargetRow({
       </div>
     </button>
   );
+}
+
+/**
+ * 这一行是不是被「保活独占」规则挡掉的 z.ai 标签。
+ *
+ * ⚠️ **判据与后台同源**（`core/browser-control/service.ts` 的 `getControllableState` 用的也是
+ * `isZaiSiteOrigin`）—— 面板只是把后台那句英文技术原因换成中文，不自己发明排除规则。
+ */
+function isZaiTargetUrl(url: string): boolean {
+  return isZaiSiteOrigin(url);
 }

@@ -307,7 +307,7 @@ function collectRealReferences(scope: t.Node, names: ReadonlySet<string>): Set<s
  * 这个标识符是不是**纯提及**（它的值最终被丢掉，不产生任何行为）？
  *
  * ⚠️⚠️ **判据是「值有没有去处」，不是「穿过了哪几种节点」** ——
- * 黑名单式写法（「穿过 void / typeof / as 就算提及」）挡不住穷举，复核实测这一族
+ * 黑名单式写法（「穿过 void / typeof / as 就算提及」）挡不住穷举，实测这一族
  * 全部 tsc-clean 且都能把守卫关掉：`void [f];`、`void \`${f}\`;`、`void ({x: f});`、
  * `(<any>f);`、`typeof f !== 'undefined'`、`f, 0;`。
  *

@@ -1,5 +1,5 @@
 /**
- * Zai++ DOM 任务协调器（方案 §4.3 Step 2）。
+ * Zai++ DOM 任务协调器。
  *
  * 自动化任务不再在后台 fetch completion，而是由后台「找到/打开一个
  * z.ai 标签页 → 把 prompt 交给该页 content script → content 复用

@@ -1,5 +1,6 @@
 import { SVG_PATHS } from '../../constants';
 import { useI18n } from '../../i18n';
+import { formatRuntimeError } from '../../runtime-response';
 import PageIntro from '../PageIntro';
 import { useBanner, useConfirm } from './primitives';
 import type { SettingsState } from '../../controllers/useSettingsController';
@@ -34,7 +35,8 @@ export default function DataSubPage({ state }: { state: SettingsState }) {
         <div className="flex justify-between items-center text-sm">
           <span style={{ color: 'var(--ds-text-secondary)' }}>{t('sidepanel.settings.memoryTotal')}</span>
           <span className="text-lg font-semibold" style={{ color: 'var(--ds-blue)' }}>
-            {state.memoryCount}
+            {/* `null` means "could not load", not "zero memories" — see useSettingsController. */}
+            {state.memoryCount ?? '—'}
           </span>
         </div>
 
@@ -68,7 +70,12 @@ export default function DataSubPage({ state }: { state: SettingsState }) {
                 if (result.ok) {
                   banner.show('success', t('sidepanel.settings.importSuccess', { count: result.imported ?? 0 }));
                 } else {
-                  banner.show('error', result.error ?? t('sidepanel.settings.jsonFormatError'));
+                  // ⚠️ 后台的领域失败是 `{ok:false, error:'invalid_memories'}` 这种**裸码**，
+                  // 直接渲染就是一行蛇形标识符 —— 过一层与侧边栏相同的判据。
+                  banner.show(
+                    'error',
+                    formatRuntimeError(result.error, t) || t('sidepanel.settings.jsonFormatError'),
+                  );
                 }
               },
             )}

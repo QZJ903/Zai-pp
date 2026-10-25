@@ -447,7 +447,7 @@ describe('the live leg merges into the history leg of the same turn', () => {
 
 describe('a record with a precise anchor never falls back to another message', () => {
   it('leaves the anchored record pending instead of mounting it on the wrong answer', () => {
-    // ⚠️⚠️ **P0-1（真机形状）**：同一轮里 `readZaiMessageId` 先返回 null、后返回 uuid
+    // ⚠️⚠️ **真机形状**：同一轮里 `readZaiMessageId` 先返回 null、后返回 uuid
     // ⇒ 先后产生 `live:<requestId>` 与 `history:<uuid>` 两条记录（签名对不上时不合流）。
     // 前者没有锚点、走兜底腿**占住了正确的那条消息**；后者带着精确锚点来的时候
     // `usedMessages` 已经把那条挡掉了 ⇒ 若兜底腿照常放行，它会被挂到**另一条回答**上。

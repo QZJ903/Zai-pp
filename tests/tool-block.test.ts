@@ -3,7 +3,9 @@ import {
   appendToolBlockToMessage,
   createToolBlockShell,
   findToolBlock,
+  findToolBlockInMessage,
   injectToolBlockStyles,
+  retargetToolBlockKey,
   removeToolBlock,
   updateToolBlockContent,
   type ToolBlockDependencies,
@@ -189,8 +191,9 @@ describe('tool block row-level collapse', () => {
   it('starts collapsed and expands on click', () => {
     const block = render();
     const toggle = toggleOf(block);
-    // ⚠️ 默认收起（上游 `createAgentToolRow`：`aria-expanded="false"` + `hidden`）——
+    // ⚠️ **纯文本详情默认收起**（上游 `createAgentToolRow`：`aria-expanded="false"` + `hidden`）——
     // 长正文（第三方 MCP 返回的正文可达数千字符）会把后面的工具行冲散。
+    // ⚠️ 可操作的卡片详情是另一档（默认展开），见下面那组用例。
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(detailOf(block)?.hidden).toBe(true);
 
@@ -255,6 +258,141 @@ describe('tool block row-level collapse', () => {
     }), () => 't');
     expect(block.querySelector('.zpp-tool-block-item-chevron')).toBeNull();
     expect(block.querySelector('.zpp-tool-block-item-detail')).toBeNull();
+  });
+});
+
+describe('tool block row-level collapse: card details start expanded', () => {
+  const withDetail = (name = 'skill_draft_create') => execution({
+    callId: `xml:${name}`,
+    name,
+    result: { ok: true, summary: 'done', detail: 'RAW DETAIL' } as ToolCardResult,
+  });
+
+  /** 带结构化输出的结果（真实渲染器认的就是 `output.kind`）。 */
+  const withCardOutput = (name = 'skill_draft_create') => execution({
+    callId: `xml:${name}`,
+    name,
+    result: {
+      ok: true,
+      summary: 'done',
+      detail: 'RAW DETAIL',
+      output: { kind: 'skill_draft' },
+    } as ToolCardResult,
+  });
+
+  /**
+   * 详情渲染成卡片的依赖 —— **只认结构化结果**（`output.kind` 存在），
+   * 与生产里 `renderDetail` → `renderToolResultWithRegistry` 的判据同形。
+   */
+  function cardDeps(): ToolBlockDependencies {
+    return deps({
+      renderDetail: (target, result) => {
+        if (!result.output || typeof result.output !== 'object') return false;
+        target.textContent = 'CARD';
+        return true;
+      },
+    });
+  }
+
+  function render(executions: ToolExecutionRecord[], useDeps = cardDeps()): HTMLElement {
+    const block = createToolBlockShell(useDeps);
+    updateToolBlockContent(block, executions, useDeps, () => 't');
+    return block;
+  }
+
+  function toggleOf(block: HTMLElement, index = 0): HTMLElement {
+    return block.querySelectorAll<HTMLElement>('.zpp-tool-block-item-toggle')[index];
+  }
+
+  function detailOf(block: HTMLElement, index = 0): HTMLElement | null {
+    return block.querySelectorAll<HTMLElement>('.zpp-tool-block-item-detail')[index] ?? null;
+  }
+
+  it('starts expanded when the detail is an actionable card', () => {
+    const block = render([withCardOutput()]);
+    // ⚠️ 卡片是整轮里唯一要用户动手的地方（「保存 Skill」「导入记忆」），
+    // 藏在折叠里等于没交付。
+    expect(toggleOf(block).getAttribute('aria-expanded')).toBe('true');
+    expect(detailOf(block)?.hidden).toBe(false);
+  });
+
+  it('keeps text details collapsed in the same block', () => {
+    // 同一块里混排：卡片行展开、纯文本行收起 —— 判据是**每一行各自的详情形态**，
+    // 不是「这一块里有卡片就全展开」。
+    const block = render([
+      withDetail('shell_exec'),
+      withCardOutput('skill_draft_create'),
+    ]);
+    expect(toggleOf(block, 0).getAttribute('aria-expanded')).toBe('false');
+    expect(toggleOf(block, 1).getAttribute('aria-expanded')).toBe('true');
+    expect(detailOf(block, 0)?.hidden).toBe(true);
+    expect(detailOf(block, 1)?.hidden).toBe(false);
+  });
+
+  it('keeps a card row collapsed once the user collapses it', () => {
+    const block = render([withCardOutput()]);
+    toggleOf(block).click();
+    expect(toggleOf(block).getAttribute('aria-expanded')).toBe('false');
+
+    // ⚠️⚠️ **重画时用户的意愿优先于默认值** —— 实时链路上每执行一步就整块重画一次，
+    // 只记「已展开的集合」的话，收起来这个动作会丢、卡片行被重新展开。
+    updateToolBlockContent(block, [withCardOutput()], cardDeps(), () => 't');
+    expect(toggleOf(block).getAttribute('aria-expanded')).toBe('false');
+    expect(detailOf(block)?.hidden).toBe(true);
+  });
+
+  it('still expands a text row when the user opens it', () => {
+    const block = render([withDetail('shell_exec')], deps());
+    toggleOf(block).click();
+    expect(toggleOf(block).getAttribute('aria-expanded')).toBe('true');
+
+    updateToolBlockContent(block, [withDetail('shell_exec')], deps(), () => 't');
+    expect(toggleOf(block).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('re-expands a row that becomes a card after being default-collapsed', () => {
+    // ⚠️⚠️ **这一格是「拿上次有效态当用户意愿」的漏洞**：某行首次渲染时渲染器没认出来
+    // （`rendered === false`）⇒ 默认收起；之后它变成卡片行时，用户从没点过它，
+    // 就应该按**新的默认态**展开 —— 否则「保存 Skill」永远藏在收起的行里。
+    let recognize = false;
+    const deps2 = () => deps({
+      renderDetail: (target, result) => {
+        if (!recognize || !result.output || typeof result.output !== 'object') return false;
+        target.textContent = 'CARD';
+        return true;
+      },
+    });
+
+    const block = createToolBlockShell(deps2());
+    updateToolBlockContent(block, [withCardOutput()], deps2(), () => 't');
+    expect(toggleOf(block).getAttribute('aria-expanded'), '首次没认出来 ⇒ 收起').toBe('false');
+
+    recognize = true;
+    updateToolBlockContent(block, [withCardOutput()], deps2(), () => 't');
+    // 用户没点过 ⇒ 按新的默认态（卡片 ⇒ 展开）。
+    expect(toggleOf(block).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps the user choice even when the row stops being a card', () => {
+    // 反过来：用户亲手展开过一行，之后那一行退化成纯文本，也不该被强行收起。
+    let recognize = true;
+    const deps2 = () => deps({
+      renderDetail: (target, result) => {
+        if (!recognize || !result.output || typeof result.output !== 'object') return false;
+        target.textContent = 'CARD';
+        return true;
+      },
+    });
+
+    const block = createToolBlockShell(deps2());
+    updateToolBlockContent(block, [withCardOutput()], deps2(), () => 't');
+    // 用户亲手收起（默认是展开的）。
+    toggleOf(block).click();
+    expect(toggleOf(block).getAttribute('aria-expanded')).toBe('false');
+
+    recognize = false;
+    updateToolBlockContent(block, [withCardOutput()], deps2(), () => 't');
+    expect(toggleOf(block).getAttribute('aria-expanded'), '用户收起的意愿要保住').toBe('false');
   });
 });
 
@@ -327,5 +465,52 @@ describe('tool block styles', () => {
     injectToolBlockStyles(deps());
     expect(document.getElementById(STYLE_ID)).toBe(first);
     expect(document.querySelectorAll(`#${STYLE_ID}`)).toHaveLength(1);
+  });
+});
+/**
+ * **同一条消息里只许有一块面板**。
+ *
+ * ⚠️⚠️ 真机症状：刷新后同一条回答上下叠两个「已调用工具（N 次）」，上面那个点不开详情
+ * —— 那是两条腿（历史 / 存储）没合流时各画一块。块键是记录 id、两腿天生不同
+ * （`history:<uuid>` / `storage:<hash>`）⇒ 按 id 找永远找不到对方。
+ * `findToolBlockInMessage` 按**宿主**找，是这条不变式的唯一入口。
+ */
+describe('tool block: one block per message', () => {
+  it('finds an existing block by host even when the restore key differs', () => {
+    const message = buildMessage('anchor-1');
+    const block = createToolBlockShell(deps(), { restoreKey: 'storage:abc' });
+    expect(appendToolBlockToMessage(message, block, deps())).toBe(true);
+
+    // 按块键找不到（键不同）。
+    expect(findToolBlock('history:anchor-1', deps())).toBeNull();
+    // 但按宿主能找到 —— 这正是「不许叠第二块」的判据。
+    expect(findToolBlockInMessage(message, deps())).toBe(block);
+  });
+
+  it('returns null for a message that has no block yet', () => {
+    const message = buildMessage('anchor-2');
+    expect(findToolBlockInMessage(message, deps())).toBeNull();
+  });
+
+  it('does not see blocks living in another message', () => {
+    const first = buildMessage('anchor-3');
+    const second = buildMessage('anchor-4');
+    const block = createToolBlockShell(deps(), { restoreKey: 'storage:xyz' });
+    appendToolBlockToMessage(first, block, deps());
+
+    expect(findToolBlockInMessage(second, deps())).toBeNull();
+    expect(findToolBlockInMessage(first, deps())).toBe(block);
+  });
+
+  it('rewrites the restore key when a block is adopted by another record', () => {
+    const message = buildMessage('anchor-5');
+    const block = createToolBlockShell(deps(), { restoreKey: 'storage:old' });
+    appendToolBlockToMessage(message, block, deps());
+
+    retargetToolBlockKey(block, 'history:anchor-5');
+
+    // 键归一之后，按新键也能找到它 —— 下一次投递就不用再走兜底。
+    expect(findToolBlock('history:anchor-5', deps())).toBe(block);
+    expect(findToolBlock('storage:old', deps())).toBeNull();
   });
 });

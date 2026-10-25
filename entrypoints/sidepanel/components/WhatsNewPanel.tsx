@@ -13,7 +13,7 @@ export default function WhatsNewPanel() {
     getWhatsNewState()
       .then(setState)
       .catch((error) => {
-        console.error('Failed to load whats-new state', error);
+        console.log('Failed to load whats-new state', error);
         setState(null);
       });
   }, []);
@@ -31,7 +31,7 @@ export default function WhatsNewPanel() {
             { type: 'WHATS_NEW_DISMISSED' },
             { decode: decodeRuntimeAckResponse },
           ))
-          .catch((error) => console.error('Failed to dismiss whats-new panel', error));
+          .catch((error) => console.log('Failed to dismiss whats-new panel', error));
       }
     };
     window.addEventListener('keydown', onKey);
@@ -48,7 +48,7 @@ export default function WhatsNewPanel() {
         { decode: decodeRuntimeAckResponse },
       ))
       .catch((error) => {
-        console.error('Failed to dismiss whats-new panel', error);
+        console.log('Failed to dismiss whats-new panel', error);
       });
   };
 

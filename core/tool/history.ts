@@ -1,4 +1,10 @@
-import type { ToolCall, ToolCallHistoryRecord, ToolExecutionTrigger, ToolResult } from './types';
+import type {
+  JsonValue,
+  ToolCall,
+  ToolCallHistoryRecord,
+  ToolExecutionTrigger,
+  ToolResult,
+} from './types';
 import { decodeToolCallHistory, encodeToolCallHistory } from './history-codec';
 import { createCoalescingMutationQueue } from '../persistence/coalescing-mutation-queue';
 
@@ -57,7 +63,7 @@ async function persistToolHistoryBurst(
 export async function getToolCallHistory(limit: number = MAX_HISTORY): Promise<ToolCallHistoryRecord[]> {
   return toolHistoryOperations.barrier(async () => {
     const history = orderToolCallHistory(await readToolCallHistoryAlreadyOwned());
-    return history.slice(0, limit);
+    return history.slice(0, limit).map(restoreOutputSnapshot);
   });
 }
 
@@ -111,6 +117,34 @@ function truncateRecord(value: Record<string, unknown>, maxLength: number): Reco
 function truncateString(value: string | undefined, maxLength: number): string | undefined {
   if (!value || value.length <= maxLength) return value;
   return `${value.slice(0, maxLength)}\n...[truncated]`;
+}
+
+/**
+ * 把落库时序列化成字符串的 `output` 还原回对象。
+ *
+ * ⚠️⚠️ **不还原的后果是静默的**：落库时 `output` 被 `JSON.stringify` 成字符串
+ * （见 `sanitizeResult`，为的是让它受同一套字符上限约束），而**结构化结果的消费者
+ * 全部按对象形状判**（`tool-result-renderer` 的两个 `get*Output` 都是
+ * `typeof value !== 'object'` 就返回 null）⇒ 读回来的记录画不出卡片，
+ * 表现是「刷新后保存按钮没了」，没有任何报错。
+ * ⚠️ **只在读取侧还原、写入侧保持字符串** —— 反过来改会让已经落库的旧记录仍然坏着。
+ * ⚠️ **截断过的还原不了**（末尾带 `...[truncated]`，JSON 不完整）⇒ 原样留着，
+ * 消费方按「形状不对」退回纯文本，与改造前行为一致。
+ */
+function restoreOutputSnapshot(record: ToolCallHistoryRecord): ToolCallHistoryRecord {
+  const output = record.result?.output;
+  if (typeof output !== 'string') return record;
+  const parsed = tryParseJson(output);
+  if (parsed === undefined) return record;
+  return { ...record, result: { ...record.result, output: parsed } };
+}
+
+function tryParseJson(value: string): JsonValue | undefined {
+  try {
+    return JSON.parse(value) as JsonValue;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

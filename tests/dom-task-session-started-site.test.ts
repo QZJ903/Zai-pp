@@ -15,7 +15,7 @@ import { createDomTaskCoordinator } from '../core/zai/dom-task-coordinator';
  *
  * ⚠️ 写成**行为测试**（真调协调器、传桩、断言回调实参），不写 AST 断言 ——
  * 后者只能问「源码里有没有出现 `siteOrigin`」，问不出「它到底传对没传对」。
- * 理由见 `core/zai/capability-install.ts` 的文件头与 `zai-code-guardrails` B15。
+ * 理由见 `core/zai/capability-install.ts` 的文件头。
  */
 
 /** 造一个协调器：标签页落在指定站点，回调里记录实参。 */

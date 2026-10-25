@@ -82,6 +82,9 @@ export const ZAI_CONTENT_RUNTIME_COMMANDS: ReadonlySet<string> = new Set([
   'REMOVE_CONVERSATION_FROM_PROJECT',
   'SAVE_SKILL',
   'SET_PENDING_PROJECT_CONTEXT',
+  // 续跑链活在页面里 ⇒ 页面被节流就等于任务失败，这两条让 z.ai 标签留在后台也能跑。
+  'START_TAB_KEEPALIVE',
+  'STOP_TAB_KEEPALIVE',
   'TOUCH_MEMORIES',
 ]);
 

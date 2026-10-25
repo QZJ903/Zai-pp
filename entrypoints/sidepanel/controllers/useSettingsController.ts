@@ -7,8 +7,8 @@ import {
 import { decodeRuntimeConfigResponse } from '../../../core/messaging/bootstrap-client';
 import type {
   BackgroundConfig,
+  Memory,
 } from '../../../core/types';
-import { getRuntimeErrorMessage } from '../runtime-response';
 import { sidepanelRuntimeClient } from '../runtime-client';
 import { libraryController } from './library-controller';
 
@@ -31,14 +31,20 @@ const DEFAULT_BACKGROUND_CONFIG: BackgroundConfig = {
 
 function settingsLoadFallback<T>(label: string, fallback: T): (error: unknown) => T {
   return (error) => {
-    console.error(`[Zai++] Failed to load ${label} settings.`, error);
+    console.log(`[Zai++] Failed to load ${label} settings.`, error);
     return fallback;
   };
 }
 
 export function useSettingsController() {
   // --- shared / general ---
-  const [memoryCount, setMemoryCount] = useState(0);
+  /**
+   * 记忆总数 —— **`null` 表示「没读到」，不是「没有记忆」**。
+   *
+   * ⚠️ 回落成 `0` 会让读取失败与「一条记忆都没有」长得一模一样，用户看不出该不该处理。
+   * 渲染层把 `null` 画成占位符。
+   */
+  const [memoryCount, setMemoryCount] = useState<number | null>(null);
   const [version, setVersion] = useState('');
   const [loading, setLoading] = useState(true);
 
@@ -78,7 +84,7 @@ export function useSettingsController() {
     (async () => {
       const [memories, cfg, bgCfg] = await Promise.all([
         libraryController.getMemories()
-          .catch(settingsLoadFallback('memory count', [])),
+          .catch(settingsLoadFallback<Memory[] | null>('memory count', null)),
         sidepanelRuntimeClient.request(
           { type: 'GET_CONFIG' },
           { decode: decodeRuntimeConfigResponse },
@@ -88,7 +94,7 @@ export function useSettingsController() {
           .catch(settingsLoadFallback('background', null)),
       ]);
       if (cancelled) return;
-      setMemoryCount(memories.length);
+      setMemoryCount(memories ? memories.length : null);
       setVersion(cfg && 'version' in cfg ? cfg.version : '');
       const normalizedBg = normalizeBackgroundConfig(bgCfg as BackgroundConfig | null);
       if (normalizedBg) syncBgState(normalizedBg);
@@ -262,7 +268,7 @@ export function useSettingsController() {
             throw new Error(result?.error || labels.jsonError);
           }
           const imported = typeof result.count === 'number' ? result.count : parsed.length;
-          setMemoryCount((count) => count + imported);
+          setMemoryCount((count) => (count === null ? null : count + imported));
           onResult?.({ ok: true, imported });
         } catch (error) {
           onResult?.({ ok: false, error: error instanceof Error ? error.message : labels.jsonError });

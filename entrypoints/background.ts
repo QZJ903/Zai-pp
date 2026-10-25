@@ -77,6 +77,7 @@ import {
   getBrowserControlState,
   saveBrowserControlSettings,
   setBrowserControlEnabled,
+  tabKeepAliveSession,
 } from '../core/browser-control';
 import {
   addConversationToProject,
@@ -396,6 +397,13 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         getBrowserControlState,
         setBrowserControlTarget: (tabId) => browserControlService.setTarget(tabId),
         detachBrowserControl: () => browserControlService.detach(),
+        // ⚠️ **保活与浏览器控制是两条独立会话**（见 `tab-keepalive.ts` 的文件头）：
+        // 浏览器控制去驱动目标标签时会 detach 它自己那条，不该把 z.ai 这条一起带走。
+        // ⚠️ 内容脚本只说「我要不要」，**挂不挂由后台按前台/后台判定**（`sync`）——
+        // 页面自己的 `document.hidden` 会被保活自己发的焦点模拟改成 false，不能用。
+        startTabKeepAlive: (tabId) => tabKeepAliveSession.want(tabId),
+        // ⚠️ **按标签解** —— 无参形式会把所有标签的保活一起解掉（并发时误伤别的自动化）。
+        stopTabKeepAlive: (tabId) => tabKeepAliveSession.unwant(tabId),
         broadcastToolDescriptorsUpdate,
         broadcastBrowserControlUpdate,
       },
@@ -648,9 +656,43 @@ async function ensureShellMcpCompatibility(server: McpServerConfig) {
   }
 }
 
+/**
+ * 哪些后台失败码**不进** `chrome://extensions` 的错误列表。
+ *
+ * 判据：失败之后界面上已经有可见结果（面板自己会提示），或者只是降级、功能仍然可用，
+ * 或者用户无法据此做任何事。这些仍然打日志（F12 的 service worker 控制台照常可查），
+ * 只是用 `console.log` —— 它低于错误面板的收录阈值，不会在扩展卡片上亮红。
+ *
+ * ⚠️ **不在这个集合里的都按 `console.error` 打** —— 那些是「坏了但界面上没有任何痕迹」
+ * 的失败（恢复未完成、内置预设建不出来、自动化整体不跑、MCP 发现失败），删掉它们
+ * 等于让故障彻底静默。
+ */
+const QUIET_BACKGROUND_ERROR_CODES: ReadonlySet<string> = new Set([
+  'locale_init_failed',
+  'locale_refresh_failed',
+  'archive_stale_memories_failed',
+  'sync_local_recovery_broadcast_failed',
+  'whats_new_badge_failed',
+  'whats_new_update_failed',
+  'automation_session_persist_failed',
+  'committed_state_broadcast_failed',
+  'committed_project_broadcast_failed',
+  'broadcast_runtime_delivery_failed',
+  'broadcast_tab_delivery_failed',
+  'broadcast_tabs_query_failed',
+  'dom_task_active_tab_query_failed',
+  'dom_task_tab_query_failed',
+  'dom_task_session_started_callback_failed',
+]);
+
 function reportBackgroundStartupError(code: string, error: unknown) {
   const detail = error instanceof Error ? error.message : String(error);
-  console.error(`[Zai++] ${code}: ${detail}`, error);
+  const line = `[Zai++] ${code}: ${detail}`;
+  if (QUIET_BACKGROUND_ERROR_CODES.has(code)) {
+    console.log(line, error);
+    return;
+  }
+  console.error(line, error);
 }
 
 function acknowledgeReportedSyncRecoveryFailure(error: unknown): void {

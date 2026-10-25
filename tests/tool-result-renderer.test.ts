@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  hasPendingAction,
   registerDefaultToolResultRenderers,
   renderToolResultWithRegistry,
   userClickGuard,
@@ -151,8 +152,9 @@ describe('tool result renderer registry', () => {
 
     trustedClick(target.querySelector<HTMLButtonElement>('.zpp-result-action'));
     await vi.waitFor(() => {
+      // ⚠️ 按钮只显示本地化的「Save failed」—— 裸码 `skill_exists` 不再画到按钮上。
       expect(target.querySelector<HTMLButtonElement>('.zpp-result-action')?.textContent)
-        .toBe('skill_exists');
+        .toBe('Save failed');
     });
   });
 
@@ -172,7 +174,7 @@ describe('tool result renderer registry', () => {
     expect(button.textContent).toBe('Saved');
   });
 
-  it('keeps the success label and stays disabled after importing memories', async () => {
+  it('swaps the import button for the status line after a successful import', async () => {
     const actions = createActions();
     registerDefaultToolResultRenderers(actions);
     const target = document.createElement('div');
@@ -180,11 +182,15 @@ describe('tool result renderer registry', () => {
     const button = target.querySelector<HTMLButtonElement>('.zpp-result-action')!;
 
     trustedClick(button);
-    await vi.waitFor(() => expect(button.textContent).toBe('Imported 2'));
 
-    expect(button.disabled).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(button.textContent).toBe('Imported 2');
+    // ⚠️⚠️ **必须是「换成状态行」，不是「改按钮文案」** —— 「已全部导入过」那条分支渲染的
+    // 就是 `.zpp-result-status`。两处形态不同的话，同一条结果会在重画前后长成两个样子；
+    // 而导入成功后、`STATE_UPDATED` 广播到达前的那次重画里 `areMemoriesImported` 还是 false，
+    // 按钮会**变回「导入记忆」**，用户以为没导进去。
+    await vi.waitFor(() => {
+      expect(target.querySelector('.zpp-result-action')).toBeNull();
+      expect(target.querySelector('.zpp-result-status')?.textContent).toBe('Imported 2');
+    });
   });
 
   it('reports a failure when the transport returns nothing at all', async () => {
@@ -216,7 +222,12 @@ describe('tool result renderer registry', () => {
     await vi.waitFor(() => expect(button.textContent).toBe('These drafts cannot be imported'));
   });
 
-  it('shows the raw message for an unmapped failure, since it carries more than a generic label', async () => {
+  it('shows a natural-language provider message but never a bare code', async () => {
+    // ⚠️ **判据是「是不是裸码」，不是「是不是来自 provider」** ——
+    // `core/skill/registry.ts` / `codec.ts` 抛的是整句
+    // （「Skill edit is ambiguous because…」），那句话比「Save failed」有信息量，
+    // 必须原样放行；而 `skill_exists` 这种蛇形标识符对用户没有意义，回落成通用文案。
+    // 判据与侧边栏、自动化卡片共用（`core/messaging/error-code.ts`）。
     const actions = createActions();
     actions.saveSkill.mockResolvedValueOnce({ ok: false, error: 'storage quota exceeded' });
     registerDefaultToolResultRenderers(actions);
@@ -237,7 +248,7 @@ describe('tool result renderer registry', () => {
     const button = target.querySelector<HTMLButtonElement>('.zpp-result-action')!;
 
     trustedClick(button);
-    await vi.waitFor(() => expect(button.textContent).toBe('skill_exists'));
+    await vi.waitFor(() => expect(button.textContent).toBe('Save failed'));
 
     expect(button.disabled).toBe(false);
   });
@@ -405,5 +416,111 @@ describe('tool result renderer registry', () => {
     expect(actionBlock.length).toBeGreaterThan(0);
     expect(actionBlock).toContain('color: var(--zpp-ui-accent-contrast)');
     expect(actionBlock).not.toMatch(/color:\s*(white|#|rgb|hsl|oklch)/i);
+  });
+});
+
+describe('tool result renderer: already-saved state', () => {
+  beforeEach(() => {
+    userClickGuard.isTrusted = () => true;
+  });
+
+  afterEach(() => {
+    userClickGuard.isTrusted = (event) => event.isTrusted;
+    document.head.innerHTML = '';
+    document.body.innerHTML = '';
+  });
+
+  it('hides the save button when the draft is already in the library', () => {
+    registerDefaultToolResultRenderers({
+      ...createActions(),
+      isSkillDraftSaved: () => true,
+    });
+    const target = document.createElement('div');
+    renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
+
+    // ⚠️ **判据是「库里有没有」，不是「这一页点过没有」** —— 点过就藏的话，
+    // 刷新一次按钮又回来，用户会再点一次（而技能早就在库里）。
+    expect(target.querySelector('.zpp-result-action')).toBeNull();
+    expect(target.querySelector('.zpp-result-status')?.textContent).toBe('Saved');
+  });
+
+  it('keeps the save button when the draft is not in the library yet', () => {
+    registerDefaultToolResultRenderers({
+      ...createActions(),
+      isSkillDraftSaved: () => false,
+    });
+    const target = document.createElement('div');
+    renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
+
+    expect(target.querySelector('.zpp-result-action')?.textContent).toBe('Save Skill');
+    expect(target.querySelector('.zpp-result-status')).toBeNull();
+  });
+
+  it('hides the import button when every draft memory already exists', () => {
+    registerDefaultToolResultRenderers({
+      ...createActions(),
+      areMemoriesImported: () => true,
+    });
+    const target = document.createElement('div');
+    renderToolResultWithRegistry({ target, result: memoryImportResult(), locale: 'en' });
+
+    expect(target.querySelector('.zpp-result-action')).toBeNull();
+    expect(target.querySelector('.zpp-result-status')?.textContent).toBe('Imported 2');
+  });
+
+  it('keeps the import button when only some drafts already exist', () => {
+    // ⚠️ **判「全部」而不是「任意一条」** —— 部分导入过时仍要能补进去。
+    registerDefaultToolResultRenderers({
+      ...createActions(),
+      areMemoriesImported: () => false,
+    });
+    const target = document.createElement('div');
+    renderToolResultWithRegistry({ target, result: memoryImportResult(), locale: 'en' });
+
+    expect(target.querySelector('.zpp-result-action')?.textContent).toBe('Import memories');
+  });
+
+  it('falls back to showing the buttons when the predicates are not injected', () => {
+    registerDefaultToolResultRenderers(createActions());
+    const target = document.createElement('div');
+    renderToolResultWithRegistry({ target, result: skillDraftResult(), locale: 'en' });
+
+    // 缺省（不注入）视为「没保存」—— 退化成改造前的行为，不会把按钮藏掉。
+    expect(target.querySelector('.zpp-result-action')?.textContent).toBe('Save Skill');
+  });
+});
+
+describe('hasPendingAction', () => {
+  it('is false once the save button is disabled (Skill saved)', () => {
+    // ⚠️⚠️ Skill 保存成功后**只改文案 + disabled，类名还在** —— 不排除 `:disabled` 的话
+    // 「还有没点过的按钮」恒为真 ⇒ 保存完块不会按设计收起（记忆导入那侧会）。
+    const container = document.createElement('div');
+    const button = document.createElement('button');
+    button.className = 'zpp-result-action';
+    button.textContent = 'Saved';
+    button.disabled = true;
+    container.appendChild(button);
+
+    expect(hasPendingAction(container)).toBe(false);
+  });
+
+  it('is true while an enabled action button is still there', () => {
+    const container = document.createElement('div');
+    const button = document.createElement('button');
+    button.className = 'zpp-result-action';
+    button.textContent = 'Save';
+    container.appendChild(button);
+
+    expect(hasPendingAction(container)).toBe(true);
+  });
+
+  it('is false for a status line (memory import already done)', () => {
+    const container = document.createElement('div');
+    const status = document.createElement('div');
+    status.className = 'zpp-result-status';
+    status.textContent = 'Imported 2';
+    container.appendChild(status);
+
+    expect(hasPendingAction(container)).toBe(false);
   });
 });

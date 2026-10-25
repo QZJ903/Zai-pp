@@ -26,7 +26,7 @@ describe('runtime tool history persistence', () => {
         },
       },
     });
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -40,7 +40,7 @@ describe('runtime tool history persistence', () => {
 
     expect(result).toEqual({ ok: true, summary: 'provider completed' });
     expect(execute).toHaveBeenCalledTimes(1);
-    expect(console.warn).toHaveBeenCalledWith(
+    expect(console.log).toHaveBeenCalledWith(
       '[Zai++] tool history persistence failed',
       expect.any(Error),
     );

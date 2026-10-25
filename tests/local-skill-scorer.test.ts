@@ -2,7 +2,7 @@
 // 覆盖：selectImplicitSkill 五例（适用场景命中 / 不适用场景命中 / 无相关 / 双弱争激活被双闸拦截 / 名称+描述高分）、
 // 以及 scoreLocalSkill / scenarioAdjustment 的精确分量。
 //
-// 关键语义（来自 local-skill-scoring-spec.md §3 / §3.4 / §3.5）：
+// 关键语义（打分规则的三个分量）：
 //   - normalizeSearchText = NFKC + 小写 + trim；tokenize 按 \p{L}\p{N}_- 切分（中文整句成单 token）。
 //   - 整串命中：name +800 / desc +400 / cat +200；逐词命中：name +100 / desc +40 / cat +60。
 //   - scenarioAdjustment：适用场景命中（覆盖率≥0.6）→ 动态加成（round(cov*100)，封顶+100），不适用场景命中 -1000。

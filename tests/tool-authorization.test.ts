@@ -559,7 +559,7 @@ describe('tool authorization context', () => {
       if (subsequentWrites === 2) throw new Error('completion write failed');
       sessionStorage = structuredClone({ ...sessionStorage, ...value });
     });
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
     const result = await runtime.executeToolCall(
       makeCall(),
@@ -570,7 +570,7 @@ describe('tool authorization context', () => {
     expect(result.ok).toBe(true);
     expect(result.output).toMatchObject({ content: 'provider-result' });
     expect(execute).toHaveBeenCalledTimes(1);
-    expect(consoleError).toHaveBeenCalledWith(
+    expect(consoleLog).toHaveBeenCalledWith(
       '[Zai++] tool authorization completion persistence failed',
       expect.any(Error),
     );

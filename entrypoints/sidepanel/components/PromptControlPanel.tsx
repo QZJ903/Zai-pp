@@ -8,7 +8,7 @@ import {
 } from '../../../core/prompt/settings';
 import { createRequestGenerationFence } from '../async-state';
 import { useI18n } from '../i18n';
-import { getRuntimeErrorMessage } from '../runtime-response';
+import { formatRuntimeError } from '../runtime-response';
 import { sidepanelRuntimeClient } from '../runtime-client';
 
 export default function PromptControlPanel() {
@@ -35,7 +35,7 @@ export default function PromptControlPanel() {
       .catch((error) => {
         if (!requestFence.current.isCurrent(generation)) return;
         setSettings(DEFAULT_PROMPT_INJECTION_SETTINGS);
-        setStatusMessage(t('sidepanel.promptControls.loadFailed', { error: getRuntimeErrorMessage(error) }));
+        setStatusMessage(t('sidepanel.promptControls.loadFailed', { error: formatRuntimeError(error, t, { bare: true }) }));
       });
     return () => requestFence.current.invalidate();
   }, [t]);
@@ -64,7 +64,7 @@ export default function PromptControlPanel() {
     } catch (error) {
       if (!requestFence.current.isCurrent(generation)) return;
       setSettings(previous);
-      setStatusMessage(t('sidepanel.promptControls.saveFailed', { error: getRuntimeErrorMessage(error) }));
+      setStatusMessage(t('sidepanel.promptControls.saveFailed', { error: formatRuntimeError(error, t, { bare: true }) }));
     }
   };
 

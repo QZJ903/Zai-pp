@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import * as t from '@babel/types';
 import { ZAI_CAPABILITY_DEP_KEYS } from '../core/zai/capability-install';
@@ -72,7 +73,7 @@ describe('content script main(): the dependency object holds the real functions'
   /**
    * `ZaiCapabilityDeps` 里**标了 `?` 的**键 —— 即「允许不传」的那几个。
    *
-   * ⚠️ **从接口派生，不手抄**（守则 B9）：手抄的第二份清单会在改接口时静默分叉，
+   * ⚠️ **从接口派生，不手抄**：手抄的第二份清单会在改接口时静默分叉，
    * 而这里的分叉形态是「本该允许不传的键被判成漏传」⇒ 假红。
    */
   function optionalCapabilityDepKeys(): Set<string> {
@@ -345,5 +346,121 @@ describe('tool panel: every delivery point is wired to its handler', () => {
     // 少一处 ⇒ 那条分支上「`TOOL_CALL` 通道没来」时结果永远补不上。
     const body = findFunctionBody(readContentProgram(), 'handleResponseComplete');
     expect(countReachableMethodCalls(body, 'toolPanel', 'rememberExecutions'), '两条分支各投一次').toBe(2);
+  });
+});
+
+/**
+ * **标签保活只在「发送链」那一段要，而且进出必须成对。**
+ *
+ * ⚠️⚠️ 挂上 debugger 会让 Chrome 在**所有窗口**顶部画「Zai++ started debugging this browser」
+ * （`ShowGlobally`，不是只画在被调试的那个窗口）⇒ 挂的窗口越长，用户看到横幅的时间越长。
+ * 而真正会被节流掐断的只有发送链那几条 80–150ms 短轮询（4 秒 / 5 秒预算）；
+ * **等响应是网络事件驱动的、不吃定时器** ⇒ 发完就能卸。
+ *
+ * ⚠️ 这三条调用点**零覆盖**：删掉任何一条，全量用例 + `tsc` 都绿（实测过）。
+ */
+describe('tab keepalive: wanted only around the send window', () => {
+  it('wants and releases inside submitContinuationViaPage (one place covers all three injection chains)', () => {
+    // ⚠️ 续跑推进 / 普通 nudge / 误用纠错都经过这个函数 ⇒ 一处覆盖三条链。
+    const program = readContentProgram();
+    const body = findFunctionBody(program, 'submitContinuationViaPage');
+
+    const wants: t.CallExpression[] = [];
+    const releases: t.CallExpression[] = [];
+    walkSourceAst(body, (node) => {
+      if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+      if (node.callee.name === 'wantTabKeepAlive') wants.push(node);
+      if (node.callee.name === 'releaseTabKeepAlive') releases.push(node);
+    });
+
+    expect(wants, '发送前要 want 一次').toHaveLength(1);
+    // ⚠️ **必须是 finally 里那一次** —— 中间任何一处抛错（注入原语 / 证据等待）都不能
+    // 把横幅留在那儿。判据：release 的调用点在某个 TryStatement 的 finalizer 里。
+    expect(releases, '发送后要 release 一次').toHaveLength(1);
+    let inFinally = false;
+    walkSourceAst(body, (node) => {
+      if (!t.isTryStatement(node) || !node.finalizer) return;
+      walkSourceAst(node.finalizer, (inner) => {
+        if (inner === releases[0]) inFinally = true;
+      });
+    });
+    expect(inFinally, 'release 必须在 finally 里 —— 抛错路径也要卸').toBe(true);
+  });
+
+  it('does not keep the session attached for the whole continuation loop', () => {
+    // ⚠️⚠️ **常驻挂着是本轮要修掉的那件事**：整轮续跑都挂 ⇒ 横幅一直显示在用户眼前。
+    // 这两个函数里都不该再有 want —— 保护由发送链按需给。
+    const program = readContentProgram();
+    for (const name of ['advanceContinuationLoop', 'handleResponseComplete', 'startMisuseCorrectionLoop']) {
+      const body = findFunctionBody(program, name);
+      const wants: t.CallExpression[] = [];
+      walkSourceAst(body, (node) => {
+        if (t.isCallExpression(node) && t.isIdentifier(node.callee, { name: 'wantTabKeepAlive' })) {
+          wants.push(node);
+        }
+      });
+      expect(wants, `${name} 不该常驻挂保活`).toHaveLength(0);
+    }
+  });
+
+  it('stops the keepalive when a fresh page starts (clears the previous page orphan)', () => {
+    // ⚠️⚠️ 保活活在 SW 里（按标签记），内容脚本是每页一份。页面一刷新，旧页面那条
+    // 循环连同它的收尾一起消失，而 SW 里那条 CDP 会话还在 ⇒ 横幅永久滞留。
+    // 新页面启动时必然没有循环 ⇒ 该标签上任何保活意图都是孤儿。
+    const program = readContentProgram();
+    const body = findMainBodyOf(program);
+    const calls: t.CallExpression[] = [];
+    walkSourceAst(body, (node) => {
+      if (t.isCallExpression(node) && t.isIdentifier(node.callee, { name: 'releaseTabKeepAlive' })) {
+        calls.push(node);
+      }
+    });
+    expect(calls, '内容脚本启动时要清掉上一页留在后台的保活会话').toHaveLength(1);
+  });
+});
+
+/**
+ * **两条建循环的路径都必须先收掉在跑的旧循环。**
+ *
+ * ⚠️⚠️ 首轮误用纠错那条（`startMisuseCorrectionLoop`）比原生轮那段守卫**更早返回**，
+ * 而它自己无条件覆盖 `continuationLoop`。漏掉这次 supersede 的后果是**旧循环归属的后台任务
+ * 永远收不到终态**（一直显示「运行中」到 180s 租约超时）—— 与原生轮那段注释描述的是同一个
+ * 失效形态，且**全量用例 + tsc 全绿**（实测，删掉它不红）。
+ *
+ * ⚠️ 判据两条一起：**恰好调一次** + **早于 `continuationLoop = {` 赋值**。
+ * 只判「调用过」挡不住「放在赋值之后」（那样旧循环已经被顶掉了，收尾时 `continuationLoop !== loop`）。
+ */
+describe('continuation loop: every creation path supersedes the running one first', () => {
+  function callsInOrder(body: t.Node, name: string): t.CallExpression[] {
+    const calls: t.CallExpression[] = [];
+    walkSourceAst(body, (node) => {
+      if (t.isCallExpression(node) && t.isIdentifier(node.callee, { name })) calls.push(node);
+    });
+    return calls;
+  }
+
+  function assignmentStart(body: t.Node): number {
+    let start = Number.POSITIVE_INFINITY;
+    walkSourceAst(body, (node) => {
+      if (!t.isAssignmentExpression(node)) return;
+      if (!t.isIdentifier(node.left, { name: 'continuationLoop' })) return;
+      start = Math.min(start, node.start ?? Number.POSITIVE_INFINITY);
+    });
+    return start;
+  }
+
+  it('the misuse correction path supersedes before creating its loop', () => {
+    const body = findFunctionBody(readContentProgram(), 'startMisuseCorrectionLoop');
+    const supersedes = callsInOrder(body, 'supersedeRunningLoop');
+    expect(supersedes, '建循环前必须先收起在跑的旧循环').toHaveLength(1);
+    expect(
+      supersedes[0]!.start ?? 0,
+      'supersede 必须早于 `continuationLoop = { … }` —— 放后面等于旧循环已经被顶掉',
+    ).toBeLessThan(assignmentStart(body));
+  });
+
+  it('the native-turn path still supersedes before creating its loop', () => {
+    const body = findFunctionBody(readContentProgram(), 'handleResponseComplete');
+    expect(callsInOrder(body, 'supersedeRunningLoop'), '原生轮那条路径也必须先收').toHaveLength(1);
   });
 });

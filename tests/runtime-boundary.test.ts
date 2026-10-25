@@ -182,7 +182,7 @@ describe('runtime sender and envelope boundary', () => {
   it('authorizes only the frozen content command surface before routing', () => {
     const extensionContext = createRuntimeMessageContext(EXTENSION_SENDER, POLICY);
     const contentContext = createRuntimeMessageContext(ZAI_SENDER, POLICY);
-    expect(ZAI_CONTENT_RUNTIME_COMMANDS.size).toBe(23);
+    expect(ZAI_CONTENT_RUNTIME_COMMANDS.size).toBe(25);
     expect(() => authorizeRuntimeMessage({ type: 'GET_MEMORIES' }, contentContext)).not.toThrow();
     expect(() => authorizeRuntimeMessage({ type: 'GET_SYNC_CONFIG' }, contentContext))
       .toThrow('not authorized for content runtime');
@@ -244,7 +244,7 @@ describe('runtime sender and envelope boundary', () => {
     // TOOL_DESCRIPTORS_UPDATED / PROJECT_CONTEXT_UPDATED 全部静默拒掉
     // （表现：侧边栏改了记忆/技能/背景，页面不更新、要刷新才生效）。
     // ⚠️ **这条测的是「判据对这类 sender 的判定」**，不是「真机投递时 url 确实是这个值」——
-    // 后者只有真机能验（见交接文档的待验证项）。
+    // 后者只有真机能验。
     const backgroundSender = {
       id: POLICY.runtimeId,
       url: 'chrome-extension://runtime-contract/background.js',

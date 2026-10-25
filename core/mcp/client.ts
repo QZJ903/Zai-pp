@@ -354,7 +354,7 @@ function buildAutoReadResult(
     : `local_file_read auto 续读异常终止（${failReason ?? '未知原因'}）。已读取 ${windows} 窗，共 ${charsReturned} 字符。`;
   // 将聚合结果装配为标准 McpCallToolResult 后交回 normalizeMcpToolResult：
   // 由其统一施加 maxResultBytes 字节上限、计时与 output 归一化，避免另起一条绕过统一
-  // normalization 的返回路径（这正是评审指出的 max_chars/maxResultBytes 失效根因）。
+  // normalization 的返回路径（否则 max_chars / maxResultBytes 会一起失效）。
   const aggregated: McpCallToolResult = {
     content: [{ type: 'text', text: detail }],
     structuredContent: {

@@ -53,7 +53,7 @@ function collectPostedTypes(program: t.Program, calleeName: string): Set<string>
 /**
  * 收集「以某个函数调用发出的消息类型」→ 该类型在信封上**平铺的载荷字段名**。
  *
- * ⚠️ **这是从发送点派生的，不是手抄的第二份清单**（守则 B9）。它的用途是：
+ * ⚠️ **这是从发送点派生的，不是手抄的第二份清单**。它的用途是：
  * 判断接收侧该把**整条信封**还是**信封里的某个字段**交给 decoder。
  */
 function collectPostedPayloadKeys(program: t.Program, calleeName: string): Map<string, Set<string>> {

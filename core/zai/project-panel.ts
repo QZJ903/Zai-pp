@@ -378,7 +378,7 @@ export function startProjectPanel(
       if (!mounted) return;
       if (mounted.created) paint(mounted.panel);
     } catch (error) {
-      console.warn('[Zai++] project panel mount check failed', error);
+      console.log('[Zai++] project panel mount check failed', error);
     }
   };
 
@@ -391,7 +391,7 @@ export function startProjectPanel(
       if (!mounted) return;
       paint(mounted.panel);
     } catch (error) {
-      console.warn('[Zai++] project panel render failed', error);
+      console.log('[Zai++] project panel render failed', error);
     }
   };
 

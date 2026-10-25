@@ -195,7 +195,7 @@ describe('MCP round trip over real HTTP uses production code end to end', () => 
     // ⚠️ 断言的是**生产的渲染结果**（`### Tool <名>` + 接受的长短两个标签名）。
     expect(rendered).toContain('### Tool echo');
     expect(rendered).toContain('Accepted tag names: mcp_mock_echo, echo');
-    expect(rendered).toContain('Invalid formats: <invoke name="echo">');
+    expect(rendered).toContain('Call it as a direct XML tag in the answer body');
     // 未注入的工具不得出现在提示词里。
     expect(rendered).not.toContain('mcp_mock_blocked');
     expect(rendered).not.toContain('"type":"function"');

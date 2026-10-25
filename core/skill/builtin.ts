@@ -32,7 +32,8 @@ export const BUILTIN_SKILLS: Skill[] = [
 
 - Shell 工具通过 Chrome Native Messaging 与本机 host (${SHELL_MCP_NATIVE_HOST}) 通信。
 - 只有在工具列表中出现对应 Shell MCP 工具时才调用；不要编造执行结果。
-- 如果 shell 工具已出现在 Available Tools / MCP 工具列表中，直接输出对应 XML 工具标签调用。
+- 如果 shell 工具已出现在「可用工具」列表中，直接输出对应 XML 工具标签调用。
+- 不要用原生 tool_call 调这些本地工具 —— 服务端不认识它们，会返回 tool call failed。
 - 不要输出伪 JSON 调用；Zai++ 只执行 <shell_exec>{"command":"..."}</shell_exec> 这种 XML 标签格式。
 - 不要猜测文件路径，先用 shell_status 判断平台和 shell，再用对应 shell 的目录命令确认实际路径。
 - Windows 默认 shell 是 PowerShell：列目录用 Get-ChildItem -LiteralPath "D:\\Documents\\Downloads\\CN" -File | Select-Object -ExpandProperty FullName，不要把 CMD 的 dir /b 直接当 PowerShell 命令；确实需要 CMD 语法时显式运行 cmd.exe /c "..."。
@@ -99,7 +100,8 @@ const ENGLISH_BUILTIN_SKILL_TEXT: Record<string, BuiltinSkillText> = {
 
 - Shell tools communicate with the local host (${SHELL_MCP_NATIVE_HOST}) through Chrome Native Messaging.
 - Only call a Shell MCP tool when it appears in the tool list; never invent command results.
-- If shell tools appear in Available Tools / MCP tools, emit the matching XML tool tag directly.
+- If shell tools appear in the "Available Tools" list, emit the matching XML tool tag directly.
+- Never call these local tools through the native tool_call channel — the server does not know them and returns tool call failed.
 - Do not output pseudo JSON calls. Zai++ only executes XML tags such as <shell_exec>{"command":"..."}</shell_exec>.
 - Do not guess file paths. First call shell_status to identify the platform and shell, then use the matching shell command to confirm real paths.
 - The default Windows shell is PowerShell: list files with Get-ChildItem -LiteralPath "D:\\Documents\\Downloads\\CN" -File | Select-Object -ExpandProperty FullName. Do not treat CMD dir /b as a PowerShell command; explicitly run cmd.exe /c "..." when CMD syntax is needed.

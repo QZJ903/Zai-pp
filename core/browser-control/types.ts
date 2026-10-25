@@ -113,4 +113,14 @@ export interface BrowserDialogState {
 export interface BrowserControlDependencies {
   chromeApi?: typeof chrome;
   now?: () => number;
+  /**
+   * 续跑保活会话（只读它的「这条标签有没有被我保活着」）。
+   *
+   * 默认用模块级单例；注入口只为可测性存在 —— 单例在模块加载时就把 `chrome` 抓走了，
+   * 而测试是加载之后才 `vi.stubGlobal` 的，没法通过它造出「正保活着某个标签」的状态。
+   *
+   * ⚠️ **判据是 `isKeepingAlive(tabId)`，不是「有没有唯一那条」** —— 保活是**按标签**
+   * 的（并发跑两个自动化时同时挂着两条），见 `tab-keepalive.ts` 的文件头。
+   */
+  tabKeepAlive?: { isKeepingAlive(tabId: number): boolean };
 }

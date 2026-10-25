@@ -8,7 +8,7 @@ import { useI18n } from '../../i18n';
 import { createRequestGenerationFence } from '../../async-state';
 import {
   decodeRuntimeResponse,
-  getRuntimeErrorMessage,
+  formatRuntimeError,
 } from '../../runtime-response';
 import { sidepanelRuntimeClient } from '../../runtime-client';
 
@@ -27,7 +27,7 @@ export default function PresetSubPage() {
 
   const showOperationError = (error: unknown) => {
     banner.show('error', t('sidepanel.presetPage.operationFailed', {
-      error: getRuntimeErrorMessage(error),
+      error: formatRuntimeError(error, t, { bare: true }),
     }));
   };
 

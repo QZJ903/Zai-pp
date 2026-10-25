@@ -205,7 +205,7 @@ describe('composer clear: 点按钮那条兜底路只在失败时清空', () => 
 describe('composer mask: 注入期间让输入框「看起来空着」', () => {
   it('这层遮罩只碰外观：不写 value、也不派发 input', () => {
     // ⚠️ 它**不能**退化成「把值清掉」—— 页面 `bind:value` 的反向同步会把值原样写回来
-    // （探针 `domWriteBackTest` 实测），而且写 value 会改掉页面读到的内容。
+    // （实测），而且写 value 会改掉页面读到的内容。
     const { program } = context();
     const body = findFunctionBody(program, MASK_FN);
     expect(callsTo(body, 'setTextareaValue')).toEqual([]);

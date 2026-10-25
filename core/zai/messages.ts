@@ -115,6 +115,10 @@ export function decodeZaiToolCallMessage(
  * ⚠️ **`assistantText` 是必需字段** —— `handleResponseComplete` 会在
  * `executionsByRequest` 为空时拿它跑 `parseToolXml` **兜底执行工具**，
  * 也就是说这条消息**同样有执行语义**（不只是「通知一轮结束」）。
+ *
+ * ⚠️ **`misusedNativeToolNames` 是可选字段** —— 缺省表示「这一轮没有用错通道」。
+ * 形状不对时按**丢弃该字段**处理（不是丢弃整条消息）：漏掉它只是少一次纠错，
+ * 而丢掉整条消息会让这一轮收尾链路断掉。
  */
 export function decodeZaiResponseCompleteMessage(
   value: unknown,
@@ -125,12 +129,21 @@ export function decodeZaiResponseCompleteMessage(
   if (typeof value.agentTaskPrompt !== 'string') return null;
   if (typeof value.assistantText !== 'string') return null;
 
+  const misused = readMisusedToolNames(value.misusedNativeToolNames);
   return {
     requestId: value.requestId,
     originalPrompt: value.originalPrompt,
     agentTaskPrompt: value.agentTaskPrompt,
     assistantText: value.assistantText,
+    ...(misused ? { misusedNativeToolNames: misused } : {}),
   };
+}
+
+/** 读「用错通道的工具名」：非数组 / 空数组 / 含非字符串元素 → 当作没误用。 */
+function readMisusedToolNames(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const names = value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+  return names.length > 0 ? [...new Set(names)] : null;
 }
 
 /**

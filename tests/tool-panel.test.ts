@@ -136,7 +136,7 @@ afterEach(() => {
 
 describe('zai adapter: site facts', () => {
   it('reads and matches the anchor through one shared class-name builder', () => {
-    // ⚠️⚠️ **「抽锚点」与「比锚点」必须同源**（P2-1 报的那条不对称）：
+    // ⚠️⚠️ **「抽锚点」与「比锚点」必须同源**：
     // `readZaiMessageId` 用 `[0-9a-f-]{36}` 的正则抽（要有形状才敢认），
     // 而定位那条腿是**逐字比类名**（id 从记录里来、不必再猜形状）。
     // 两处各写一遍 `message-${id}` 时，服务端 id 若不是标准 uuid 形态
@@ -253,10 +253,45 @@ describe('zai adapter: site facts', () => {
     } as ToolCardResult)).toBe('s\noutput: {"a":1}');
   });
 
-  it('adds an error segment for failures and keeps the extracted reason in detail', () => {
+  it('drops the error segment when it would repeat the reason already shown', () => {
+    // ⚠️ **去重是这条改动的承重行为**：`finalizePending` 构造的 `error.message`
+    // 恰好等于 `detail`（同一个字符串），不去重就是同一句话在面板里出现两遍。
+    // 判据按**归一后的文本**比（去首尾标点与多余空白），不按字面 ——
+    // `extractReadableError` 抽出来的句子常常少一个句号。
+    const formatted = formatZaiToolDetail({
+      ok: false,
+      summary: 'failed',
+      detail: '未完成（回答被中断）',
+      error: { code: 'tool_call_incomplete', message: '未完成（回答被中断）', retryable: false },
+    } as ToolCardResult);
+    expect(formatted).toBe('failed\n未完成（回答被中断）');
+    expect(formatted).not.toContain('error: ');
+
+    // 差异只在标点时同样算同一句。
+    const punctuation = formatZaiToolDetail({
+      ok: false,
+      summary: 'failed',
+      detail: '{"error":{"message":"权限不足"}}',
+      error: { code: 'x', message: '权限不足。', retryable: false },
+    } as ToolCardResult);
+    expect(punctuation).not.toContain('error: ');
+
+    // 真正不同的两句仍要各出现一次（宁可多一行，也不吞掉有差异的信息）。
+    const differing = formatZaiToolDetail({
+      ok: false,
+      summary: 'failed',
+      detail: '连接超时',
+      error: { code: 'x', message: '宿主未安装', retryable: false },
+    } as ToolCardResult);
+    expect(differing).toContain('连接超时');
+    expect(differing).toContain('error: 宿主未安装');
+  });
+
+  it('extracts a readable sentence from a JSON detail and never dumps the error object', () => {
     // ⚠️ **失败分支保留「从 JSON detail 里抽可读错误」**（上游 `.dpp-tool-block` 的
     // 祖先行为）—— 抽取只在第三方 MCP 把 JSON 塞进 content 文本时命中。
-    // ⚠️ **不丢信息**：抽出来的可读句在 detail 段，原文仍在 `error:` 段。
+    // ⚠️ 本例里 `error.message` 恰好等于 detail 原文（MCP 失败即如此）⇒ `error:` 段被去重，
+    // 面板里只剩抽出来的那句。**这不是丢信息**，同一个串本来就在上面。
     const error = { code: 'mcp_tool_result_error', message: '{"error":{"message":"权限不足"}}', retryable: false };
     const formatted = formatZaiToolDetail({
       ok: false, summary: 'failed',
@@ -264,7 +299,10 @@ describe('zai adapter: site facts', () => {
       error,
     } as ToolCardResult);
     expect(formatted).toContain('权限不足');
-    expect(formatted).toContain(`error: ${JSON.stringify(error)}`);
+    // ⚠️ 面板里只显示 `error.message` —— 整对象序列化（`{code,retryable,details}`）
+    // 对用户没有信息量，还占掉详情框的大半。`code` 仍留在存储里供排查。
+    expect(formatted).not.toContain('mcp_tool_result_error');
+    expect(formatted).not.toContain('"retryable"');
     expect(formatted.startsWith('failed\n权限不足')).toBe(true);
   });
 
@@ -377,10 +415,11 @@ describe('tool panel: pending finalize (todo 64)', () => {
     expect(status?.textContent).toBe('FAILED');
     expect(status?.className).toContain('error');
     const detail = document.querySelector('.zpp-tool-block-item-detail');
-    // 三段式：summary + 原因 + `error: JSON`（详情框默认收起，但文本已在 DOM 里）。
+    // 三段式：summary + 原因 + `error:` 段。⚠️ 但 `finalizePending` 构造的 `error.message`
+    // **恰好等于** `detail`（同一个字符串）⇒ `formatZaiToolDetail` 会去重、不重复列一段。
     expect(detail?.textContent).toContain('FAILED');
     expect(detail?.textContent).toContain('未完成（回答被中断）');
-    expect(detail?.textContent).toContain('error: ');
+    expect(detail?.textContent).not.toContain('error: ');
     expect((detail as HTMLElement)?.hidden).toBe(true);
   });
 
@@ -738,5 +777,339 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
 
     // ⚠️ 两块并成一块（不是「一块有结果 + 一块没有」）⇒ 证明 raw 真的带上了。
     expect(document.querySelectorAll('.zpp-tool-block')).toHaveLength(1);
+  });
+});
+describe('tool panel: block-level default state', () => {
+  function blockOf(): HTMLElement | null {
+    return document.querySelector<HTMLElement>('.zpp-tool-block');
+  }
+
+  /**
+   * 造一个「详情会画成卡片」的 renderDetail —— 判据与生产同形：
+   * 只有带结构化 `output` 的结果才认。
+   */
+  function cardRenderer() {
+    return (target: HTMLElement, result: ToolCardResult): boolean => {
+      if (!result.output || typeof result.output !== 'object') return false;
+      target.textContent = 'CARD';
+      return true;
+    };
+  }
+
+  function cardExecution(): ToolExecutionRecord {
+    return execution({
+      callId: 'xml:card',
+      name: 'skill_draft_create',
+      result: {
+        ok: true,
+        summary: 'Skill 草稿已就绪',
+        detail: 'greeting',
+        output: { kind: 'skill_draft' },
+      } as ToolCardResult,
+    });
+  }
+
+  it('collapses the block after sealing even when a row drew an actionable card', async () => {
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel({ renderDetail: cardRenderer() });
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' });
+    panel.completeToolCall('req-1', cardExecution());
+    await settle();
+    // 在飞时展开 —— 这一条不变。
+    expect(blockOf()?.getAttribute('data-collapsed')).toBe('false');
+
+    panel.sealTurn('req-1');
+    await settle();
+
+    // ⚠️⚠️ **块的口径是「只展开一次」** —— 收尾后必须收起，卡片行也不例外。
+    // 曾经的「有可操作卡片就展开」让带 Skill 草稿的块**永久展开**：刷新一次、切会话回来
+    // 又摊开，跑 N 轮就是 N 块全展开。按钮本身仍默认展开在行里，只是要先展开这一块。
+    expect(blockOf()?.getAttribute('data-collapsed')).toBe('true');
+    // ⚠️ 收起的只是**块**，行级的展开态没被动过 —— 展开块之后按钮就在那儿。
+    const rowToggle = blockOf()?.querySelector<HTMLElement>('.zpp-tool-block-item-toggle');
+    expect(rowToggle?.getAttribute('aria-expanded'), '卡片行自己仍然默认展开').toBe('true');
+  });
+
+  it('keeps a restored card block collapsed on reload', async () => {
+    // ⚠️ 刷新 / 切会话回来走的正是这条恢复路径（存储腿 `live` 缺省为假）——
+    // 它就是用户报的那个症状：「保存草稿后刷新，面板还是展开的」。
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel({
+      renderDetail: cardRenderer(),
+      loadToolHistory: async () => [{
+        id: 'h1',
+        call: {
+          id: 'xml:card',
+          name: 'skill_draft_create',
+          raw: '',
+          // ⚠️ **存储腿必须带锚点才会被渲染** —— `resolveTarget` 对
+          // `source === 'storage'` 刻意禁用兜底腿（宁可不显示，也不挂到错的消息上）。
+          source: { chatSessionId: 'chat-1', assistantMessageId: UUID_A },
+        },
+        result: {
+          ok: true,
+          summary: 'Skill 草稿已就绪',
+          // ⚠️ **`detail` 必须与 `summary` 不同** —— `hasDetail` 的判据是
+          // `detail !== '' && detail !== summary`，两者相同时整行没有详情框，
+          // 渲染器根本不会被调用（这条用例就会变成「没画卡片也不展开」的假绿）。
+          detail: 'greeting',
+          output: { kind: 'skill_draft' },
+        } as ToolCardResult,
+        createdAt: 5,
+      }],
+    });
+    await panel.install();
+    await settle();
+
+    // ⚠️ 存储腿记录**真的画出了卡片**（否则这条用例测不到那个判据）。
+    expect(document.querySelector('.zpp-tool-block-item-detail')?.textContent).toBe('CARD');
+    // 恢复 ⇒ 收起（与「卡片行不撑开块」是同一条判据的两个入口）。
+    expect(blockOf()?.getAttribute('data-collapsed')).toBe('true');
+  });
+
+  it('still collapses a sealed block whose rows have only text details', async () => {
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel({ renderDetail: cardRenderer() });
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
+    panel.completeToolCall('req-1', execution({
+      result: { ok: true, summary: 'EXECUTED', detail: 'ls 的输出' } as ToolCardResult,
+    }));
+    await settle();
+    panel.sealTurn('req-1');
+    await settle();
+
+    // 没有卡片行时保持原口径（跑 N 轮看到 N 行块头）。
+    expect(blockOf()?.getAttribute('data-collapsed')).toBe('true');
+  });
+
+  it('respects the user collapsing a card block, and keeps it collapsed across redraws', async () => {
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel({ renderDetail: cardRenderer() });
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' });
+    panel.completeToolCall('req-1', cardExecution());
+    await settle();
+    const header = blockOf()?.querySelector<HTMLElement>('.zpp-tool-block-header');
+    header?.click();
+    expect(blockOf()?.getAttribute('data-collapsed')).toBe('true');
+
+    // ⚠️ 再投递一次同一条记录（实时链路每执行一步都会重画一次）。
+    panel.rememberExecutions('req-1', [cardExecution()], '');
+    await settle();
+    expect(blockOf()?.getAttribute('data-collapsed')).toBe('true');
+  });
+});
+
+/**
+ * **两条腿没合流时也不许在同一条回答里叠两块。**
+ *
+ * 真机症状：刷新后同一条回答上下两个「已调用工具（2 次）」，上面那个点不开详情
+ * （历史腿合出来的行没有 detail）、下面那个才有真结果（存储腿）。
+ */
+describe('tool panel: one block per message when the legs fail to merge', () => {
+  it('keeps the storage result when the history leg arrives first and is redrawn', async () => {
+    buildRealisticMessage(UUID_A, '这是一段足够长的助手正文内容');
+    // ⚠️ 反向顺序：历史腿先画（只有工具名），存储腿后到（有真结果）。
+    const panel = makePanel({
+      loadToolHistory: async () => [],
+    });
+    await panel.install();
+    await settle();
+
+    panel.rememberHistoryRecords([{
+      messageId: UUID_A,
+      parentMessageId: null,
+      content: '这是一段足够长的助手正文内容',
+      calls: [{ name: 'shell_exec', raw: '<shell_exec>{"command":"ls"}</shell_exec>' }],
+    }], 'chat-1');
+    await settle();
+    // 历史腿单独画出来时：一行、没有详情框（只有工具名与「已执行」）。
+    expect(document.querySelectorAll('.zpp-tool-block')).toHaveLength(1);
+    expect(document.querySelector('.zpp-tool-block-item-detail')).toBeNull();
+
+    // 存储腿带着真结果补到（锚点相同 ⇒ 走同一个块）。
+    panel.rememberExecutions('req-x', [{
+      callId: 'xml:ls',
+      name: 'shell_exec',
+      result: { ok: true, summary: '真实结果', detail: 'ls 的真实输出' } as ToolCardResult,
+    }], '');
+    await settle();
+
+    // 仍然只有一块，且真结果落进去了。
+    expect(document.querySelectorAll('.zpp-tool-block')).toHaveLength(1);
+    expect(document.querySelector('.zpp-tool-block-item-detail')?.textContent).toContain('ls 的真实输出');
+  });
+});
+
+/**
+ * **实时腿用 `live:<requestId>`、历史腿用 `history:<uuid>`，落在同一条回答上。**
+ *
+ * ⚠️⚠️ 这是真机那个「同一条回答上下叠两个面板、上面那个点不开详情」的**最短复现**：
+ * 实时腿在 `readZaiMessageId` 拿不到 uuid 的那一刻出生 ⇒ 键是 `live:<requestId>`；
+ * 历史腿后来带着锚点到达 ⇒ 键是 `history:<uuid>`。两个键不同，按 key 谁都找不到对方，
+ * 于是同一条消息里出现两块 —— 上面那块只有工具名（没有 detail ⇒ 没有展开箭头）。
+ */
+describe('tool panel: live leg and history leg collide on one message', () => {
+  it('keeps a single block and lets the history leg take it over', async () => {
+    // 气泡没有 `message-<uuid>` 锚点 ⇒ 实时腿那一刻读不到 uuid。
+    buildMessageWithoutAnchor();
+    const panel = makePanel();
+    await panel.install();
+
+    // ⚠️ **两边的 raw 刻意不同** —— 否则签名一致、两条记录会先合流成一条，
+    // 那样 `findToolBlock(record.id)` 自己就能命中，**根本测不到「按宿主兜底」**。
+    // 真机合流失败的形态正是这样：两边各拿到一份措辞略有出入的 raw。
+    panel.beginToolCall('req-1', {
+      callId: 'xml:aaa',
+      name: 'shell_exec',
+      raw: '<shell_exec>{"command":"ls"}</shell_exec>',
+    });
+    // ⚠️ 实时腿的结果**带 detail** —— 那是「真结果」的唯一标志（历史腿合成的行没有它）。
+    // 后面用它验「历史腿接管时不许把真结果冲掉」。
+    panel.completeToolCall('req-1', execution({
+      result: { ok: true, summary: '真实结果', detail: 'ls 的真实输出' } as ToolCardResult,
+    }));
+    await settle();
+    // 实时腿画的块：键是 `live:req-1`，有真结果。
+    expect(document.querySelectorAll('.zpp-tool-block')).toHaveLength(1);
+    expect(document.querySelector('.zpp-tool-block-item-detail')?.textContent).toContain('ls 的真实输出');
+
+    // 历史腿到达：**同一条消息**（同一 `.chat-assistant`）、键是 `history:<uuid>`。
+    const message = document.querySelector('.chat-assistant') as Element;
+    message.parentElement?.classList.add(`message-${UUID_A}`);
+    panel.rememberHistoryRecords([{
+      messageId: UUID_A,
+      parentMessageId: null,
+      content: '',
+      calls: [{ name: 'shell_exec', raw: '<shell_exec>{"command": "ls"}</shell_exec>' }],
+    }], 'chat-1');
+    await settle();
+
+    // ⚠️⚠️ **仍然只有一块** —— 后到的那条必须接管已有的块，不新建第二块。
+    expect(document.querySelectorAll('.zpp-tool-block')).toHaveLength(1);
+    // 接管之后块键归一成历史腿的那个。
+    expect(document.querySelector('.zpp-tool-block')?.getAttribute('data-zpp-tool-key'))
+      .toBe(`history:${UUID_A}`);
+    // ⚠️⚠️ **真结果不能被历史腿的空结果冲掉** —— 它只有工具名（`executions` 恒空），
+    // 用它重画会把实时腿带进来的 detail 换成合成的「已执行」。
+    // 这条守的是 `RICH_CONTENT_ATTR`：没有它，刷新后面板会退回「只有工具名」。
+    expect(document.querySelector('.zpp-tool-block-item-detail')?.textContent).toContain('ls 的真实输出');
+  });
+});
+
+/**
+ * **「有未点按钮就保持展开、刷新后不展开」** —— 用户口径的精确落点。
+ *
+ * ⚠️ 判据不是「卡片行」，而是「详情里还有没有可点的东西」：
+ * - 本页面会话内跑完的那一轮、按钮还在 ⇒ 保持展开（不然用户不知道有按钮）；
+ * - 刷新页面 / 切会话后从历史恢复 ⇒ 一律收起，哪怕按钮还在；
+ * - 点过保存（按钮换成状态行）⇒ 下次重画就收起。
+ */
+describe('tool panel: block stays expanded only while an unsaved action is visible', () => {
+  /** 本 describe 自己用的块查询（不跨 describe 借用 helper）。 */
+  function blockOf(): HTMLElement | null {
+    return document.querySelector<HTMLElement>('.zpp-tool-block');
+  }
+
+  /** 一条带 `skill_draft_create` 结果的执行（本 describe 自带，不跨块借用）。 */
+  function cardExecution(): ToolExecutionRecord {
+    return execution({
+      callId: 'xml:card',
+      name: 'skill_draft_create',
+      result: {
+        ok: true,
+        summary: 'Skill 草稿已就绪',
+        detail: 'greeting',
+        output: { kind: 'skill_draft' },
+      } as ToolCardResult,
+    });
+  }
+
+  /** 真实形态：详情里画出一个可点的 `.zpp-result-action` 按钮。 */
+  function actionableCardRenderer() {
+    return (target: HTMLElement, result: ToolCardResult): boolean => {
+      if (!result.output || typeof result.output !== 'object') return false;
+      const button = document.createElement('button');
+      button.className = 'zpp-result-action';
+      button.textContent = '保存';
+      target.appendChild(button);
+      return true;
+    };
+  }
+
+  it('keeps the block expanded after sealing while the save button is still there', async () => {
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel({ renderDetail: actionableCardRenderer() });
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' });
+    panel.completeToolCall('req-1', cardExecution());
+    await settle();
+    panel.sealTurn('req-1');
+    await settle();
+
+    // ⚠️ 轮次结束**不收起** —— 按钮还在，藏起来等于没交付。
+    expect(blockOf()?.getAttribute('data-collapsed')).toBe('false');
+    expect(blockOf()?.querySelector('.zpp-result-action')).not.toBeNull();
+  });
+
+  it('collapses after sealing once the button is gone (already saved)', async () => {
+    buildRealisticMessage(UUID_A);
+    // 这张卡片「没有可点的动作」（模拟点过保存之后的状态行）。
+    const statusOnlyRenderer = (target: HTMLElement, result: ToolCardResult): boolean => {
+      if (!result.output || typeof result.output !== 'object') return false;
+      const status = document.createElement('div');
+      status.className = 'zpp-result-status';
+      status.textContent = '已保存';
+      target.appendChild(status);
+      return true;
+    };
+    const panel = makePanel({ renderDetail: statusOnlyRenderer });
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' });
+    panel.completeToolCall('req-1', cardExecution());
+    await settle();
+    panel.sealTurn('req-1');
+    await settle();
+
+    // 没有可点的东西 ⇒ 按普通口径收起。
+    expect(blockOf()?.getAttribute('data-collapsed')).toBe('true');
+  });
+
+  it('collapses a restored block on reload even when the button is still there', async () => {
+    // ⚠️⚠️ **这条是「刷新后不展开」的守卫** —— 恢复路径进来的记录不在
+    // `sealedThisSessionIds` 里，所以哪怕按钮还在也收起。
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel({
+      renderDetail: actionableCardRenderer(),
+      loadToolHistory: async () => [{
+        id: 'h1',
+        call: {
+          id: 'xml:card',
+          name: 'skill_draft_create',
+          raw: '',
+          source: { chatSessionId: 'chat-1', assistantMessageId: UUID_A },
+        },
+        result: {
+          ok: true,
+          summary: 'Skill 草稿已就绪',
+          detail: 'greeting',
+          output: { kind: 'skill_draft' },
+        } as ToolCardResult,
+        createdAt: 5,
+      }],
+    });
+    await panel.install();
+    await settle();
+
+    // 按钮确实画出来了（否则这条用例测不到判据）。
+    expect(blockOf()?.querySelector('.zpp-result-action')).not.toBeNull();
+    expect(blockOf()?.getAttribute('data-collapsed')).toBe('true');
   });
 });

@@ -12,6 +12,8 @@ export const common = {
   enabled: 'Enabled',
   loading: 'Loading...',
   none: 'None',
+  /** Sidebar-wide fallback for a bare error code; natural-language messages keep their own text. */
+  operationFailedWithCode: 'Operation failed ({code})',
   preview: 'Preview',
   refresh: 'Refresh',
   remove: 'Remove',

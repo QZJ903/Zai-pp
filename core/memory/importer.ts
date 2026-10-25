@@ -1,4 +1,5 @@
 import type { Memory, MemoryType, NewMemory } from '../types';
+import { memoryDedupeKey } from './dedupe';
 
 export interface MemoryImportPreview {
   kind: 'memory_import_preview';
@@ -161,5 +162,5 @@ function requiredContent(value: string): string {
 }
 
 function dedupeKey(content: string): string {
-  return content.toLowerCase().replace(/\s+/g, ' ').trim();
+  return memoryDedupeKey(content);
 }

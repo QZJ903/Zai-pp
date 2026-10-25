@@ -276,7 +276,7 @@ describe('tool execution call sites are awaited', () => {
     // 模块状态可能被一条更新的同步顶掉，那时读到的是更旧的目录，
     // 表现是「这一轮注入的工具清单比实际少/旧」，且不报错。
     //
-    // ⚠️ 这条是评审查出的 P1：改造闸门时只改了授权重试那一处，漏了这两个调用点。
+    // ⚠️ 改造闸门时容易只改授权重试那一处、漏掉这两个调用点。
     const program = readContentProgram();
     for (const fnName of ['advanceContinuationLoop', 'handleResponseComplete'] as const) {
       // ⚠️ **走共享实现**（只认 `program.body` 的顶层声明）—— 本地 `walkSourceAst` 版本

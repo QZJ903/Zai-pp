@@ -239,7 +239,7 @@ describe('continuation submit: 发送判据是三态的，Stop 只作诊断', ()
     // ① 恰好读一次 Stop（诊断字段用）。
     expect(callsTo(body, 'isAgentCurrentlyRunning'), '应当读一次 Stop 按钮').toHaveLength(1);
 
-    // ② ⚠️⚠️ **Stop 不能是「提前返回」的驱动**。实测（zai-site §9.1）：Stop 比请求
+    // ② ⚠️⚠️ **Stop 不能是「提前返回」的驱动**。实测：Stop 比请求
     // 早 3–5ms 出现 —— 它是页面进入生成态的信号，**不是**「这一发发出去了」的证据。
     // 把它当证据，主判据一失效就会误判。
     // ⚠️ **判据是「那个 if 的 consequent 里有没有任何 return」** —— 现在返回的是对象字面量

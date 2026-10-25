@@ -85,18 +85,42 @@ export class BrowserConnection {
     });
   }
 
+  /**
+   * 断开当前附着。
+   *
+   * ⚠️⚠️ **成功（或「本来就没挂」）之后才清 `attachedTabId`** —— 先清再 await 的话，
+   * 一次非「已掉线」的失败会让内部状态与浏览器实际状态分叉：本地以为断了、Chrome 侧
+   * 仍然挂着我们那条会话。而那个假状态**无法自愈**：
+   * - `attach` 第一行是「已在同一条就 return」—— 本地是 null，所以会重新 attach，
+   *   撞上 `Another debugger is already attached`（指的是**我们自己**那条僵尸会话）；
+   * - `releaseUncontrollableTarget` 第一行读 `connection.tabId`，null 就直接跳过；
+   * - `onDetach` 监听也是 `source.tabId !== this.attachedTabId` 才处理，null 时永不匹配。
+   * ⇒ 只有 service worker 重启才能恢复。**与 `TabKeepAliveSession.detach` 同口径。**
+   */
   async detach(): Promise<void> {
     if (this.attachedTabId === null) return;
     const tabId = this.attachedTabId;
-    this.attachedTabId = null;
     try {
       await this.getDebuggerApi().detach({ tabId });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes('not attached') && !message.includes('No tab with id')) {
-        throw error;
+      // 「已经掉了」（DevTools 顶掉 / 标签关了 / 标签不存在）不是错误 —— 目标状态已达成。
+      // ⚠️ 两种「标签没了」的措辞来自不同 API，都要认：
+      // `chrome.tabs.*` 是 `No tab with id: N.`，`chrome.debugger.*` 是
+      // `No tab with given id N.`（Chromium `kNoTargetError` 模板里 `given` 夹在中间）。
+      if (
+        message.includes('not attached') ||
+        message.includes('No tab with id') ||
+        message.includes('No tab with given id')
+      ) {
+        this.attachedTabId = null;
+        return;
       }
+      // ⚠️ **其它失败时保留 `attachedTabId`**，让调用方看到真实状态（仍是「已连接」），
+      // 下一次 `detach` / `attach` 也能基于正确的前提做决定。
+      throw error;
     }
+    this.attachedTabId = null;
   }
 
   async sendCommand<T extends Record<string, unknown> = Record<string, unknown>>(

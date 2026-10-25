@@ -54,6 +54,29 @@ export const ZAI_BUILTIN_HISTORY_TOOL_NAMES: readonly string[] = [
   // 结果走 `core/ui/` 的卡片渲染）
   'skill_draft_create',
   'memory_import_preview',
+  // 浏览器控制（`core/browser-control/tool.ts` 的 `BROWSER_CONTROL_TOOL_NAMES`）
+  //
+  // ⚠️⚠️ **这一组漏过一次，症状是「浏览器工具的 XML 与面板一起出现」**：这 18 个名字
+  // 只在动态快照里，而页面刚加载时快照还是空集（见本文件顶部）⇒ 历史侧请求早于同步时
+  // **一个都剥不掉**，而 shell / memory / skill 的照常剥掉 ⇒ 只剩浏览器工具那块原样显示。
+  'browser_navigate',
+  'browser_go_back',
+  'browser_go_forward',
+  'browser_refresh',
+  'browser_list_tabs',
+  'browser_select_tab',
+  'browser_close_tab',
+  'browser_snapshot',
+  'browser_click',
+  'browser_hover',
+  'browser_fill',
+  'browser_fill_form',
+  'browser_key',
+  'browser_type',
+  'browser_attach_file',
+  'browser_wait_for',
+  'browser_handle_dialog',
+  'browser_evaluate_script',
   // 已退役的内置工具名（本文件上方的 `ZAI_RETIRED_TOOL_NAMES`，零依赖、只需展开）
   ...ZAI_RETIRED_TOOL_NAMES,
 ];

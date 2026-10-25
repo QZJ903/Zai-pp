@@ -92,3 +92,45 @@ function sampleResult(index: number): ToolResult {
     detail: 'd'.repeat(20),
   };
 }
+
+describe('tool history output round-trip', () => {
+  it('restores a structured output snapshot back into an object', async () => {
+    // ⚠️⚠️ 落库时 `output` 被 `JSON.stringify` 成字符串（为了受同一套字符上限约束），
+    // 而结构化结果的消费者全部按**对象形状**判 ⇒ 不还原就读不出卡片
+    // （表现：刷新后「保存 Skill」按钮没了，且不报错）。
+    await appendToolCallHistory(sampleCall(0), {
+      ok: true,
+      summary: 'Skill draft ready',
+      output: { kind: 'skill_draft', draft: { name: 'greeting' } },
+    }, 'manual_chat');
+
+    const [record] = await getToolCallHistory();
+    expect(record.result.output).toEqual({ kind: 'skill_draft', draft: { name: 'greeting' } });
+  });
+
+  it('leaves a truncated output as the original string', async () => {
+    // 截断过的 JSON 不完整、还原不了 ⇒ 原样留着，消费方按「形状不对」退回纯文本。
+    await appendToolCallHistory(sampleCall(0), {
+      ok: true,
+      summary: 'huge',
+      output: { kind: 'skill_draft', blob: 'x'.repeat(20_000) },
+    }, 'manual_chat');
+
+    const [record] = await getToolCallHistory();
+    expect(typeof record.result.output).toBe('string');
+    expect(String(record.result.output)).toContain('...[truncated]');
+  });
+
+  it('keeps the persisted form a string so the storage shape does not change', async () => {
+    // ⚠️ **只在读取侧还原** —— 写入侧改回对象会让已落库的旧记录仍然坏着，
+    // 而且会动到字符上限那套约束。
+    await appendToolCallHistory(sampleCall(0), {
+      ok: true,
+      summary: 'Skill draft ready',
+      output: { kind: 'skill_draft' },
+    }, 'manual_chat');
+
+    const persisted = storage['zai_pp_tool_history'] as Array<{ result: { output: unknown } }>;
+    expect(typeof persisted[0].result.output).toBe('string');
+  });
+});
