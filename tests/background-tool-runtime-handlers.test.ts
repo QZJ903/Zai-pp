@@ -91,7 +91,7 @@ const call: ToolCall = {
 };
 
 describe('tool runtime handler ownership', () => {
-  it('creates exactly the 27 inventory-assigned handlers without duplicate ownership', () => {
+  it('creates exactly the 31 inventory-assigned handlers without duplicate ownership', () => {
     const handlers = createToolRuntimeHandlers({
       mcp: createMcpDependencies(),
       browser: createBrowserDependencies(),
@@ -99,11 +99,11 @@ describe('tool runtime handler ownership', () => {
     });
     const types = handlers.map((handler) => handler.type);
     const expected = readInventoryCommands(
-      'Group C — MCP, tool, browser control, and sandbox (29)',
+      'Group C — MCP, tool, browser control, and sandbox (31)',
     );
 
-    expect(types).toHaveLength(29);
-    expect(new Set(types).size).toBe(29);
+    expect(types).toHaveLength(31);
+    expect(new Set(types).size).toBe(31);
     expect([...types].sort()).toEqual([...expected].sort());
     for (const type of types) expect(getRuntimeCommandOwner(type)).toBe('typed-handler');
 
@@ -113,7 +113,7 @@ describe('tool runtime handler ownership', () => {
       .filter((type) => expected.includes(type))
       .sort();
     expect(Object.keys(TOOL_RUNTIME_PAYLOAD_DECODERS).sort()).toEqual(decodedTypes);
-    expect(decodedTypes).toHaveLength(18);
+    expect(decodedTypes).toHaveLength(19);
   });
 
   it('rejects malformed nested MCP input before persistence or external I/O', async () => {
@@ -714,6 +714,8 @@ function createBrowserDependencies(): BrowserToolRuntimeHandlerDependencies {
     detachBrowserControl: vi.fn(async () => undefined),
     startTabKeepAlive: vi.fn(async () => undefined),
     stopTabKeepAlive: vi.fn(async () => undefined),
+    getTabKeepaliveSettings: vi.fn(async () => ({ enabled: true })),
+    setTabKeepaliveEnabled: vi.fn(async (enabled: boolean) => ({ enabled })),
     broadcastToolDescriptorsUpdate: vi.fn(async () => undefined),
     broadcastBrowserControlUpdate: vi.fn(async () => undefined),
   };

@@ -34,6 +34,46 @@ const TOOL_CALL_LOCAL = frame({
   metadata: { tool_call_id: 'call_b', type: 'function' },
 });
 
+/**
+ * 真机抓包一：`delta_name` 带着模型自造的 XML 尾巴（闭合标签是 `</arg_value>`，
+ * 不在我们的任何提示词里），`delta_arguments` 未闭合，**整轮没有 `tool_response`**。
+ *
+ * ⚠️⚠️ 这一帧是判据从「整串相等」改成边界匹配的**唯一理由** —— 别删。
+ */
+const TOOL_CALL_CAPTURED_A = frame({
+  phase: 'tool_call',
+  delta_name: 'shell_status>\n{}\n</arg_value>',
+  delta_arguments: '{',
+  metadata: { tool_call_id: 'call_captured_a', type: 'function' },
+});
+
+/** 真机抓包二：同样的尾巴，`delta_arguments` 完整，后面跟 `sandbox:status` 与服务端回执。 */
+const TOOL_CALL_CAPTURED_B = frame({
+  phase: 'tool_call',
+  delta_name: 'shell_status>{}</arg_value>',
+  delta_arguments: '{}',
+  metadata: { tool_call_id: 'call_captured_b', type: 'function' },
+});
+
+/**
+ * 抓包二里服务端的回执 —— ⚠️ **`tool_name` 也被原样回显成那串垃圾**，
+ * 所以「改读服务端回执拿干净名字」这条路不成立（见 `matchCatalogToolName` 的说明）。
+ */
+const TOOL_RESPONSE_CAPTURED_B = frame({
+  phase: 'tool_response',
+  delta_content: 'tool call failed: shell_status>{}</arg_value>',
+  tool_name: 'shell_status>{}</arg_value>',
+  status: 'error',
+  metadata: { is_error: true, tool_call_id: 'call_captured_b' },
+});
+
+const USAGE = frame({
+  phase: 'other',
+  usage: { prompt_tokens: 39692, completion_tokens: 1502, total_tokens: 41194 },
+});
+
+const DONE = frame({ phase: 'done', done: true });
+
 const TOOL_RESPONSE_ERROR = frame({
   phase: 'tool_response',
   delta_content: 'tool call failed: skill_draft_create',
@@ -140,5 +180,38 @@ describe('native tool_call misuse detection', () => {
     // 所以这一轮没有任何可执行内容 —— 不纠错的话就是一次静默失败。
     const run = await runTurn([TOOL_CALL_LOCAL, TOOL_RESPONSE_ERROR], ['skill_draft_create']);
     expect(run.complete?.assistantText).toBe('');
+  });
+
+  it('detects the misuse in a real captured turn whose delta_name carries an XML tail', async () => {
+    // 抓包一：`tool_call` → `usage` → `done`，**没有 `tool_response`、没有 `answer`**。
+    // 整串相等判据在这种帧上一条都命中不了（这正是纠错链曾经整条失效的原因）。
+    const run = await runTurn(
+      [TOOL_CALL_CAPTURED_A, USAGE, DONE],
+      ['shell_status', 'shell_exec'],
+    );
+    expect(run.complete?.misusedNativeToolNames).toEqual(['shell_status']);
+    // 用户看到「模型不回复」的那一轮：没有任何可执行正文。
+    expect(run.complete?.assistantText).toBe('');
+  });
+
+  it('detects the misuse even though the server echoes the polluted name back', async () => {
+    // 抓包二：服务端回执的 `tool_name` 同样是那串垃圾 ⇒ 检测只能靠 `tool_call` 帧本身。
+    const run = await runTurn(
+      [TOOL_CALL_CAPTURED_B, USAGE, TOOL_RESPONSE_CAPTURED_B],
+      ['shell_status', 'shell_exec'],
+    );
+    expect(run.complete?.misusedNativeToolNames).toEqual(['shell_status']);
+  });
+
+  it('does not mistake a sandbox tool with an XML tail for a local one', async () => {
+    // 沙箱工具同样可能带尾巴 —— 它不在本轮目录里，不该被误判成本地工具。
+    const sandboxWithTail = frame({
+      phase: 'tool_call',
+      delta_name: 'Bash>{}</arg_value>',
+      delta_arguments: '{}',
+      metadata: { tool_call_id: 'call_d', type: 'function' },
+    });
+    const run = await runTurn([sandboxWithTail, ANSWER], ['skill_draft_create']);
+    expect(run.complete?.misusedNativeToolNames).toBeUndefined();
   });
 });

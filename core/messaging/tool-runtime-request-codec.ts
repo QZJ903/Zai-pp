@@ -153,6 +153,11 @@ export const TOOL_RUNTIME_PAYLOAD_DECODERS: ToolRuntimePayloadDecoderMap = {
     validateBrowserControlSettingsPatch(payload, 'SAVE_BROWSER_CONTROL_SETTINGS.payload');
     return typedPayload<'SAVE_BROWSER_CONTROL_SETTINGS'>(payload);
   },
+  SET_TAB_KEEPALIVE_ENABLED(value) {
+    const payload = recordValue(value, 'SET_TAB_KEEPALIVE_ENABLED.payload');
+    booleanValue(payload.enabled, 'SET_TAB_KEEPALIVE_ENABLED.payload.enabled');
+    return typedPayload<'SET_TAB_KEEPALIVE_ENABLED'>(payload);
+  },
   SET_BROWSER_CONTROL_ENABLED(value) {
     const payload = recordValue(value, 'SET_BROWSER_CONTROL_ENABLED.payload');
     booleanValue(payload.enabled, 'SET_BROWSER_CONTROL_ENABLED.payload.enabled');

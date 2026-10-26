@@ -4,13 +4,31 @@
  * ## 为什么需要它
  *
  * 本项目的续跑链跑在**页面里**：扩展把 prompt 写进输入框、让页面自己提交，然后靠页面的
- * fetch-hook 读 SSE、靠内容脚本的续跑循环往下推。而 Chrome 会把后台标签节流：
- * 隐藏超过 5 分钟可能直接冻结（定时器 / Promise 回调 / 事件处理全部暂停），
- * 在那之前 `setTimeout` 也已经降到每秒一次。
+ * fetch-hook 读 SSE、靠内容脚本的续跑循环往下推。而浏览器会**节流后台标签的定时器**：
+ * `setTimeout` / `setInterval` 降到每秒一次，隐藏满 5 分钟后进一步降到每分钟一次
+ * （强化节流，Chrome 88+）。
  *
  * 表现是「只打开了网页、没有后续」：发送链靠 80–150ms 的短轮询串起来
  * （`waitForSendButtonEnabled` 4 秒预算、`waitForSendEvidence` 5 秒预算），
  * 被节流到每秒一次之后，预算还没走完几轮就超时 ⇒ 判「没发出去」⇒ 收尾。
+ *
+ * ⚠️⚠️ **更正一条曾经的错误说法（2026-10-26）**：这里原先写「隐藏超过 5 分钟可能
+ * **直接冻结**（定时器 / Promise 回调 / 事件处理全部暂停）」。查 Chromium 官方
+ * [Page Freezing Opt-In and Opt-Out](https://chromium.googlesource.com/chromium/src/+/HEAD/chrome/browser/performance_manager/docs/freezing_opt_out_opt_in.md)
+ * 之后确认：**`Freezing isn't enabled on Chrome for Desktop yet`** ——
+ * 「隐藏 5 分钟就冻结」是 **Android** 的行为（M68 起），不是桌面版。
+ * 桌面版当前只有**节流**。⇒ 保活在 Chrome 桌面上的收益是「定时器精度」，
+ * 不是「防冻结」；而**防冻结**这条对它仍然有意义，因为：
+ *
+ * - **Edge 的 Sleeping tabs** 是真会冻结页面的（Chromium 的 freezing 机制），
+ *   默认闲置 15 分钟~2 小时，省电模式下可短到 5 分钟；
+ * - Chromium 有一个「desktop conservative freezing」的提案（隐藏静音满 15 分钟后
+ *   每 5 分钟只给 50ms 预算），**当前启用状态未查实**。
+ *
+ * ⚠️ **挂着 debugger 本身还额外拿到一层保护**：Chromium 的冻结/丢弃策略把
+ * 「当前正被 DevTools 检查」列为豁免（源码 `decision_details.cc` 的
+ * `LIVE_STATE_DEVTOOLS_OPEN`、提交 `ee2169b`「Exclude tabs that are pinned or with
+ * dev tools from discarding」）。`chrome.debugger.attach` 走的是同一条标记。
  *
  * ## 两条命令就够
  *
@@ -48,11 +66,20 @@
  *   所以 `want()` 每次都会重新 `sync`（掉线就重挂、在线就重发那两条命令）。
  */
 
+import { DEFAULT_TAB_KEEPALIVE_SETTINGS } from './keepalive-settings';
+
 const DEBUGGER_PROTOCOL_VERSION = '1.3';
 
 /** 保活所需的注入点。 */
 export interface TabKeepAliveDependencies {
   chromeApi?: typeof chrome;
+  /**
+   * 构造时的开关初值。**缺省 = `DEFAULT_TAB_KEEPALIVE_SETTINGS.enabled`（false）**。
+   *
+   * ⚠️ 仅供测试与后台启动注入 —— 这个类刻意不自己读 storage（见 `enabled` 字段的说明）。
+   * 生产路径由 `background.ts` 在启动时 `getTabKeepaliveSettings()` 读进来。
+   */
+  enabled?: boolean;
 }
 
 export class TabKeepAliveSession {
@@ -72,9 +99,72 @@ export class TabKeepAliveSession {
    */
   private readonly attached = new Set<number>();
   private listenersRegistered = false;
+  /**
+   * 用户开关（`keepalive-settings.ts`）。**关掉就一条都不挂**。
+   *
+   * ⚠️ 默认 `false`（与 `DEFAULT_TAB_KEEPALIVE_SETTINGS` 一致）—— 挂 debugger 会画
+   * **全局可见**的调试横幅，那个代价不该默认替用户承担。真正的取值由后台在启动时
+   * 与命令里同步进来 ——
+   * 这个类刻意**不自己读 storage**：它被单元测试直接构造，读 storage 会让
+   * 每个用例都要桩 `chrome.storage`，而判据本身与「值从哪来」无关。
+   */
+  private enabled: boolean;
+  /**
+   * 开关的**真实值是否已经确定**。
+   *
+   * ⚠️⚠️ **存在的唯一理由是「启动读盘是异步的」**：`background.ts` 启动时
+   * `void getTabKeepaliveSettings().then(setEnabled)`，而内容脚本的
+   * `START_TAB_KEEPALIVE` 可能先到。那时 `enabled` 还是构造默认值（`false`），
+   * 而它**不代表用户的选择** —— 只是「还没读到」。
+   *
+   * ⇒ 未确定时 `want()` **按「开着」处理**：多挂一次只是横幅闪一下，
+   * 少挂一次会让那一轮发送**静默失败**（失败方向不对称，选代价小的那边）。
+   *
+   * ✅ 显式 `setEnabled(...)` 与启动读盘完成都会置位 —— 之后行为与常理一致
+   * （用户关掉就是关掉，不会因为「还没读到」又被放行）。
+   */
+  private enabledResolved: boolean;
 
   constructor(dependencies: TabKeepAliveDependencies = {}) {
     this.chromeApi = dependencies.chromeApi ?? (typeof chrome === 'undefined' ? undefined : chrome);
+    // ⚠️ **默认值只写一份** —— 从 `keepalive-settings` 读，别在这里手抄一个 `false`。
+    this.enabled = dependencies.enabled ?? DEFAULT_TAB_KEEPALIVE_SETTINGS.enabled;
+    // ⚠️ **调用方显式给了 `enabled` 就算已确定** —— 那是测试与启动注入两条路。
+    // 不给（生产里构造单例）就是「还没读到」，由 `setEnabled` 置位。
+    this.enabledResolved = dependencies.enabled !== undefined;
+  }
+
+  /** 当前是否允许保活（只读，诊断与测试用）。 */
+  get isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  /**
+   * 设置开关。**关掉时立刻卸掉全部会话** —— 否则横幅会一直挂着，
+   * 而用户刚刚才把它关掉，那种「关了还在」比不给开关更糟。
+   *
+   * ⚠️ **重新开启不主动恢复** —— 关闭时 `wanted` 已清空，所以重开后**没有任何旧意图**
+   * （这是刻意的：那些续跑可能早就结束了，复活它们会让横幅永久挂着）。
+   * 之后由下一次 `want()` / `sync()`
+   * 决定要不要挂（那时页面可能已经回到前台，贸然 attach 会白挂一条横幅）。
+   *
+   * ⚠️ **没有「开启后 syncAll 补一次」这种恢复路径** —— 曾经在注释里这么写过，
+   * 但全仓没有任何调用方这么做，而且即便调了也是空转（`wanted` 已被清空）。
+   * 真正需要补的那一格是「启动读盘窗口内到达的 `want()`」，由 `enabledResolved` 处理。
+   */
+  async setEnabled(enabled: boolean): Promise<void> {
+    // ⚠️ **先置位再比早退** —— 否则「构造值是 false、显式设 false」那一格会早退，
+    // `enabledResolved` 永远是 false，`want()` 会一直按「开着」放行。
+    const wasResolved = this.enabledResolved;
+    this.enabledResolved = true;
+    if (this.enabled === enabled && wasResolved) return;
+    this.enabled = enabled;
+    if (!enabled) {
+      // 意图也一并丢掉 —— 留着的话，重新开启后 `syncAll()` 会立刻把旧标签全挂上，
+      // 而那些续跑可能早就结束了（页面刷新、任务完成都不会通知这里）。
+      this.wanted.clear();
+      await this.detach();
+    }
   }
 
   /** 当前**实际**保活着的标签（只读快照，测试与诊断用）。 */
@@ -93,6 +183,12 @@ export class TabKeepAliveSession {
    * ⚠️ **只是登记意图**，挂不挂由 `sync` 按前台/后台决定。
    */
   async want(tabId: number): Promise<void> {
+    // ⚠️ **关闭状态下连意图都不登记** —— 登记了会让 `setEnabled(true)` 之后的
+    // `syncAll()` 把一堆早就结束了的续跑标签全挂上。
+    // ⚠️⚠️ **但「还没读到开关」不等于「关着」** —— 见 `enabledResolved` 的说明：
+    // 那个窗口里直接 return 会把这一轮的意图丢掉，而没人会重放它
+    // ⇒ SW 重启后的第一次发送**静默失去保护**。
+    if (!this.enabled && this.enabledResolved) return;
     this.wanted.add(tabId);
     this.registerListeners();
     await this.sync(tabId);
@@ -117,8 +213,23 @@ export class TabKeepAliveSession {
    * ⚠️ 判据是 `tab.active && window.focused`（**不受 CDP 模拟影响**的源，见文件头）。
    * ⚠️ 查不到标签（已关 / chrome 报错）按「前台」处理 ⇒ 不挂。失败方向安全：
    * 少挂一次只是可能被节流，多挂一次则会让用户看到横幅。
+   * ⚠️ **关闭状态一律不挂** —— 判断放在最前面（`wanted` 之前），这样关闭期间
+   * 内容脚本仍然发 `START_TAB_KEEPALIVE` 也挂不上任何东西。
    */
   async sync(tabId: number): Promise<void> {
+    // ⚠️ **与 `want()` 同一判据** —— 「还没读到开关」不等于「关着」。
+    // 这里漏判的话，`want()` 虽然登记了意图，`sync()` 仍会立刻 detach
+    // ⇒ 与丢掉意图等价。
+    //
+    // ⚠️ **但它是防御性冗余，当前没有独立用例能证明它必要**（Sonnet 复核实测：
+    // 单独删掉这道门，26 条用例全绿；只有 `want()` 那道被抓住）。
+    // 保留它的理由：`sync()` 也是 `syncAll()` 的入口，而 `syncAll` 会在
+    // `tabs.onActivated` / `windows.onFocusChanged` 上被触发 —— 那些时刻可能落在
+    // 「读盘还没回来」的窗口里，与 `want()` 无关。两处判据保持一致比留一个口子安全。
+    if (!this.enabled && this.enabledResolved) {
+      await this.detach(tabId);
+      return;
+    }
     if (!this.wanted.has(tabId)) {
       await this.detach(tabId);
       return;

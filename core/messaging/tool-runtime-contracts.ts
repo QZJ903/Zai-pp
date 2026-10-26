@@ -11,6 +11,7 @@ import type {
   BrowserControlState,
   BrowserControlTarget,
 } from '../browser-control/types';
+import type { TabKeepaliveSettings } from '../browser-control/keepalive-settings';
 import type { PlatformEnvironment } from '../platform/capabilities';
 import type {
   MessageAction,
@@ -114,9 +115,17 @@ export interface ToolRuntimeCommandContracts {
     };
     response: BrowserControlSettings;
   };
+  SET_TAB_KEEPALIVE_ENABLED: {
+    request: { type: 'SET_TAB_KEEPALIVE_ENABLED'; payload: { enabled: boolean } };
+    response: { ok: true };
+  };
   SET_BROWSER_CONTROL_ENABLED: {
     request: { type: 'SET_BROWSER_CONTROL_ENABLED'; payload: { enabled: boolean } };
     response: BrowserControlSettings;
+  };
+  GET_TAB_KEEPALIVE_SETTINGS: {
+    request: { type: 'GET_TAB_KEEPALIVE_SETTINGS' };
+    response: TabKeepaliveSettings;
   };
   GET_BROWSER_CONTROL_STATE: {
     request: { type: 'GET_BROWSER_CONTROL_STATE' };

@@ -105,6 +105,10 @@ export const RUNTIME_COMMAND_CONTRACTS = {
   GET_BROWSER_CONTROL_SETTINGS: typedCommand('none', 'value', 'background-error', 'live-only'),
   SAVE_BROWSER_CONTROL_SETTINGS: typedCommand('payload-decoded', 'value', 'background-error', 'live-only', 'optional'),
   SET_BROWSER_CONTROL_ENABLED: typedCommand('payload-decoded', 'value', 'background-error', 'live-only'),
+  /** 「后台保活」开关（挂不挂 chrome.debugger）。⚠️ 只在内容脚本/后台可用，与浏览器控制无关。 */
+  SET_TAB_KEEPALIVE_ENABLED: typedCommand('payload-decoded', 'ack', 'background-error', 'live-only'),
+  /** 读「后台保活」开关的当前值（侧边栏设置页用）。 */
+  GET_TAB_KEEPALIVE_SETTINGS: typedCommand('none', 'value', 'background-error', 'live-only'),
   GET_BROWSER_CONTROL_STATE: typedCommand('none', 'value', 'background-error', 'live-only'),
   SET_BROWSER_CONTROL_TARGET: typedCommand('payload-decoded', 'status', 'background-error', 'live-only'),
   DETACH_BROWSER_CONTROL: typedCommand('none', 'ack', 'background-error', 'live-only'),

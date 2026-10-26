@@ -49,6 +49,14 @@ export function useSettingsController() {
   const [loading, setLoading] = useState(true);
 
   // --- background ---
+  /**
+   * 「后台保活」开关（挂不挂 `chrome.debugger`）。
+   *
+   * ⚠️ **默认 false** = 与 `DEFAULT_TAB_KEEPALIVE_SETTINGS` 一致。
+   * ⚠️ 首帧用 false 的另一个好处：加载完成前显示「关」比显示「开」安全 ——
+   * 用户若在这几百毫秒里看到「开」，会以为它一直在挂调试横幅。
+   */
+  const [keepaliveEnabled, setKeepaliveEnabled] = useState(false);
   const [bgEnabled, setBgEnabled] = useState(false);
   const [bgType, setBgType] = useState<'upload' | 'url'>('upload');
   const [bgUrl, setBgUrl] = useState('');
@@ -82,7 +90,7 @@ export function useSettingsController() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [memories, cfg, bgCfg] = await Promise.all([
+      const [memories, cfg, bgCfg, keepalive] = await Promise.all([
         libraryController.getMemories()
           .catch(settingsLoadFallback<Memory[] | null>('memory count', null)),
         sidepanelRuntimeClient.request(
@@ -92,12 +100,19 @@ export function useSettingsController() {
           .catch(settingsLoadFallback('extension version', undefined)),
         sidepanelRuntimeClient.request({ type: 'GET_BACKGROUND' })
           .catch(settingsLoadFallback('background', null)),
+        sidepanelRuntimeClient.request({ type: 'GET_TAB_KEEPALIVE_SETTINGS' })
+          .catch(settingsLoadFallback('tab keepalive', null)),
       ]);
       if (cancelled) return;
       setMemoryCount(memories ? memories.length : null);
       setVersion(cfg && 'version' in cfg ? cfg.version : '');
       const normalizedBg = normalizeBackgroundConfig(bgCfg as BackgroundConfig | null);
       if (normalizedBg) syncBgState(normalizedBg);
+      // ⚠️ **读不到就保持 false** —— 与后台的归一化同口径
+      // （`normalizeTabKeepaliveSettings` 只在显式 `=== true` 时开）。
+      if (keepalive && typeof keepalive === 'object' && 'enabled' in keepalive) {
+        setKeepaliveEnabled((keepalive as { enabled?: unknown }).enabled === true);
+      }
       setLoading(false);
     })();
 
@@ -118,6 +133,24 @@ export function useSettingsController() {
     // 落库成功才推进「已保存的 URL」—— 预览与开关的可用性都跟着它走，
     // 保证它们描述的是**实际生效**的背景，而不是输入框里正在打的字。
     setBgConfirmedUrl(config.url ?? '');
+  }, []);
+
+  /**
+   * 切换「后台保活」。
+   *
+   * ⚠️ **先落库再改 state** —— 反过来会让界面显示成已关、实际后台还挂着
+   * （`setTabKeepaliveEnabled` 里会同时卸掉已挂的会话，失败时必须能看出来）。
+   */
+  const handleKeepaliveToggle = useCallback(async (enabled: boolean) => {
+    try {
+      await sidepanelRuntimeClient.request({
+        type: 'SET_TAB_KEEPALIVE_ENABLED',
+        payload: { enabled },
+      });
+      setKeepaliveEnabled(enabled);
+    } catch (error) {
+      console.log('[Zai++] setting the tab keepalive switch failed', error);
+    }
   }, []);
 
   const handleBgToggle = useCallback(
@@ -305,6 +338,8 @@ export function useSettingsController() {
     bgOpacity,
     bgPreview,
     fileInputRef,
+    keepaliveEnabled,
+    handleKeepaliveToggle,
     handleBgToggle,
     handleFileSelect,
     handleUrlConfirm,

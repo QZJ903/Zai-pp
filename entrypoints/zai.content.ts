@@ -80,6 +80,11 @@ import {
 } from '../core/zai/continuation';
 import { installContinuationBubbleHider } from '../core/zai/continuation-bubble';
 import {
+  createWaiterRegistry,
+  waitForDomCondition,
+  waitForNotified,
+} from '../core/zai/event-wait';
+import {
   ZAI_CONTENT_TO_MAIN,
   ZAI_MAIN_TO_CONTENT,
   decodeZaiHistoryToolRecordsMessage,
@@ -180,6 +185,20 @@ let currentRequestMessageCount = 0;
  * （等它的代码自己就占着队列）。
  */
 let observedAugRequestCount = 0;
+/**
+ * **等这两个计数器变化的唤醒者**（消费者是 `waitForNewAugRequest` / `waitForSendEvidence`，
+ * 都走 `waitForNotified` + `augProgressWaiters`）。
+ *
+ * ⚠️⚠️ **为什么不能靠轮询读它们**：等它们的代码（`waitForNewAugRequest` /
+ * `waitForSendEvidence`）跑在串行队列里，而后台标签的定时器被节流到每秒一次 ——
+ * 5 秒证据窗口只剩 5 个采样点，而桥消息的真实延迟是几十毫秒级 ⇒ 采样太粗会让
+ * 「确实发出去了」被判成 `ambiguous`，进而起看门狗、回收循环。
+ *
+ * ⚠️ **唤醒点必须在计数器自增的那一刻**（`dispatchMainWorldMessage` 的同步区），
+ * 那个位置本来就在串行队列之外 —— 在队列内 notify 的话，被唤醒者自己占着队列，
+ * 永远排不到 ⇒ 自锁（与那两个计数器必须写在队列外是同一条理由）。
+ */
+const augProgressWaiters = createWaiterRegistry();
 /**
  * 自动化发送链最后一次致命错误的 kind（`no_textarea` / `form_not_connected` / `agent_not_idle`）。
  *
@@ -1618,6 +1637,9 @@ async function dispatchMainWorldMessage(data: Record<string, unknown>): Promise<
     );
     observedAugRequestCount += delta.requestDelta;
     continuationRequestSeq += delta.continuationDelta;
+    // ⚠️ **必须在这里叫醒**（同步区、串行队列之外）—— 等它们的代码正占着串行队列，
+    // 在队列内 notify 等于让它等自己。见 `augProgressWaiters` 的说明。
+    augProgressWaiters.notify();
   }
   // 「响应已到达」的登记同样必须在串行队列**之外**、消息抵达瞬间完成。
   // ⚠️ **它是「是否用户手动停止」的判据**（`armManualStopDetection` 挂窗口时与窗口到期时各读一次
@@ -2100,11 +2122,22 @@ async function handleUsageSnapshot(raw: unknown): Promise<void> {
  * 而不是抛错（见 `sendRuntimeMessageStrict` 那条注释），不判就会把失败当成功。
  */
 /**
+ * **长窗口保活**是否已开启 —— 由 `startSustainedKeepAliveWatch` 在循环跑了
+ * {@link SUSTAINED_KEEPALIVE_AFTER_MS} 之后置位，`finishContinuationLoop` 复位。
+ *
+ * ⚠️⚠️ **它拦的是 `releaseTabKeepAlive`，不是 `wantTabKeepAlive`** ——
+ * 每次发送的 `finally` 都会调 release，若不拦，长窗口会被第一个发完的轮次摘掉。
+ */
+let sustainedKeepAlive = false;
+/** 长窗口的定时器（循环结束时清掉）。 */
+let sustainedKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
  * 标签保活：**告诉后台「这个标签现在需要防节流」/「不需要了」**。
  *
  * ⚠️ **为什么需要它**：续跑链活在页面里（扩展写输入框、页面自己发请求、页面 fetch-hook 读流），
- * 而 Chrome 会把后台标签节流到「定时器每秒一次」甚至直接冻结 ⇒ 发送链那几条
- * 80–150ms 的短轮询全部超时 ⇒ 判「没发出去」⇒ 收尾。表现是「只打开了网页、没有后续」。
+ * 而浏览器会把后台标签的定时器节流到「每秒一次」甚至每分钟一次 ⇒ 发送链的等待会超时
+ * ⇒ 判「没发出去」⇒ 收尾。表现是「只打开了网页、没有后续」。
  *
  * ⚠️⚠️ **页面这里只说「要不要」，挂不挂由后台判** —— 判据是 `chrome.tabs.active` +
  * `windows.focused`，**不是 `document.hidden`**。后者会被保活自己发的
@@ -2112,8 +2145,11 @@ async function handleUsageSnapshot(raw: unknown): Promise<void> {
  * attach / detach 之间无限来回跳，横幅反复出现且保活等于没起作用。
  *
  * ⚠️ **调用窗口要尽量短**（横幅是**全局**可见的，Chrome 走 `ShowGlobally`）——
- * 只有**发送链那几秒**真的需要它：`submitContinuationViaPage` 进去时 `want`、
- * `finally` 里 `unwant`。不要在整个续跑循环期间常驻挂着。
+ * 短任务只有**发送链那几秒**需要它：`submitContinuationViaPage` 进去时 `want`、
+ * `finally` 里 `release`；跑超过 {@link SUSTAINED_KEEPALIVE_AFTER_MS} 的长任务才转常驻。
+ *
+ * ⚠️ **开关是用户的**（设置 → 通用 → 后台保活，默认关）—— 这里照发不误，
+ * 拦在后台的 `TabKeepAliveSession.want()`。内容脚本不该读开关状态。
  *
  * ⚠️ **失败方向必须是「静默降级」**：挂不上只是退回改造前的行为（前台能跑），
  * 不能让续跑链因为保活失败而中断。
@@ -2127,11 +2163,90 @@ async function wantTabKeepAlive(): Promise<void> {
 }
 
 async function releaseTabKeepAlive(): Promise<void> {
+  // ⚠️ **长窗口期间不卸** —— 每个发送轮次的 `finally` 都会走到这里，
+  // 只拦 `want` 而不拦 `release` 的话，长窗口会被第一轮发送完就摘掉。
+  if (sustainedKeepAlive) return;
   try {
     await sendRuntimeMessage({ type: 'STOP_TAB_KEEPALIVE' });
   } catch {
     /* 同上：卸不掉最多让横幅多挂一会儿，不该影响收尾 */
   }
+}
+
+/**
+ * 循环跑够 {@link SUSTAINED_KEEPALIVE_AFTER_MS} 之后转成**长窗口保活**。
+ *
+ * ## 为什么要分两档
+ *
+ * 短任务（绝大多数）只需要发送链那几秒的保护 —— 那时横幅只是闪一下。
+ * 长任务则要全程挂着，否则「发送成功之后、下一轮注入之前」那段（等响应 + 模型思考，
+ * 常常几分钟）会掉回被节流的状态，而**那段时间正是页面自己想要动的时候**。
+ *
+ * ## 阈值为什么是 3 分钟
+ *
+ * Chrome 的强化节流在**隐藏超过 5 分钟**后才生效（`setTimeout` 降到每分钟一次），
+ * 3 分钟留出 2 分钟余量。而隐藏不满 5 分钟时定时器仍是每秒一次 ⇒
+ * **这个定时器本身的误差在 1 秒内，不会拖到节流之后才触发**。
+ * 它从**循环创建**开始算，不从「切到后台」开始算 —— 更保守，也不增加复杂度。
+ *
+ * ⚠️ **这是「挂不挂 debugger」的时长决策，与用户开关正交**：开关关掉时
+ * `want()` 在后台就被拦掉了（`TabKeepAliveSession`），这里置位也没用。
+ */
+const SUSTAINED_KEEPALIVE_AFTER_MS = 3 * 60_000;
+
+function startSustainedKeepAliveWatch(loop: ContinuationLoop): void {
+  clearSustainedKeepAliveTimer();
+  // ⚠️⚠️ **已经在长窗口里就直接继承** —— 一个跑了 20 分钟的循环被顶替后，
+  // 新循环不该从 3 分钟重新计时（那会有最长 3 分钟的保护缺口，而顶替的典型成因
+  // 正是**用户手发一条消息**，也就是新任务马上要发东西）。
+  // ⚠️ 这里**不重新 `want`** —— 会话本来就挂在那条标签上（保活按标签），
+  // 再发一次 START 没有意义，还可能和 `finishContinuationLoop` 的收尾撞。
+  //
+  // ⚠️⚠️ **已知残余：没跑到 3 分钟就被顶替时，时钟会重置。**
+  // 旧循环跑了 2 分 50 秒、被顶替（`preserveKeepAlive` 保留了**标记**，但那时
+  // `sustainedKeepAlive` 还是 false）⇒ 上面那个 `clearSustainedKeepAliveTimer()`
+  // 把旧计时清掉、新循环重新起一个满 3 分钟的 ⇒ **最长多出 3 分钟没有长窗口**。
+  //
+  // ⚠️ **刻意不改**：要接管旧定时器的剩余时间，就得把「这个定时器属于哪条循环、
+  // 还剩多久」也做成跨循环传递的状态 —— 而顶替本身是异常路径（前一条已判失败），
+  // 多等 3 分钟的代价小于那份复杂度。**别再提议「继承剩余时间」。**
+  if (sustainedKeepAlive) {
+    console.log('[Zai++] sustained keep-alive inherited', { step: loop.stepCount });
+    return;
+  }
+  sustainedKeepAliveTimer = setTimeout(() => {
+    sustainedKeepAliveTimer = null;
+    // ⚠️ 到期时复检：循环可能早已收尾（那个过程中 `finishContinuationLoop` 会清定时器，
+    // 但万一先到的是这个回调，就得自己判）。
+    if (continuationLoop !== loop || loop.status !== 'running') return;
+    sustainedKeepAlive = true;
+    void wantTabKeepAlive();
+    console.log('[Zai++] sustained keep-alive engaged', {
+      step: loop.stepCount,
+      afterMs: SUSTAINED_KEEPALIVE_AFTER_MS,
+    });
+  }, SUSTAINED_KEEPALIVE_AFTER_MS);
+}
+
+/**
+ * **只清定时器，不动标记** —— 顶替场景专用。
+ *
+ * ⚠️⚠️ **它与 `stopSustainedKeepAliveWatch` 必须分开**：循环被 `supersedeRunningLoop`
+ * 顶替时（用户手发一条消息就会发生），长窗口应该**原样交给新循环**，
+ * 而不是「先卸再挂」—— 那两次 `sendRuntimeMessage`（STOP / START）**没有顺序保证**，
+ * STOP 后到会把 START 摘掉，而保活失效是**静默**的（横幅不出现，没人知道为什么）。
+ */
+function clearSustainedKeepAliveTimer(): void {
+  if (sustainedKeepAliveTimer !== null) {
+    clearTimeout(sustainedKeepAliveTimer);
+    sustainedKeepAliveTimer = null;
+  }
+}
+
+/** 停掉长窗口：清定时器 + 复位标记（**不发 STOP** —— 由调用方决定要不要卸）。 */
+function stopSustainedKeepAliveWatch(): void {
+  clearSustainedKeepAliveTimer();
+  sustainedKeepAlive = false;
 }
 
 async function saveSkillDraftViaRuntime(
@@ -2497,6 +2612,10 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
   // ⚠️ **建循环时不挂保活** —— 只有「发送链那几秒」真的需要它（见
   // `submitContinuationViaPage`）。整轮常驻挂着会让调试横幅（**全局可见**）
   // 一直显示在用户眼前，而等响应那段是网络事件驱动的、不吃定时器。
+  //
+  // ⚠️ **但要起一个「跑久了就转长窗口」的计时** —— 见 `startSustainedKeepAliveWatch`：
+  // 短任务维持现状（横幅只闪一下），跑超过 3 分钟才全程挂载。
+  startSustainedKeepAliveWatch(continuationLoop);
   await advanceContinuationLoop();
 }
 
@@ -2597,9 +2716,14 @@ async function submitContinuationViaPage(prompt: string): Promise<ZaiSendEvidenc
   //
   // ⚠️ **为什么窗口这么短**：挂上 debugger 会让 Chrome 在**所有窗口**顶部画
   // 「Zai++ started debugging this browser」（`ShowGlobally`，不是只画在被调试的那个窗口）。
-  // 而真正会被节流掐断的只有发送链那几条 80–150ms 短轮询
-  // （`waitForSendButtonEnabled` 4 秒 / `waitForSendEvidence` 5 秒）；
-  // **等响应是网络事件驱动的、不吃定时器** ⇒ 发完就能卸。
+  // 而发送链的等待已全部改成事件驱动（`core/zai/event-wait.ts`），
+  // **只有观察器覆盖不到的那几条兜底定时器仍吃节流** ⇒ 发完就能卸。
+  // **等响应是网络事件驱动的、不吃定时器**（实测：桥上 postMessage 后台间隔 p50 = 0.2ms）。
+  // ⚠️ 跑超过 3 分钟的循环会转成**长窗口**（`startSustainedKeepAliveWatch`），
+  // 那时这条 `release` 会被 `sustainedKeepAlive` 拦下 —— 见该函数的说明。
+  //
+  // ⚠️ **用户没开开关时这里照发不误** —— 拦在后台（`TabKeepAliveSession.want` 直接丢）。
+  // 内容脚本不该知道开关状态：它可能读到旧值，而多一层判断就多一个失效点。
   //
   // ⚠️ **必须 `finally` 卸** —— 中间任何一处抛错（注入原语 / 证据等待）都不能把横幅留在那儿。
   // ⚠️ **不 await `want`**：挂不上只是退回改造前的行为，不该拖住注入。
@@ -2712,6 +2836,7 @@ async function startMisuseCorrectionLoop(
     pendingWatchdog: null,
   };
   const loop = continuationLoop;
+  startSustainedKeepAliveWatch(loop);
   await submitMisuseCorrection(loop, complete);
   return true;
 }
@@ -2741,7 +2866,9 @@ function supersedeRunningLoop(requestId: string): void {
       error: 'continuation_loop_superseded',
     });
   }
-  finishContinuationLoop(staleLoop);
+  // ⚠️ **长窗口原样交给下一条循环** —— 顶替的典型成因是「用户手发一条消息」，
+  // 那条新循环马上就要发送，不该从 3 分钟重新计时。见 `preserveKeepAlive`。
+  finishContinuationLoop(staleLoop, { preserveKeepAlive: true });
 }
 
 /** 等地址栏出现 `/c/<id>`；超时返回 null。 */
@@ -2964,36 +3091,153 @@ async function waitForDomTaskRecognized(taskId: string, timeoutMs = AUTOMATION_R
 
 /** 等 `observedAugRequestCount` 变大（首条 chatNew 从发送到桥上广播有延迟，与串行队列无关）。 */
 async function waitForNewAugRequest(beforeCount: number, timeoutMs = 1_200): Promise<boolean> {
-  const endAt = Date.now() + timeoutMs;
-  while (Date.now() < endAt) {
-    if (observedAugRequestCount > beforeCount) return true;
-    await sleep(80);
-  }
-  return false;
+  return waitForNotified(() => observedAugRequestCount > beforeCount, timeoutMs, augProgressWaiters);
 }
 
-/** 等 textarea 所在的 form 真正挂载到文档（isConnected）并给一个反应式稳定期。 */
+/**
+ * 等 textarea 所在的 form 真正挂载到文档（`isConnected`）并给一个反应式稳定期。
+ *
+ * ⚠️ **原来的实现是 `await sleep(60)` / `sleep(80)` 轮询** —— 后台标签里定时器被压到
+ * 每秒一次，4 秒预算只剩 4 个采样点，「连续两帧 DOM 不变」这个判据基本凑不齐
+ * ⇒ 白等到超时 ⇒ 提交撞上「节点刚被替换」的窗口。现在改成观察器驱动：
+ * 每次 DOM 变动后重取 form 并重做那两项检查，稳定期的判断也随之落在事件上。
+ */
+/**
+ * 表单首次挂载后的**反应式稳定期**：连续两帧 `outerHTML` 长度不变才算稳定。
+ *
+ * ⚠️ 60ms 是老实现里 `sleep(60)` 的值，原样搬过来 —— 它要覆盖的是 Svelte 一次
+ * 反应式刷新，不是任意的 DOM 活动。
+ */
+const FORM_SETTLE_MS = 60;
+
 async function waitForFormConnected(
   textarea: HTMLTextAreaElement,
   timeoutMs = 4_000,
 ): Promise<boolean> {
-  const endAt = Date.now() + timeoutMs;
-  while (Date.now() < endAt) {
-    const form = textarea.closest('form');
-    if (form && form.isConnected) {
-      // 连续两帧 DOM 不变（Svelte 反应式稳定）再放行，避免提交撞上「节点刚被替换」的窗口。
-      const snapBefore = form.outerHTML.length;
-      await sleep(60);
-      const formAfter = textarea.closest('form');
-      if (formAfter && formAfter.isConnected && formAfter.outerHTML.length === snapBefore) {
-        return true;
+  /** 上一次观察到的 form 快照长度；两次采样之间长度相同才算「稳定」。 */
+  let lastSnapshotLength: number | null = null;
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    /** 稳定期采样定时器 —— **必须自己有一个**，见下面的说明。 */
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+    let deadline: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = () => {
+      settled = true;
+      observer.disconnect();
+      if (settleTimer !== null) clearTimeout(settleTimer);
+      if (deadline !== null) clearTimeout(deadline);
+      settleTimer = null;
+      deadline = null;
+    };
+    const finish = (value: boolean) => {
+      if (settled) return;
+      cleanup();
+      resolve(value);
+    };
+
+    /**
+     * 采一次样：`true` = 已稳定，`false` = 还没，`null` = 先把当前长度记下来。
+     *
+     * ⚠️⚠️ **稳定期不能只靠「等下一次 DOM 变动」**（这是上一版的缺陷）——
+     * 页面安静下来之后就没有下一次变动了，那样只能等到 4 秒超时、然后走
+     * `isConnected` 兜底放行 ⇒ **既白等 4 秒、又完全跳过了「连续两帧不变」这项检查**，
+     * 而这项检查正是为防「提交撞上节点被替换」加的。
+     * ⇒ 由 `settleTimer` 在 `FORM_SETTLE_MS` 后**主动**再采一次。
+     */
+    const sample = (): boolean | null => {
+      const form = textarea.closest('form');
+      if (!form || !form.isConnected) {
+        lastSnapshotLength = null;
+        return null;
       }
+      // ⚠️ **只比长度、不比节点身份** —— Svelte 换成一个 `outerHTML` 长度相同的新 form
+      // 会被判「稳定」。⚠️ 这是**旧实现就有的口径**（老代码也是 `form.outerHTML.length`），
+      // 不是本轮引入；改成「同时比 form 引用」是行为改动，留待真机确认是否有必要。
+      const length = form.outerHTML.length;
+      if (lastSnapshotLength === null) {
+        lastSnapshotLength = length;
+        return null;
+      }
+      // ⚠️ 长度与上次不同 = 页面还在改它（Svelte 反应式未收敛）⇒ 重新等一轮。
+      if (length !== lastSnapshotLength) {
+        lastSnapshotLength = length;
+        return null;
+      }
+      return true;
+    };
+
+    /** 采一次样并按结果决定「结束 / 再等一轮」。 */
+    const evaluate = () => {
+      if (settled) return;
+      const verdict = sample();
+      if (verdict === true) {
+        finish(true);
+        return;
+      }
+      // 还没稳定（或刚记下长度）⇒ 挂一个稳定期定时器，到点再采。
+      scheduleSettle();
+    };
+
+    const scheduleSettle = () => {
+      if (settled || settleTimer !== null) return;
+      settleTimer = setTimeout(() => {
+        settleTimer = null;
+        evaluate();
+      }, FORM_SETTLE_MS);
+    };
+
+    const observer = new MutationObserver(() => {
+      // DOM 在动 ⇒ 之前的采样作废，立刻重采（不必等稳定期定时器）。
+      if (settleTimer !== null) {
+        clearTimeout(settleTimer);
+        settleTimer = null;
+      }
+      evaluate();
+    });
+
+    deadline = setTimeout(() => finish(false), timeoutMs);
+
+    const root = document.body ?? document.documentElement;
+    if (!root) {
+      finish(false);
+      return;
     }
-    await sleep(80);
-  }
-  // 兜底：超时仍按当前状态放行（isConnected 那次检查给了最大把握）。
-  const form = textarea.closest('form');
-  return !!form && form.isConnected;
+    try {
+      // ⚠️ **这一档刻意比 `waitForDomCondition` 宽**（含 `characterData` / `attributes`，
+      // 且没有 `attributeFilter`）—— 它要判断的是「form 的 `outerHTML` 长度是否还在变」，
+      // 而长度可以被**任何**一类变动影响（子节点增删 / 文本变化 / 属性变化）。
+      // 收窄任何一档都会漏掉一类「还在变」的情形。
+      //
+      // ⚠️ **代价是每次变动都要跑一次 `form.outerHTML.length`（整段序列化）**。
+      // 实测（jsdom）无感；真实 z.ai 的表单更大、流式期变动更密，若真机发现掉帧，
+      // 优化方向是「去掉 length 比较、只比 form 引用 + 用 settleTimer 兜稳定」，
+      // **不是**加 `attributeFilter`（那会让「只改属性」那一类变动不再重置稳定期，
+      // 于是把「页面还在改」误判成「已稳定」）。
+      observer.observe(root, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+      });
+    } catch {
+      finish(false);
+      return;
+    }
+
+    // 立刻采第一次。
+    // ⚠️ **不是「零等待返回」** —— `sample()` 首次必然只记下长度、返回 `null`，
+    // 最快也要过一个 `FORM_SETTLE_MS`（60ms）才可能判稳定。
+    // 这一步的价值是「已经在稳定态时不必等**第二次 DOM 变动**」（旧实现的缺陷），
+    // 不是「不必等时间」。
+    evaluate();
+  }).then((ready) => {
+    if (ready) return true;
+    // 兜底：超时仍按当前状态放行（`isConnected` 那次检查给了最大把握）。
+    const form = textarea.closest('form');
+    return !!form && form.isConnected;
+  });
 }
 
 /**
@@ -3692,7 +3936,21 @@ function reportContinuationSendNotObserved(
   console.log(message, detail);
 }
 
-function finishContinuationLoop(loop: ContinuationLoop): void {
+function finishContinuationLoop(
+  loop: ContinuationLoop,
+  options?: {
+    /**
+     * **顶替场景**：把长窗口与它挂着的会话**原样交给下一条循环**。
+     *
+     * ⚠️⚠️ 为什么不能「先卸再挂」：`release` 与随后的 `want` 是两条独立的
+     * `sendRuntimeMessage`，**没有顺序保证** —— STOP 后到会把 START 摘掉，
+     * 而保活失效是静默的。
+     * ⚠️ 只有 `supersedeRunningLoop` 会传它；正常收尾（任务跑完 / 循环自己结束）
+     * 一律不传，必须卸干净。
+     */
+    preserveKeepAlive?: boolean;
+  },
+): void {
   // ⚠️ **这里刻意不停保活**：早退说明 `continuationLoop` 已经是**另一条循环**
   // （被 `supersedeRunningLoop` 顶替、或新的建循环抢先落地）。保活是**按标签**的，
   // 同一标签只有一条会话 ⇒ 那条会话此刻归新循环用，停掉等于把新循环的保护摘了。
@@ -3703,13 +3961,17 @@ function finishContinuationLoop(loop: ContinuationLoop): void {
     clearTimeout(loop.pendingWatchdog);
     loop.pendingWatchdog = null;
   }
+  // ⚠️ **先复位长窗口标记，再卸保活** —— 反过来的话 `releaseTabKeepAlive`
+  // 会因为 `sustainedKeepAlive` 还是 true 而直接返回，那条会话就留在那儿了。
+  // ⚠️ 顶替场景**跳过**这两步（见 `preserveKeepAlive`）：长窗口原样留给新循环。
+  if (!options?.preserveKeepAlive) stopSustainedKeepAliveWatch();
   loop.status = 'idle';
   loop.activeRequestId = null;
   loop.pendingPrompt = null;
   continuationLoop = null;
   // 循环结束了就把保活卸掉 —— 留一条挂着的 debugger 会话会让调试横幅一直挂着。
   // （正常情况下 `submitContinuationViaPage` 的 `finally` 已经卸过，这里兜底。）
-  void releaseTabKeepAlive();
+  if (!options?.preserveKeepAlive) void releaseTabKeepAlive();
   // 后台 DOM 任务：续跑收尾 → 回传终态成功并清理归属。
   if (loop.taskId) {
     const task = activeDomTasks.get(loop.taskId);
@@ -3762,6 +4024,23 @@ const MANUAL_STOP_GRACE_MS = 4_000;
 const respondedRequestIds = new Set<string>();
 const manualStopTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+/**
+ * Stop 出现/消失的**稳定期**（`waitForAgentIdle` 用）。
+ *
+ * ⚠️ **不能用「再睡 150ms 然后重判」的轮询写法** —— 后台标签里定时器被压到每秒一次，
+ * 那样会让每次等待都白等一整秒。改成「观察到消失后挂一个一次性定时器」：
+ * 它被压到 1000ms 只是**多等一会儿**（失败方向安全），不是漏判。
+ */
+const STOP_IDLE_GRACE_MS = 150;
+
+/**
+ * **等 Stop 状态变化**的唤醒者（`waitForAgentIdle` 注册）。
+ *
+ * ⚠️ 与 `augProgressWaiters` 同性质：等待方跑在串行队列里，唤醒必须在
+ * `stopObserver` 的回调里同步发生（那个回调不在队列上）。
+ */
+const stopStateWaiters = createWaiterRegistry();
+
 /** 停止按钮的候选 aria-label（z.ai 中文界面是「停止」，英文是「Stop」）。 */
 const STOP_BUTTON_SELECTORS = [
   '[aria-label="Stop"]',
@@ -3779,6 +4058,17 @@ function findStopButton(): HTMLElement | null {
 
 function installStopObserver(): void {
   if (stopObserverInstalled) return;
+  /**
+   * ⚠️⚠️ **`document.body` 拿不到时不能把「已安装」置位** —— 置了之后
+   * 这个函数永远直接 return，观察器**再也不会被装上**。
+   *
+   * ⚠️ 本轮改动把这一格的后果**放大了**：原来 `waitForAgentIdle` 是每 120ms
+   * 轮询 DOM 的，观察器没装上它照样能判；改成事件驱动之后，**观察器是唯一的唤醒源**
+   * ⇒ 装不上就等于 `waitForAgentIdle` 只能等满 deadline。
+   * `runAt: 'document_idle'` 下 `document.body` 通常非空，所以这条路径很难触发 ——
+   * 但「很难触发」和「触发了就永远坏」不该共存。
+   */
+  if (!document.body) return;
   stopObserverInstalled = true;
   stopObserver = new MutationObserver(() => {
     const stop = findStopButton();
@@ -3791,9 +4081,36 @@ function installStopObserver(): void {
       // 窗口内等不到 RESPONSE_COMPLETE 就判定手动停止。
       armManualStopDetection();
     }
+    // 叫醒 `waitForAgentIdle` 的等待者 —— 见 `stopStateWaiters` 的说明。
+    stopStateWaiters.notify();
   });
-  if (document.body) {
-    stopObserver.observe(document.body, { childList: true, subtree: true });
+  // ⚠️ **`observe()` 也可能抛**（body 在判断之后被换掉 / 被分离）——
+  // 抛了就回滚「已安装」，让下一次调用重试，理由同上。
+  //
+  // ⚠️⚠️ **只观察 `childList`，不观察 `attributes`** —— 真机实测（2026-10-27）：
+  // Stop 消失那一刻 `childList` 记录 662 条、`attributes` 只有 3 条，**倾向删节点**。
+  // ⇒ 节点增删这一档就够用。
+  //
+  // ⛔ **曾经加过 `attributes` + `attributeFilter: ['class','style','aria-label']`，已撤回**：
+  // 那份依据（「`childHits: 0` 说明不是删节点」）是**假的** —— 探针当时装的是英文选择器
+  // `[aria-label="Stop"]`，而界面是中文（真实元素是 `[aria-label="停止"]`），
+  // **从头到尾没匹配到过元素**，`childHits: 0` 只是「什么都没测到」。
+  // 加上的实际后果是**把无关属性变动也纳入触发面**：`lastStopButtonGoneAt` 会被
+  // hover / 面板重画 / Svelte 收尾反复重盖章 ⇒ 150ms 稳定期永远满足不了 ⇒
+  // `waitForAgentIdle` 白等满 deadline（实测：安静页 152ms，有 25ms 无关 churn 时 >2s 未完成）。
+  //
+  // ⚠️ **代价（如实记）**：若哪天站点改成「切 class 隐藏 Stop」，这一档不会触发 ⇒
+  // 等待者只能等各自的 deadline（`waitForAgentIdle` 是 8 秒）。**失败方向是「慢」不是「错」**，
+  // 而加了它换来的是**必然的慢**。届时先复查这里的实测结论再决定。
+  try {
+    stopObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+  } catch {
+    stopObserver = null;
+    stopObserverInstalled = false;
+    return;
   }
   // 初始快照（防止 observer 装上时 Stop 已经在页面里）。
   lastStopButtonAppearedAt = findStopButton() ? Date.now() : 0;
@@ -3859,18 +4176,82 @@ function isAgentCurrentlyRunning(): boolean {
 /** 等待上一轮生成结束（Stop 按钮消失），最多等 `timeoutMs`。 */
 async function waitForAgentIdle(timeoutMs = 8_000): Promise<boolean> {
   installStopObserver();
-  const endAt = Date.now() + timeoutMs;
-  // 若刚观察到 Stop 按钮消失，等一个微小稳定期，避免 Svelte 还在收尾。
-  while (Date.now() < endAt) {
-    if (!isAgentCurrentlyRunning()) {
-      const goneAt = lastStopButtonGoneAt;
-      if (goneAt > 0 && Date.now() - goneAt > 150) return true;
-      // observer 还没记录到「消失」事件，说明它从没出现过或刚装好：直接按当前 DOM 判定。
-      if (goneAt === 0) return true;
-    }
-    await sleep(120);
-  }
-  return !isAgentCurrentlyRunning();
+
+  /**
+   * 此刻是否「空闲」。**150ms 稳定期**的语义原样保留 —— 它防的是 Svelte 收尾未完成。
+   * ⚠️ `lastStopButtonGoneAt === 0` 表示 observer 从没记录到「消失」事件
+   * （Stop 从没出现过，或 observer 刚装好）⇒ 直接按当前 DOM 判定。
+   */
+  const isIdleNow = (): boolean => {
+    if (isAgentCurrentlyRunning()) return false;
+    const goneAt = lastStopButtonGoneAt;
+    if (goneAt === 0) return true;
+    // ⚠️⚠️ **必须是 `>=`，不能是 `>`** —— `graceTimer` 用的正是 `STOP_IDLE_GRACE_MS`
+    // （150ms），定时器到点时差值**恰好 150**，`> 150` 为假 ⇒ 回调里判否、
+    // **而它不再重挂** ⇒ 只能等满 8 秒的 deadline。
+    // 实测（40 次）：`>` 只命中 24/40，`>=` 命中 39/40。
+    // ⚠️ **只在「前台」发作**：后台标签的定时器被压到 ≥1000ms，回调时差值远超 150 所以为真
+    // ⇒ 症状是「用户盯着的时候反而卡 8 秒，切走再回来就好了」，最难归因的那种。
+    // ⚠️ 这个 `>` 是原来就有的字面量，但那时代码是死路径（缺 `check()` 首调，从没执行过）；
+    // 事件驱动之后它成了唯一判据，容差问题才暴露出来。
+    return Date.now() - goneAt >= STOP_IDLE_GRACE_MS;
+  };
+
+  if (isIdleNow()) return true;
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let unsubscribe: () => void = () => undefined;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    let deadline: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = () => {
+      settled = true;
+      unsubscribe();
+      if (deadline !== null) clearTimeout(deadline);
+      if (graceTimer !== null) clearTimeout(graceTimer);
+      graceTimer = null;
+      deadline = null;
+    };
+    const finish = (value: boolean) => {
+      if (settled) return;
+      cleanup();
+      resolve(value);
+    };
+
+    /**
+     * 每次 Stop 出现/消失时跑一遍。
+     *
+     * ⚠️ **稳定期那一段必须有自己的定时器** —— 它是「再等一会儿」而不是「轮询」：
+     * 后台标签里它可能被压到 1000ms，但那只是**多等一会儿**（失败方向安全），
+     * 不是漏判。这跟原来每 120ms 无脑重试整段逻辑是两回事。
+     */
+    const check = () => {
+      if (settled) return;
+      if (isIdleNow()) {
+        finish(true);
+        return;
+      }
+      if (!isAgentCurrentlyRunning() && graceTimer === null) {
+        graceTimer = setTimeout(() => {
+          graceTimer = null;
+          if (settled) return;
+          if (isIdleNow()) finish(true);
+        }, STOP_IDLE_GRACE_MS);
+      }
+    };
+
+    deadline = setTimeout(() => finish(!isAgentCurrentlyRunning()), timeoutMs);
+    unsubscribe = stopStateWaiters.add(check);
+    // ⚠️⚠️ **登记完必须立刻跑一次** —— 否则「已经停下、但距 `lastStopButtonGoneAt`
+    // 不足 150ms」这一格**没有任何定时器在跑**（`graceTimer` 只在 `check` 里才建），
+    // 只能等下一次 Stop 观察器回调或整个 `timeoutMs` 的 deadline。
+    // 而首调场景**必然命中**：`installStopObserver()` 会把 `lastStopButtonGoneAt`
+    // 初始化成 `Date.now()`，所以装完观察器后第一次调用一定走进等待分支；
+    // 页面上再没有 Stop 节点增删时一次 notify 都不会来 ⇒ **白等满一个 deadline**。
+    // 旧实现靠每 120ms 轮询自愈，事件驱动之后必须显式补这一下。
+    check();
+  });
 }
 
 /**
@@ -4099,41 +4480,30 @@ function insertPromptText(text: string): { ok: true; insertedLength: number } | 
 }
 
 function waitForSendButtonEnabled(): Promise<HTMLButtonElement | null> {
-  return new Promise((resolve) => {
-    const startedAt = Date.now();
-    const check = () => {
+  return waitForDomCondition<HTMLButtonElement | null>({
+    probe: () => {
       const button = document.querySelector<HTMLButtonElement>(SEND_BUTTON_SELECTOR);
-      if (button && !button.disabled && getComputedStyle(button).pointerEvents !== 'none') {
-        resolve(button);
-        return;
-      }
-      if (Date.now() - startedAt > 4_000) {
-        resolve(null);
-        return;
-      }
-      setTimeout(check, 80);
-    };
-    check();
+      if (!button) return null;
+      if (button.disabled) return null;
+      if (getComputedStyle(button).pointerEvents === 'none') return null;
+      return button;
+    },
+    timeoutMs: 4_000,
+    fallback: () => null,
   });
 }
 
 function waitForComposerReady(): Promise<void> {
-  return new Promise((resolve) => {
-    const startedAt = Date.now();
-    const check = () => {
-      const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
-      if (textarea) {
-        resolve();
-        return;
-      }
-      if (Date.now() - startedAt > 6_000) {
-        resolve();
-        return;
-      }
-      setTimeout(check, 100);
-    };
-    check();
-  });
+  // ⚠️ **`probe` 返回 `true` 而不是 `undefined`** —— `waitForDomCondition` 的判据是
+  // `!== null`，用 `undefined` 当「成立」会让「探针忘了写 return」这种错变成
+  // 静默的立即成功。返回值在这里没意义，只用来表达「成立 / 未成立」。
+  // ⚠️ **超时也 resolve**（不是 reject、也不是无限等）—— 调用方紧接着会自己
+  // `querySelector` 一次并判空，所以「超时」与「就绪」在这里**不需要区分**。
+  return waitForDomCondition<boolean>({
+    probe: () => (document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR) ? true : null),
+    timeoutMs: 6_000,
+    fallback: () => false,
+  }).then(() => undefined);
 }
 
 /** 自动化专用：等 #chat-input 出现，最多 timeoutMs（默认 60s）。不碰续跑用的 waitForComposerReady。 */
@@ -4197,23 +4567,26 @@ async function waitForSendEvidence(): Promise<{
 }> {
   const startSeq = continuationRequestSeq;
   const startCount = observedAugRequestCount;
-  const endAt = Date.now() + 5_000;
-  let sawStop = false;
+  // ⚠️ **`sawStop` 的取法跟着改了**：原来是每 150ms 采样一次、记「等待期间看到过」。
+  // 改成事件驱动之后没有采样点了，但 `installStopObserver` 本来就在记
+  // `lastStopButtonAppearedAt`（Stop 出现的时刻）⇒ 直接比时间戳，
+  // **比轮询更准**（不会因为采样错过而漏记）。
+  const startedAt = Date.now();
 
   const verdict = (): ZaiSendEvidence => classifySendEvidence(
     observedAugRequestCount - startCount,
     continuationRequestSeq - startSeq,
   );
 
-  while (Date.now() < endAt) {
-    if (verdict() === 'sent') break;
-    if (!sawStop && isAgentCurrentlyRunning()) sawStop = true;
-    await sleep(150);
-  }
+  // ⚠️ **改成事件唤醒**（原来 `await sleep(150)` 轮询）：后台标签里定时器被压到
+  // 每秒一次，5 秒窗口只剩 5 个采样点，而桥消息的真实延迟是几十毫秒级 ⇒ 会把
+  // 「确实发出去了」判成 `ambiguous` ⇒ 起看门狗、回收循环（静默收尾）。
+  await waitForNotified(() => verdict() === 'sent', 5_000, augProgressWaiters);
 
   return {
     evidence: verdict(),
-    sawStop,
+    // 等待期间 Stop 出现过（时间戳比较），或此刻仍在生成。
+    sawStop: lastStopButtonAppearedAt > startedAt || isAgentCurrentlyRunning(),
     requestDelta: observedAugRequestCount - startCount,
     continuationDelta: continuationRequestSeq - startSeq,
   };

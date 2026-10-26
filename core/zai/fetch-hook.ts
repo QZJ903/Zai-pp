@@ -42,6 +42,7 @@ import {
   createZaiCompletionStreamRewriter,
   encodeZaiStreamText,
 } from './stream-strip';
+import { matchCatalogToolName } from './tool-name-match';
 
 export interface ZaiHookState {
   toolDescriptorNames: ReadonlySet<string>;
@@ -536,6 +537,11 @@ async function interceptCompletionResponse(
    *
    * ⚠️ **判据是 `delta_name` 落在本请求的模型可见目录里** —— 服务端自己的 tool_call
    * （`delta_name: "Bash"` 这类沙箱工具）是正常流量，不能按「出现 tool_call 相位」判。
+   * ⚠️⚠️ **判据不能是「整串相等」** —— `delta_name` 在真机上会带**模型自造的 XML 尾巴**
+   * （实测：`shell_status>{}</arg_value>`、`shell_status>\n{}\n</arg_value>`），
+   * 整串相等会一条都命中不了。匹配规则见 `matchCatalogToolName`（边界匹配、取第一个命中的）。
+   * ⚠️ **也不改读 `tool_response.tool_name`** —— 那一份同样被原样回显成垃圾，
+   * 且有一份样本整轮根本没有 `tool_response`。
    * ⚠️ **`requestToolNames` 为 `undefined`（未增广）时不判** —— 那时拿不到「本轮注入了
    * 哪些本地工具」，判下去会把沙箱工具误报成本地工具。
    */
@@ -544,9 +550,8 @@ async function interceptCompletionResponse(
     if (requestToolNames === undefined) return;
     for (const event of parsed.events) {
       if (event.phase !== 'tool_call') continue;
-      const raw = event.parsed.delta_name;
-      const name = typeof raw === 'string' ? raw.trim() : '';
-      if (!name || !requestToolNames.includes(name)) continue;
+      const name = matchCatalogToolName(event.parsed.delta_name, requestToolNames);
+      if (!name) continue;
       misusedNativeToolNames.add(name);
     }
   };

@@ -7,6 +7,7 @@ import type {
   BrowserControlState,
   BrowserControlTarget,
 } from '../../core/browser-control/types';
+import type { TabKeepaliveSettings } from '../../core/browser-control/keepalive-settings';
 import { defineToolPayloadRuntimeCommandHandler } from './runtime-handler';
 
 export interface BrowserToolRuntimeHandlerDependencies {
@@ -19,6 +20,10 @@ export interface BrowserToolRuntimeHandlerDependencies {
   setBrowserControlTarget(tabId: number): Promise<BrowserControlTarget>;
   detachBrowserControl(): Promise<void>;
   startTabKeepAlive(tabId: number): Promise<void>;
+  /** 读「后台保活」开关。⚠️ 与浏览器控制的 settings 是两套，别混。 */
+  getTabKeepaliveSettings(): Promise<TabKeepaliveSettings>;
+  /** 写「后台保活」开关。⚠️ 关掉时实现方**必须**同时卸掉已挂的会话。 */
+  setTabKeepaliveEnabled(enabled: boolean): Promise<TabKeepaliveSettings>;
   /** ⚠️ **必须带 tabId** —— 只解这一条标签的保活，并发时不能波及别人（见 `tab-keepalive.ts` 文件头）。 */
   stopTabKeepAlive(tabId: number): Promise<void>;
   broadcastToolDescriptorsUpdate(excludeTabId?: number): Promise<void>;
@@ -65,6 +70,20 @@ export function createBrowserToolRuntimeHandlers(
         throw new Error('START_TAB_KEEPALIVE requires a tab-scoped sender.');
       }
       await dependencies.startTabKeepAlive(context.tabId);
+      return { ok: true as const };
+    }),
+    definePayloadlessRuntimeCommandHandler('GET_TAB_KEEPALIVE_SETTINGS', () => (
+      dependencies.getTabKeepaliveSettings()
+    )),
+    // ⚠️ **不要求 tab-scoped sender** —— 侧边栏（扩展页面）也要能改这个开关，
+    // 而它的 `context.tabId` 是 undefined。这条命令不操作任何具体标签。
+    // ⚠️ **刻意不广播**（与 `SET_BROWSER_CONTROL_ENABLED` 不同）：那个开关的效果是
+    // 全局的（工具目录、浏览器控制状态都要跟着变），而这个只影响「本扩展要不要给某个
+    // z.ai 标签挂 debugger」，没有别的消费者需要立刻知道。
+    // ⇒ 代价是：同时开两个侧边栏时，另一份的开关会停在旧值，直到那个页面重开
+    // （它挂载时读 `GET_TAB_KEEPALIVE_SETTINGS`）。**刻意接受**，不为它新增一条广播类型。
+    defineToolPayloadRuntimeCommandHandler('SET_TAB_KEEPALIVE_ENABLED', async (payload) => {
+      await dependencies.setTabKeepaliveEnabled(payload.enabled);
       return { ok: true as const };
     }),
     definePayloadlessRuntimeCommandHandler('STOP_TAB_KEEPALIVE', async (context) => {

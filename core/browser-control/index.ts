@@ -16,6 +16,15 @@ export {
 } from './settings';
 
 export {
+  DEFAULT_TAB_KEEPALIVE_SETTINGS,
+  TAB_KEEPALIVE_STORAGE_KEY,
+  getTabKeepaliveSettings,
+  normalizeTabKeepaliveSettings,
+  saveTabKeepaliveSettings,
+} from './keepalive-settings';
+export type { TabKeepaliveSettings } from './keepalive-settings';
+
+export {
   decodeBrowserControlSettings,
   decodeBrowserControlState,
   decodeBrowserControlTarget,

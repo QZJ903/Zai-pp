@@ -78,6 +78,8 @@ import {
   saveBrowserControlSettings,
   setBrowserControlEnabled,
   tabKeepAliveSession,
+  getTabKeepaliveSettings,
+  saveTabKeepaliveSettings,
 } from '../core/browser-control';
 import {
   addConversationToProject,
@@ -404,6 +406,14 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         startTabKeepAlive: (tabId) => tabKeepAliveSession.want(tabId),
         // ⚠️ **按标签解** —— 无参形式会把所有标签的保活一起解掉（并发时误伤别的自动化）。
         stopTabKeepAlive: (tabId) => tabKeepAliveSession.unwant(tabId),
+        // ⚠️ **开关落地时必须同时做两件事**：写库（下次启动读得到）+ 推给会话
+        // （关掉要立刻卸掉已挂的会话，否则横幅会留在那里）。
+        getTabKeepaliveSettings,
+        setTabKeepaliveEnabled: async (enabled) => {
+          const settings = await saveTabKeepaliveSettings({ enabled });
+          await tabKeepAliveSession.setEnabled(settings.enabled);
+          return settings;
+        },
         broadcastToolDescriptorsUpdate,
         broadcastBrowserControlUpdate,
       },
@@ -523,6 +533,45 @@ export default defineBackground(() => {
     .catch(acknowledgeReportedSyncRecoveryFailure);
   ensureBuiltInMcpPresets().catch((error) => reportBackgroundStartupError('builtin_mcp_presets_failed', error));
   refreshWhatsNewBadge().catch((error) => reportBackgroundStartupError('whats_new_badge_failed', error));
+  // ⚠️⚠️ **启动时必须把「后台保活」开关读进会话** —— MV3 的 service worker 会被回收，
+  // 重启后 `tabKeepAliveSession` 是**新实例**（默认 `false`）。不读的话，用户明明开着开关、
+  // 内容脚本也在发 `START_TAB_KEEPALIVE`，而 `want()` 会因为 `enabled === false` 静默丢掉
+  // ⇒ 保活整个失效且**没有任何痕迹**（横幅不出现，用户以为是自己关的）。
+  // ⚠️⚠️ **读失败要重试，否则整个 SW 生命周期都静默关着** —— 而设置页直读 storage
+  // 会显示「开」⇒ 用户看到的是「开着但不生效」，这是最难排查的形态。
+  // ⇒ 失败后隔一会儿再读一次（只重试一轮：storage 持续不可用时重试也救不回来，
+  // 而那时 `want()` 仍然按「未确定 ⇒ 放行」处理，见 `TabKeepAliveSession.enabledResolved`）。
+  /**
+   * 读「后台保活」开关并推给会话。
+   *
+   * ⚠️⚠️ **两轮都失败时的失败方向是「失败即放行」** —— `enabledResolved` 永远
+   * 保持 false，而 `TabKeepAliveSession.want()` 在「未确定」时按「开着」处理。
+   * ⇒ **即使用户把开关关掉了，横幅也可能出现。**
+   *
+   * ⚠️ 这是**刻意的取舍**：另一头（少挂一次）是「续跑静默失败」，代价更大。
+   * 但对「会画全局调试横幅」这件事来说，方向未必理想 —— 用户明确关掉的功能
+   * 因为一次 storage 读失败又出现，观感很差。**要改就得让 `want()` 在这种时候
+   * 也能读一次 storage**（成本更高，而且仍然可能失败）。
+   * ⇒ 当前接受，**并如实记在这里**，不写成「不会发生」。
+   *
+   * ⚠️ `setTimeout` 在 SW 被回收时会丢 —— **不算问题**：SW 重启会重跑整个启动链
+   * （`applyTabKeepaliveSettings()` 从头来一次），不会永久卡死。
+   * ⚠️ `tab_keepalive_settings_failed` 不在 `QUIET_BACKGROUND_ERROR_CODES` 里，
+   * 所以每次启动失败会在 SW 控制台打一条 `console.error`（可接受：这是「读不到
+   * 用户配置」级别的异常，值得留痕）。
+   */
+  const applyTabKeepaliveSettings = (attempt = 0): void => {
+    void getTabKeepaliveSettings()
+      .then((settings) => tabKeepAliveSession.setEnabled(settings.enabled))
+      .catch((error) => {
+        reportBackgroundStartupError('tab_keepalive_settings_failed', error);
+        if (attempt < 1) {
+          // 1 秒后再试一次。**不 await**：启动链不该被它拖住。
+          setTimeout(() => applyTabKeepaliveSettings(attempt + 1), 1_000);
+        }
+      });
+  };
+  applyTabKeepaliveSettings();
   ensureAutomationWakeAlarm().catch((error) => reportBackgroundStartupError('automation_alarm_create_failed', error));
   syncLocalRecoveryBarrier.ensureReady()
     .then(() => scanDueAutomationsFromWake()

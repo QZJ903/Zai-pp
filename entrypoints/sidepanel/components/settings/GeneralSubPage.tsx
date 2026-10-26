@@ -56,6 +56,18 @@ export default function GeneralSubPage({ state }: { state: SettingsState }) {
       </SettingsSection>
 
       <SettingsSection
+        title={t('sidepanel.settings.keepaliveSection')}
+        description={t('sidepanel.settings.keepaliveSectionDescription')}
+      >
+        <ToggleRow
+          title={t('sidepanel.settings.keepaliveTitle')}
+          description={t('sidepanel.settings.keepaliveDescription')}
+          enabled={state.keepaliveEnabled}
+          onToggle={state.handleKeepaliveToggle}
+        />
+      </SettingsSection>
+
+      <SettingsSection
         title={t('sidepanel.settings.backgroundSection')}
         description={t('sidepanel.settings.customBackgroundDescription')}
       >

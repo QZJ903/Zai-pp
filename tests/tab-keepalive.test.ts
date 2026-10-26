@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TabKeepAliveSession } from '../core/browser-control/tab-keepalive';
+import { DEFAULT_TAB_KEEPALIVE_SETTINGS } from '../core/browser-control/keepalive-settings';
 
 /**
  * 标签保活会话的行为。
@@ -125,9 +126,42 @@ afterEach(() => {
 });
 
 describe('tab keepalive session', () => {
-  it('sends both emulation commands when it attaches', async () => {
+  it('is off by default — the debug banner is not something to opt users into', async () => {
+    // ⚠️ 默认值来自 `DEFAULT_TAB_KEEPALIVE_SETTINGS`（单一真源）。
+    // ⚠️⚠️ **这里要显式传 `enabled: false`** —— 它代表「开关值已确定、且是关的」。
+    // 不传的话是「还没读到」（`enabledResolved === false`），那种状态故意按「开着」
+    // 放行（见下一条用例），不能用它来测「默认关」。
+    const stub = createChromeStub();
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: false });
+
+    expect(session.isEnabled).toBe(false);
+    await session.want(7);
+    expect(session.attachedTabIds).toEqual([]);
+    expect(stub.attached).toEqual([]);
+  });
+
+  it('falls back to the default (off) once the switch value is resolved', async () => {
     const stub = createChromeStub();
     const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    // 构造时不传 ⇒ 未确定；显式 setEnabled 之后按真实值走。
+    await session.setEnabled(DEFAULT_TAB_KEEPALIVE_SETTINGS.enabled);
+    expect(session.isEnabled).toBe(DEFAULT_TAB_KEEPALIVE_SETTINGS.enabled);
+    await session.want(7);
+    expect(session.attachedTabIds).toEqual([]);
+  });
+
+  it('honours an explicit enabled: true from the caller', async () => {
+    const stub = createChromeStub();
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
+
+    expect(session.isEnabled).toBe(true);
+    await session.want(7);
+    expect(session.attachedTabIds).toEqual([7]);
+  });
+
+  it('sends both emulation commands when it attaches', async () => {
+    const stub = createChromeStub();
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await session.want(7);
 
@@ -146,7 +180,7 @@ describe('tab keepalive session', () => {
     // 前台挂上去是纯代价。判据是 `tabs.active && windows.focused`，
     // **不能用 `document.hidden`**（它会被我们自己的焦点模拟改成 false）。
     const stub = createChromeStub({ foreground: [7] });
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await session.want(7);
 
@@ -157,7 +191,7 @@ describe('tab keepalive session', () => {
   it('attaches once the tab goes to the background, and detaches when it comes back', async () => {
     // 意图登记之后，**切走 / 切回都要跟着动** —— 靠 tabs.onActivated 重算。
     const stub = createChromeStub({ foreground: [7] });
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
     await session.want(7);
     expect(stub.attached).toEqual([]);
 
@@ -176,7 +210,7 @@ describe('tab keepalive session', () => {
     // 「挂着别的先 detach」⇒ 第二个标签一挂上就把第一个顶掉，而第一个正卡在发送链的
     // 短轮询里 ⇒ 被 Chrome 节流 ⇒ 静默收尾。
     const stub = createChromeStub();
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await session.want(7);
     await session.want(9);
@@ -191,7 +225,7 @@ describe('tab keepalive session', () => {
     // ⚠️ **`unwant(tabId)` 只解这一条** —— 无参形式会一次性解掉所有标签，
     // 那正是并发时代「一方收尾、另一方被静默断掉」的成因。
     const stub = createChromeStub();
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await session.want(7);
     await session.want(9);
@@ -205,7 +239,7 @@ describe('tab keepalive session', () => {
 
   it('re-applies the emulation on every sync, even when still attached', async () => {
     const stub = createChromeStub();
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await session.want(7);
     const afterFirst = emulationCommands(stub.sent, 7).length;
@@ -221,7 +255,7 @@ describe('tab keepalive session', () => {
 
   it('re-attaches after the session is dropped by DevTools', async () => {
     const stub = createChromeStub();
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await session.want(7);
     stub.simulateDetach(7);
@@ -234,7 +268,7 @@ describe('tab keepalive session', () => {
 
   it('keeps the other tab alive when DevTools drops one of them', async () => {
     const stub = createChromeStub();
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await session.want(7);
     await session.want(9);
@@ -245,7 +279,7 @@ describe('tab keepalive session', () => {
 
   it('treats an already-gone tab as success when detaching', async () => {
     const stub = createChromeStub();
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
     await session.want(7);
 
     stub.chromeApi.debugger.detach = vi.fn(async () => {
@@ -263,7 +297,7 @@ describe('tab keepalive session', () => {
     //   （Chromium `debugger_api_constants.cc` 的 `kNoTargetError` 模板
     //   `"No * with given id *."`，展开后 `given` 卡在中间）
     const stub = createChromeStub();
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
     await session.want(7);
 
     stub.chromeApi.debugger.detach = vi.fn(async () => {
@@ -280,7 +314,7 @@ describe('tab keepalive session', () => {
     // ⇒ Chrome 报「another debugger already attached」⇒ 被调用方的空 catch 吞掉
     // ⇒ **保活从此静默不可用**。
     const stub = createChromeStub();
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
     await session.want(7);
 
     stub.chromeApi.debugger.detach = vi.fn(async () => {
@@ -296,7 +330,7 @@ describe('tab keepalive session', () => {
     stub.chromeApi.debugger.sendCommand = vi.fn(async () => {
       throw new Error('Cannot access a chrome:// URL');
     }) as unknown as typeof stub.chromeApi.debugger.sendCommand;
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     // ⚠️ 命令发失败就把会话收回去 —— 留一条挂着的空会话只会挡住浏览器控制。
     await expect(session.want(7)).rejects.toThrow();
@@ -310,7 +344,7 @@ describe('tab keepalive session', () => {
     // 先 detach 放掉它、再重试一次。
     const stub = createChromeStub();
     stub.occupyWithOtherSession(7);
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await session.want(7);
 
@@ -331,7 +365,7 @@ describe('tab keepalive session', () => {
     stub.chromeApi.debugger.detach = vi.fn(async () => {
       throw new Error('Debugger is not attached to the tab with id: 7.');
     }) as unknown as typeof stub.chromeApi.debugger.detach;
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await expect(session.want(7)).rejects.toThrow('already attached');
     expect(attempts).toBe(2);
@@ -343,7 +377,7 @@ describe('tab keepalive session', () => {
     stub.chromeApi.debugger.attach = vi.fn(async () => {
       throw new Error('Cannot attach to this target.');
     }) as unknown as typeof stub.chromeApi.debugger.attach;
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await expect(session.want(7)).rejects.toThrow('Cannot attach to this target.');
     expect(stub.detached).toEqual([]);
@@ -354,10 +388,106 @@ describe('tab keepalive session', () => {
     // 查不到标签（已关 / chrome 出错）⇒ 按「前台」处理、不挂。失败方向安全：
     // 少挂一次只是可能被节流，多挂一次则会让用户看到横幅。
     const stub = createChromeStub({ missing: [7] });
-    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
 
     await session.want(7);
 
     expect(stub.attached).toEqual([]);
+  });
+  it('attaches nothing while the switch is off, and drops what is already attached', async () => {
+    // ⚠️ 开关关掉是个**用户可见的承诺**：不该再有横幅。所以已挂的必须立刻卸，
+    // 而不是等下一次 sync（那可能永远不来 —— 循环早就结束了）。
+    const stub = createChromeStub();
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
+
+    await session.want(7);
+    expect(stub.attached).toEqual([7]);
+
+    await session.setEnabled(false);
+    expect(session.isEnabled).toBe(false);
+    // ⚠️ `stub.attached` 是「**曾经**挂过」的累计列表（stub 的 detach 不会把它移除），
+    // 所以「当前还挂着几条」只能看 `session.attachedTabIds`。
+    expect(session.attachedTabIds).toEqual([]);
+    expect(stub.detached).toContain(7);
+
+    // 关闭期间内容脚本仍然会发 START_TAB_KEEPALIVE —— 必须一条都挂不上。
+    await session.want(9);
+    expect(session.attachedTabIds).toEqual([]);
+    expect(stub.attached).not.toContain(9);
+  });
+
+  it('does not resurrect old tabs when the switch is turned back on', async () => {
+    // ⚠️ **关闭时要把 `wanted` 一起清掉** —— 留着的话，重新开启后 `syncAll()`
+    // 会把一堆早就结束了的续跑标签全挂上（横幅永久亮着，而没有任何任务在跑）。
+    const stub = createChromeStub();
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
+
+    await session.want(7);
+    await session.setEnabled(false);
+    await session.setEnabled(true);
+    await session.syncAll();
+
+    expect(session.attachedTabIds).toEqual([]);
+  });
+
+  it('does not remember a want() that arrived while the switch was off', async () => {
+    // ⚠️ 这条守的是 `want()` 里那个 `if (!this.enabled) return` ——
+    // 去掉它的话，关闭期间收到的 START 会留在 `wanted` 里，重新开启后
+    // `syncAll()` 就把那条标签挂上了（横幅亮着、而那个续跑可能早就结束了）。
+    const stub = createChromeStub();
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
+
+    await session.setEnabled(false);
+    await session.want(9);          // 关闭期间内容脚本照旧会发 START
+    await session.setEnabled(true);
+    await session.syncAll();
+
+    expect(session.attachedTabIds).toEqual([]);
+    expect(stub.attached).not.toContain(9);
+  });
+
+  it('resumes honouring want() after the switch is turned back on', async () => {
+    const stub = createChromeStub();
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi, enabled: true });
+
+    await session.setEnabled(false);
+    await session.setEnabled(true);
+    await session.want(7);
+
+    expect(stub.attached).toEqual([7]);
+    expect(session.isEnabled).toBe(true);
+  });
+  it('honours want() before the switch value is known (SW restart window)', async () => {
+    // ⚠️⚠️ **这一格是 P1**：`background.ts` 启动时异步读开关，而内容脚本的
+    // `START_TAB_KEEPALIVE` 可能先到。那时 `enabled` 还是构造默认值（false），
+    // 但它**不代表用户的选择** —— 只是「还没读到」。
+    // 直接 return 会把这一轮的意图丢掉，而没人会重放 ⇒ 第一次发送静默失去保护。
+    // 方向不对称（多挂一次只是横幅闪一下，少挂一次是静默失败）⇒ 按「开着」放行。
+    const stub = createChromeStub();
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    // 构造时没给 enabled ⇒ enabledResolved = false
+    await session.want(7);
+    expect(session.attachedTabIds).toEqual([7]);
+  });
+
+  it('stops honouring want() once the switch is known to be off', async () => {
+    // ⚠️ 显式 `setEnabled(false)` 之后 `enabledResolved` 置位 ⇒ 行为回到「关掉就是关掉」，
+    // 不会再因为「还没读到」放行。
+    const stub = createChromeStub();
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    await session.setEnabled(false);
+    await session.want(7);
+    expect(session.attachedTabIds).toEqual([]);
+  });
+
+  it('settles enabledResolved even when setEnabled receives the same value', async () => {
+    // ⚠️ 「构造默认是 false、显式 setEnabled(false)」这一格：若早退就永远不置位，
+    // `want()` 会一直按「开着」放行 —— 用户的关闭动作静默失效。
+    const stub = createChromeStub();
+    const session = new TabKeepAliveSession({ chromeApi: stub.chromeApi });
+    expect(session.isEnabled).toBe(false);
+    await session.setEnabled(false);
+    await session.want(7);
+    expect(session.attachedTabIds).toEqual([]);
   });
 });
