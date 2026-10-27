@@ -93,3 +93,73 @@ export function classifySendEvidence(
   if (requestDelta > 0 || continuationDelta > 0) return 'sent';
   return 'ambiguous';
 }
+
+/**
+ * 续跑发送「确定没发出去」的**出口**细码。
+ *
+ * ⚠️ **它不是新的档位**：`evidence` 仍是三态，`reason` 只回答「从哪个出口退出」。
+ * 分它的两个用途：
+ * ① 决定要不要延迟重试一次 —— 只有可能在下一秒自己好的那几类才值得重试；
+ * ② 日志里给出原因 —— 只有 `step` 的日志分不清「页面还在生成」与「输入框被页面换掉」。
+ *
+ * ⚠️ **全部在提交动作之前产出** —— 提交触发之后的失败只会是 `sent` / `ambiguous`。
+ */
+export type ContinuationSendReason =
+  | 'send_in_flight'
+  | 'no_textarea'
+  | 'agent_not_idle'
+  | 'send_button_disabled'
+  | 'submit_no_form'
+  | 'submit_form_not_connected'
+  | 'submit_threw'
+  | 'session_changed';
+
+/** 一次续跑发送的结果：三态 + 出口原因。成功时 `reason` 为 null。 */
+export interface ContinuationSendOutcome {
+  evidence: ZaiSendEvidence;
+  reason: ContinuationSendReason | null;
+}
+
+/**
+ * 「这一轮续跑没继续下去」的两个回传码。
+ *
+ * ⚠️ **`loop_missing` 承担了不止一种成因**（会话已切走 / 步数用尽 / 纠错次数用尽）——
+ * 这三种在界面上要做的是同一件事（重跑），而错误码清单里没有更细的档位。
+ * 精确成因写在日志的 `reason` / `step` 字段里。
+ */
+export const ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE = 'continuation_send_unconfirmed';
+export const ZAI_CONTINUATION_LOOP_MISSING_CODE = 'continuation_loop_missing';
+
+export type ContinuationFailureCode =
+  | typeof ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE
+  | typeof ZAI_CONTINUATION_LOOP_MISSING_CODE;
+
+/**
+ * 「这一轮续跑失败」该回传哪个码。
+ *
+ * ⚠️ **只在这里判** —— 三个调用点各写一遍三目，改一处必然漏两处。
+ */
+export function classifyContinuationSendFailure(
+  reason: ContinuationSendReason | null,
+): ContinuationFailureCode {
+  return reason === 'session_changed'
+    ? ZAI_CONTINUATION_LOOP_MISSING_CODE
+    : ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE;
+}
+
+/**
+ * 值得**立刻再试一次**的出口。
+ *
+ * ⚠️ **只收「下一秒可能自己好」的三类**：
+ * - `agent_not_idle`：页面刚好在收尾，稍等就空闲；
+ * - `send_button_disabled`：Svelte 的按钮态更新比 bound-value 晚一拍；
+ * - `send_in_flight`：另一条发送链占着锁，等它放开。
+ *
+ * ⚠️ **其余一律不重试**：没有输入框、表单脱连、提交抛错这三类等再久也还是那样，
+ * 而重试一轮最长要再等「8 秒等空闲 + 4 秒等按钮」，白等一次就是十几秒。
+ */
+export const CONTINUATION_RETRYABLE_REASONS: ReadonlySet<ContinuationSendReason> = new Set([
+  'agent_not_idle',
+  'send_button_disabled',
+  'send_in_flight',
+]);

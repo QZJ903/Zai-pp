@@ -21,6 +21,8 @@
  */
 
 import type { ToolCardResult, ToolExecutionRecord } from '../types';
+import { createLatestSyncGate } from '../tool/latest-sync';
+import { sleep } from './async';
 import {
   appendToolBlockToMessage,
   applyBlockCollapseDefault,
@@ -267,6 +269,21 @@ export function createToolPanelController(
   /** 实时面板：requestId → 本轮的执行收集。 */
   const liveSessions = new Map<string, LiveSession>();
 
+  /**
+   * 存储腿读取的「只有最新一次生效」闸门。
+   *
+   * ⚠️⚠️ **重试引入了新的并发面**：`install()` 与换会话都会调 `loadStorageLeg`，
+   * 而重试把一次读取拉长到 250ms+。期间新的一次读取可能已经落地，
+   * 不作废的话旧那次会把它**覆盖回旧会话的记录**。
+   * ⚠️ `dispose()` 也要 `begin()` 一次 —— 卸载之后落在重试里的那次
+   * `restore.remember` 会把块重新挂回新 DOM（测试会跨用例污染）。
+   */
+  const storageLegGate = createLatestSyncGate();
+  /** 存储腿最多读几次（首次 + 一次重试）。 */
+  const STORAGE_LEG_ATTEMPTS = 2;
+  /** 重试前的等待 —— 与编排层的重试间隔同值（生产 250ms，测试注入 1ms）。 */
+  const DEFAULT_STORAGE_LEG_RETRY_MS = 250;
+
   function getOrCreateSession(requestId: string): LiveSession {
     const existing = liveSessions.get(requestId);
     if (existing) return existing;
@@ -498,6 +515,8 @@ export function createToolPanelController(
   }
 
   function dispose(): void {
+    // ⚠️ **作废在飞的重试** —— 否则卸载后落在重试里的那次 `remember` 会把块挂回新 DOM。
+    storageLegGate.begin();
     restore.stop();
     liveSessions.clear();
   }
@@ -510,17 +529,39 @@ export function createToolPanelController(
    * 是**唯一**能把记录归到某条会话上的字段（记录里没有消息 id）。
    * ⚠️ **取不到当前会话时整批丢弃**：宁可不显示，也不要「把别的会话的工具
    * 挂到当前会话的消息上」。
+   *
+   * ⚠️⚠️ **读取失败要重试一次** —— 这条链只在 `install()` 与换会话时各跑一次，
+   * 而失败是**静默**的（读不到就只剩历史腿，面板退化成「工具名 + 已执行」、
+   * 没有详情、没有「保存 / 导入」按钮）。启动那一刻正是最挤的窗口
+   * （页面刚刷新、后台可能正在冷启动、`messages/batch` 同时在打）。
+   *
+   * ⚠️ **两次尝试之间用 `createLatestSyncGate` 作废** —— 重试是异步的，
+   * 期间可能已经换过会话（`handleSessionChange` 会再拉一次）或被卸载；
+   * 不作废就会把**旧会话**的记录塞进新会话的表里。
    */
   async function loadStorageLeg(): Promise<void> {
+    const lease = storageLegGate.begin();
     const chatSessionId = dependencies.getChatSessionId();
     if (!chatSessionId) return;
-    let history: readonly ToolHistoryRecordLike[];
-    try {
-      history = await dependencies.loadToolHistory();
-    } catch {
-      // ⚠️ 静默降级：存储读不到只是「没有真结果」，历史腿仍然能把面板画出来。
-      return;
+
+    let history: readonly ToolHistoryRecordLike[] | null = null;
+    for (let attempt = 0; attempt < STORAGE_LEG_ATTEMPTS; attempt += 1) {
+      try {
+        history = await dependencies.loadToolHistory();
+        break;
+      } catch (error) {
+        if (attempt + 1 >= STORAGE_LEG_ATTEMPTS) {
+          // ⚠️ 两次都失败 ⇒ 与改造前一致：静默降级（历史腿仍能把面板画出来）。
+          console.log('[Zai++] tool history read failed twice; keeping the history leg only', error);
+          return;
+        }
+        await sleep(dependencies.retryDelayMs ?? DEFAULT_STORAGE_LEG_RETRY_MS);
+      }
     }
+    // ⚠️ **这行是类型收窄 + 防御，当前不可达** —— 两次都失败时最后一次尝试已经
+    // 在 catch 里 return 了，所以走到这里时 `history` 必然非 null。
+    // **别为它写用例**（写不出来），也别删（删了 `for…of` 就对着 `null` 编译不过）。
+    if (!history) return;
 
     const records: ToolBlockRestoreRecord[] = [];
     for (const item of history) {
@@ -550,7 +591,9 @@ export function createToolPanelController(
         createdAt: item.createdAt,
       });
     }
-    if (records.length > 0) restore.remember(records);
+    if (records.length === 0) return;
+    // ⚠️ **落地前再验一次** —— 重试那 250ms 里会话可能已经换了，那批记录不再属于当前会话。
+    lease.commit(() => restore.remember(records));
   }
 
   /**
@@ -656,15 +699,24 @@ export function createToolPanelController(
   }
 
   /**
-   * 换会话了 —— 丢掉旧会话的记录，重新拉一次存储腿。
+   * 换会话了 —— 丢掉**不属于当前会话**的记录，重新拉一次存储腿。
    *
+   * ⚠️⚠️ **不能一律清空** —— 会话通知是 1 秒轮询驱动的，页面刚加载时必然触发一次
+   * 「假变化」（上一次通知的会话 id 初值是 null）；那一刻 `install()` 刚拉到的存储腿
+   * 记录连同 `pending` 一起被清掉 ⇒ 面板只剩历史腿那份摘要（没有详情、没有保存按钮），
+   * 而且**不会自愈**（存储腿只在这两处拉）。
+   * ⇒ 判据用**记录自己冻结的 `chatSessionId`** 与当前会话严格相等：
+   * 真换会话时旧记录一条都不匹配（与清空等价），假变化时全都留着。
+   *
+   * ⚠️ **拿不到当前会话 id 时退回 `clearAll`** —— 不知道不等于都属于当前会话。
    * ⚠️ **顺序是「先清、再拉」** —— 反过来的话，新拉到的记录会被紧接着的清空删掉。
-   * ⚠️ **`liveSessions` 也要清**：那是「本轮」的收集容器，它属于旧会话的那一轮；
-   * 留着会让 `snapshot().livePending` 报出已经不存在的轮次，且新一轮若拿到
-   * 相同的 requestId（不会，但别依赖）会读到旧的执行列表。
+   * ⚠️ **`liveSessions` 无条件清**：那是「本轮」的收集容器，它属于旧会话的那一轮；
+   * 留着会让 `snapshot().livePending` 报出已经不存在的轮次。
    */
   function handleSessionChange(): void {
-    restore.clearAll();
+    const current = dependencies.getChatSessionId();
+    if (current === null) restore.clearAll();
+    else restore.retainRecords((record) => record.chatSessionId === current);
     liveSessions.clear();
     // ⚠️ **切会话等于「刷新页面」** —— 那个会话的块不该再保持展开（用户口径：
     // 只有「刚刚在这一次页面会话里跑完的那一轮」才可能因为按钮而展开）。

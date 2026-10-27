@@ -1,9 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  buildShellAllowlistUpgrade,
   buildShellToolLimitUpgrade,
   createShellMcpPresetInput,
-  DEFAULT_SHELL_MCP_ALLOWLIST_TOOL_NAMES,
   isShellMcpServer,
 } from '../core/shell/policy';
 import { SHELL_TOOL_NAMES } from '../core/shell/contracts';
@@ -14,23 +13,23 @@ describe('createShellMcpPresetInput', () => {
 
     // 服务本身仍默认停用（要用户先装 host 再启用）。
     expect(preset.enabled).toBe(false);
-    expect(preset.allowlist).toEqual({ mode: 'allow', toolNames: [...DEFAULT_SHELL_MCP_ALLOWLIST_TOOL_NAMES] });
+    // ⚠️⚠️ **预设不写 allowlist** —— 缺省由 `createMcpServer` 补成 `mode: 'all'`，
+    // 与其它 MCP 服务同一口径：工具级开关完全归用户。
+    expect(preset.allowlist).toBeUndefined();
     // ⚠️ **「自动执行」默认开启。** 关着的时候 `isMcpToolEnabled` 恒假 ⇒ 工具列表
     // 整列显示 0/N，而面板上没有任何一处解释「是这一项在挡」。Shell 是本项目的一等能力，
     // 默认值就该是「能用」。
     expect(preset.execution).toEqual({ enabled: true, mode: 'auto' });
   });
 
-  it('keeps shell_exec and the persistent session tools out of the default allowlist', () => {
-    // These are the opt-in, risk-bearing tools. They must NOT appear in the
-    // safe-by-default allowlist — the default preset exposes only read/status
-    // tools so a fresh install cannot execute commands until the user opts in.
+  it('leaves every tool switch to the user instead of seeding an allowlist', () => {
+    // ⚠️⚠️ **这条守的是一个真实缺陷**：预设曾经硬编码 `mode: 'allow'` + 三个只读工具，
+    // 配一个「启动时把缺的本地文件工具补回名单」的升级函数 ⇒ **用户关掉的工具
+    // 每次浏览器启动都被重新打开**（`mode: 'allow'` 下关工具 = 从名单删掉，
+    // 而升级判据正是「缺了就补」）。
+    // ⇒ 预设不许再带名单；工具开关只由用户在 MCP 页写。
     const preset = createShellMcpPresetInput();
-    const allowlisted = new Set(preset.allowlist?.toolNames ?? []);
-    const gatedTools = ['shell_exec', 'python_exec', 'local_file_write', 'local_file_read', 'local_file_stat', 'shell_session_begin', 'shell_session_exec', 'shell_session_end'];
-    for (const tool of gatedTools) {
-      expect(allowlisted.has(tool as string)).toBe(false);
-    }
+    expect(preset.allowlist, '预设不许替用户预选任何工具').toBeUndefined();
   });
 
   it('registers the persistent session tools in the shell tool catalog', () => {
@@ -67,41 +66,6 @@ describe('createShellMcpPresetInput', () => {
     expect(buildShellToolLimitUpgrade({ maxResultBytes: 64_000, maxToolCount: 128 })).toBeNull();
   });
 
-  it('upgrades legacy read-only Shell allowlists with local file tools too', () => {
-    expect(buildShellAllowlistUpgrade({
-      mode: 'allow',
-      toolNames: ['shell_status', 'python_status'],
-    })).toEqual({
-      mode: 'allow',
-      toolNames: [
-        'shell_status',
-        'python_status',
-        'local_folder_pick',
-        'local_file_stat',
-        'local_file_read',
-        'local_file_write',
-      ],
-    });
-  });
-
-  it('preserves existing exec tools while upgrading Shell allowlists', () => {
-    expect(buildShellAllowlistUpgrade({
-      mode: 'allow',
-      toolNames: ['shell_status', 'python_status', 'shell_exec'],
-    })).toEqual({
-      mode: 'allow',
-      toolNames: [
-        'shell_status',
-        'python_status',
-        'shell_exec',
-        'local_folder_pick',
-        'local_file_stat',
-        'local_file_read',
-        'local_file_write',
-      ],
-    });
-  });
-
   it('detects the built-in Shell Local server by name or native host', () => {
     expect(isShellMcpServer({
       displayName: 'Shell Local',
@@ -115,5 +79,40 @@ describe('createShellMcpPresetInput', () => {
       displayName: 'Anything',
       transport: { kind: 'native_messaging', nativeHost: 'com.example.other' },
     })).toBe(false);
+  });
+});
+
+describe('user tool switches are never rewritten by the startup path', () => {
+  /**
+   * ⚠️⚠️ **缺陷形态**：`ensureShellMcpCompatibility` 曾在每次浏览器启动时调
+   * `buildShellAllowlistUpgrade`，把「名单里缺的本地文件工具」补回去。
+   * 而 `mode: 'allow'` 下关工具 = 从名单删掉 ⇒ **用户关掉的工具每次启动都被重新打开**，
+   * 且没有任何提示。用户报的就是这一条（四个本地文件 / 文件夹工具）。
+   *
+   * ⇒ 判据：启动链只许升 `limits`，**不许写 `allowlist`**。
+   * ⚠️ 这条是源码级断言（启动链不可 import），但判据收窄到**那一个函数体内**，
+   * 不是「文件里出现过这个名字」。
+   * ⚠️⚠️ **必须先剥注释再断言** —— 函数体里的说明文字本身就写着 `allowlist`，
+   * 不剥的话这条判据被自己的注释喂饱、永远绿（实测踩过）。
+   */
+  function stripComments(source: string): string {
+    return source
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  }
+
+  it('ensureShellMcpCompatibility never writes an allowlist', () => {
+    const background = readFileSync('entrypoints/background.ts', 'utf8');
+    const start = background.indexOf('async function ensureShellMcpCompatibility');
+    expect(start, '应当能找到 ensureShellMcpCompatibility').toBeGreaterThan(-1);
+    // 函数体到下一个顶层 `}` 前的那段（缩进 0 的 `}` 结束）。
+    const end = background.indexOf('\n}', start);
+    expect(end, '应当能找到函数体结束').toBeGreaterThan(start);
+    const body = stripComments(background.slice(start, end));
+
+    // ⚠️⚠️ **判据要不区分大小写** —— 只认小写的 `allowlist` 时，
+    // `const upgradedAllowlist = …` 这种写法能整个溜过去（实测：变异后仍绿）。
+    expect(body, '启动链不许写 allowlist —— 那是用户的选择').not.toMatch(/allowlist/i);
+    expect(body, '启动链应当仍然升级 maxToolCount').toContain('buildShellToolLimitUpgrade');
   });
 });

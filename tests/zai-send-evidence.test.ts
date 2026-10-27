@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CONTINUATION_RETRYABLE_REASONS,
+  ZAI_CONTINUATION_LOOP_MISSING_CODE,
+  ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE,
   classifyAugmentRequest,
+  classifyContinuationSendFailure,
   classifySendEvidence,
 } from '../core/zai/send-evidence';
 import { buildZaiContinuationPrompt, buildZaiNudgePrompt } from '../core/zai/continuation';
@@ -139,5 +143,62 @@ describe('classifySendEvidence: 两个计数器 → 三档', () => {
     }
     expect(results.has('unsent'), '等待结果不产出 unsent').toBe(false);
     expect([...results].sort()).toEqual(['ambiguous', 'sent']);
+  });
+});
+
+describe('classifyContinuationSendFailure: 没发出去该报哪个码', () => {
+  it('两个码的字面值与自动化页的映射表对齐', () => {
+    // ⚠️ 判定端（`automation-error-message.ts`）按 `dom_automation_${code}` 查文案，
+    // 字面值一变那条映射就静默失配。
+    expect(ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE).toBe('continuation_send_unconfirmed');
+    expect(ZAI_CONTINUATION_LOOP_MISSING_CODE).toBe('continuation_loop_missing');
+  });
+
+  it('会话已切走 ⇒ 报「执行链中断」', () => {
+    expect(classifyContinuationSendFailure('session_changed'))
+      .toBe(ZAI_CONTINUATION_LOOP_MISSING_CODE);
+  });
+
+  it('其余出口一律报「这一发没确认发出」', () => {
+    const others = [
+      'send_in_flight',
+      'no_textarea',
+      'agent_not_idle',
+      'send_button_disabled',
+      'submit_no_form',
+      'submit_form_not_connected',
+      'submit_threw',
+    ] as const;
+    for (const reason of others) {
+      expect(classifyContinuationSendFailure(reason))
+        .toBe(ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE);
+    }
+  });
+
+  it('reason 为 null 时不炸，落到「没确认发出」', () => {
+    expect(classifyContinuationSendFailure(null)).toBe(ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE);
+  });
+});
+
+describe('CONTINUATION_RETRYABLE_REASONS: 哪些出口值得再试一次', () => {
+  it('只收「下一秒可能自己好」的那三类', () => {
+    expect([...CONTINUATION_RETRYABLE_REASONS].sort()).toEqual([
+      'agent_not_idle',
+      'send_button_disabled',
+      'send_in_flight',
+    ]);
+  });
+
+  it('确定性的失败一律不进白名单', () => {
+    const deterministic = [
+      'no_textarea',
+      'submit_no_form',
+      'submit_form_not_connected',
+      'submit_threw',
+      'session_changed',
+    ] as const;
+    for (const reason of deterministic) {
+      expect(CONTINUATION_RETRYABLE_REASONS.has(reason), `${reason} 不该重试`).toBe(false);
+    }
   });
 });

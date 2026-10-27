@@ -101,7 +101,15 @@ const BASELINE = Object.freeze({
   // ⇒ 初始 shell 实测 raw **331527** / gzip **103943**（+487 raw / +291 gzip）。
   // 同批 `runtime-response.ts` 让产物从 43 文件涨到 **45**（两个同名 chunk 互相 import，
   // 共享模块被提成独立 chunk，属「entrypoint 数量决定切分」那类）。
-  initialShell: { raw: 331_527, gzip: 103_943 },
+  //
+  // ⚠️ **同日十七测（`## 角色` 改占位符 + 新增联网 / 定时任务两节）**：
+  // ① `systemChat` 的角色正文抽成 `prompt.defaultRole`（中英各 +1 键，值就是原正文）；
+  // ② `sandboxHostSection` 原生工具清单加 `WebSearch` / `WebFetch` / `cron`，
+  //    「三、联网搜索」整段重写（原生工具 vs skill 两条路），新增「四、定时任务」一节。
+  // 实测 raw **340419** / gzip **107013** —— **+8892 raw / +3070 gzip**。
+  // ⚠️ **这是单次涨幅最大的一档**，且两段都是**每轮注入**的提示词：
+  // 加内容前先问「这句值不值每轮都付」。
+  initialShell: { raw: 340_419, gzip: 107_013 },
   // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
   // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
   // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，

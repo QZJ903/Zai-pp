@@ -464,3 +464,209 @@ describe('continuation loop: every creation path supersedes the running one firs
     expect(callsInOrder(body, 'supersedeRunningLoop'), '原生轮那条路径也必须先收').toHaveLength(1);
   });
 });
+
+/**
+ * **切会话必须收掉续跑循环。**
+ *
+ * ⚠️⚠️ 不收的后果不是「横幅挂着」那一点：循环停在 `running`，而 `runDomTask` 的 busy
+ * 判据读的正是它 ⇒ **之后这个标签页上每一次自动化都被静默拒掉**（`busy` 不在
+ * `RETRYABLE_PRE_SEND_ERRORS` 里、后台不重试、不打日志）。长窗口也因此永不解除。
+ */
+describe('session change: reclaim the continuation loop', () => {
+  const RECLAIM_FN = 'reclaimLoopOnSessionChange';
+
+  /** 子树里所有 `name(...)` 调用（按位置排序）。 */
+  function callsInOrder(node: t.Node, name: string): t.CallExpression[] {
+    const found: t.CallExpression[] = [];
+    walkSourceAst(node, (child) => {
+      if (t.isCallExpression(child) && t.isIdentifier(child.callee, { name })) found.push(child);
+    });
+    return found.sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
+  }
+
+  it('收尾走 failContinuationLoop，不是 finishContinuationLoop', () => {
+    // ⚠️⚠️ `finishContinuationLoop` 在 `loop.taskId` 存在时**无条件回 `DOM_TASK_COMPLETE`**
+    // （= 成功），而这里的事实是「任务被掐断」。回 COMPLETE 会让自动化显示成功、
+    // 正文却是空的 —— 协调器按 `ok: true` 收、scheduler 记 `succeeded`。
+    const body = findFunctionBody(readContentProgram(), RECLAIM_FN);
+    expect(callsInOrder(body, 'failContinuationLoop')).toHaveLength(1);
+    expect(callsInOrder(body, 'finishContinuationLoop')).toHaveLength(0);
+  });
+
+  it('判据是地址栏会话，且必须有 `chatSessionId` 非空守卫', () => {
+    // ⚠️⚠️ 非空守卫挡的是**启动时的假变化**：`onZaiSessionChange` 由 1 秒轮询驱动，
+    // 而页面刚加载时 `lastNotifiedSessionId` 初值是 null、必然触发一次「变了」。
+    // 那一刻若循环刚建好，缺这条会被误杀。两条建循环路径都保证 `chatSessionId` 非空。
+    const program = readContentProgram();
+    const source = readFileSync('entrypoints/zai.content.ts', 'utf8');
+    const body = findFunctionBody(program, RECLAIM_FN);
+
+    expect(callsInOrder(body, 'getCurrentChatSessionId').length, '必须读当前会话')
+      .toBeGreaterThan(0);
+
+    const guards = body.body.filter((node): node is t.IfStatement => t.isIfStatement(node));
+    const tests = guards.map((node) => source.slice(node.test.start ?? 0, node.test.end ?? 0));
+    // ⚠️ **非空守卫必须单独断言** —— 只判「出现过 `loop.chatSessionId`」会被后面那条
+    // 比较式喂饱，删掉非空守卫照样绿（实测）。
+    expect(
+      tests.some((text) => text.includes('!loop.chatSessionId')),
+      '必须有 `if (!loop.chatSessionId) return;` —— 它挡的是启动时的假会话变化',
+    ).toBe(true);
+    expect(
+      tests.some((text) => text.includes('current') && text.includes('loop.chatSessionId')),
+      '必须比较「当前会话」与「循环的会话」',
+    ).toBe(true);
+    // ⚠️⚠️ **比较式必须是「不等就收」，不许给 null 留放行** ——
+    // 首页 / 新会话页（`https://zchat.z.ai/`）pathname 是 `/`，读不到会话 id；
+    // 放行 null 会让续跑 prompt 被提进一个全新对话。
+    expect(
+      tests.some((text) => text.includes('current === loop.chatSessionId')),
+      '判据必须是 `current === loop.chatSessionId` 的正向相等（取反即「不等就收」）',
+    ).toBe(true);
+    expect(
+      tests.some((text) => text.includes('!current')),
+      '不許有 `!current` 这类「读不到就放行」的短路',
+    ).toBe(false);
+  });
+
+  it('isSessionStillCurrent 也不给 null 留放行', () => {
+    // ⚠️ 同一条不变式在发送原语那侧：那里原本是 `!current || current === expected`，
+    // 首页（无会话 id）同样会放行。
+    const program = readContentProgram();
+    const source = readFileSync('entrypoints/zai.content.ts', 'utf8');
+    const body = findFunctionBody(program, 'isSessionStillCurrent');
+    const text = source.slice(body.start ?? 0, body.end ?? 0);
+    expect(text, '必须直接与 expect 相等比较').toContain('getCurrentChatSessionId() === expectedSessionId');
+    expect(text, '不许 `!current` 放行').not.toContain('!current');
+  });
+
+  it('接线在 handleSessionChange 里，且排在面板换记录之前', () => {
+    const program = readContentProgram();
+    const object = (() => {
+      let found: t.ObjectExpression | undefined;
+      walkReachable(findMainBodyOf(program), (node) => {
+        if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+        if (node.callee.name !== 'installZaiCapabilities') return;
+        const [options] = node.arguments;
+        if (t.isObjectExpression(options)) found = options;
+      });
+      expect(found, 'main() 里应当调 installZaiCapabilities({ … })').toBeDefined();
+      return found!;
+    })();
+
+    const property = object.properties.find((entry): entry is t.ObjectProperty => (
+      t.isObjectProperty(entry) && t.isIdentifier(entry.key, { name: 'handleSessionChange' })
+    ));
+    expect(property, '依赖对象里应当有 handleSessionChange').toBeDefined();
+
+    const value = property!.value;
+    expect(
+      t.isArrowFunctionExpression(value) || t.isFunctionExpression(value),
+      'handleSessionChange 必须是适配器（要先收循环再换面板记录）',
+    ).toBe(true);
+
+    let reclaimAt: number | null = null;
+    let panelAt: number | null = null;
+    walkReachable((value as t.ArrowFunctionExpression).body, (node) => {
+      if (!t.isCallExpression(node)) return;
+      if (t.isIdentifier(node.callee, { name: RECLAIM_FN })) reclaimAt = node.start ?? null;
+      if (t.isMemberExpression(node.callee) && t.isIdentifier(node.callee.property, { name: 'handleSessionChange' })) {
+        panelAt = node.start ?? null;
+      }
+    });
+    expect(reclaimAt, `handleSessionChange 里必须调 ${RECLAIM_FN}`).not.toBeNull();
+    expect(panelAt, 'handleSessionChange 里应当仍然调面板那处').not.toBeNull();
+    expect(reclaimAt!, '先收循环、再换面板记录').toBeLessThan(panelAt!);
+  });
+});
+
+/**
+ * **保活的 release 必须带所有权**。
+ *
+ * ⚠️⚠️ 缺陷形态：一条循环被顶替时，旧那条的 `submitContinuationViaPage` 可能还挂在
+ * await 上（最长 5 秒证据等待），它的 `finally` 会调 release。没有所有权判据的话，
+ * 那次 release 会把**新循环**刚挂上的会话摘掉（新循环还没跑满 3 分钟 ⇒
+ * `sustainedKeepAlive` 仍是 false，长窗口那道早退拦不住），而保活失效是**静默**的
+ * ⇒ 新循环的发送落在被节流的窗口里 ⇒ 判 `unsent` ⇒ 收尾。
+ */
+describe('tab keepalive: release carries an ownership token', () => {
+  it('发送链的 want / release 都带 `loop.loopId`', () => {
+    const program = readContentProgram();
+    const body = findFunctionBody(program, 'submitContinuationViaPage');
+    const calls: { name: string; args: number; first?: string }[] = [];
+    walkSourceAst(body, (node) => {
+      if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+      if (node.callee.name !== 'wantTabKeepAlive' && node.callee.name !== 'releaseTabKeepAlive') return;
+      const [first] = node.arguments;
+      calls.push({
+        name: node.callee.name,
+        args: node.arguments.length,
+        first: t.isMemberExpression(first) && t.isIdentifier(first.property)
+          ? first.property.name
+          : undefined,
+      });
+    });
+    expect(calls, '发送链里各一次').toHaveLength(2);
+    for (const call of calls) {
+      expect(call.args, `${call.name} 必须带所有权参数`).toBe(1);
+      expect(call.first, `${call.name} 的所有权必须是 loop.loopId`).toBe('loopId');
+    }
+  });
+
+  it('releaseTabKeepAlive 里有「所有权换人就早退」这道判据', () => {
+    const program = readContentProgram();
+    const source = readFileSync('entrypoints/zai.content.ts', 'utf8');
+    const body = findFunctionBody(program, 'releaseTabKeepAlive');
+    const guards = body.body.filter((node): node is t.IfStatement => t.isIfStatement(node));
+    const tests = guards.map((node) => source.slice(node.test.start ?? 0, node.test.end ?? 0));
+    // ⚠️⚠️ **判据里不许再出现 `keepAliveOwner !== null`** —— 顶替场景把 owner
+    // 交还成 null 之后，旧循环还在 await 上的那次 release 会因此通过判据、照发 STOP，
+    // 而它与新循环的 START 没有顺序保证 ⇒ 正是这个 token 当初要挡的那件事。
+    const earlyExit = tests.find((text) => text.includes('keepAliveOwner') && text.includes('owner'));
+    expect(earlyExit, '必须有「所有权已经换人 ⇒ 不卸」的判据').toBeDefined();
+    expect(earlyExit, '早退判据不许要求 owner 非空（那样交还后拦不住）')
+      .not.toContain('keepAliveOwner !== null');
+  });
+
+  it('releaseTabKeepAlive 的所有出口都复位所有权', () => {
+    // ⚠️ 强制 release（`owner === null`）也要复位 —— 否则正常收尾后
+    // `keepAliveOwner` 停在一个已死循环的 loopId 上，与「null = 没有任何循环在要」冲突。
+    const program = readContentProgram();
+    const body = findFunctionBody(program, 'releaseTabKeepAlive');
+    let unconditional = false;
+    walkSourceAst(body, (node) => {
+      if (!t.isExpressionStatement(node) || !t.isAssignmentExpression(node.expression)) return;
+      const { left, right } = node.expression;
+      if (t.isIdentifier(left, { name: 'keepAliveOwner' }) && t.isNullLiteral(right)) {
+        unconditional = true;
+      }
+    });
+    expect(unconditional, '必须有裸的 `keepAliveOwner = null;`（不受 owner 是否为空影响）').toBe(true);
+  });
+
+  it('wantTabKeepAlive 会登记所有权', () => {
+    const program = readContentProgram();
+    const source = readFileSync('entrypoints/zai.content.ts', 'utf8');
+    const body = findFunctionBody(program, 'wantTabKeepAlive');
+    expect(source.slice(body.start ?? 0, body.end ?? 0), 'want 必须写 keepAliveOwner')
+      .toContain('keepAliveOwner = owner');
+  });
+
+  it('顶替场景交还所有权但不发 STOP', () => {
+    // ⚠️ 顶替时新循环马上要 `want`；这里若发 STOP，与它的 START 没有顺序保证，
+    // STOP 后到会把新循环的会话摘掉 —— 这正是 `preserveKeepAlive` 当初要治的那件事，
+    // 只是当时只处理了「长窗口」那一半。
+    const program = readContentProgram();
+    const source = readFileSync('entrypoints/zai.content.ts', 'utf8');
+    const body = findFunctionBody(program, 'finishContinuationLoop');
+    // ⚠️ 同一个函数里有**两处** `!options?.preserveKeepAlive` 判据（长窗口那处在前），
+    // 要挑「带 alternate 的那一处」—— 只有它是「顶替时交还所有权」这条。
+    const branch = body.body.filter((node): node is t.IfStatement => t.isIfStatement(node))
+      .find((node) => source.slice(node.test.start ?? 0, node.test.end ?? 0)
+        .includes('preserveKeepAlive') && node.alternate != null);
+    expect(branch, '应当有 `preserveKeepAlive` 那条带 else 的分支').toBeDefined();
+    const alternate = source.slice(branch!.alternate?.start ?? 0, branch!.alternate?.end ?? 0);
+    expect(alternate, '顶替分支里必须交还所有权').toContain('keepAliveOwner');
+    expect(alternate, '顶替分支里不许发 STOP').not.toContain('releaseTabKeepAlive');
+  });
+});

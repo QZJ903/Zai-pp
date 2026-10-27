@@ -109,8 +109,30 @@ function within(inner: t.Node, outer: t.Node): boolean {
   return a >= c && b <= d;
 }
 
+/** 分支体里有没有 `return`（= 提前退出，不会走到后面的提交）。 */
+function hasEarlyReturn(statement: t.IfStatement): boolean {
+  let found = false;
+  t.traverseFast(statement.consequent, (child) => {
+    if (t.isReturnStatement(child)) found = true;
+  });
+  return found;
+}
+
+/**
+ * 函数体里所有「提前退出」的分支。
+ *
+ * ⚠️⚠️ **判据的实质是「提交有没有发生过」，不是「清空在不在某个特定的 if 里」** ——
+ * 提交之前允许清空，当且仅当这条路径**根本不会提交**（分支体内 `return`）。
+ * 早期版本的断言把这条写成了「必须落在 `!sendButton` 那一个分支里」，
+ * 于是后来新增的「会话已切走 ⇒ 不提交」出口明明同样满足实质，却被判成违规。
+ * ⇒ 判据收窄到实质：**提交之前的清空必须挂在提前退出的分支上**。
+ */
+function earlyExitBranches(node: t.Node): t.IfStatement[] {
+  return ifStatements(node).filter(hasEarlyReturn);
+}
+
 describe('composer clear: 清空必须晚于提交触发', () => {
-  it('续跑主路的每一次清空，都在提交调用之后或在「没等到发送按钮」那条分支里', () => {
+  it('续跑主路的每一次清空，都在提交调用之后或在「不会提交」的提前退出分支里', () => {
     const { program, source } = context();
     const body = findFunctionBody(program, FORM_PATH_FN);
 
@@ -125,12 +147,14 @@ describe('composer clear: 清空必须晚于提交触发', () => {
     const clears = callsTo(body, CLEAR_FN);
     expect(clears.length, `${FORM_PATH_FN} 里应当有清空调用`).toBeGreaterThan(0);
 
+    const branches = earlyExitBranches(body);
     const violations = clears
-      .filter((call) => !within(call, guard[0]!) && (call.start ?? 0) < (submitCall.start ?? 0))
+      .filter((call) => (call.start ?? 0) < (submitCall.start ?? 0))
+      .filter((call) => !branches.some((branch) => within(call, branch)))
       .map((call) => call.loc?.start.line ?? -1);
     expect(
       violations,
-      '这些清空出现在提交调用之前（且不在「没等到发送按钮」分支里）—— '
+      '这些清空出现在提交调用之前（且不在「不会提交」的提前退出分支里）—— '
       + '页面还没读值就清空会把这次发送打空，且失败方向是静默的',
     ).toEqual([]);
   });
@@ -166,7 +190,7 @@ describe('composer clear: 点按钮那条兜底路只在失败时清空', () => 
     ).toEqual([]);
   });
 
-  it('提交触发之后一次都不清空，只剩「没等到发送按钮」那一条前置出口', () => {
+  it('提交触发之后一次都不清空，点之前的清空只挂在「不会点」的提前退出分支里', () => {
     const { program, source } = context();
     const body = findFunctionBody(program, DOM_PATH_FN);
 
@@ -175,18 +199,28 @@ describe('composer clear: 点按钮那条兜底路只在失败时清空', () => 
 
     // ⚠️⚠️ **提交之后不再有任何清空分支** —— 三态里这个函数只能拿到 `sent` / `ambiguous`：
     // `sent` 页面自己会清；`ambiguous`（可能已发出）**不能清**，清了会把这次发送打空、
-    // 失败方向静默。**`unsent` 不由 `classifySendEvidence` 产出**，它的三个出口
-    // （无 textarea / agent 不空闲 / 点前无发送按钮）全在点击**之前**。
+    // 失败方向静默。**`unsent` 不由 `classifySendEvidence` 产出**，它的出口
+    // （无 textarea / agent 不空闲 / 点前无发送按钮 / 会话已切走）全在点击**之前**。
     //
-    // ⇒ 这条用例判的是「**除了 `!sendButton` 那一条，没有第二处清空**」。
+    // ⇒ 判据是「**点下去之后一次都不清；点之前的清空必须挂在不会点的分支上**」。
     // ⚠️ 曾经的判据是「清空只能挂在只认 unsent 的条件上」，而那条 `if` 恒假 ——
     // 用例被一条**永远不会执行的**分支喂饱，看着绿、实际什么都没守。
     // **判据要对着「真实可能执行的路径」写**，不是对着「代码里写了什么」。
-    const clears = callsTo(body, CLEAR_FN);
-    const outsideSendButtonGuard = clears.filter((call) => !within(call, guard[0]!));
+    const click = memberCallsTo(body, 'click');
+    expect(click, '应当有一处点击').toHaveLength(1);
+    const branches = earlyExitBranches(body);
+    const violations = callsTo(body, CLEAR_FN)
+      .filter((call) => (call.start ?? 0) > (click[0]!.start ?? 0))
+      .concat(
+        callsTo(body, CLEAR_FN)
+          .filter((call) => (call.start ?? 0) < (click[0]!.start ?? 0))
+          .filter((call) => !branches.some((branch) => within(call, branch))),
+      )
+      .map((call) => call.loc?.start.line ?? -1);
     expect(
-      outsideSendButtonGuard.map((call) => call.loc?.start.line ?? -1),
-      '提交之后的任何清空都是错的 —— ambiguous 那一发可能已经发出去了',
+      violations,
+      '点击之后的任何清空都是错的（ambiguous 那一发可能已经发出去了）；'
+      + '点击之前的清空必须挂在不会点击的提前退出分支里',
     ).toEqual([]);
 
     // 反面自检：`unsent` 这个字面量不该再以「清空条件」的形式出现。

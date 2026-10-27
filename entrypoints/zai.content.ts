@@ -64,8 +64,14 @@ import {
   rewriteZaiLastUserMessage,
 } from '../core/zai/request-codec';
 import {
+  CONTINUATION_RETRYABLE_REASONS,
+  ZAI_CONTINUATION_LOOP_MISSING_CODE,
+  ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE,
   classifyAugmentRequest,
+  classifyContinuationSendFailure,
   classifySendEvidence,
+  type ContinuationSendOutcome,
+  type ContinuationSendReason,
   type ZaiSendEvidence,
 } from '../core/zai/send-evidence';
 import {
@@ -404,6 +410,20 @@ async function tryFinalizeRequest(requestId: string): Promise<void> {
   // 正常结束的轮次不走这里：`respondedRequestIds` 已在响应到达时登记。
   if (!respondedRequestIds.has(requestId)) {
     armManualStopDetection();
+    // 手动轮的「这一轮被中止」收尾：自动化轮靠上面那个 4 秒宽限走到
+    // `terminateDomTaskAsStopped`（它先摘 taskId 再回 FAILED），而**手动轮没有 taskId**，
+    // 上面那条宽限路径一条也命中不了 ⇒ 不收的话 `continuationLoop` 会一直停在 running、
+    // `activeRequestId` 指着一个已经中止的请求，直到下一条带工具的回复把它顶掉。
+    // ⚠️ **只收手动轮**：自动化轮若在这里提前收，`loop.taskId` 还在，
+    // `finishContinuationLoop` 会把它当成「正常跑完」回 `DOM_TASK_COMPLETE`。
+    if (
+      continuationLoop?.status === 'running' &&
+      continuationLoop.activeRequestId === requestId &&
+      continuationLoop.taskId === null
+    ) {
+      console.log('[Zai++] continuation aborted; reclaiming the manual loop', { requestId });
+      finishContinuationLoop(continuationLoop);
+    }
   }
   // 64：请求终态到了 —— 该请求下还标着「执行中」的行收成失败。
   // ⚠️ **排在 `releaseRequestState` 之前**：那个函数会清掉本请求的所有请求级状态。
@@ -2131,6 +2151,17 @@ async function handleUsageSnapshot(raw: unknown): Promise<void> {
 let sustainedKeepAlive = false;
 /** 长窗口的定时器（循环结束时清掉）。 */
 let sustainedKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * 此刻「谁」要的保活（`ContinuationLoop.loopId`）。
+ *
+ * ⚠️⚠️ **它是 release 的所有权凭据** —— 一条循环被顶替时，旧那条的
+ * `submitContinuationViaPage` 可能还挂在 await 上（最长 5 秒证据等待），
+ * 它的 `finally` 会调 release。没有这道判据的话，那次 release 会把**新循环**
+ * 刚挂上的会话摘掉（新循环还没跑满 3 分钟 ⇒ `sustainedKeepAlive` 仍是 false，
+ * 长窗口那道早退拦不住），而保活失效是**静默**的。
+ * ⚠️ **`null` = 没有任何循环在要**（启动清理、收尾兜底走的就是这一档）。
+ */
+let keepAliveOwner: string | null = null;
 
 /**
  * 标签保活：**告诉后台「这个标签现在需要防节流」/「不需要了」**。
@@ -2154,7 +2185,9 @@ let sustainedKeepAliveTimer: ReturnType<typeof setTimeout> | null = null;
  * ⚠️ **失败方向必须是「静默降级」**：挂不上只是退回改造前的行为（前台能跑），
  * 不能让续跑链因为保活失败而中断。
  */
-async function wantTabKeepAlive(): Promise<void> {
+async function wantTabKeepAlive(owner: string | null = null): Promise<void> {
+  // ⚠️ **登记所有权** —— 只有「此刻要它的那条循环」的 release 才算数，见 `keepAliveOwner`。
+  if (owner) keepAliveOwner = owner;
   try {
     await sendRuntimeMessage({ type: 'START_TAB_KEEPALIVE' });
   } catch {
@@ -2162,10 +2195,28 @@ async function wantTabKeepAlive(): Promise<void> {
   }
 }
 
-async function releaseTabKeepAlive(): Promise<void> {
+/**
+ * 告诉后台「这个标签不再需要防节流」。
+ *
+ * ⚠️⚠️ **必须带所有权判据，不能无条件 release** —— 见 `keepAliveOwner`：
+ * 旧循环的 `finally` 晚于新循环的 `want` 落地时，无条件 release 会把新循环刚挂上的
+ * 会话摘掉，而那时新循环还没跑满 3 分钟（长窗口那道早退拦不住）。
+ *
+ * ⚠️ **`owner` 为 `null` = 强制 release**：启动清理（页面刚加载，必然没有任何循环）
+ * 与收尾兜底（循环已经收掉、所有权已交还）走这一档。
+ */
+async function releaseTabKeepAlive(owner: string | null = null): Promise<void> {
   // ⚠️ **长窗口期间不卸** —— 每个发送轮次的 `finally` 都会走到这里，
   // 只拦 `want` 而不拦 `release` 的话，长窗口会被第一轮发送完就摘掉。
   if (sustainedKeepAlive) return;
+  // ⚠️ **带 owner 时只放掉自己的**：所有权已经换人（含已被交还成 null）就什么都不做。
+  // ⚠️⚠️ **不能要求 `keepAliveOwner !== null`** —— 顶替场景把 owner 置 null 之后，
+  // 旧循环挂在 await 上的那次 release 会因此通过判据、照发 STOP，
+  // 而它与新循环的 START 没有顺序保证 ⇒ 正是这个 token 当初要挡的那件事。
+  if (owner !== null && keepAliveOwner !== owner) return;
+  // ⚠️ **所有出口都要复位**（含强制档）—— 否则正常收尾后 `keepAliveOwner`
+  // 会停在一个已死循环的 `loopId` 上，与「`null` = 没有任何循环在要」的声明冲突。
+  keepAliveOwner = null;
   try {
     await sendRuntimeMessage({ type: 'STOP_TAB_KEEPALIVE' });
   } catch {
@@ -2220,7 +2271,9 @@ function startSustainedKeepAliveWatch(loop: ContinuationLoop): void {
     // 但万一先到的是这个回调，就得自己判）。
     if (continuationLoop !== loop || loop.status !== 'running') return;
     sustainedKeepAlive = true;
-    void wantTabKeepAlive();
+    // ⚠️ **长窗口也要登记所有权** —— 否则收尾那次 `releaseTabKeepAlive(loopId)` 会因为
+    // 「所有权为空」被当成强制 release 放过去，与短窗口那一档的口径不一致。
+    void wantTabKeepAlive(loop.loopId);
     console.log('[Zai++] sustained keep-alive engaged', {
       step: loop.stepCount,
       afterMs: SUSTAINED_KEEPALIVE_AFTER_MS,
@@ -2359,19 +2412,22 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       const orphanTaskId = taskIdByRequestId.get(complete.requestId);
       if (orphanTaskId) {
         clearActiveDomTask(orphanTaskId);
-        console.error('[Zai++] continuation turn without a running loop; failing the task', {
+        console.log('[Zai++] continuation turn without a running loop; failing the task', {
           taskId: orphanTaskId,
           requestId: complete.requestId,
         });
         void sendRuntimeMessage({
           type: 'DOM_TASK_FAILED',
           taskId: orphanTaskId,
-          error: 'continuation_loop_missing',
+          error: ZAI_CONTINUATION_LOOP_MISSING_CODE,
         });
       }
       return;
     }
-    continuationLoop.activeRequestId = null;
+    // ⚠️⚠️ **本分支后续的一切都只认 `loop`** —— `continuationLoop` 是模块变量，
+    // 中间的 await（工具执行上界 120 秒）期间它可能被取消路径置空、或被新循环顶替。
+    const loop = continuationLoop;
+    loop.activeRequestId = null;
     // 本轮已完成，摘掉它的归属登记（收尾时 clearActiveDomTask 会兜底清剩下的）。
     taskIdByRequestId.delete(complete.requestId);
 
@@ -2379,7 +2435,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     // 又发 RESPONSE_COMPLETE，两条消息同 requestId）。先读回已执行记录复用，别再重新执行
     // ——否则会被 executedToolCallSignatures 防重挡住，误判「无可续跑工具」→ 提前收尾。
     const alreadyExecutedThisTurn = executionsByRequest.get(complete.requestId) ?? [];
-    let executedThisTurn: ToolExecutionRecord[] = [...alreadyExecutedThisTurn];
+    const executedThisTurn: ToolExecutionRecord[] = [...alreadyExecutedThisTurn];
 
     if (alreadyExecutedThisTurn.length === 0) {
       // TOOL_CALL 通道没先到：兜底在这里解析并执行。用本请求注入的那份描述符（与提示词同源）。
@@ -2389,24 +2445,25 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       );
       for (const call of calls) {
         const execution = await executeDetected(call, complete.requestId);
-        if (execution) {
-          continuationLoop.toolExecutions.push(execution);
-          executedThisTurn.push(execution);
-        }
-      }
-    } else {
-      // 复用已执行结果：也要补进 loop.toolExecutions（如果还没被 TOOL_CALL 通道 push 过）。
-      for (const execution of alreadyExecutedThisTurn) {
-        if (!continuationLoop.toolExecutions.includes(execution)) {
-          continuationLoop.toolExecutions.push(execution);
-        }
+        if (execution) executedThisTurn.push(execution);
       }
     }
 
-    // 更新上一轮可见正文，供 nudge 回看。
-    continuationLoop.lastVisibleText = complete.assistantText;
-    // 续跑轮每轮更新最终回传正文。
-    continuationLoop.finalAssistantText = complete.assistantText;
+    // ⚠️ **执行期间循环可能已经被收掉**（取消 / 手动停止宽限都跑在串行队列之外）——
+    // 那一轮的终态已由收掉它的路径负责，这里只把结果交给面板（面板只认 requestId），
+    // 绝不能写进一条已经结束的循环。
+    const loopAlive = continuationLoop === loop;
+    if (loopAlive) {
+      // 复用已执行结果时也要补进 `loop.toolExecutions`（如果还没被 TOOL_CALL 通道 push 过）。
+      for (const execution of executedThisTurn) {
+        if (!loop.toolExecutions.includes(execution)) loop.toolExecutions.push(execution);
+      }
+      // 更新上一轮可见正文，供 nudge 回看。
+      loop.lastVisibleText = complete.assistantText;
+      // ⚠️ **只在有正文时更新** —— 纯工具轮（模型只吐 XML）的 `assistantText` 是空串，
+      // 无条件覆盖会让「跑到步数上限 / 纠错用尽」的收尾把最终正文写成空。
+      if (complete.assistantText) loop.finalAssistantText = complete.assistantText;
+    }
 
     // 工具调用面板（本节所有执行过的工具收成一块）。**尽力而为** ——
     // 找不到锚点就不挂，不影响执行链与续跑判定。
@@ -2422,6 +2479,9 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     // （`advanceContinuationLoop()` 推进下一轮、nudge 分支），
     // 只放收尾的话中间那些轮的块会一直摊着。
     toolPanel.sealTurn(complete.requestId);
+
+    // 循环在工具执行期间已被收掉 ⇒ 面板已经画完，这一轮到此为止（不推进、不再收尾）。
+    if (!loopAlive) return;
 
     // 核心判定：本轮模型有没有「可续跑」的工具。
     const continuable = executedThisTurn.filter(isContinuableExecution);
@@ -2439,11 +2499,14 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     //    会命中「文本为空 ⇒ 需要 nudge」那一档、走通用提示，模型未必知道该改什么。
     // ③ **前置条件是「本轮无可续跑工具」**（走到这里已经成立）—— 与原生轮同口径。
     if (complete.misusedNativeToolNames?.length) {
-      if (continuationLoop.nudgeCount >= ZAI_INLINE_AGENT_MAX_NUDGES) {
-        finishContinuationLoop(continuationLoop);
+      if (loop.nudgeCount >= ZAI_INLINE_AGENT_MAX_NUDGES) {
+        console.log('[Zai++] misuse correction limit reached; failing the task', {
+          step: loop.stepCount,
+        });
+        failContinuationLoop(loop, ZAI_CONTINUATION_LOOP_MISSING_CODE);
         return;
       }
-      await submitMisuseCorrection(continuationLoop, complete);
+      await submitMisuseCorrection(loop, complete);
       return;
     }
 
@@ -2451,40 +2514,48 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     // （比如「接下来读文件」却没吐工具），就发 nudge 让它继续，而不是直接收尾。
     // 这就是「记忆+建文件分两步」不会烂尾的关键。
     const shouldNudgeNow =
-      continuationLoop.nudgeCount < ZAI_INLINE_AGENT_MAX_NUDGES &&
+      loop.nudgeCount < ZAI_INLINE_AGENT_MAX_NUDGES &&
       shouldNudgeZai(
-        continuationLoop.originalTask,
-        continuationLoop.toolExecutions,
+        loop.originalTask,
+        loop.toolExecutions,
         complete.assistantText,
       );
     if (shouldNudgeNow) {
-      continuationLoop.nudgeCount += 1;
       // 实时拉取最新工具目录，nudge 轮注入的「可用工具清单」同样实时。
       // ⚠️ 用返回值而不是模块状态：模块状态按「最新一次同步生效」落地，本次可能被顶掉。
       const nudgeState = await loadAndSyncRuntimeState();
+      // ⚠️⚠️ **await 之后必须验身份再用** —— 这期间取消分支（不在串行队列上）
+      // 可能已经把循环收掉或顶替。此后一律用 `loop`，不再读模块变量，
+      // 否则会把「另一条循环的任务」与「这一轮的正文」拼进同一条 nudge。
+      if (continuationLoop !== loop || loop.status !== 'running') return;
+      if (!isSessionStillCurrent(loop.chatSessionId)) {
+        console.log('[Zai++] nudge continuation session changed; failing the task', {
+          step: loop.stepCount,
+        });
+        failContinuationLoop(loop, ZAI_CONTINUATION_LOOP_MISSING_CODE);
+        return;
+      }
+      loop.nudgeCount += 1;
       const nudgeToolNames = catalogNamesFor(modelFacingDescriptorsFor(nudgeState.descriptors));
       const nudgePrompt = buildZaiNudgePrompt(
-        continuationLoop.originalTask,
+        loop.originalTask,
         complete.assistantText,
-        continuationLoop.toolExecutions,
-        continuationLoop.nudgeCount,
+        loop.toolExecutions,
+        loop.nudgeCount,
         nudgeToolNames,
       );
-      // ⚠️ **await 之后必须重新取，且要判 null** —— `submitContinuationViaPage` 内部最长等 5 秒，
-      // 这期间 `chrome.runtime.onMessage` 的取消分支（不在串行队列上）可能已经把
-      // `continuationLoop` 置空 ⇒ 直接读它会抛 TypeError，被外层 catch 吞成一行日志、nudge 静默丢弃。
-      const nudgeLoop = continuationLoop;
-      if (!nudgeLoop) return;
-      const nudgeStepAtArm = nudgeLoop.stepCount;
-      const nudgeAtArm = nudgeLoop.nudgeCount;
-      const nudgeEvidence = await submitContinuationViaPage(nudgePrompt);
+      const nudgeStepAtArm = loop.stepCount;
+      const nudgeAtArm = loop.nudgeCount;
+      const { evidence: nudgeEvidence, reason: nudgeReason } =
+        await submitContinuationWithRetry(nudgePrompt, loop);
+      if (continuationLoop !== loop || loop.status !== 'running') return;
       if (nudgeEvidence === 'unsent') {
         reportContinuationSendNotObserved(
-          nudgeLoop,
+          loop,
           '[Zai++] nudge continuation was not observed',
-          { step: nudgeStepAtArm },
+          { step: nudgeStepAtArm, reason: nudgeReason },
         );
-        finishContinuationLoop(nudgeLoop);
+        failContinuationLoop(loop, classifyContinuationSendFailure(nudgeReason));
         return;
       }
       if (nudgeEvidence === 'ambiguous') {
@@ -2492,13 +2563,13 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
         console.log('[Zai++] nudge continuation left no evidence; arming the watchdog', {
           step: nudgeStepAtArm,
         });
-        armAmbiguousSendWatchdog(nudgeLoop, nudgeStepAtArm, nudgeAtArm);
+        armAmbiguousSendWatchdog(loop, nudgeStepAtArm, nudgeAtArm);
       }
       return;
     }
 
     // 无可续跑工具、也没有待办 → 收尾。
-    finishContinuationLoop(continuationLoop);
+    finishContinuationLoop(loop);
     return;
   }
 
@@ -2574,7 +2645,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     const orphanTaskId = taskIdByRequestId.get(complete.requestId);
     if (orphanTaskId) {
       clearActiveDomTask(orphanTaskId);
-      console.error('[Zai++] no chat session id; failing the task instead of starting a loop', {
+      console.log('[Zai++] no chat session id; failing the task instead of starting a loop', {
         taskId: orphanTaskId,
         requestId: complete.requestId,
         pathname: location.pathname,
@@ -2631,8 +2702,17 @@ async function advanceContinuationLoop(): Promise<void> {
 
   // 本轮无任何可续跑工具就别再推进——直接收尾，避免空转注入。
   const continuable = loop.toolExecutions.filter(isContinuableExecution);
-  if (continuable.length === 0 || loop.stepCount >= ZAI_INLINE_AGENT_MAX_STEPS) {
+  if (continuable.length === 0) {
     finishContinuationLoop(loop);
+    return;
+  }
+  // ⚠️ **步数用尽与「没有可续跑工具」是两件事**：前者是**截断**（模型还没收口就被切断），
+  // 按成功上报会让自动化显示「跑完了」而正文往往是空串。
+  if (loop.stepCount >= ZAI_INLINE_AGENT_MAX_STEPS) {
+    console.log('[Zai++] continuation step limit reached; failing the task', {
+      step: loop.stepCount,
+    });
+    failContinuationLoop(loop, ZAI_CONTINUATION_LOOP_MISSING_CODE);
     return;
   }
 
@@ -2643,6 +2723,18 @@ async function advanceContinuationLoop(): Promise<void> {
   // （用户新增 skill / MCP 后，续跑轮立刻能用到，而非首条消息时的快照）。
   // ⚠️ 用返回值而不是模块状态：模块状态按「最新一次同步生效」落地，本次可能被顶掉。
   const loopState = await loadAndSyncRuntimeState();
+  // ⚠️⚠️ **await 之后必须验身份** —— 这期间 `CANCEL_DOM_TASK` / 手动停止宽限
+  // 都可能把这条循环收掉（两者都跑在串行队列之外）。不验就会给一条已经结束的循环
+  // 再注入一轮：页面上多出一轮没人认领的对话，而它的完成事件只会走 orphan 分支静默返回。
+  if (continuationLoop !== loop || loop.status !== 'running') return;
+  // 会话已切走 ⇒ 这一轮不能再发（发送原语里还有一道紧贴提交的同类判据）。
+  if (!isSessionStillCurrent(loop.chatSessionId)) {
+    console.log('[Zai++] continuation session changed; failing the task', {
+      step: loop.stepCount,
+    });
+    failContinuationLoop(loop, ZAI_CONTINUATION_LOOP_MISSING_CODE);
+    return;
+  }
   // ⚠️⚠️ **这份 `toolNames` 与续跑分支的 `modelFacing` 必须同源** —— 前者写进提示词、
   // 后者决定识别与解析。
   const toolNames = catalogNamesFor(modelFacingDescriptorsFor(loopState.descriptors));
@@ -2666,25 +2758,30 @@ async function advanceContinuationLoop(): Promise<void> {
   }
 
   // 主路：复用页面原生 form submit（send 函数路线）；兜底：DOM 点按钮（只在 unsent 时）。
-  const evidence = await submitContinuationViaPage(prompt);
+  // 外层再包一层「只在瞬时出口上重试一次」——见 `submitContinuationWithRetry`。
+  const { evidence, reason } = await submitContinuationWithRetry(prompt, loop);
+  const injected = pendingUserComposerRestore;
+  pendingUserComposerRestore = null;
 
   // 注入完成后，恢复用户之前输入的草稿（如果有）。恢复时不要触发输入事件，避免误发。
-  if (pendingUserComposerRestore !== null) {
+  if (injected !== null) {
     const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
     if (textarea) {
-      setTextareaValue(textarea, pendingUserComposerRestore);
+      setTextareaValue(textarea, injected);
     }
-    pendingUserComposerRestore = null;
   }
 
+  // 发送期间循环可能已被收掉或顶替 —— 那一轮的终态已经由收掉它的那条路径负责。
+  if (continuationLoop !== loop || loop.status !== 'running') return;
+
   if (evidence === 'unsent') {
-    // 确定没发出去 ⇒ 直接收尾（这一刻没有任何副作用，收掉是安全的）。
+    // 确定没发出去 ⇒ 收尾。**不能按成功上报**（见 `failContinuationLoop`）。
     reportContinuationSendNotObserved(
       loop,
       '[Zai++] continuation submit was not observed',
-      { step: loop.stepCount },
+      { step: loop.stepCount, reason },
     );
-    finishContinuationLoop(loop);
+    failContinuationLoop(loop, classifyContinuationSendFailure(reason));
     return;
   }
   if (evidence === 'ambiguous') {
@@ -2710,7 +2807,10 @@ async function advanceContinuationLoop(): Promise<void> {
  * （`waitForAgentIdle` 超时），那种情况下页面**正在生成、而我们根本没注入**，
  * 看 Stop 会把它误判成「已经发出去了」⇒ 续跑等一个不会来的响应 ⇒ 只能等 180s 租约。
  */
-async function submitContinuationViaPage(prompt: string): Promise<ZaiSendEvidence> {
+async function submitContinuationViaPage(
+  prompt: string,
+  loop: ContinuationLoop,
+): Promise<ContinuationSendOutcome> {
   // ⚠️⚠️ **保活只在「发送链」这一段要** —— 这里是三条注入链的唯一汇合点
   // （续跑推进 / 普通 nudge / 误用纠错），所以一处覆盖三条。
   //
@@ -2725,19 +2825,51 @@ async function submitContinuationViaPage(prompt: string): Promise<ZaiSendEvidenc
   // ⚠️ **用户没开开关时这里照发不误** —— 拦在后台（`TabKeepAliveSession.want` 直接丢）。
   // 内容脚本不该知道开关状态：它可能读到旧值，而多一层判断就多一个失效点。
   //
+  // ⚠️⚠️ **`want` / `release` 都要带 `loop.loopId`** —— 这条循环被顶替时，
+  // 它的发送链可能还挂在 await 上，`finally` 里那次 release 会把**新循环**刚挂上的
+  // 会话摘掉（那时新循环还没跑满 3 分钟，长窗口那道早退拦不住）。判据见 `keepAliveOwner`。
+  //
   // ⚠️ **必须 `finally` 卸** —— 中间任何一处抛错（注入原语 / 证据等待）都不能把横幅留在那儿。
   // ⚠️ **不 await `want`**：挂不上只是退回改造前的行为，不该拖住注入。
-  void wantTabKeepAlive();
+  void wantTabKeepAlive(loop.loopId);
   try {
-    const viaForm = await trySubmitViaFormRequestSubmit(prompt);
-    if (viaForm !== 'unsent') return viaForm;
+    const viaForm = await trySubmitViaFormRequestSubmit(prompt, loop.chatSessionId);
+    if (viaForm.evidence !== 'unsent') return viaForm;
 
-    const viaDom = await sendPromptViaDom(prompt);
     // ⚠️ 兜底路返回的仍然是三态（它自己也会区分）；这里**不能**再压成布尔。
-    return viaDom;
+    return await sendPromptViaDom(prompt, loop.chatSessionId);
   } finally {
-    void releaseTabKeepAlive();
+    void releaseTabKeepAlive(loop.loopId);
   }
+}
+
+/** 「确定没发出去」之后再等这么久试一次。 */
+const CONTINUATION_SEND_RETRY_MS = 500;
+
+/**
+ * 发送一次续跑，**只在「下一秒可能自己好」的出口上重试一次**。
+ *
+ * ⚠️⚠️ **`unsent` 允许重试、`ambiguous` 绝不允许** —— 前者的全部出口都在提交动作
+ * **之前**（`form.requestSubmit()` / `sendButton.click()` 都没执行过），重试的是
+ * 「没有发生的动作」；后者是「可能已经发出去了」，再发一遍就是同一段 prompt 进两次。
+ * 这条边界由 `submitContinuationViaPage` 内部那条唯一的 `'unsent'` 守卫守着。
+ *
+ * ⚠️ **只重试白名单里的三类出口**（见 `CONTINUATION_RETRYABLE_REASONS`）——
+ * 没有输入框 / 表单脱连 / 提交抛错这三类等再久也一样，而重试一轮最长要再等 12 秒。
+ */
+async function submitContinuationWithRetry(
+  prompt: string,
+  loop: ContinuationLoop,
+): Promise<ContinuationSendOutcome> {
+  const first = await submitContinuationViaPage(prompt, loop);
+  if (first.reason === null || !CONTINUATION_RETRYABLE_REASONS.has(first.reason)) return first;
+  // ⚠️ **第二次尝试之前再验一次身份** —— 两次尝试之间夹着 500ms + 第二轮最长 12 秒，
+  // 这期间循环可能已被收掉或顶替。不验的话会把注定无人认领的 prompt 再发一遍。
+  if (continuationLoop !== loop || loop.status !== 'running') return first;
+  console.log('[Zai++] continuation submit failed; retrying once', { reason: first.reason });
+  await sleep(CONTINUATION_SEND_RETRY_MS);
+  if (continuationLoop !== loop || loop.status !== 'running') return first;
+  return submitContinuationViaPage(prompt, loop);
 }
 
 // ---------------------------------------------------------------------------
@@ -2773,18 +2905,24 @@ async function submitMisuseCorrection(
   );
   const stepAtArm = loop.stepCount;
   const nudgeAtArm = loop.nudgeCount;
-  // ⚠️ **await 之后必须重新取** —— `submitContinuationViaPage` 内部最长等 5 秒，
-  // 期间取消分支可能已经把 `continuationLoop` 置空（与普通 nudge 同一处坑）。
+  // ⚠️ **发送前两道判据**：循环还在不在（取消分支跑在串行队列之外）、会话有没有切走。
   if (continuationLoop !== loop) return;
-  const evidence = await submitContinuationViaPage(prompt);
+  if (!isSessionStillCurrent(loop.chatSessionId)) {
+    console.log('[Zai++] misuse correction session changed; failing the task', {
+      tool: toolName,
+    });
+    failContinuationLoop(loop, ZAI_CONTINUATION_LOOP_MISSING_CODE);
+    return;
+  }
+  const { evidence, reason } = await submitContinuationWithRetry(prompt, loop);
   if (continuationLoop !== loop) return;
   if (evidence === 'unsent') {
     reportContinuationSendNotObserved(
       loop,
       '[Zai++] misuse correction was not observed',
-      { tool: toolName },
+      { tool: toolName, reason },
     );
-    finishContinuationLoop(loop);
+    failContinuationLoop(loop, classifyContinuationSendFailure(reason));
     return;
   }
   if (evidence === 'ambiguous') {
@@ -3324,13 +3462,47 @@ async function runDomTask(input: {
   return { ok: true };
 }
 
+/** 一个「确定没发出去」的结果。所有 `unsent` 出口都必须带上原因。 */
+function unsentSend(reason: ContinuationSendReason): ContinuationSendOutcome {
+  return { evidence: 'unsent', reason };
+}
+
+/** 提交动作的三种失败 → 出口原因。 */
+function submitFailureReason(
+  outcome: 'no_form' | 'form_not_connected' | 'threw',
+): ContinuationSendReason {
+  if (outcome === 'no_form') return 'submit_no_form';
+  if (outcome === 'form_not_connected') return 'submit_form_not_connected';
+  return 'submit_threw';
+}
+
+/**
+ * 页面是否还停在**这一轮续跑所属的会话**上。
+ *
+ * ⚠️⚠️ **「读不到会话 id」不等于「不知道」** —— 首页 / 新会话页（`https://zchat.z.ai/`，
+ * pathname 是 `/`）**没有会话 id**，那是「明确不在任何会话里」，不是「读不出来」。
+ * 所以这里**不能放行**：放行的话续跑 prompt 会被提进一个全新对话
+ * （`readZaiChatSessionId` 的正则是 `^/c/<id>`，对 `/` 必然返回 null）。
+ * ⚠️ **调用方传进来的 `expectedSessionId` 恒非空**（循环只在 `/c/<id>` 之后才建），
+ * 所以「预期为空」这一档不存在、不需要为它留口子。
+ * ⚠️ 判的是「地址栏是否还是那个会话」—— 发送链最长会等 12 秒
+ * （8 秒等空闲 + 4 秒等发送按钮），这期间用户完全可能切走。
+ */
+function isSessionStillCurrent(expectedSessionId: string | null): boolean {
+  if (!expectedSessionId) return true;
+  return getCurrentChatSessionId() === expectedSessionId;
+}
+
 /**
  * send 函数路线（Svelte 页面里唯一可复用的「原生发送」= form.requestSubmit()）。
  * 与 DOM 点按钮同层（都要先设 textarea value + dispatch input 让 bound-value 同步），
  * 区别只在「触发提交」这一步走原生 submit 事件链而非模拟点击。
  */
-async function trySubmitViaFormRequestSubmit(prompt: string): Promise<ZaiSendEvidence> {
-  if (domSendInFlight) return 'unsent';
+async function trySubmitViaFormRequestSubmit(
+  prompt: string,
+  expectedSessionId: string | null,
+): Promise<ContinuationSendOutcome> {
+  if (domSendInFlight) return unsentSend('send_in_flight');
   domSendInFlight = true;
   /** 注入期间对输入框做的那层「看不见」的撤销函数（任何出口都要走 finally 还原）。 */
   let restoreComposerAppearance: (() => void) | null = null;
@@ -3346,13 +3518,18 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<ZaiSendEvi
   let wasDisabled = false;
   try {
     await waitForComposerReady();
-    const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
-    if (!textarea) return 'unsent';
+    let textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
+    if (!textarea) return unsentSend('no_textarea');
 
     // 等上一轮生成结束，避免首页双提交（首条消息卡在首页的根因）。
     if (!(await waitForAgentIdle())) {
-      return 'unsent';
+      return unsentSend('agent_not_idle');
     }
+
+    // ⚠️⚠️ **等完必须重取** —— 上一轮生成结束时页面会把这一小块 DOM 重建掉，
+    // 等待之前抓的引用可能已经脱连：往里写值页面收不到 ⇒ 发送按钮永远不亮 ⇒
+    // 这一发被判成失败。取不到就退回旧引用（写不进去时后面的出口会自己失败）。
+    textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR) ?? textarea;
 
     // 注入期间锁定输入框，避免用户打字与注入交错。
     wasDisabled = textarea.disabled;
@@ -3374,15 +3551,28 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<ZaiSendEvi
     if (!sendButton) {
       clearInjectedComposerText();
       textarea.disabled = wasDisabled;
-      return 'unsent';
+      return unsentSend('send_button_disabled');
+    }
+
+    // ⚠️ **提交前再取一次** —— 写值之后页面还可能重建这一小块，旧引用会脱连
+    // （对它提交只报 `form is not connected`、不发请求）。页面会把输入内容从
+    // 自己的状态里写回新节点，所以提交新节点是安全的。
+    const submitTarget = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR) ?? textarea;
+
+    // ⚠️ **会话判据必须紧贴提交** —— 上面两次等待合计最长 12 秒，用户可能已经切走；
+    // 此刻提交会把这一轮的续跑 prompt 送进**另一个对话**。
+    if (!isSessionStillCurrent(expectedSessionId)) {
+      clearInjectedComposerText();
+      textarea.disabled = wasDisabled;
+      return unsentSend('session_changed');
     }
 
     // 异常已在 `submitFormViaRequestSubmit` 内部吞掉并转成 `'threw'`，这里只判结果。
-    const outcome = submitFormViaRequestSubmit(textarea);
+    const outcome = submitFormViaRequestSubmit(submitTarget);
     if (outcome !== 'ok') {
       clearInjectedComposerText();
       textarea.disabled = wasDisabled;
-      return 'unsent';
+      return unsentSend(submitFailureReason(outcome));
     }
 
     // 提交已触发 ⇒ 页面已经读过值（见 `clearInjectedComposerText` 的说明）⇒ 立刻清掉，
@@ -3397,7 +3587,8 @@ async function trySubmitViaFormRequestSubmit(prompt: string): Promise<ZaiSendEvi
 
     // 成功判据见 `waitForSendEvidence` —— 不能用「输入框被清空」（上面那行替页面满足了它）。
     // ⚠️ 这里**不再把三态压成布尔** —— 压掉之后调用方就分不清「能不能重发」了。
-    return (await waitForSendEvidence()).evidence;
+    const { evidence } = await waitForSendEvidence();
+    return { evidence, reason: null };
   } finally {
     // ⚠️ **任何出口都要撤销那层「看不见」** —— 漏一次，用户的输入框会一直是透明的。
     restoreComposerAppearance?.();
@@ -3596,7 +3787,13 @@ const toolPanel = createToolPanelController({
       type: 'GET_TOOL_CALL_HISTORY',
       payload: { limit: TOOL_PANEL_HISTORY_LIMIT },
     });
-    return Array.isArray(history) ? history : [];
+    // ⚠️⚠️ **读失败必须抛、不能收敛成 `[]`** —— `sendRuntimeMessage` 在
+    // 「扩展上下文没了」与「sendMessage 抛错」两条路上都返回 `undefined`，
+    // 而 `[]` 与「读到了但一条记录都没有」在下游**无法区分**：面板会静默退化成
+    // 「工具名 + 已执行」（没有详情、没有保存按钮），且没有任何重试。
+    // 抛出去之后 `loadStorageLeg` 会重试一次（见那边的说明）。
+    if (!Array.isArray(history)) throw new Error('tool_history_read_failed');
+    return history;
   },
   observeRoot: () => document.getElementById('app') ?? document.body,
 });
@@ -3877,19 +4074,7 @@ function armAmbiguousSendWatchdog(
       step: loop.stepCount,
       taskId: loop.taskId,
     });
-    const stuckTaskId = loop.taskId;
-    // 先摘 taskId ⇒ `finishContinuationLoop` 不再进「回 COMPLETE」那一支。
-    loop.taskId = null;
-    finishContinuationLoop(loop);
-    if (stuckTaskId) {
-      clearActiveDomTask(stuckTaskId);
-      void sendRuntimeMessage({
-        type: 'DOM_TASK_FAILED',
-        taskId: stuckTaskId,
-        error: ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE,
-        chatSessionId: getCurrentChatSessionId(),
-      });
-    }
+    failContinuationLoop(loop, ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE);
   }, ZAI_CONTINUATION_SEND_WATCHDOG_MS);
   loop.pendingWatchdog = timer;
 }
@@ -3906,34 +4091,89 @@ function armAmbiguousSendWatchdog(
 const ZAI_CONTINUATION_SEND_WATCHDOG_MS = 5_000;
 
 /**
- * 「续跑这一发没拿到发出证据」的失败码。
+ * 「这一发没拿到发出证据」的日志。
  *
- * ⚠️ 与 `continuation_loop_missing` / `continuation_loop_superseded` 分开：
- * 那两个说的是「循环没了」，这个说的是「循环还在但这一发可能没出去」，
- * 用户能做的事不同（前者只能等，后者可以重跑）。
- */
-const ZAI_CONTINUATION_SEND_UNCONFIRMED_CODE = 'continuation_send_unconfirmed';
-
-/**
- * 「这一发确定没发出去」的上报级别 —— **按有没有后台任务分两档**。
- *
- * ⚠️⚠️ **自动化轮必须留在 `console.error`**：这些出口收尾走的是 `finishContinuationLoop`，
- * 它在 `loop.taskId` 存在时**无条件回传 `DOM_TASK_COMPLETE`**（= 成功），而协调器按
- * `ok: true` 收、scheduler 记成 `succeeded` ⇒ **多步任务在第 N 轮静默中断，界面上却是绿的**。
- * 那一类的失败在界面上没有任何痕迹，正是「必须让用户看见」的判据。
- * ⚠️ **手动轮（`taskId` 为 null）没有回传通道**，界面本来就不会显示任何东西，
- * 打 `console.error` 只是噪音 ⇒ 降成 `console.log`。
+ * ⚠️ **一律 `console.log`** —— 续跑失败是最常见、也最容易恢复的一类，把它打成
+ * `console.error` 会让扩展的错误面板长期挂着一条红字。用户可见的那一面由
+ * `failContinuationLoop` 回传的 `DOM_TASK_FAILED` 承担（自动化卡片与运行记录），
+ * 日志只负责给出成因。
+ * ⚠️ **刻意保留第一个形参**（不叫、也不读）：三处调用点都传 `loop`，
+ * 去掉它会让调用点看不出「这条日志属于哪条循环」。`noUnusedParameters` 用下划线前缀豁免。
  */
 function reportContinuationSendNotObserved(
-  loop: ContinuationLoop,
+  _loop: ContinuationLoop,
   message: string,
   detail: Record<string, unknown>,
 ): void {
-  if (loop.taskId) {
-    console.error(message, detail);
-    return;
-  }
   console.log(message, detail);
+}
+
+/**
+ * **把这一轮续跑判为失败并收尾。**
+ *
+ * ⚠️⚠️ **必须走这个函数，不能直接 `finishContinuationLoop`** —— 后者在 `loop.taskId`
+ * 存在时无条件回传 `DOM_TASK_COMPLETE`（= 成功），协调器按 `ok: true` 收、
+ * scheduler 记成 `succeeded` ⇒ **多步任务在第 N 轮静默中断，界面上却是绿的**。
+ *
+ * ⚠️ **顺序是承重的**：先摘 `taskId`，`finishContinuationLoop` 才不进「回 COMPLETE」那一支；
+ * 而 `clearActiveDomTask` 那句写在 `finishContinuationLoop` 的 `if (loop.taskId)` 块里，
+ * 摘掉之后就不会执行 ⇒ 必须在这里自己清（不清会在 `activeDomTasks` 里留一条僵尸，
+ * 把后续所有自动化判成 `busy`）。
+ *
+ * ⚠️ **手动轮（`taskId` 为 null）只收尾、不回报** —— 它本来就没有回传通道。
+ */
+function failContinuationLoop(loop: ContinuationLoop, code: string): void {
+  const taskId = loop.taskId;
+  loop.taskId = null;
+  finishContinuationLoop(loop);
+  if (!taskId) return;
+  clearActiveDomTask(taskId);
+  void sendRuntimeMessage({
+    type: 'DOM_TASK_FAILED',
+    taskId,
+    // ⚠️ 报**这一轮真正跑的那个会话**，不是此刻地址栏里的 —— 用户切走之后
+    // 地址栏已经指向别的对话，取现值会把运行记录记到别人头上。
+    chatSessionId: loop.chatSessionId,
+    error: code,
+  });
+}
+
+/**
+ * **页面切到了别的会话（或回到首页 / 新会话页）** ⇒ 这一轮续跑再也推进不下去，收掉它。
+ *
+ * ⚠️⚠️ **判据必须是地址栏，不能是「页面 abort 了那一轮」** —— 后者只能覆盖
+ * 「正在流式接收、且 `activeRequestId` 还没被清」这一窄窗口。实际最容易卡住的三段它都盖不到：
+ * ① **答完 → 等证据 → 注入**（没有请求、没有终态，`activeRequestId` 已经是 null）；
+ * ② **HTML 挑战页**（`fetch-hook` 只发 `onHtmlChallenge`，不发终态）；
+ * ③ **发送链正在 await**（最长 12 秒，没有请求可 abort）。
+ * 这三种情况下循环会永久停在 `running`，而 `runDomTask` 的 busy 判据读的正是它
+ * ⇒ **之后这个标签页上所有自动化都会被静默拒掉**（`busy` 不在 `RETRYABLE_*` 里、不重试）。
+ *
+ * ⚠️⚠️ **回到首页也算「不在这个会话里」** —— 首页（`https://zchat.z.ai/`）与新会话页
+ * pathname 都是 `/`，`readZaiChatSessionId` 对它返回 null。所以判据写成
+ * **`current !== loop.chatSessionId`**（不是「`current` 非空且不等」）：
+ * 放行 null 会让续跑 prompt 被提进一个**全新对话**（多一条没人认领的对话 + 一次真实计费）。
+ *
+ * ⚠️⚠️ **`loop.chatSessionId !== null` 是必需的守卫** —— `onZaiSessionChange` 是
+ * 1 秒轮询驱动的，而页面刚加载时 `lastNotifiedSessionId` 的初值是 null、必然触发一次
+ * 「假变化」；那一刻若循环刚建好，缺这条会被误杀。两条建循环路径都保证它非空，
+ * 所以这条守卫不会挡住任何真实场景。
+ *
+ * ⚠️ **不设宽限窗口**：续跑只能活在它自己那条会话里 —— 切走那一刻，下一轮注入就会
+ * 打进**另一个对话**，不存在「切回来继续」的状态。所以这里只有「立刻判失败」一个选项。
+ */
+function reclaimLoopOnSessionChange(): void {
+  const loop = continuationLoop;
+  if (!loop || loop.status !== 'running') return;
+  if (!loop.chatSessionId) return;
+  const current = getCurrentChatSessionId();
+  if (current === loop.chatSessionId) return;
+  console.log('[Zai++] continuation session changed; reclaiming the loop', {
+    from: loop.chatSessionId,
+    to: current,
+    step: loop.stepCount,
+  });
+  failContinuationLoop(loop, ZAI_CONTINUATION_LOOP_MISSING_CODE);
 }
 
 function finishContinuationLoop(
@@ -3971,15 +4211,20 @@ function finishContinuationLoop(
   continuationLoop = null;
   // 循环结束了就把保活卸掉 —— 留一条挂着的 debugger 会话会让调试横幅一直挂着。
   // （正常情况下 `submitContinuationViaPage` 的 `finally` 已经卸过，这里兜底。）
-  if (!options?.preserveKeepAlive) void releaseTabKeepAlive();
+  // ⚠️ **顶替场景必须交还所有权、但不发 STOP** —— 新循环马上就要 `want`；
+  // 这里发 STOP 与它的 START 没有顺序保证，STOP 后到会把新循环的会话摘掉。
+  if (!options?.preserveKeepAlive) {
+    void releaseTabKeepAlive();
+  } else if (keepAliveOwner === loop.loopId) {
+    keepAliveOwner = null;
+  }
   // 后台 DOM 任务：续跑收尾 → 回传终态成功并清理归属。
   if (loop.taskId) {
     const task = activeDomTasks.get(loop.taskId);
-    // 固定会话：回传前强制 re-read location 的真实 /c/<id>。新建会话场景
-    // 下，loop.chatSessionId 可能是早期读到的 null；此刻页面早已跳到 /c/<id>，重新
-    // 读才能把「真实会话 id」落库，后续运行才能沿用同一个对话。
-    const liveSessionId = getCurrentChatSessionId();
-    const finalSessionId = liveSessionId ?? task?.chatSessionId ?? loop.chatSessionId;
+    // ⚠️ **会话 id 取这一轮自己跑的那个**（建循环时抓的），不是此刻地址栏里的 ——
+    // 用户中途切走会话时，读现值会把这次运行记到**另一个对话**上。
+    // 地址栏只作兜底（循环的会话 id 在两条建循环路径上都必然非空，这一档是防御）。
+    const finalSessionId = loop.chatSessionId ?? getCurrentChatSessionId() ?? task?.chatSessionId ?? null;
     clearActiveDomTask(loop.taskId);
     void sendRuntimeMessage({
       type: 'DOM_TASK_COMPLETE',
@@ -4265,8 +4510,11 @@ async function waitForAgentIdle(timeoutMs = 8_000): Promise<boolean> {
  * 注意：这里只管「发送动作是否成功发出」，**不管**后续的请求归属/续跑/收尾，
  * 那些是调用方（续跑状态机 / 自动化任务状态机）各自的职责。续跑机制不被本函数改动。
  */
-async function sendPromptPrimitive(prompt: string): Promise<ZaiSendEvidence> {
-  if (domSendInFlight) return 'unsent';
+async function sendPromptPrimitive(
+  prompt: string,
+  expectedSessionId: string | null,
+): Promise<ContinuationSendOutcome> {
+  if (domSendInFlight) return unsentSend('send_in_flight');
   domSendInFlight = true;
   /** 注入期间对输入框做的那层「看不见」的撤销函数（任何出口都要走 finally 还原）。 */
   let restoreComposerAppearance: (() => void) | null = null;
@@ -4279,13 +4527,17 @@ async function sendPromptPrimitive(prompt: string): Promise<ZaiSendEvidence> {
   let wasDisabled = false;
   try {
     await waitForComposerReady();
-    const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
-    if (!textarea) return 'unsent';
+    let textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
+    if (!textarea) return unsentSend('no_textarea');
 
     // 等上一轮生成结束，避免注入被当作用户抢答丢弃（首页首条尤其重要）。
     if (!(await waitForAgentIdle())) {
-      return 'unsent';
+      return unsentSend('agent_not_idle');
     }
+
+    // ⚠️⚠️ **等完必须重取**（理由同 `trySubmitViaFormRequestSubmit`）：生成结束时
+    // 页面会重建这一小块 DOM，旧引用可能已经脱连，写进去的内容页面收不到。
+    textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR) ?? textarea;
 
     wasDisabled = textarea.disabled;
     textarea.disabled = true;
@@ -4302,7 +4554,14 @@ async function sendPromptPrimitive(prompt: string): Promise<ZaiSendEvidence> {
     if (!sendButton) {
       clearInjectedComposerText();
       textarea.disabled = wasDisabled;
-      return 'unsent';
+      return unsentSend('send_button_disabled');
+    }
+
+    // ⚠️ **会话判据必须紧贴点击** —— 会话已切走时点下去，这一轮的工具结果会落进另一个对话。
+    if (!isSessionStillCurrent(expectedSessionId)) {
+      clearInjectedComposerText();
+      textarea.disabled = wasDisabled;
+      return unsentSend('session_changed');
     }
 
     sendButton.click();
@@ -4314,10 +4573,10 @@ async function sendPromptPrimitive(prompt: string): Promise<ZaiSendEvidence> {
     // `ambiguous`：那一发**可能已经发出去了**，页面还没读走值，清了会把这次发送打空
     //   且失败方向静默（请求照发、正文是空的）；
     // `unsent`：**这个函数拿不到这一档** —— `classifySendEvidence` 只产出 `sent` / `ambiguous`，
-    //   `unsent` 的三个出口（无 textarea / agent 不空闲 / 点前无发送按钮）都在点击**之前**，
-    //   那三处已各自清过。
+    //   `unsent` 的四个出口（无 textarea / agent 不空闲 / 点前无发送按钮 / 会话已切走）
+    //   都在点击**之前**，那几处已各自清过。
     textarea.disabled = wasDisabled;
-    return evidence;
+    return { evidence, reason: null };
   } finally {
     // ⚠️ **任何出口都要撤销那层「看不见」** —— 漏一次，用户的输入框会一直是透明的。
     restoreComposerAppearance?.();
@@ -4327,9 +4586,12 @@ async function sendPromptPrimitive(prompt: string): Promise<ZaiSendEvidence> {
   }
 }
 
-async function sendPromptViaDom(prompt: string): Promise<ZaiSendEvidence> {
+async function sendPromptViaDom(
+  prompt: string,
+  expectedSessionId: string | null,
+): Promise<ContinuationSendOutcome> {
   // 收敛到共享发送原语：等上一轮生成结束 → 写 value → 点 send → 判定已发出。
-  return sendPromptPrimitive(prompt);
+  return sendPromptPrimitive(prompt, expectedSessionId);
 }
 
 /**
@@ -4812,7 +5074,13 @@ export default defineContentScript({
       installContinuationBubbleHider,
       installToolPanel: () => toolPanel.install(),
       onSessionChange: onZaiSessionChange,
-      handleSessionChange: () => toolPanel.handleSessionChange(),
+      // ⚠️⚠️ **两件事，顺序不能反**：先收续跑循环，再让面板换记录。
+      // 循环不收的话它会永久停在 `running`，`runDomTask` 的 busy 判据会把之后
+      // **每一次自动化**都静默拒掉（`busy` 不在可重试码里）；长窗口也不会解除。
+      handleSessionChange: () => {
+        reclaimLoopOnSessionChange();
+        toolPanel.handleSessionChange();
+      },
       refreshAuth: refreshZaiAuth,
       // 「最近活跃站」（A 兜底）：内容脚本是唯一知道页面在哪一站的上下文，
       // 由它把这个事实写进 storage 供没有页面上下文的链路（侧边栏兜底拼链接、

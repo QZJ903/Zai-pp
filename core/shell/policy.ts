@@ -2,7 +2,6 @@ import type {
   McpServerConfig,
   McpServerCreateInput,
   McpServerResultLimits,
-  McpToolAllowlist,
 } from '../mcp/types';
 import { SHELL_MCP_NATIVE_HOST, SHELL_MCP_SERVER_NAME, SHELL_TOOL_NAMES } from './contracts';
 
@@ -12,22 +11,20 @@ export interface ShellMcpPresetOptions {
   executionEnabled?: boolean;
 }
 
-export const DEFAULT_SHELL_MCP_ALLOWLIST_TOOL_NAMES = [
-  'shell_status',
-  'python_status',
-  'local_folder_pick',
-] as const;
-
-export const LOCAL_SKILL_SHELL_TOOL_NAMES = [
-  'local_folder_pick',
-] as const;
-
-export const LOCAL_FILE_SHELL_TOOL_NAMES = [
-  'local_file_stat',
-  'local_file_read',
-  'local_file_write',
-] as const;
-
+/**
+ * 新装时的 Shell Local 预设。
+ *
+ * ⚠️⚠️ **刻意不写 `allowlist`** —— 缺省由 `createMcpServer` 补成
+ * `{ mode: 'all', toolNames: [] }`，与其它 MCP 服务**同一口径**：工具级开关由用户在
+ * MCP 页自己勾，服务级启用看 `enabled`。
+ *
+ * ⚠️ **曾经这里硬编码 `mode: 'allow'` + 三个只读工具**（`shell_status` /
+ * `python_status` / `local_folder_pick`），配一个「启动时把缺的本地文件工具补回名单」
+ * 的升级函数。后果是**用户关掉的工具每次浏览器启动都被重新打开**（`mode: 'allow'` 下
+ * 关工具 = 从名单删掉，而那个升级判据正是「缺了就补」）。
+ * ⇒ 那条升级与这份名单一起删除。**不要为了「safe-by-default」把名单加回来** ——
+ * 真正的安全边界是服务默认 `enabled: false`（用户装完 host 再手动启用）。
+ */
 export function createShellMcpPresetInput(
   options: ShellMcpPresetOptions = {},
 ): McpServerCreateInput {
@@ -55,10 +52,6 @@ export function createShellMcpPresetInput(
       // 曾经取值 8，于是 local_file_write 与三个 shell_session_* 一直不可达。
       maxToolCount: 12,
     },
-    allowlist: {
-      mode: 'allow',
-      toolNames: [...DEFAULT_SHELL_MCP_ALLOWLIST_TOOL_NAMES],
-    },
     execution: {
       // ⚠️ **默认开启「自动执行」** —— 关着的时候这三个开关任一为假，`isMcpToolEnabled`
       // 就返回 false，工具列表整列显示为「未启用」（`{active}/{total} 自动` 会显示 0/12），
@@ -76,21 +69,6 @@ export function isShellMcpServer(
 ): boolean {
   return server.displayName === SHELL_MCP_SERVER_NAME ||
     server.transport.nativeHost === SHELL_MCP_NATIVE_HOST;
-}
-
-export function buildShellAllowlistUpgrade(allowlist: McpToolAllowlist): McpToolAllowlist | null {
-  if (allowlist.mode !== 'allow') return null;
-
-  const names = new Set(allowlist.toolNames);
-  const missingLocalSkillTools = LOCAL_SKILL_SHELL_TOOL_NAMES.filter((name) => !names.has(name));
-  const missingLocalFileTools = LOCAL_FILE_SHELL_TOOL_NAMES.filter((name) => !names.has(name));
-  const missing = [...missingLocalSkillTools, ...missingLocalFileTools];
-  if (missing.length === 0) return null;
-
-  return {
-    mode: 'allow',
-    toolNames: [...allowlist.toolNames, ...missing],
-  };
 }
 
 /**

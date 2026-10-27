@@ -709,6 +709,36 @@ describe('records from another conversation are never mounted', () => {
 
     expect(harness.controller.snapshot()).toEqual({ records: 0, pending: 0 });
   });
+
+  it('retainRecords keeps the matching ones and drops the rest with their pending entry', () => {
+    const harness = buildHarness();
+    harness.controller.remember([
+      record({ id: 'r1', chatSessionId: 'chat-1' }),
+      record({ id: 'r2', chatSessionId: 'chat-2' }),
+      record({ id: 'r3', chatSessionId: 'chat-1' }),
+    ]);
+    // 三条都还没渲染（宿主可用，但要等一帧）—— 此刻 pending 里也是三条。
+    expect(harness.controller.snapshot().records).toBe(3);
+
+    harness.controller.retainRecords((entry) => entry.chatSessionId === 'chat-1');
+
+    // ⚠️ 留下的两条必须**重新入 pending**（换会话后页面会重建消息节点，块得重挂）；
+    // 丢掉的那条要连 pending 一起删 —— 只删 records 会让它永远留在 pending 里。
+    expect(harness.controller.snapshot()).toEqual({ records: 2, pending: 2 });
+  });
+
+  it('retainRecords re-renders the kept records on the rebuilt DOM', () => {
+    const harness = buildHarness();
+    harness.controller.remember([record({ id: 'r1', chatSessionId: 'chat-1' })]);
+    harness.controller.renderPending();
+    expect(harness.rendered.map((entry) => entry.recordId)).toEqual(['r1']);
+
+    harness.controller.retainRecords((entry) => entry.chatSessionId === 'chat-1');
+    harness.controller.renderPending();
+
+    // 会话没变 ⇒ 同一条记录被重新排队并再渲染一次（而不是留在表里没人管）。
+    expect(harness.rendered.map((entry) => entry.recordId)).toEqual(['r1', 'r1']);
+  });
 });
 
 describe('lifecycle', () => {

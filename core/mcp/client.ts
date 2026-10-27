@@ -22,6 +22,7 @@ import type {
   McpToolDefinition,
 } from './types';
 import { getExtensionVersion } from '../version';
+import { isExtensionInternalTool } from './internal-tools';
 import {
   MCP_PROTOCOL_VERSION,
   MCP_SUPPORTED_PROTOCOL_VERSIONS,
@@ -420,11 +421,29 @@ export function applyMcpToolPolicy(tools: ToolDescriptor[], server: McpServerCon
   const names = new Set(server.allowlist.toolNames);
   return tools.map((tool) => {
     const selected = names.has(tool.name) || names.has(tool.invocationName);
-    const allowed = server.allowlist.mode === 'all'
+    // ⚠️⚠️ **内部工具不受 allowlist 约束** —— 它们由扩展自己调用
+    // （本地 Skill 导入读技能文件夹），而 MCP 页**不显示**它们（见
+    // `core/mcp/internal-tools.ts`）⇒ 用户没有任何地方能把它们「打开」。
+    // 若仍让 allowlist 决定，一旦名单变成 `deny` 或名单里没它，导入链就会
+    // 报 `mcp_tool_disabled`，而界面上无从修复。
+    // ⚠️ **只跳过 allowlist 这一层**：服务级三道门（`enabled` / `execution.enabled` /
+    // `mode`）照旧生效 —— 用户关掉整个 Shell Local 时，导入当然也不该能用。
+    // ⚠️ **判据要同时看 `name` 与 `invocationName`** —— 与 `core/zai/model-facing.ts`
+    // 那一层同口径。只判 `name` 的话，将来清单里出现 MCP 前缀名（`mcp_<serverId>_…`）
+    // 两层就会静默分叉。
+    const internal = isExtensionInternalTool(tool.name)
+      || isExtensionInternalTool(tool.invocationName);
+    // ⚠️ **链尾那个 `: !selected` 是 `mode === 'deny'` 这一档**，靠「`mode` 是闭合联合
+    // （`'all' | 'allow' | 'deny'`）+ `normalizeServerForMutation` 把未知值归一成 `'all'`」
+    // 才成立。**将来若给 `mode` 加第四档，这里会静默把它当 deny 处理，而 tsc 不会报错**
+    // （链尾的 else 吞掉一切）—— 加档时记得回来改这一处。
+    const allowed = internal
       ? true
-      : server.allowlist.mode === 'allow'
-        ? selected
-        : !selected;
+      : server.allowlist.mode === 'all'
+        ? true
+        : server.allowlist.mode === 'allow'
+          ? selected
+          : !selected;
     return {
       ...tool,
       provider: {

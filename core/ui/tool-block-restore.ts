@@ -176,6 +176,22 @@ export interface ToolBlockRestoreController {
    * ⚠️ 不 `stop()`：观察器要继续工作，只是记录不再属于当前会话。
    */
   clearAll: () => void;
+  /**
+   * **只丢不属于当前会话的记录**（`keep` 返回 false 的），其余重新排队等重挂。
+   *
+   * ⚠️⚠️ **为什么不能一律 `clearAll`** —— 会话通知是 1 秒轮询驱动的，页面刚加载时
+   * 必然触发一次「假变化」（上一次通知的会话 id 初值是 null）；而 `install()` 刚拉到的
+   * 存储腿记录会连同 `pending` 一起被清掉 ⇒ 真结果只剩历史腿那份摘要（面板退化成
+   * 「工具名 + 已执行」、没有详情、没有保存按钮），且**不会自愈**。
+   *
+   * ⚠️ **保留项要重新入 `pending`** —— 换会话后页面会重建消息节点，块得重挂；
+   * 只留着 `records` 而不排队，那一轮就再也没人去渲染它们。
+   * ⚠️ **调用方拿不到会话 id 时仍走 `clearAll`**（不知道 ≠ 都属于当前会话）。
+   * ⚠️⚠️ **这里的 `null` 口径与 `isRecordOnCurrentSession` 相反，是有意的** ——
+   * 那条是「定位腿的放行」（记录说不知道就允许它挂），这条是「表内归属的清理」
+   * （不知道属于谁就不留）。两处各回答一个问题，**别为了「统一」把判据合并**。
+   */
+  retainRecords: (keep: (record: ToolBlockRestoreRecord) => boolean) => void;
   /** 开始观察页面变动（页面重建我们的块时自动重排队）。 */
   start: () => void;
   /** 停止观察并清空全部状态。 */
@@ -554,6 +570,28 @@ export function createToolBlockRestoreController(
   }
 
   /**
+   * 只丢不属于当前会话的记录，其余重新排队等重挂。
+   *
+   * ⚠️ **保留项必须重新入 `pending`** —— 换会话后页面会重建消息节点，已经挂好的块
+   * 跟着没了；只留着 `records` 而不排队，它们就再也没人去渲染。
+   * ⚠️ **被丢弃的项要连 `pending` 一起删** —— 只删 `records` 的话，
+   * `renderPending` 会因为 `records.get(id)` 取不到而静默跳过，留下永不消费的 pending。
+   */
+  function retainRecords(keep: (record: ToolBlockRestoreRecord) => boolean): void {
+    for (const [id, record] of [...records]) {
+      if (keep(record)) {
+        pending.add(id);
+        continue;
+      }
+      records.delete(id);
+      pending.delete(id);
+    }
+    // ⚠️ 与 `requeueAll` 同形：预算归零 + 重新排一次（否则要等下一次 observer 唤醒）。
+    attempts = 0;
+    schedule();
+  }
+
+  /**
    * 找这条记录该挂哪条消息。四条腿按优先级试。
    *
    * ⚠️ **前三条都可能miss**（消息还没渲染出来），届时**返回 null 让它下轮再试** ——
@@ -756,6 +794,7 @@ export function createToolBlockRestoreController(
     renderPending,
     sealLive,
     clearAll,
+    retainRecords,
     start,
     stop,
     snapshot: () => ({ records: records.size, pending: pending.size }),

@@ -22,6 +22,7 @@ import {
   isMcpToolSelected,
   mcpToolsController,
   nextMcpToolAllowlist,
+  visibleMcpTools,
   type McpConnectionAction,
   type McpPresetKind,
 } from './mcp-tools-controller';
@@ -294,8 +295,9 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
     ? servers.find((server) => server.id === selectedId) ?? null
     : null;
   const enabledCount = servers.filter((server) => server.enabled).length;
+  // ⚠️ 与 MCP 页的工具列表同口径（剔掉内部工具）—— 否则页头显示 12、服务行显示 11。
   const toolCount = useMemo(() => servers.reduce(
-    (sum, server) => sum + countEnabledMcpTools(server, caches[server.id]?.descriptors ?? []),
+    (sum, server) => sum + countEnabledMcpTools(server, visibleMcpTools(caches[server.id])),
     0,
   ), [caches, servers]);
 

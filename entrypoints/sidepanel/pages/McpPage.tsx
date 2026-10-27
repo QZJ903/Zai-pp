@@ -28,6 +28,7 @@ import {
   isMcpToolSelected,
   isShellMcpServer,
   orderMcpToolsByPin,
+  visibleMcpTools,
   riskBadgeLabelKey,
   type McpToolRiskBadge,
 } from '../controllers/mcp-tools-controller';
@@ -724,7 +725,9 @@ function ServerRow({
     server.enabled ? (cache?.health.status ?? server.status) : 'disabled',
     t,
   );
-  const activeTools = countEnabledMcpTools(server, cache?.descriptors ?? []);
+  // ⚠️ 计数与列表同口径 —— 分母不能含列表里看不见的内部工具，否则会出现
+  // 「`10/12 自动` 而列表只有 11 条」这种对不上的显示。
+  const activeTools = countEnabledMcpTools(server, visibleMcpTools(cache));
 
   return (
     <div
@@ -758,7 +761,9 @@ function ServerRow({
         <div className="text-[11px] truncate" style={{ color: 'var(--ds-text-tertiary)' }}>
           {transportLabel(server.transport.kind)} · {t('sidepanel.mcpPage.row.autoTools', {
             active: activeTools,
-            total: cache?.descriptors.length ?? 0,
+            // ⚠️ 分母与列表同口径（剔掉内部工具）—— 否则全开时会显示「11/12 自动」
+            // 而列表只有 11 条。
+            total: visibleMcpTools(cache).length,
           })}
         </div>
         <div className="flex items-center gap-1 shrink-0" onClick={(event) => event.stopPropagation()}>
@@ -805,7 +810,11 @@ function ServerDetail({
   t: Translator;
   locale: SupportedLocale;
 }) {
-  const tools = cache?.descriptors ?? [];
+  // ⚠️ **内部工具不进这个列表** —— 它们由扩展自己调用（本地 Skill 导入读技能文件夹），
+  // 模型看不见、用户也没有使用入口。显示成可勾选的普通工具只会误导
+  //（勾上之后模型仍然不知道它存在）。真源见 `core/mcp/internal-tools.ts`。
+  // ⚠️ 只裁**显示**：`cache.descriptors` 与 `health.toolCount` 仍是 host 的事实。
+  const tools = visibleMcpTools(cache);
   // Pinning only reorders this list; the Schema projection keeps the server order.
   const orderedTools = orderMcpToolsByPin(tools, pinnedDescriptorIds);
   const serverHistory = history.filter((record) => record.call.provider?.id === server.id).slice(0, 5);
@@ -1522,7 +1531,14 @@ export function shellSetupMessage(
         isError: true,
       };
     }
-    return { message: t(`${setupKey}.ready` as LocaleMessageKey, { count: cache.health.toolCount }), isError: false };
+    // ⚠️ **这里报的是「你能看到几个」，不是 `health.toolCount`** ——
+    // 后者是 host 发布的总数（含不出现在列表里的内部工具），两个数一起显示会
+    // 出现「发现 12 个工具」而列表只有 11 条。⚠️ 「host 有没有少发」由上面那条
+    // `missingShellTools` 判据独立负责，它仍用完整清单，不受这里影响。
+    return {
+      message: t(`${setupKey}.ready` as LocaleMessageKey, { count: visibleMcpTools(cache).length }),
+      isError: false,
+    };
   }
   return { message: t(`${setupKey}.installFirst` as LocaleMessageKey), isError: false };
 }

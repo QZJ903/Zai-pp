@@ -1,4 +1,5 @@
 import type { ToolDescriptor } from '../tool/types';
+import { isExtensionInternalTool } from './internal-tools';
 import {
   getMcpCapabilityServerSettings,
 } from './capability-settings';
@@ -58,7 +59,9 @@ export function projectMcpCapabilityDescriptors(
     // Default settings are direct. Preserve the released descriptor order and
     // exclude the internal catalog controls so legacy prompt bytes stay stable.
     return {
-      descriptors: input.descriptors.filter((descriptor) => !isMcpCapabilityDescriptor(descriptor)),
+      descriptors: input.descriptors.filter(
+        (descriptor) => !isMcpCapabilityDescriptor(descriptor) && !isInternalDescriptor(descriptor),
+      ),
       directDescriptorIds: eligibleMcp.map((descriptor) => descriptor.id),
       hiddenDescriptorIds: [],
       usesCatalog: false,
@@ -69,6 +72,10 @@ export function projectMcpCapabilityDescriptors(
   const descriptors = [
     ...input.descriptors.filter((descriptor) => (
       !isMcpCapabilityDescriptor(descriptor) &&
+      // ⚠️ **内部工具在这里也要排掉** —— 它恒 `enabled: true`（MCP 页不显示、用户没有开关），
+      // 而下面的 `!isExecutableMcpDescriptor(...)` 对它是**真**（已由那条判据排除）
+      // ⇒ 不加这一条它反而会被「保留」进 descriptors。
+      !isInternalDescriptor(descriptor) &&
       (!isMcpDescriptor(descriptor) || !isExecutableMcpDescriptor(descriptor) || selectedIds.has(descriptor.id))
     )),
     ...helpers,
@@ -126,8 +133,32 @@ export function isMcpDescriptor(descriptor: ToolDescriptor): boolean {
   return descriptor.provider.kind === 'mcp';
 }
 
+/**
+ * 这条描述符是不是**扩展内部工具**（`core/mcp/internal-tools.ts`）。
+ *
+ * ⚠️ **判据同时看 `name` 与 `invocationName`** —— 与 `core/zai/model-facing.ts`
+ * 和 `applyMcpToolPolicy` 同口径，三层不许各判一套。
+ */
+function isInternalDescriptor(descriptor: ToolDescriptor): boolean {
+  return isExtensionInternalTool(descriptor.name)
+    || isExtensionInternalTool(descriptor.invocationName);
+}
+
+/**
+ * 这条 MCP 描述符**能不能被投给模型 / 被 `mcp_invoke` 调到**。
+ *
+ * ⚠️⚠️ **必须排除内部工具**（`core/mcp/internal-tools.ts`）—— 这条判据是**能力目录那条通道**
+ * 的总闸：`eligibleMcp`、adaptive 直投、`mcp_discover` 候选池、`mcp_invoke` 租约全走它。
+ * 内部工具由扩展自己调用（读技能文件夹）、对模型退役，但它**在 `applyMcpToolPolicy` 里恒为
+ * `enabled: true`**（因为 MCP 页不显示它 ⇒ 用户没有开关能关它）⇒ 少了这一条，它会经由
+ * 「恒 enabled」漏进能力目录，变成**默认开、无开关可关**的模型可见工具。
+ * ⚠️ 与 `core/zai/model-facing.ts` 是**两条独立通道**，两边都要裁（那层管注入给模型的目录）。
+ */
 export function isExecutableMcpDescriptor(descriptor: ToolDescriptor): boolean {
-  return isMcpDescriptor(descriptor) && descriptor.execution.enabled && descriptor.execution.mode !== 'disabled';
+  return isMcpDescriptor(descriptor)
+    && !isInternalDescriptor(descriptor)
+    && descriptor.execution.enabled
+    && descriptor.execution.mode !== 'disabled';
 }
 
 function selectAdaptiveDescriptors(

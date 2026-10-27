@@ -327,3 +327,127 @@ describe('continuation submit: 发送判据是三态的，Stop 只作诊断', ()
     expect(callsTo(body, 'isAgentCurrentlyRunning')).toEqual([]);
   });
 });
+
+/** 成员调用（`document.querySelector(...)` 这类 callee 是成员表达式，`callsTo` 收不到）。 */
+function memberCallsTo(node: t.Node, property: string): t.CallExpression[] {
+  const found: t.CallExpression[] = [];
+  t.traverseFast(node, (child) => {
+    if (
+      t.isCallExpression(child)
+      && t.isMemberExpression(child.callee)
+      && t.isIdentifier(child.callee.property)
+      && child.callee.property.name === property
+    ) {
+      found.push(child);
+    }
+  });
+  return found;
+}
+
+describe('continuation send: 失败必须如实上报', () => {
+  const NOT_OBSERVED_FN = 'reportContinuationSendNotObserved';
+  const FAIL_FN = 'failContinuationLoop';
+
+  /** 「没发出去」的收尾必须走失败路径，不能直接 `finishContinuationLoop`（它会回 COMPLETE）。 */
+  for (const fnName of ['advanceContinuationLoop', 'submitMisuseCorrection', 'handleResponseComplete']) {
+    it(`${fnName} 的 unsent 出口必须调 failContinuationLoop`, () => {
+      const { program, source } = context();
+      const body = findFunctionBody(program, fnName);
+      const unsentBranches = ifStatements(body).filter((statement) => {
+        const test = source.slice(statement.test.start ?? 0, statement.test.end ?? 0);
+        return test.includes("'unsent'") && containsAnyReturn(statement.consequent);
+      });
+      expect(unsentBranches.length, '应当有一条 unsent 分支').toBeGreaterThan(0);
+      for (const branch of unsentBranches) {
+        expect(
+          callsTo(branch.consequent, FAIL_FN).length,
+          'unsent 分支必须走 failContinuationLoop',
+        ).toBe(1);
+        expect(
+          callsTo(branch.consequent, 'finishContinuationLoop'),
+          'unsent 分支不许直接 finish（那会回 DOM_TASK_COMPLETE = 成功）',
+        ).toEqual([]);
+      }
+    });
+  }
+
+  it('失败码由 classifyContinuationSendFailure 决定，不许就地写三目', () => {
+    const { program } = context();
+    const body = findFunctionBody(program, 'advanceContinuationLoop');
+    expect(callsTo(body, 'classifyContinuationSendFailure')).toHaveLength(1);
+    expect(conditionalExpressions(body), '不该在调用点手写三目挑码').toEqual([]);
+  });
+
+  it('上报级别只剩 console.log（续跑失败不进扩展错误面板）', () => {
+    const { program, source } = context();
+    const body = findFunctionBody(program, NOT_OBSERVED_FN);
+    expect(source.slice(body.start ?? 0, body.end ?? 0)).not.toContain('console.error');
+  });
+});
+
+describe('continuation send: 等待之后必须重取输入框', () => {
+  for (const fnName of ['trySubmitViaFormRequestSubmit', 'sendPromptPrimitive']) {
+    it(`${fnName} 在等空闲之后、写值之前又取了一次 CHAT_INPUT_SELECTOR`, () => {
+      // ⚠️ **等待最长 8 秒，而输入框会被页面重建**（上一轮生成结束时）——
+      // 用等待之前抓的引用写值，页面收不到 ⇒ 发送按钮永不亮 ⇒ 这一发判成失败。
+      // 判据必须落在「等完之后、写值之前」这一格：提交前那次重取（表单路有、DOM 路没有）
+      // 不能替代它，否则写进去的仍是脱连节点。
+      const { program } = context();
+      const body = findFunctionBody(program, fnName);
+      const idle = callsTo(body, 'waitForAgentIdle');
+      expect(idle, '应当有一处等待空闲').toHaveLength(1);
+      const writes = callsTo(body, 'setTextareaValue');
+      expect(writes.length, '应当有写值').toBeGreaterThan(0);
+      const firstWrite = Math.min(...writes.map((call) => call.start ?? 0));
+      const refetch = memberCallsTo(body, 'querySelector').filter((call) => (
+        t.isIdentifier(call.arguments[0])
+        && call.arguments[0].name === 'CHAT_INPUT_SELECTOR'
+        && (call.start ?? 0) > (idle[0]!.start ?? 0)
+        && (call.start ?? 0) < firstWrite
+      ));
+      expect(refetch.length, '等完空闲必须重新取一次输入框再写').toBeGreaterThan(0);
+    });
+  }
+});
+
+describe('continuation loop: await 之后必须验身份', () => {
+  /** 判据：`if (continuationLoop !== loop ...)` 必须出现在提交之前，且提交之后再有一次。 */
+  function identityGuards(node: t.Node, source: string): t.IfStatement[] {
+    return ifStatements(node).filter((statement) => {
+      const test = source.slice(statement.test.start ?? 0, statement.test.end ?? 0);
+      return test.includes('continuationLoop') && test.includes('loop')
+        && (test.includes('!==') || test.includes('!='));
+    });
+  }
+
+  it('advanceContinuationLoop 在 await 之后、提交之前验一次，提交之后再验一次', () => {
+    const { program, source } = context();
+    const body = findFunctionBody(program, 'advanceContinuationLoop');
+    const submit = callsTo(body, 'submitContinuationWithRetry');
+    expect(submit, '应当有一处续跑提交').toHaveLength(1);
+    const guards = identityGuards(body, source);
+    expect(
+      guards.filter((guard) => (guard.start ?? 0) < (submit[0]!.start ?? 0)).length,
+      '提交之前必须验身份（await 期间循环可能已被收掉或顶替）',
+    ).toBeGreaterThan(0);
+    expect(
+      guards.filter((guard) => (guard.start ?? 0) > (submit[0]!.start ?? 0)).length,
+      '提交之后也要验一次（发送期间同样可能被收掉）',
+    ).toBeGreaterThan(0);
+  });
+
+  it('nudge 分支的 prompt 只用局部 loop，不再读模块变量拼内容', () => {
+    // 旧实现在 await 之后从 `continuationLoop` 重取任务与执行列表 —— 一旦被顶替，
+    // 拼出来的是「另一条循环的任务 + 这一轮的正文」。
+    const { program, source } = context();
+    const body = findFunctionBody(program, 'handleResponseComplete');
+    const nudgePrompt = callsTo(body, 'buildZaiNudgePrompt');
+    expect(nudgePrompt).toHaveLength(1);
+    const args = source.slice(
+      nudgePrompt[0]!.arguments[0]!.start ?? 0,
+      nudgePrompt[0]!.arguments[0]!.end ?? 0,
+    );
+    expect(args).toContain('loop.originalTask');
+    expect(args).not.toContain('continuationLoop.originalTask');
+  });
+});

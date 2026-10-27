@@ -532,6 +532,56 @@ describe('tool panel: block collapse state', () => {
     // ⚠️ 且**顺序是「先清、再拉」**：反过来的话新拉到的会被紧接着的清空删掉。
     expect(loadToolHistory.mock.calls.length).toBeGreaterThan(callsBefore);
   });
+
+  it('keeps the records when the session id did not actually change', async () => {
+    // ⚠️⚠️ 会话通知是 1 秒轮询驱动的，而页面刚加载时**必然**触发一次「假变化」
+    // （上一次通知的会话 id 初值是 null）。那一刻若一律清空，`install()` 刚拉到的
+    // 存储腿记录会连同 pending 一起被丢掉 ⇒ 面板只剩历史腿那份摘要
+    // （没有详情、没有保存按钮），而且**不会自愈**（存储腿只在这两处拉）。
+    buildRealisticMessage(UUID_A, '这是一段足够长的助手正文内容');
+    const panel = makePanel({ getChatSessionId: () => 'chat-1' });
+    await panel.install();
+
+    panel.rememberHistoryRecords([{
+      messageId: UUID_A,
+      parentMessageId: null,
+      content: '这是一段足够长的助手正文内容',
+      calls: [{ name: 'shell_exec', raw: '<shell_exec>{}</shell_exec>' }],
+    }], 'chat-1');
+    await settle();
+    expect(panel.snapshot().records).toBe(1);
+
+    // 同一个会话 id 再通知一次（= 启动时那次假变化）。
+    panel.handleSessionChange();
+    await settle();
+
+    expect(panel.snapshot().records, '会话没变 ⇒ 记录必须留着').toBe(1);
+    expect(document.querySelectorAll('.zpp-tool-block-item-name')).toHaveLength(1);
+  });
+
+  it('drops records from another conversation but keeps the current one', async () => {
+    // 真换会话时的判据是「记录自己冻结的 chatSessionId」—— 与当前会话严格相等才留。
+    buildRealisticMessage(UUID_A, '这是一段足够长的助手正文内容');
+    buildRealisticMessage(UUID_B, '另一条足够长的助手正文内容');
+    let sessionId = 'chat-1';
+    const panel = makePanel({ getChatSessionId: () => sessionId });
+    await panel.install();
+
+    panel.rememberHistoryRecords([{
+      messageId: UUID_A,
+      parentMessageId: null,
+      content: '这是一段足够长的助手正文内容',
+      calls: [{ name: 'shell_exec', raw: '<shell_exec>{}</shell_exec>' }],
+    }], 'chat-1');
+    await settle();
+
+    sessionId = 'chat-2';
+    panel.handleSessionChange();
+    await settle();
+
+    // 旧会话那条不匹配 ⇒ 丢掉；表里不残留。
+    expect(panel.snapshot().records).toBe(0);
+  });
 });
 
 describe('tool panel: history leg (L3) and storage leg (L2)', () => {
@@ -581,13 +631,47 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     expect(panel.snapshot().records).toBe(1);
   });
 
-  it('stays silent when the storage read fails', async () => {
+  it('retries the storage read once, then stays silent when both attempts fail', async () => {
     buildRealisticMessage(UUID_A);
-    const panel = makePanel({
-      loadToolHistory: async () => { throw new Error('boom'); },
-    });
-    // 读不到只是「没有真结果」，不该抛出去打断启动链。
+    const loadToolHistory = vi.fn(async () => { throw new Error('boom'); });
+    const panel = makePanel({ loadToolHistory });
+    // ⚠️ 读不到只是「没有真结果」，不该抛出去打断启动链 —— 但**必须先重试一次**：
+    // 启动那一刻是最挤的窗口（页面刚刷新、后台可能冷启动、batch 同时在打），
+    // 而这条链只在 install / 换会话时各跑一次，一次失败就再无机会。
     await expect(panel.install()).resolves.toBeUndefined();
+    expect(loadToolHistory, '首次 + 一次重试').toHaveBeenCalledTimes(2);
+    expect(panel.snapshot().records).toBe(0);
+  });
+
+  it('draws the real result when the retry succeeds', async () => {
+    buildRealisticMessage(UUID_A, '这是一段足够长的助手正文内容');
+    const raw = '<shell_exec>{"command":"ls"}</shell_exec>';
+    let attempt = 0;
+    const panel = makePanel({
+      loadToolHistory: async () => {
+        attempt += 1;
+        if (attempt === 1) throw new Error('cold start');
+        return [{
+          id: 'h1',
+          call: {
+            id: 'xml:ls',
+            name: 'shell_exec',
+            raw,
+            // ⚠️ 存储腿必须自带锚点才会被渲染（`resolveTarget` 对 storage 腿禁用兜底腿）。
+            source: { chatSessionId: 'chat-1', assistantMessageId: UUID_A },
+          },
+          result: { ok: true, summary: '真实结果', detail: 'ls 的真实输出' } as ToolCardResult,
+          createdAt: 5,
+        }];
+      },
+    });
+    await panel.install();
+    await settle();
+
+    // 重试救回来的那一批必须真的画出真结果（有 detail 才是真结果，不是历史腿的摘要）。
+    expect(panel.snapshot().records).toBe(1);
+    expect(document.querySelector('.zpp-tool-block-item-detail')?.textContent)
+      .toContain('ls 的真实输出');
   });
 
   it('skips the storage leg entirely without a conversation id', async () => {

@@ -1,6 +1,6 @@
 import { getMcpToolDescriptors, refreshMcpServerDiscovery } from '../mcp/discovery';
-import { getAllMcpServers, getMcpToolCache, updateMcpServer } from '../mcp/store';
-import { buildShellAllowlistUpgrade, isShellMcpServer } from '../shell';
+import { getAllMcpServers, getMcpToolCache } from '../mcp/store';
+import { isShellMcpServer } from '../shell';
 import type {
   LocalSkillImportRequest,
   LocalSkillImportBlock,
@@ -616,18 +616,10 @@ async function getShellMcpServer(): Promise<McpServerConfig> {
   if (!server.execution.enabled || server.execution.mode === 'disabled') {
     throw new Error('Shell MCP execution is disabled. Enable execution on the MCP page before importing local Skills.');
   }
-  server = await ensureLocalSkillShellToolsAllowed(server);
+  // ⚠️⚠️ **不再自动替用户打开工具** —— 这里曾经调 `buildShellAllowlistUpgrade`
+  // 把 `local_folder_pick` / `local_file_read` 等补进 allowlist，后果是用户关掉的工具
+  // 每次导入 Skill 又被打开一次。现在工具开关完全归用户；缺了就在下面按需报错。
   return server;
-}
-
-async function ensureLocalSkillShellToolsAllowed(server: McpServerConfig): Promise<McpServerConfig> {
-  const upgradedAllowlist = buildShellAllowlistUpgrade(server.allowlist);
-  if (!upgradedAllowlist) return server;
-
-  const updated = await updateMcpServer(server.id, {
-    allowlist: upgradedAllowlist,
-  });
-  return updated ?? server;
 }
 
 function parseLocalSkillHostBundle(output: JsonValue | undefined): LocalSkillHostBundle {
@@ -956,6 +948,19 @@ function formatToolFailure(result: ToolResult): string {
   }
   if (result.error?.code === 'mcp_tool_not_found' && result.name === 'local_skill_preview') {
     return 'Current Shell Native Host does not expose local_skill_preview. Reinstall Shell Native Host from the MCP page, restart the browser, then try again.';
+  }
+  // ⚠️⚠️ **`mcp_tool_disabled` 要单独给一句可操作的** —— 它的成因是「用户在 MCP 页把这个工具关掉了」，
+  // 而笼统的 `is disabled by server policy.` 既不说是哪个工具、也没告诉他去哪儿打开。
+  // ⚠️ **改前这条路基本见不到**：那时候启动链会把缺的工具自动补回 allowlist
+  // （那个升级已删除），所以用户关掉也会被悄悄打开 ⇒ 永远撞不到这个码。
+  // ⚠️ **只有 `local_folder_pick` 能走到这里** —— 内部工具（`local_skill_preview`）在
+  // `applyMcpToolPolicy` 里跳过 allowlist，只受服务级三道门约束，而那三道门各自有更早的错误码。
+  // 那条分支作为对称保留：将来内部工具的口径若变了，它会自己生效。
+  if (result.error?.code === 'mcp_tool_disabled' && result.name === 'local_folder_pick') {
+    return 'Shell MCP tool local_folder_pick is turned off. Open MCP > Shell Local, enable it in the tools list, then try again.';
+  }
+  if (result.error?.code === 'mcp_tool_disabled' && result.name === 'local_skill_preview') {
+    return 'Shell MCP tool local_skill_preview is turned off, so local Skill folders cannot be read. Open MCP > Shell Local, enable it in the tools list, then try again.';
   }
   const message = result.error?.message || result.detail || result.summary || 'Local Skill scan failed';
   if (isLegacyWindowsFolderPickerFailure(message)) {

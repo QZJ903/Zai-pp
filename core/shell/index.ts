@@ -12,10 +12,6 @@ export type {
 } from './contracts';
 
 export {
-  DEFAULT_SHELL_MCP_ALLOWLIST_TOOL_NAMES,
-  LOCAL_FILE_SHELL_TOOL_NAMES,
-  LOCAL_SKILL_SHELL_TOOL_NAMES,
-  buildShellAllowlistUpgrade,
   buildShellToolLimitUpgrade,
   createShellMcpPresetInput,
   isShellMcpServer,

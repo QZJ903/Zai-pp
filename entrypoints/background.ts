@@ -126,7 +126,6 @@ import {
 import { refreshMcpServerDiscovery } from '../core/mcp/discovery';
 import { getMcpOriginPattern, hasMcpServerOriginPermission } from '../core/mcp/transports';
 import {
-  buildShellAllowlistUpgrade,
   buildShellToolLimitUpgrade,
   createShellMcpPresetInput,
   isShellMcpServer,
@@ -679,16 +678,13 @@ async function ensureBuiltInMcpPresets() {
 
 async function ensureShellMcpCompatibility(server: McpServerConfig) {
   let nextServer = server;
-  // ⚠️ **工具上限与 allowlist 都要升** —— 只升 allowlist 的话，默认值改了也只对新装生效：
-  // 存量记录的 `limits` 由 `normalizeServerForMutation` 从存储原样读出，
-  // 而 `maxToolCount` 小于 host 工具总数时，尾部工具会在发现阶段被静默截断。
+  // ⚠️⚠️ **只升工具上限，不碰 allowlist** —— 上限小于 host 工具总数时，尾部工具会在
+  // 发现阶段被静默截断（那是真缺陷）；而 allowlist 是**用户的选择**，
+  // 启动流程不该替用户打开任何工具（曾经的「把缺的本地文件工具补回名单」已删除，
+  // 它的后果是用户关掉的工具每次启动都被重新打开）。
   const upgradedLimits = buildShellToolLimitUpgrade(server.limits);
-  const upgradedAllowlist = buildShellAllowlistUpgrade(server.allowlist);
-  if (upgradedLimits || upgradedAllowlist) {
-    nextServer = await updateMcpServer(server.id, {
-      ...(upgradedLimits ? { limits: upgradedLimits } : {}),
-      ...(upgradedAllowlist ? { allowlist: upgradedAllowlist } : {}),
-    }) ?? server;
+  if (upgradedLimits) {
+    nextServer = await updateMcpServer(server.id, { limits: upgradedLimits }) ?? server;
   }
 
   if (!nextServer.enabled || !nextServer.execution.enabled || nextServer.execution.mode === 'disabled') {
@@ -696,7 +692,7 @@ async function ensureShellMcpCompatibility(server: McpServerConfig) {
   }
 
   const hasCache = Boolean(await getMcpToolCache(nextServer.id));
-  if (!hasCache && !upgradedAllowlist && !upgradedLimits) return;
+  if (!hasCache && !upgradedLimits) return;
 
   try {
     await refreshMcpServerDiscovery(nextServer.id);

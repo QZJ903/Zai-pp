@@ -103,24 +103,16 @@ describe('local Skill importer', () => {
     }));
   });
 
-  it('adds local file tools to older Shell allowlists before picking folders', async () => {
+  it('leaves the Shell allowlist alone when picking folders', async () => {
+    // ⚠️⚠️ **导入流程不再替用户打开工具** —— 它曾经调 `buildShellAllowlistUpgrade`
+    // 把 `local_folder_pick` / `local_file_*` 补进名单，后果是用户关掉的工具
+    // 每导入一次 Skill 又被打开一次。现在工具开关完全归用户；
+    // 缺了就在执行时按需报错（文案见 `pickLocalSkillFolder` 的失败分支）。
     vi.mocked(getAllMcpServers).mockResolvedValueOnce([createShellServer(['shell_status', 'python_status'])]);
     vi.mocked(executeMcpToolCall).mockResolvedValueOnce(createFolderPickToolResult());
 
     await expect(pickLocalSkillFolder()).resolves.toBe('/Users/me/.codex/skills/demo');
-    expect(updateMcpServer).toHaveBeenCalledWith('shell-local', {
-      allowlist: {
-        mode: 'allow',
-        toolNames: [
-          'shell_status',
-          'python_status',
-          'local_folder_pick',
-          'local_file_stat',
-          'local_file_read',
-          'local_file_write',
-        ],
-      },
-    });
+    expect(updateMcpServer, '导入流程不许写 allowlist').not.toHaveBeenCalled();
   });
 
   it('refreshes Shell discovery once when the folder picker cache is stale', async () => {
@@ -159,6 +151,29 @@ describe('local Skill importer', () => {
     const pick = pickLocalSkillFolder();
     await expect(pick).rejects.toThrow('copy the generated install command');
     await expect(pick).rejects.not.toThrow('<your-extension-id>');
+  });
+
+  it('tells the user where to re-enable a tool they turned off', async () => {
+    // ⚠️⚠️ **这条是本轮改动的连带面**：改前启动链会把关掉的工具自动补回 allowlist
+    // （那个升级已删除），所以用户永远撞不到 `mcp_tool_disabled`。
+    // 现在它保持关闭 ⇒ 这里必须给一句「去哪儿打开」，而不是笼统的
+    // `is disabled by server policy.`（既不说是哪个工具、也没说去哪儿开）。
+    vi.mocked(executeMcpToolCall).mockResolvedValueOnce({
+      ok: false,
+      summary: 'MCP tool disabled',
+      detail: 'MCP tool local_folder_pick is disabled by server policy.',
+      name: 'local_folder_pick',
+      error: {
+        code: 'mcp_tool_disabled',
+        message: 'MCP tool local_folder_pick is disabled by server policy.',
+        retryable: false,
+      },
+    });
+
+    const pick = pickLocalSkillFolder();
+    await expect(pick).rejects.toThrow('Open MCP > Shell Local, enable it in the tools list');
+    // 反面自检：不能再说「重装 host」—— 重装解决不了「用户自己关掉了」。
+    await expect(pick).rejects.not.toThrow('Reinstall');
   });
 
   it('previews and imports local Skills while preserving script execution boundaries', async () => {

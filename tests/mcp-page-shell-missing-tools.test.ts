@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { translate } from '../core/i18n';
-import { SHELL_MCP_NATIVE_HOST, SHELL_MCP_SERVER_NAME, SHELL_TOOL_NAMES } from '../core/shell';
+import {
+  EXPOSED_SHELL_TOOL_NAMES,
+  SHELL_MCP_NATIVE_HOST,
+  SHELL_MCP_SERVER_NAME,
+  SHELL_TOOL_NAMES,
+} from '../core/shell';
 import type { McpServerConfig, McpToolCacheEntry, ToolDescriptor } from '../core/types';
 import { missingShellTools, shellSetupMessage } from '../entrypoints/sidepanel/pages/McpPage';
 
@@ -37,7 +42,10 @@ describe('shellSetupMessage', () => {
     const result = shellSetupMessage(shellServer, shellCache([]), translateAt('zh-CN'));
 
     expect(result.isError).toBe(false);
-    expect(result.message).toContain(`已连接，发现 ${SHELL_TOOL_NAMES.length} 个工具`);
+    // ⚠️ **报的是「列表里能看见几个」** —— 内部工具（`local_skill_preview`）由扩展自己
+    // 调用、不进 MCP 页列表，所以这里是「完整清单 − 内部工具」。若仍用
+    // `health.toolCount`（host 发布的总数），会出现「发现 12 个」而列表只有 11 条。
+    expect(result.message).toContain(`已连接，发现 ${EXPOSED_SHELL_TOOL_NAMES.length} 个工具`);
     expect(result.message).not.toContain('个工具没有返回');
   });
 

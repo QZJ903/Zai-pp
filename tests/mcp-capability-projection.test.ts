@@ -65,6 +65,38 @@ describe('MCP capability projection', () => {
       .toEqual([local.id, alpha.id, beta.id]);
   });
 
+  it('never projects extension-internal tools through any exposure mode', () => {
+    // ⚠️⚠️ **能力目录是「模型能不能看到/调到某个 MCP 工具」的第二条通道**，
+    // 与 `core/zai/model-facing.ts` 那条（注入给模型的目录）互相独立。
+    // 内部工具（`local_skill_preview`）在 `applyMcpToolPolicy` 里**恒为 enabled**
+    // —— 因为 MCP 页不显示它、用户没有开关能关它 —— 所以少了这条排除，
+    // 它会经由「恒 enabled」漏进能力目录，变成**默认开、无开关可关**的模型可见工具。
+    const internal = createMcpDescriptor('shell-local', 'local_skill_preview');
+    const ordinary = createMcpDescriptor('shell-local', 'shell_status');
+    const helpers = createMcpCapabilityToolDescriptors('en');
+
+    // 三种曝光模式各验一遍：direct / adaptive / on_demand 都不许带上它。
+    for (const mode of ['direct', 'adaptive', 'on_demand'] as const) {
+      const projection = projectMcpCapabilityDescriptors({
+        descriptors: [internal, ordinary, ...helpers],
+        settings: createSettings({
+          servers: { 'shell-local': { mode, pinnedDescriptorIds: [] } },
+        }),
+        intent: 'preview a local skill folder',
+      });
+      const visibleIds = projection.descriptors.map((descriptor) => descriptor.id);
+      expect(visibleIds, `${mode} 模式不该投内部工具`).not.toContain(internal.id);
+      expect(projection.hiddenDescriptorIds, `${mode} 模式不该把内部工具列进目录`)
+        .not.toContain(internal.id);
+      expect(projection.directDescriptorIds, `${mode} 模式不该直投内部工具`)
+        .not.toContain(internal.id);
+      // 反面自检：普通工具在 direct 模式下必须出现（否则「全部被排除」也会让上面绿）。
+      if (mode === 'direct') {
+        expect(visibleIds, '普通工具不该被一起排掉').toContain(ordinary.id);
+      }
+    }
+  });
+
   it('uses deterministic adaptive selection, honors pins, and exposes the closed catalog controls', () => {
     const local = createLocalDescriptor();
     const alpha = createMcpDescriptor('server-1', 'alpha_search');

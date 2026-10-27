@@ -1,4 +1,5 @@
 import type { ToolRiskLevel } from '../tool/types';
+import { isExtensionInternalTool } from '../mcp/internal-tools';
 
 export const SHELL_MCP_SERVER_NAME = 'Shell Local';
 export const SHELL_MCP_NATIVE_HOST = 'com.zai_pp.shell';
@@ -7,12 +8,15 @@ export const SHELL_TOOL_NAMES = ['shell_exec', 'shell_status', 'python_status', 
 export type ShellToolName = typeof SHELL_TOOL_NAMES[number];
 
 /**
- * 暴露给模型/提示词的 shell 工具名（4.3：local_skill_preview 退役）。
+ * 暴露给模型/提示词的 shell 工具名（`local_skill_preview` 退役）。
  * 完整 SHELL_TOOL_NAMES 仍保留用于执行 catalog（老会话 XML 解析），
  * 这里只裁剪「提示词里点名」的工具清单。
+ *
+ * ⚠️ **判据从 `core/mcp/internal-tools.ts` 派生** —— 与「模型可见目录」
+ * 和「MCP 页工具列表」共用同一份真源，别在这里另写工具名。
  */
 export const EXPOSED_SHELL_TOOL_NAMES = SHELL_TOOL_NAMES.filter(
-  (name) => name !== 'local_skill_preview',
+  (name) => !isExtensionInternalTool(name),
 );
 
 export interface ShellToolSpec {

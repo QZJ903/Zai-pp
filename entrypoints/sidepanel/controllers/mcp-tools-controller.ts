@@ -12,6 +12,7 @@ import {
   createShellMcpPresetInput,
   type ShellToolName,
 } from '../../../core/shell';
+import { isExtensionInternalTool } from '../../../core/mcp/internal-tools';
 import { decodeToolCallHistory } from '../../../core/tool/history-codec';
 import type { LocaleMessageKey, MessageParams } from '../../../core/i18n';
 import type {
@@ -425,6 +426,20 @@ export function isMcpToolSelected(server: McpServerConfig, tool: ToolDescriptor)
 export function isMcpToolEnabled(server: McpServerConfig, tool: ToolDescriptor): boolean {
   if (!server.enabled || !server.execution.enabled || server.execution.mode === 'disabled') return false;
   return isMcpToolSelected(server, tool);
+}
+
+/**
+ * **用户在 MCP 页能看到/能勾的工具** —— 剔掉内部工具（`core/mcp/internal-tools.ts`）。
+ *
+ * ⚠️⚠️ **只用于显示层**（列表、计数、状态行），不要拿它做「host 发布了什么」的判据 ——
+ * 那个问题用 `cache.descriptors` 或 `missingShellTools`。
+ * ⚠️ **判据同时看 `name` 与 `invocationName`** —— 与 `core/zai/model-facing.ts`
+ * 和 `applyMcpToolPolicy` 同口径，三层不许各判一套。
+ */
+export function visibleMcpTools(cache: McpToolCacheEntry | null | undefined): ToolDescriptor[] {
+  return (cache?.descriptors ?? []).filter(
+    (tool) => !isExtensionInternalTool(tool.name) && !isExtensionInternalTool(tool.invocationName),
+  );
 }
 
 export function countEnabledMcpTools(

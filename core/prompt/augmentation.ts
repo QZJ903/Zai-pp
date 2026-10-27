@@ -69,8 +69,19 @@ export function buildPromptAugmentation(
   // 之后、`## Tools` 之前）—— 这样它才与工具用法同处一段、且排在工具清单之前。
   // 站点只有 agent 模式，这段**始终注入**（目录里没有本地 Shell 工具时返回空串）。
   const sandboxHost = renderSandboxHostGuidance(toolDescriptors, locale);
+  // ⚠️⚠️ **系统提示词预设替换 `## 角色` 的正文**（不是叠加）——
+  // `presetContent` 非空表示「预设已激活且本轮命中注入频率」（判据在调用方
+  // `shouldInjectPresetForTurn`，所以「预设注入频率」这一项对角色段照常生效）。
+  // 为空时填默认文案 ⇒ **没有预设时输出与改造前逐字节相同**。
+  // ⚠️ **空串 / 纯空白也走默认** —— 预设的 `content` 在存储契约里只校验「是字符串」
+  // （`core/preset/codec.ts` 的 `stringValue`），「非空」只是 UI 约定；不兜的话
+  // 一条空预设会把角色段换成空段。
+  const roleText = presetContent && presetContent.trim()
+    ? presetContent
+    : translate(locale, 'prompt.defaultRole');
   const baseSystem = systemPromptEnabled
     ? translate(locale, 'prompt.systemChat', {
+      role: roleText,
       memories: memBlock,
       tools: toolsBlock,
       sandboxHost: sandboxHost ? `\n\n${sandboxHost}` : '',
@@ -89,7 +100,10 @@ export function buildPromptAugmentation(
     renderProjectContext(projectContext),
     renderForcedResponseLanguage(forceResponseLanguage, locale),
   ].filter(Boolean).join('\n\n');
-  const presetPrefix = presetContent ? `${presetContent}\n\n---\n\n` : '';
+  // ⚠️ **预设已经填进 `{role}`，这里只兜「系统提示词总开关关掉」那一档** ——
+  // 那时 `systemChat` 整段不注入，`{role}` 也就没有落脚点；若不在这里补一段，
+  // 用户关掉系统提示词之后预设会**静默失效**（而它明明是独立于那段模板的设置）。
+  const presetPrefix = !systemPromptEnabled && presetContent ? `${presetContent}\n\n---\n\n` : '';
   const toolReminder = systemPromptEnabled ? renderToolFormatReminder(toolDescriptors, locale) : '';
   const systemPrefix = system ? `${system}\n\n` : '';
 
