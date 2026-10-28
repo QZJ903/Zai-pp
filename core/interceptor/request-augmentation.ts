@@ -1,5 +1,4 @@
 import { DEFAULT_LOCALE, translate, type SupportedLocale } from '../i18n/background';
-import { parseSkillCommand } from '../skill/parser';
 import { isLocalIndexInstructions, buildLocalExecutionBoundary } from '../skill/local-importer';
 import { selectImplicitSkill, type LocalSkillIndex } from '../skill/local-skill-scorer';
 import { absolutizeSkillReferences, joinUnderRoot } from '../skill/local-path-rewriter';
@@ -84,22 +83,6 @@ export function resolveSkills(
   if (!primarySkill) return null;
 
   const primaryPrompt = composeResolvedInstructions(primarySkill);
-
-  const secondInvocation = parseSkillCommand('/' + args);
-  if (secondInvocation) {
-    const secondSkill = skills.find((s) => s.name === secondInvocation.skillName);
-    if (secondSkill) {
-      const userArgs = secondInvocation.args;
-      const combinedInstructions = primaryPrompt + '\n\n---\n\n' + composeResolvedInstructions(secondSkill);
-      return {
-        combinedPrompt: userArgs
-          ? wrapUserInput(combinedInstructions, userArgs, locale)
-          : combinedInstructions,
-        memoryEnabled: primarySkill.memoryEnabled || secondSkill.memoryEnabled,
-        skillName: primarySkill.name,
-      };
-    }
-  }
 
   return {
     combinedPrompt: args

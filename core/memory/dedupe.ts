@@ -10,7 +10,14 @@
  * 否则会出现「预览说没有重复、卡片说已经导入过」这种自相矛盾。
  */
 
-/** 内容归一化：小写 + 空白折叠 + 去首尾。空串表示这条记忆没有可比对的内容。 */
+/**
+ * 内容归一化：**Unicode 兼容归一化** + 小写 + 空白折叠 + 去首尾。
+ * 空串表示这条记忆没有可比对的内容。
+ *
+ * ⚠️ **NFKC 是承重的** —— 只做小写与空白折叠时，「记忆（重要）」与「记忆(重要)」、
+ * 「ＡＢＣ」与「ABC」、NFC 与 NFD 的「café」都会判成**不同内容**，于是同一段记忆
+ * 换个来源粘贴就被判成新条目、重复导入。同仓 `normalizeSearchText` 用的也是 NFKC。
+ */
 export function memoryDedupeKey(content: string): string {
-  return content.toLowerCase().replace(/\s+/g, ' ').trim();
+  return content.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
 }

@@ -249,7 +249,7 @@ export const sidepanel = {
       about: 'About',
     },
     navLabel: 'Settings sub-navigation',
-    generalDescription: 'Interface language and background settings.',
+    generalDescription: 'Interface language, background keep-alive, and background settings.',
     dataDescription: 'Local memory import, export and clear.',
     promptDescription: 'Control how memory, system prompt and presets are injected.',
     usageDescription: 'Review recent model tokens, activity, and model distribution.',
@@ -266,9 +266,9 @@ export const sidepanel = {
     jsonFormatError: 'Invalid JSON format',
     clearAllConfirm: 'Clear all memories? This cannot be undone.',
     keepaliveSection: 'Background keep-alive',
-    keepaliveSectionDescription: 'Keeps the z.ai tab running in the background, at the cost of a debug banner.',
+    keepaliveSectionDescription: 'Lets the z.ai tab work normally in the background without browser throttling, at the cost of a debug banner.',
     keepaliveTitle: 'Enable background keep-alive',
-    keepaliveDescription: 'Keeps the z.ai tab free of browser throttling while in the background, at the cost of a banner. When on, the browser shows a "Zai++ started debugging this browser" banner; if a task runs longer than 3 minutes it stays visible. Off by default — no banner, but background continuations and automations may fail.',
+    keepaliveDescription: 'When on, the browser shows a "Zai++ started debugging this browser" banner; if a task runs longer than 3 minutes it stays visible. When off, no banner appears, but background continuations and automations may fail.',
     backgroundSection: 'Background settings',
     customBackground: 'Custom background',
     customBackgroundDescription: 'Set a background image for Zai pages',
@@ -314,7 +314,7 @@ export const sidepanel = {
       modelUsageTitle: 'Model usage',
     },
     aboutSection: 'About',
-    aboutTagline: 'Agentic memory and Skill system',
+    aboutTagline: 'Agentic memory, skills, MCP, and local tools for z.ai',
   },
   promptControls: {
     title: 'Prompt controls',
@@ -592,6 +592,7 @@ export const sidepanel = {
       runFailedWithCode: 'Run failed ({code})',
       // ── schedule validation ──
       scheduleTooFrequent: 'Schedule is too frequent — 15 minutes minimum',
+      scheduleTooSparse: 'Schedule is too sparse — consecutive runs must be at most one year apart',
       scheduleNoNextRun: 'This expression has no runnable time within the next year',
       scheduleInvalidCron: 'Cron expression could not be parsed; check the minute / hour / day / month / weekday fields',
       scheduleInvalidRrule: 'RRULE could not be parsed; only MINUTELY / HOURLY / DAILY are supported',
@@ -610,7 +611,10 @@ export const sidepanel = {
       pageNoInput: 'Page input box not found — reload the Zai page and retry',
       pageBusy: 'The page is busy — retry after the current answer finishes',
       pageWrongConversation: 'The page was showing a different conversation, so this task did not run',
-      pageHandshakeTimeout: 'Timed out connecting to the page — make sure a Zai tab is open',
+      pageHandshakeTimeout: 'The Zai page did not respond to the extension — reload the Zai page and retry',
+      // ⚠️ `pageContentScriptMissing` moved to `common.pageContentScriptMissing` — the text
+      // is shared by several chains (automation handshake / saved-item insert / any future
+      // `tabs.sendMessage` failure), so it does not belong to the automation page.
       pageStopped: 'Stopped manually',
       pageContinuationBroken: 'The execution chain broke (continuation state was lost) — please retry',
       pageSendUnconfirmed: 'This continuation step could not be confirmed as sent (it may have gone through) — waiting stopped. Check the conversation before retrying',

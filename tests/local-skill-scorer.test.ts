@@ -42,6 +42,17 @@ describe('scenarioAdjustment', () => {
   it('无场景标注 → 0', () => {
     expect(scenarioAdjustment('普通描述，与周报无关', '周报', ['周报'])).toBe(0);
   });
+
+  it('同一句话同时出现在「适用」与「不适用」两块 → 不判 -1000', () => {
+    // ⚠️ 这是 `SKILL.md` 里极常见的写法：「## 不适用场景：不适用于写周报」。
+    // `distinctTerms`（去掉在适用块里出现过的词）会算成空数组，此时必须整段跳过
+    // -1000 —— 否则那个技能对「写周报」**永久无法隐式激活**（-1000 远低于阈值 100）。
+    const desc = '## 适用场景\n写周报。\n## 不适用场景\n写周报。';
+    expect(scenarioAdjustment(desc, '写周报', ['写周报', '写周', '周报'])).toBe(100);
+    // 只出现在不适用块里的词仍然要压制。
+    const distinct = '## 适用场景\n写周报。\n## 不适用场景\n写财报。';
+    expect(scenarioAdjustment(distinct, '财报', ['财报'])).toBe(-1000);
+  });
 });
 
 describe('scoreLocalSkill', () => {

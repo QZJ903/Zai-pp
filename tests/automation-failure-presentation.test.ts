@@ -52,6 +52,9 @@ describe('formatAutomationError', () => {
       'dom_automation_busy',
       'dom_automation_wrong_conversation',
       'dom_automation_dom_task_handshake_timeout',
+      // 该标签页里没有活着的内容脚本（扩展重载后的孤儿页面）。
+      // ⚠️ 与上一条分开：那个说「页面没应答」，这个说「页面里没有我们的脚本」。
+      'dom_automation_dom_task_content_script_missing',
       'dom_automation_cancelled',
       'dom_automation_continuation_loop_missing',
       'dom_automation_continuation_loop_superseded',
@@ -88,6 +91,8 @@ describe('formatAutomationError', () => {
 
     expect(source).toContain("?? 'dom_task_rejected'");
     expect(source).toContain("|| 'dom_task_failed'");
+    // 「该页面里没有活着的内容脚本」也是裸字面量，同样经 `dom_automation_` 前缀拼装。
+    expect(source).toContain("'dom_task_content_script_missing'");
   });
 
   it('covers the scheduler and reconcile codes too', () => {
@@ -107,6 +112,7 @@ describe('formatAutomationError', () => {
   it('covers every schedule validation code', () => {
     for (const code of [
       'schedule_too_frequent',
+      'schedule_too_sparse',
       'cron_no_next_run',
       'invalid_cron',
       'invalid_cron_field',

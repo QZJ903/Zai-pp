@@ -119,11 +119,17 @@ export function scenarioAdjustment(desc: string, queryNorm: string, queryTerms: 
   // not-applicable block relative to the applicable block. Ambiguous words that
   // appear in both blocks must NOT trigger -1000; let the applicable bonus or
   // baseline score decide, to avoid killing valid requests.
+  //
+  // ⚠️ **`distinctTerms` 为空时整段跳过** —— 若把「两块都提到」的查询继续交给
+  // `flexHits`，它第一行的「整串包含」判据与 `queryTerms` 无关，照样返回 true
+  // ⇒ 常见的「## 不适用场景：不适用于写周报」写法会让该技能对该查询**永久 -1000**。
   if (notApplicable) {
     const distinctTerms = applicable
       ? queryTerms.filter((term) => !flexHits(applicable, term, [term], false))
       : queryTerms;
-    if (flexHits(notApplicable, queryNorm, distinctTerms, true)) return -1000;
+    if (distinctTerms.length > 0 && flexHits(notApplicable, queryNorm, distinctTerms, true)) {
+      return -1000;
+    }
   }
   // Coverage-driven dynamic bonus, replacing the fixed +300.
   // Bonus only when coverage >= 0.6, round(coverage*100) capped at +100; avoids the weakest language unit (2-gram)

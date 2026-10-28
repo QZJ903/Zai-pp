@@ -35,8 +35,9 @@ type FailureLike = Pick<AutomationErrorState, 'code' | 'message'>;
  */
 const AUTOMATION_ERROR_KEYS: Readonly<Record<string, LocaleMessageKey>> = Object.freeze({
   // ── 排期校验（core/automation/schedule.ts 的 ScheduleError.code）──
-  // 13 个 code 归成 6 条文案：给用户看的差别只有「哪一类表达式错了」。
+  // 14 个 code 归成 8 条文案：给用户看的差别只有「哪一类表达式错了」。
   schedule_too_frequent: 'sidepanel.automationPage.error.scheduleTooFrequent',
+  schedule_too_sparse: 'sidepanel.automationPage.error.scheduleTooSparse',
   cron_no_next_run: 'sidepanel.automationPage.error.scheduleNoNextRun',
   invalid_cron: 'sidepanel.automationPage.error.scheduleInvalidCron',
   invalid_cron_field: 'sidepanel.automationPage.error.scheduleInvalidCron',
@@ -67,6 +68,10 @@ const AUTOMATION_ERROR_KEYS: Readonly<Record<string, LocaleMessageKey>> = Object
   dom_automation_busy: 'sidepanel.automationPage.error.pageBusy',
   dom_automation_wrong_conversation: 'sidepanel.automationPage.error.pageWrongConversation',
   dom_automation_dom_task_handshake_timeout: 'sidepanel.automationPage.error.pageHandshakeTimeout',
+  // 该标签页里没有活着的内容脚本（扩展重载后旧页面成了孤儿、或内容脚本没能注入）。
+  // ⚠️ **与上一条分开**：上一条是「页面在、但没应答」，这一条是「页面里根本没有我们的脚本」
+  // —— 用户该做的事不同，合并成一句话会把两类成因混在一起。
+  dom_automation_dom_task_content_script_missing: 'common.pageContentScriptMissing',
   dom_automation_cancelled: 'sidepanel.automationPage.error.pageStopped',
   dom_automation_continuation_loop_missing: 'sidepanel.automationPage.error.pageContinuationBroken',
   dom_automation_continuation_loop_superseded: 'sidepanel.automationPage.error.pageContinuationBroken',

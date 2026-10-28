@@ -381,7 +381,12 @@ function applyCompletionSignature(
 ): { url: string; headers: Record<string, string> } {
   const body = parseZaiBody(requestBody);
   if (!body) return { url, headers: {} };
-  const resigned = resignZaiCompletionRequest(url, body);
+  // ⚠️ **必须传 `baseUrl`** —— fetch hook 拿到的 `url` 可能是相对路径，
+  // 而 `resignZaiCompletionRequest` 内部要 `new URL()` 才能读 query 里的
+  // `timestamp` / `requestId` / `user_id`。相对路径解析失败时它会返回 `null`，
+  // 调用方于是沿用页面自己那份 `X-Signature`，而 body 里的 `signature_prompt`
+  // 已经被增广改写 ⇒ 签名与正文对不上，且**全程无报错**。
+  const resigned = resignZaiCompletionRequest(url, body, readPageOrigin());
   if (!resigned) return { url, headers: {} };
   return { url: resigned.url, headers: { 'X-Signature': resigned.signature } };
 }

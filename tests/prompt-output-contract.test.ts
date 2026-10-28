@@ -16,7 +16,7 @@ import {
   takeExternalizedToolPayloadText,
 } from '../core/tool/externalized-payload';
 import { findFirstXmlToolTag, getPartialXmlToolTagTailLength } from '../core/tool/xml-tags';
-import type { Memory, ToolDescriptor } from '../core/types';
+import type { ToolDescriptor } from '../core/types';
 
 const CONTRACT_DATE = Date.UTC(2026, 6, 13);
 
@@ -176,24 +176,3 @@ function mcpServer(
   };
 }
 
-function memory(
-  id: number,
-  name: string,
-  content: string,
-  pinned = false,
-): Memory {
-  return {
-    id,
-    syncId: `memory-${id}`,
-    type: 'reference',
-    name,
-    content,
-    description: '',
-    tags: ['compatibility'],
-    pinned,
-    createdAt: CONTRACT_DATE,
-    updatedAt: CONTRACT_DATE,
-    accessCount: id,
-    lastAccessedAt: CONTRACT_DATE,
-  };
-}

@@ -249,7 +249,7 @@ export const sidepanel = {
       about: '关于',
     },
     navLabel: '设置子导航',
-    generalDescription: '界面语言与背景设置。',
+    generalDescription: '界面语言、后台保活与背景设置。',
     promptDescription: '控制记忆、系统提示词与预设的注入策略。',
     usageDescription: '查看近期模型 Token、活跃度与模型分布。',
     dataDescription: '本地记忆的导入、导出和清除。',
@@ -266,9 +266,9 @@ export const sidepanel = {
     jsonFormatError: 'JSON 格式错误',
     clearAllConfirm: '确定要清除所有记忆吗？此操作不可撤销。',
     keepaliveSection: '后台保活',
-    keepaliveSectionDescription: '让 z.ai 标签在后台继续正常跑，代价是调试横幅。',
+    keepaliveSectionDescription: '让 z.ai 标签在后台可以正常使用，避免被浏览器节流，但是会显示调试横幅。',
     keepaliveTitle: '启用后台保活',
-    keepaliveDescription: '让 z.ai 标签在后台免受浏览器节流，代价是横幅。开启后浏览器顶部会显示「Zai++ started debugging this browser」；任务跑超过 3 分钟时会一直显示。默认关闭 —— 关着时不出现横幅，但后台续跑与自动化可能失败。',
+    keepaliveDescription: '开启后浏览器顶部会显示「Zai++ started debugging this browser」；任务跑超过 3 分钟时会一直显示。关闭时不出现横幅，但后台续跑与自动化可能失败。',
     backgroundSection: '背景设置',
     customBackground: '自定义背景',
     customBackgroundDescription: '为 Zai 页面设置背景图片',
@@ -314,7 +314,7 @@ export const sidepanel = {
       modelUsageTitle: '模型用量',
     },
     aboutSection: '关于',
-    aboutTagline: 'Agentic 记忆与 Skill 系统',
+    aboutTagline: 'z.ai 的 Agentic 记忆、Skill、MCP 与本地工具',
   },
   promptControls: {
     title: '提示词控制',
@@ -591,6 +591,7 @@ export const sidepanel = {
       runFailedWithCode: '运行失败（{code}）',
       // ── 排期校验 ──
       scheduleTooFrequent: '排期间隔太短，最少 15 分钟',
+      scheduleTooSparse: '排期过于稀疏，相邻两次运行最多相隔一年',
       scheduleNoNextRun: '这条表达式在未来一年内没有可运行的时间点',
       scheduleInvalidCron: 'Cron 表达式无法解析，请检查分 / 时 / 日 / 月 / 周的写法',
       scheduleInvalidRrule: 'RRULE 表达式无法解析，仅支持 MINUTELY / HOURLY / DAILY',
@@ -609,7 +610,10 @@ export const sidepanel = {
       pageNoInput: '找不到页面输入框，请刷新 Zai 页面后重试',
       pageBusy: '页面正忙，请等当前回答结束后重试',
       pageWrongConversation: '页面停在别的对话上，未执行本次任务',
-      pageHandshakeTimeout: '与页面建立连接超时，请确认 Zai 标签页已打开',
+      pageHandshakeTimeout: '页面没有响应扩展，请刷新 Zai 页面后重试',
+      // ⚠️ `pageContentScriptMissing` 已移到 `common.pageContentScriptMissing` ——
+      // 这条文案被多条链共用（自动化握手 / 收藏页插入到对话 / 将来任何
+      // `tabs.sendMessage` 失败），不属于自动化页。
       pageStopped: '已手动停止',
       pageContinuationBroken: '执行链中断（续跑状态丢失），请重试',
       pageSendUnconfirmed: '这一轮续跑没能确认发出（可能已发出），已停止等待。请先检查对话内容，再决定是否重试',

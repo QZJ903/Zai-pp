@@ -2,6 +2,14 @@ export const prompt = {
   memoryEmpty: '(No memories yet)',
   memoryDisabled: '(Memory injection disabled for this request)',
   /**
+   * Appended to a memory whose body was cut to fit the injection budget.
+   *
+   * ⚠️ This text is **read by the model** — without it the model treats the cut
+   * memory as complete and answers from half the facts, so it is a plain
+   * statement rather than a log-style `[truncated]` marker.
+   */
+  memoryTruncated: '(this memory was too long and has been truncated)',
+  /**
    * Default body of the `## Role` section — used when no system-prompt preset is active.
    *
    * ⚠️ It fills `{role}` in `systemChat`, it is not a standalone block: when a preset

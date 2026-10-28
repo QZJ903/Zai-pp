@@ -58,6 +58,104 @@ describe('summarizeUsage', () => {
   });
 });
 
+/**
+ * ⚠️ 窗口必须覆盖**恰好 `rangeDays` 个日历日**，而日历日不是等长的 ——
+ * 夏令时前拨日当地一天只有 23 小时。用 `now - n * 86400000` 推进时，
+ * 跨过前拨日那一步会落回**前一天的 23:00**，那个日历日整天从窗口里消失，
+ * 它名下的记录会被 `summarizeUsage` 当作「不在范围内」丢掉。
+ *
+ * ⚠️ **必须在 DST 时区下跑** —— 宿主时区是 Asia/Shanghai（无 DST）时这个缺陷
+ * 完全不可见，所以这组用例显式改 `process.env.TZ`，跑完恢复。
+ */
+describe('summarizeUsage across DST transitions', () => {
+  const originalTimeZone = process.env.TZ;
+
+  afterEach(() => {
+    if (originalTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTimeZone;
+  });
+
+  /**
+   * ⚠️⚠️ **必须先证明时区切换真的生效，否则这组用例全是假绿。**
+   *
+   * 若运行时忽略运行期 `process.env.TZ` 变更（或在首次取时区后就缓存），用例会退化成
+   * 宿主时区（本项目是 Asia/Shanghai，无 DST）下跑 —— 而那时 `days` 仍连续、
+   * 仍含 `2026-03-08`、`currentStreak` 仍是 4 ⇒ **断言照样全绿，守不住任何东西**
+   * （断言的前提与它要证的东西同源，等于自证）。
+   *
+   * 判据用 `getTimezoneOffset()`：纽约 2026-03-08 已进入夏令时，偏移是 **300**（UTC-5）。
+   * 宿主时区是 +480，无 DST 的时区也给不出 300 ⇒ 这条断言能真正区分「切成功 / 没切」。
+   */
+  function assertNewYorkInEffect(): void {
+    expect(
+      new Date(2026, 2, 8).getTimezoneOffset(),
+      'process.env.TZ 未生效（时区切换失败时这组用例会假绿）',
+    ).toBe(300);
+  }
+
+  it('keeps the whole calendar-day window across a spring-forward day', () => {
+    // America/New_York 2026-03-08 02:00 前拨（当地一天 23 小时）。
+    process.env.TZ = 'America/New_York';
+    assertNewYorkInEffect();
+    const now = new Date(2026, 2, 10, 12).getTime();
+    const records = [
+      makeRecord({ id: 'before', day: '2026-03-07', totalTokens: 100 }),
+      makeRecord({ id: 'spring-forward', day: '2026-03-08', totalTokens: 777 }),
+      makeRecord({ id: 'after', day: '2026-03-09', totalTokens: 100 }),
+      makeRecord({ id: 'today', day: '2026-03-10', totalTokens: 100 }),
+    ];
+
+    const seven = summarizeUsage(records, { rangeDays: 7, now });
+    expect(seven.days).toHaveLength(7);
+    expect(seven.days.map((day) => day.day)).toContain('2026-03-08');
+    expect(seven.totalTokens).toBe(1077);
+    expect(seven.activeDays).toBe(4);
+    expect(seven.currentStreak).toBe(4);
+
+    const thirty = summarizeUsage(records, { rangeDays: 30, now });
+    expect(thirty.days).toHaveLength(30);
+    expect(thirty.days.map((day) => day.day)).toContain('2026-03-08');
+    expect(thirty.totalTokens).toBe(1077);
+  });
+
+  it('keeps the whole calendar-day window across a fall-back day', () => {
+    // America/New_York 2026-11-01 回拨（当地一天 25 小时）。
+    process.env.TZ = 'America/New_York';
+    assertNewYorkInEffect();
+    const now = new Date(2026, 10, 3, 12).getTime();
+    const records = [
+      makeRecord({ id: 'a', day: '2026-10-31', totalTokens: 100 }),
+      makeRecord({ id: 'fall-back', day: '2026-11-01', totalTokens: 200 }),
+      makeRecord({ id: 'b', day: '2026-11-02', totalTokens: 100 }),
+    ];
+
+    const summary = summarizeUsage(records, { rangeDays: 7, now });
+    expect(summary.days).toHaveLength(7);
+    expect(summary.totalTokens).toBe(400);
+    expect(summary.activeDays).toBe(3);
+    // 今天（11-03）没有用量 ⇒ 连续天数从末尾数第一步就断。
+    expect(summary.currentStreak).toBe(0);
+  });
+
+  it('returns strictly consecutive, duplicate-free day keys around a DST change', () => {
+    process.env.TZ = 'America/New_York';
+    assertNewYorkInEffect();
+    const now = new Date(2026, 2, 10, 12).getTime();
+    for (const rangeDays of [7, 30] as const) {
+      const days = summarizeUsage([], { rangeDays, now }).days.map((day) => day.day);
+      expect(new Set(days).size, `rangeDays=${rangeDays}`).toBe(rangeDays);
+      // 逐项比对「日历上的次日」，不经过时间戳加法。
+      for (let index = 1; index < days.length; index += 1) {
+        const [year, month, date] = days[index - 1]!.split('-').map(Number) as [number, number, number];
+        const expected = new Date(Date.UTC(year, month - 1, date + 1));
+        const pad = (value: number) => String(value).padStart(2, '0');
+        expect(days[index], `${days[index - 1]} 的次日`)
+          .toBe(`${expected.getUTCFullYear()}-${pad(expected.getUTCMonth() + 1)}-${pad(expected.getUTCDate())}`);
+      }
+    }
+  });
+});
+
 describe('usage store', () => {
   it('upserts later server metrics for the same request id', async () => {
     const { chromeStub } = createChromeStub();

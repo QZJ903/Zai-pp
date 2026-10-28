@@ -8,14 +8,13 @@ export default function AboutSubPage({ state }: { state: SettingsState }) {
     <div className="space-y-5">
       <SettingsSection
         title={t('sidepanel.settings.aboutSection')}
-        description={t('sidepanel.settings.aboutTagline')}
       >
         <div className="flex items-center gap-2.5">
           <div
             className="w-8 h-8 rounded-lg flex items-center justify-center text-white text-[11px] font-bold"
             style={{ background: 'linear-gradient(135deg, var(--ds-blue), var(--ds-logo-gradient-end))' }}
           >
-            G+
+            Z+
           </div>
           <div>
             <div className="text-sm font-medium" style={{ color: 'var(--ds-text)' }}>

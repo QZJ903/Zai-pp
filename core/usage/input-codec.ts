@@ -1,3 +1,4 @@
+import { USAGE_MESSAGE_COUNT } from '../constants';
 import { toLocalDayKey } from './stats';
 import type {
   TokenMetricSource,
@@ -36,7 +37,7 @@ export function normalizeUsageTurnInput(input: unknown): UsageTurnRecord {
     tps: normalizePositiveNumber(value.tps, 0),
     speedSource: normalizeMetricSource(value.speedSource),
     elapsedMs: normalizePositiveNumber(value.elapsedMs, 0),
-    messageCount: normalizePositiveInteger(value.messageCount, 2),
+    messageCount: normalizePositiveInteger(value.messageCount, USAGE_MESSAGE_COUNT),
   };
 }
 

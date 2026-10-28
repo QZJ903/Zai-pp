@@ -3,6 +3,48 @@ import type { AutomationSchedule } from './types';
 export const DEFAULT_MINIMUM_INTERVAL_MINUTES = 15;
 export const MAX_CRON_LOOKAHEAD_DAYS = 370;
 
+/**
+ * 相邻两次命中允许的**最大间隔**（天）。
+ *
+ * ⚠️⚠️ **超过它的表达式一律拒建** —— 判据不是「某个日期形态」，而是周期长度：
+ * cron 五字段里相邻命中间隔大于一年的情况**只有闰日一种**
+ * （`0 0 29 2 *`，4 年一次；其余最稀是 `0 0 1 1 *` 的 365 天）。
+ *
+ * **为什么必须拒**：这类表达式能在 `MAX_CRON_LOOKAHEAD_DAYS = 370` 的窗口内
+ * 建出来（只要下一个闰日落在一年内），但**跑完一次之后重算下一次就扫不到了**
+ * ⇒ `calculateNextRunAt` 返回 `cron_no_next_run` ⇒ `nextRunAt` 恒为 null
+ * ⇒ 每分钟的扫描都会重算一次、失败一次，卡片上「排期无法计算」的红条**常驻**，
+ * 而任务永远不会再跑。用户只能手动改排期或删掉它。
+ *
+ * ⚠️ **判据放上界而不是「拒绝二月二十九日」**：按周期长度判，将来 cron 语义
+ * 扩展（加秒字段、支持 `L`/`W` 之类）时这里仍然成立；按日期形态判则会漏。
+ *
+ * ⚠️ **365 ~ 1460 之间取任何值都等价** —— 五字段 cron 里相邻命中间隔只有两档：
+ * 「每年一次」的约 365~366 天，和「闰日」的 1461 天，中间没有别的可能。
+ *
+ * ⚠️⚠️ **为什么是 366 而不是 365**：年度表达式的间隔**不是恒定 365 天** ——
+ * 判据算的是两个时刻的**毫秒差**再除以 `DAY_MS`，而跨夏令时的年度间隔会多出
+ * 那一小时的零头。实测 `0 0 10 3 *` 在 `America/New_York` 的锚点对是
+ * **365.0417 天**（2026-03-10 → 2027-03-10）；锚点若落在闰年，更是整 366 天。
+ * ⇒ 取 365 会**误拒每年一次的表达式**。366 才覆盖得住这两类零头。
+ */
+export const MAX_CRON_INTERVAL_DAYS = 366;
+
+/**
+ * 稀疏判据的扫描窗口（天）。
+ *
+ * ⚠️⚠️ **必须是独立下限，不能写成 `MAX_CRON_INTERVAL_DAYS * 倍数`** ——
+ * 第二跳要看到闰日的下一次命中（2028-02-29 → 2032-02-29）需要 **≥1461 天**窗口，
+ * 而 `× 5` 只在阈值 ≥293 时成立。阈值将来一旦下调（比如改成「最多一个月」取 31），
+ * 窗口就不够、`findNextCronRun` 扫不到第一次命中、函数走「扫不到就放行」那条分支
+ * ⇒ **本判据静默失效、闰日表达式又能建出来**，而 `scheduler.ts` 里那段
+ * 「建得进就永远成立」的注释正是建立在它有效之上。洞会无声复活。
+ *
+ * 取 `max(阈值, 1461) * 2` 而不是写死 1500：阈值若将来调到比 1461 更大，
+ * 窗口会跟着放大，不会反过来卡住新阈值。
+ */
+const SPARSE_LOOKAHEAD_DAYS = Math.max(MAX_CRON_INTERVAL_DAYS, 1461) * 2;
+
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 
@@ -128,18 +170,112 @@ export function calculateNextRunAt(
   if (isScheduleFailure(first)) return failure(first);
   if (first.value == null) return first;
 
-  const second = findNextCronRun(parsed.value.cron, parsed.value.timezone, first.value, options);
-  if (!isScheduleFailure(second) && second.value != null) {
-    const gapMinutes = (second.value - first.value) / MINUTE_MS;
-    if (gapMinutes < minimumIntervalMinutes) {
-      return error(
-        'schedule_too_frequent',
-        `Schedule interval must be at least ${minimumIntervalMinutes} minutes.`,
-      );
-    }
+  if (isCronTooFrequent(parsed.value.cron, parsed.value.timezone, minimumIntervalMinutes)) {
+    return error(
+      'schedule_too_frequent',
+      `Schedule interval must be at least ${minimumIntervalMinutes} minutes.`,
+    );
+  }
+
+  if (isCronTooSparse(parsed.value.cron, parsed.value.timezone)) {
+    return error(
+      'schedule_too_sparse',
+      `Schedule interval must be at most ${MAX_CRON_INTERVAL_DAYS} days.`,
+    );
   }
 
   return first;
+}
+
+/**
+ * 稀疏判据：相邻两次命中的间隔**超过 `MAX_CRON_INTERVAL_DAYS`** 即拒。
+ *
+ * ⚠️⚠️ **窗口必须够长** —— 默认 370 天从锚点起**扫不到闰日的第一次命中**
+ * （`0 0 29 2 *` 从 2026-01-01 起要等到 2028-02-29），于是 `first` 直接是
+ * `cron_no_next_run`、判据被静默跳过。窗口常量见 `SPARSE_LOOKAHEAD_DAYS`。
+ *
+ * ⚠️ **锚点与 `isCronTooFrequent` 共用同一个**（`localMidnightTimestamp`），
+ * 否则同一条表达式会在两个判据里看到不同的「第一次命中」。
+ *
+ * ⚠️ **锚点窗口内扫不到命中时返回 `false`（放行）** —— 那种情况由随后的
+ * `findNextCronRun` 按 `referenceAt` 如实报 `cron_no_next_run`（该建不进来还是建不进来）。
+ * 这里只负责「建得进、但滚不动」那一档。
+ *
+ * ⚠️ **成本**：只在「月字段不是全部 12 个月」时才走 —— 每月都跑的表达式不可能
+ * 稀疏，直接跳过。而长窗口里绝大多数日子被「整日跳过」快路径 O(1) 干掉。
+ * 实测（`calculateNextRunAt` 整体、含稀疏判据那两跳）：闰日表达式
+ * **UTC 约 5.5ms / America/New_York 约 7.5ms**，年度表达式（`0 0 1 11 *`）NY 约 12ms；
+ * 对照每天一次 `0 9 * * *` 约 2.2ms。
+ * ⚠️ **只在创建与刷新排期时跑，不在每分钟的扫描热路径上** —— 后者走的是
+ * `findNextCronRun`（单跳），不吃这个开销。
+ */
+function isCronTooSparse(cron: ParsedCron, timezone: string): boolean {
+  // 月字段是全集 ⇒ 每月都有机会命中 ⇒ 间隔上界只受日/周字段影响，最稀也 ≤ 366 天。
+  if (cron.month.values.size === 12) return false;
+
+  const options = { maxLookaheadDays: SPARSE_LOOKAHEAD_DAYS };
+  const anchor = localMidnightTimestamp(timezone) - MINUTE_MS;
+  const first = findNextCronRun(cron, timezone, anchor, options);
+  if (isScheduleFailure(first) || first.value == null) return false;
+  const second = findNextCronRun(cron, timezone, first.value, options);
+  if (isScheduleFailure(second) || second.value == null) return false;
+  return (second.value - first.value) / DAY_MS > MAX_CRON_INTERVAL_DAYS;
+}
+
+/**
+ * 固定锚点：`2026-01-01` 当地 00:00（再往前挪一分钟，让「当地 00:00 命中」也算进头两次）。
+ *
+ * ⚠️⚠️ **频率判据必须与调用方的 `referenceAt` 无关** —— 同一份表达式在任何时刻
+ * 都应得到同一个结论。早先的实现拿 `referenceAt` 当起点数头两次命中，于是
+ * `0,10 9 * * *`（09:00 与 09:10 相隔 10 分钟）在 08:00 被拒、在 09:05 被放行；
+ * 而自动化任务收尾时是用「完成时刻」重算下一次的 ⇒ **每小时有 50 分钟被判
+ * `schedule_too_frequent`、`nextRunAt` 恒为 null**，界面上反复出现「排期间隔太短」。
+ *
+ * ⚠️ **代价（刻意接受）**：只数「固定锚点之后头两次命中」，因此「跨午夜的那一对」
+ * （如 23:55 与次日 00:00）数不到 —— 失败方向是**放行**一个过密的表达式，
+ * 不会误拒正常表达式。要覆盖那一档得扫完整个周期，成本远高于收益。
+ */
+const FREQUENCY_ANCHOR_DATE = { year: 2026, month: 0, day: 1 } as const;
+
+/**
+ * 频率判据：从**固定锚点**起数头两次命中的间隔，短于下限即判过密。
+ *
+ * ⚠️ **锚点处扫不到命中时返回 `false`（放行）** —— 闰日这类表达式从锚点起
+ * 370 天窗口内无命中，频率无从判断；此时不该把它当成「过密」拒掉，
+ * 「窗口内无命中」由随后的 `findNextCronRun` 按它自己的 `referenceAt` 如实报。
+ */
+function isCronTooFrequent(
+  cron: ParsedCron,
+  timezone: string,
+  minimumIntervalMinutes: number,
+): boolean {
+  // 快判：同一小时内至多命中一次（分钟字段只有一个值）⇒ 相邻命中至少隔 60 分钟。
+  // 这一步把「每天/每月一次」这类最常见表达式的判据降到零成本 —— 否则每次调用
+  // 都要为锚点扫一遍那一天的 1440 分钟。⚠️ 只在下限 ≤ 60 时成立。
+  if (cron.minute.values.size === 1 && minimumIntervalMinutes <= 60) return false;
+
+  const anchor = localMidnightTimestamp(timezone) - MINUTE_MS;
+  const first = findNextCronRun(cron, timezone, anchor, {});
+  if (isScheduleFailure(first) || first.value == null) return false;
+  const second = findNextCronRun(cron, timezone, first.value, {});
+  if (isScheduleFailure(second) || second.value == null) return false;
+  return (second.value - first.value) / MINUTE_MS < minimumIntervalMinutes;
+}
+
+/** 求固定锚点那一天在 `timezone` 里的当地 00:00 时刻。 */
+function localMidnightTimestamp(timezone: string): number {
+  let candidate = Date.UTC(
+    FREQUENCY_ANCHOR_DATE.year,
+    FREQUENCY_ANCHOR_DATE.month,
+    FREQUENCY_ANCHOR_DATE.day,
+  );
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const parts = getZonedDateParts(candidate, timezone);
+    const offsetMs = (parts.hour * 60 + parts.minute) * MINUTE_MS;
+    if (offsetMs === 0) return candidate;
+    candidate -= offsetMs;
+  }
+  return candidate;
 }
 
 export function validateAutomationSchedule(
@@ -256,7 +392,17 @@ function parseCronToken(
 ): ScheduleResult<{ start: number; end: number; step: number }> {
   if (!token) return error('invalid_cron_field', 'Cron field contains an empty token.');
 
-  const [rangePart, stepPart] = token.split('/');
+  /**
+   * ⚠️ **多出来的段必须拒绝，不能静默丢弃** —— `split` 的解构会把它们扔掉：
+   * `1-2-3` 只剩 `1-2`、`1-2/3/4` 只剩 `1-2/3`，两者都**返回 ok**。
+   * 用户写了个自以为复杂的表达式，实际只生效一部分，表现是「任务跑得比预期少」，
+   * 界面上没有任何提示。标准 cron 里这两种写法都是非法的。
+   */
+  const slashParts = token.split('/');
+  if (slashParts.length > 2) {
+    return error('invalid_cron_range', `Invalid cron token "${token}": at most one "/" is allowed.`);
+  }
+  const [rangePart, stepPart] = slashParts;
   const step = stepPart == null ? 1 : Number.parseInt(stepPart, 10);
   if (!Number.isInteger(step) || step < 1) {
     return error('invalid_cron_step', `Invalid cron step "${stepPart}".`);
@@ -266,9 +412,22 @@ function parseCronToken(
     return { ok: true, value: { start: min, end: max, step } };
   }
 
-  const [startRaw, endRaw] = rangePart.split('-');
-  const start = Number.parseInt(startRaw, 10);
-  const end = endRaw == null ? start : Number.parseInt(endRaw, 10);
+  const rangeParts = (rangePart as string).split('-');
+  if (rangeParts.length > 2) {
+    return error('invalid_cron_range', `Invalid cron range "${rangePart}": at most one "-" is allowed.`);
+  }
+  const [startRaw, endRaw] = rangeParts;
+  const start = Number.parseInt(startRaw as string, 10);
+  /**
+   * ⚠️ **`n/step` 的终点是字段上界，不是 `n` 本身** —— 标准 cron 里 `0/5` 等价于
+   * 「从 0 到 59、每 5 分钟」，而早先的实现把 `end` 取成 `start`，`step` 被静默丢弃：
+   * `0/5 * * * *` 只在每小时 :00 触发一次，用户看到的是「怎么一小时才跑一次」，
+   * 既不报错也没有任何提示。只有**带 `/` 且没写范围**时才取上界，
+   * 纯数字 `5` 仍然是「只匹配 5」。
+   */
+  const end = endRaw == null
+    ? (stepPart == null ? start : max)
+    : Number.parseInt(endRaw, 10);
 
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < min || end > max || start > end) {
     return error('invalid_cron_range', `Invalid cron range "${rangePart}".`);

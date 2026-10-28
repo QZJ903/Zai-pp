@@ -57,7 +57,7 @@ export function buildPromptAugmentation(
   const promptTokens = estimateTokens(originalPrompt);
   const budget = getMemoryBudget(promptTokens);
   const selected = memoryEnabled
-    ? selectMemories(originalPrompt, [...memories], { budget, identityOnly })
+    ? selectMemories(originalPrompt, [...memories], { budget, identityOnly, locale })
     : [];
   const memBlock = memoryEnabled
     ? formatMemoriesBlock(selected, locale)
@@ -106,7 +106,7 @@ export function buildPromptAugmentation(
 
   return {
     augmented: presetPrefix + systemPrefix + visiblePromptMetadata + markVisibleUserPrompt(originalPrompt) + toolReminder,
-    usedMemoryIds: selected.map((memory) => memory.id!).filter(Boolean),
+    usedMemoryIds: selected.map((entry) => entry.memory.id!).filter(Boolean),
     renderedToolCount: systemPromptEnabled ? toolDescriptors.length : 0,
   };
 }

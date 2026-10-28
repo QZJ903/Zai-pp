@@ -1,4 +1,4 @@
-import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+import { IDBFactory } from 'fake-indexeddb';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   IndexedDb,
@@ -47,7 +47,11 @@ function memoryUpgrades(): IndexedDbUpgradeStep[] {
 beforeEach(() => {
   indexedDbFactory = new IDBFactory();
   vi.stubGlobal('indexedDB', indexedDbFactory);
-  vi.stubGlobal('IDBKeyRange', IDBKeyRange);
+  // ⚠️ `IDBKeyRange` 的桩已删 —— `core/persistence/indexeddb.ts` 现在对它零引用
+  // （唯一使用者 `deleteWhere` 随 `where().equals().delete()` 一起删了）。
+  // ⚠️ **只删本文件的这一条**：`memory-indexeddb-compatibility` / `memory-repository` /
+  // `sync-recovery-indexeddb` 三个测试各自也 stub 了它，那几处是独立文件的局部桩，
+  // 别顺手推广过去。
 });
 
 afterEach(async () => {
@@ -382,24 +386,24 @@ describe('IndexedDb thin wrapper', () => {
     expect(await memories.get(999)).toBeUndefined();
   });
 
-  it('deletes by index equality and orders by index descending primary keys', async () => {
+  it('orders by index in both directions and exposes descending primary keys', async () => {
     const db = freshDb();
     const memories = db.table('memories');
     await memories.bulkAdd([
-      { id: 1, type: 'topic', name: 'a', pinned: false, scope: 'project', projectId: 'p1', syncId: 's1' },
-      { id: 2, type: 'topic', name: 'b', pinned: false, scope: 'project', projectId: 'p1', syncId: 's2' },
-      { id: 3, type: 'topic', name: 'c', pinned: false, scope: 'global', projectId: 'p2', syncId: 's3' },
+      { id: 1, type: 'topic', name: 'a', pinned: false, syncId: 's1' },
+      { id: 2, type: 'topic', name: 'b', pinned: false, syncId: 's2' },
+      { id: 3, type: 'topic', name: 'c', pinned: false, syncId: 's3' },
     ]);
 
-    expect(await memories.where('projectId').equals('p1').delete()).toBe(2);
+    await memories.bulkDelete([1, 2]);
     expect(await memories.orderBy('id').toArray()).toEqual([
       expect.objectContaining({ id: 3 }),
     ]);
 
     await memories.bulkAdd([
-      { id: 4, type: 'topic', name: 'd', pinned: false, scope: 'project', projectId: 'p2', syncId: 's4', createdAt: 10 },
-      { id: 5, type: 'topic', name: 'e', pinned: false, scope: 'project', projectId: 'p2', syncId: 's5', createdAt: 20 },
-      { id: 6, type: 'topic', name: 'f', pinned: false, scope: 'global', projectId: 'p2', syncId: 's6', createdAt: 30 },
+      { id: 4, type: 'topic', name: 'd', pinned: false, syncId: 's4', createdAt: 10 },
+      { id: 5, type: 'topic', name: 'e', pinned: false, syncId: 's5', createdAt: 20 },
+      { id: 6, type: 'topic', name: 'f', pinned: false, syncId: 's6', createdAt: 30 },
     ]);
     expect(await memories.orderBy('createdAt').reverse().primaryKeys()).toEqual([6, 5, 4]);
     expect(await memories.count()).toBe(4);

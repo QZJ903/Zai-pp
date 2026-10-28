@@ -33,6 +33,7 @@ export const tool = {
     invalidType: 'type 必须是 user、feedback、topic 或 reference',
     invalidName: 'name 必须是非空字符串',
     invalidContent: 'content 必须是非空字符串',
+    invalidContentTooLong: 'content 太长，单条记忆最多 {max} 个字符',
     invalidTags: 'tags 必须是字符串数组',
     invalidId: '无效 ID',
     notFound: '未找到记忆',

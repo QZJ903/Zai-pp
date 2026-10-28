@@ -27,6 +27,25 @@ function nextCronRun(expression: string, timezone: string, referenceAt: number):
   throw new Error(result.error.message);
 }
 
+/**
+ * 保留错误码的版本 —— 给「期望它被拒」的用例用。
+ *
+ * ⚠️ `nextCronRun` 遇到非 `cron_no_next_run` 的错误会 throw（那是给「应当成功」的
+ * 用例用的守卫）。判「某表达式该被拒」时必须能读出**是哪个**错误码，
+ * 否则「因为别的原因被拒」也会让断言通过。
+ */
+function nextCronRunOrError(
+  expression: string,
+  timezone: string,
+  referenceAt: number,
+): { ok: true; value: number | null } | { ok: false; code: string } {
+  const result = calculateNextRunAt(cron(expression, timezone), referenceAt, {
+    minimumIntervalMinutes: 0,
+  });
+  if (result.ok) return { ok: true, value: result.value };
+  return { ok: false, code: result.error.code };
+}
+
 /** 取某时刻在该时区的当地日期（`YYYY-MM-DD`）。 */
 function localDayKey(timestamp: number, timezone: string): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -70,7 +89,9 @@ const GOLDEN: Array<[string, string, Array<number | null>]> = [
   ['0 0 1 * *', 'UTC', [1788220800000, 1806537600000, 1832976000000]],
   ['0 0 1 * *', 'Asia/Shanghai', [1790784000000, 1806508800000, 1832947200000]],
   ['0 0 1 1 *', 'UTC', [1798761600000, 1830297600000, 1861920000000]],
-  ['15 3 29 2 *', 'UTC', [null, 1835406900000, 1835406900000]],
+  // ⚠️ 原来的 `['15 3 29 2 *', ...]`（闰日）已移出黄金表 —— 它现在被
+  // `MAX_CRON_INTERVAL_DAYS` 拒掉（相邻命中间隔 4 年），见下方
+  // 「rejects an expression whose consecutive runs are more than a year apart」。
   ['0 0 1 1,7 *', 'UTC', [1798761600000, 1814400000000, 1846022400000]],
   ['59 23 31 12 *', 'Asia/Shanghai', [1798732740000, 1830268740000, 1861891140000]],
   ['0 12 * * 0', 'America/New_York', [1788710400000, 1805644800000, 1830445200000]],
@@ -216,11 +237,16 @@ describe('cron next-run calculation', () => {
   });
 
   it('handles the leap day that only exists every four years', () => {
-    // 起点在 2028 年之前不久 → 能扫到 2028-02-29。
-    expect(nextCronRun('0 0 29 2 *', 'UTC', Date.UTC(2028, 0, 1, 0, 0, 0)))
-      .toBe(Date.UTC(2028, 1, 29, 0, 0, 0));
-    // 起点离下一个闰日超过 370 天 → 如实报「窗口内无命中」，而不是硬等。
-    expect(nextCronRun('0 0 29 2 *', 'UTC', Date.UTC(2026, 8, 23, 0, 0, 0))).toBeNull();
+    // ⚠️ **闰日表达式现在整条被拒**（相邻命中间隔 4 年 > `MAX_CRON_INTERVAL_DAYS`）。
+    // 两条错误码分属两个判据，**都是拒绝**，但成因不同：
+    //   ① 下一个闰日**在** 370 天窗口内 ⇒ 先算出下一次，再由稀疏判据拒（`schedule_too_sparse`）；
+    //   ② 下一个闰日**在**窗口外 ⇒ `findNextCronRun` 当场报 `cron_no_next_run`，
+    //      稀疏判据根本没机会执行（它排在第一次查找之后）。
+    // ⚠️ 两者都拒 = 建不出来，所以「建得进、滚不动」那条路从两头都堵上了。
+    expect(nextCronRunOrError('0 0 29 2 *', 'UTC', Date.UTC(2028, 0, 1, 0, 0, 0)))
+      .toEqual({ ok: false, code: 'schedule_too_sparse' });
+    expect(nextCronRunOrError('0 0 29 2 *', 'UTC', Date.UTC(2026, 8, 23, 0, 0, 0)))
+      .toEqual({ ok: false, code: 'cron_no_next_run' });
   });
 
   it('agrees with a brute-force scan on the dense expressions', () => {
@@ -232,6 +258,8 @@ describe('cron next-run calculation', () => {
       ['0 9 * * *', 'Asia/Shanghai'],
       ['*/30 9-18 * * 1-5', 'Asia/Shanghai'],
       ['0 0-23/6 * * *', 'UTC'],
+      ['0 9/3 * * *', 'UTC'],
+      ['0 9-18/3 * * *', 'UTC'],
     ];
     for (const [expression, timezone] of cases) {
       for (const referenceAt of REFERENCES) {
@@ -240,6 +268,86 @@ describe('cron next-run calculation', () => {
           `${expression} @ ${timezone} from ${new Date(referenceAt).toISOString()}`,
         ).toBe(bruteForceNextCronRun(expression, timezone, referenceAt));
       }
+    }
+  });
+
+  it('treats "n/step" as "from n up to the field max, stepping by step"', () => {
+    // 标准 cron 语义：`n/step` 等价于 `n-max/step`，而不是「只匹配 n」。
+    // 早先的实现把终点取成 n、把 step 静默丢掉，`0/5 * * * *` 于是每小时只在 :00 触发。
+    const start = Date.UTC(2026, 9, 28, 0, 0, 0);
+    expect(collectRuns('0 9/3 * * *', 'UTC', start, 4))
+      .toEqual([9, 12, 15, 18].map((hour) => Date.UTC(2026, 9, 28, hour, 0, 0)));
+    // 带范围的写法不受影响。
+    expect(collectRuns('0 9-18/3 * * *', 'UTC', start, 4))
+      .toEqual([9, 12, 15, 18].map((hour) => Date.UTC(2026, 9, 28, hour, 0, 0)));
+    // 纯数字仍是单值 —— 别把「没写 /」也当成上界。
+    expect(collectRuns('5 * * * *', 'UTC', start, 2))
+      .toEqual([Date.UTC(2026, 9, 28, 0, 5), Date.UTC(2026, 9, 28, 1, 5)]);
+  });
+
+  it('rejects a token with extra "-" or "/" segments instead of silently dropping them', () => {
+    // ⚠️ 解构 `const [a, b] = token.split('-')` 会把多出来的段**静默丢掉**：
+    // `1-2-3` 只剩 `1-2`、`1-2/3/4` 只剩 `1-2/3`，两者都返回 ok。
+    // 用户以为写了个复杂表达式，实际只生效一部分，界面上没有任何提示。
+    for (const expression of [
+      '1-2-3 * * * *',
+      '1-2-3-4 * * * *',
+      '1-2/3/4 * * * *',
+      '1/2/3 * * * *',
+    ]) {
+      const parsed = parseAutomationSchedule(cron(expression));
+      expect(parsed.ok, expression).toBe(false);
+    }
+    // 合法形态不受影响。
+    for (const expression of [
+      '1-2 * * * *',
+      '1-2/3 * * * *',
+      '*/5 * * * *',
+      '0/5 * * * *',
+      '5 * * * *',
+      '0,20,40 * * * *',
+    ]) {
+      expect(parseAutomationSchedule(cron(expression)).ok, expression).toBe(true);
+    }
+  });
+
+  it('rejects an expression whose consecutive runs are more than a year apart', () => {
+    // ⚠️⚠️ **闰日表达式能「建得进、滚不动」** —— 只要下一个闰日落在 370 天窗口内
+    // 它就能通过创建校验，但**跑完一次之后重算下一次就扫不到了**：
+    // `nextRunAt` 恒为 null ⇒ 每分钟扫描重算一次、失败一次 ⇒ 卡片上「排期无法计算」
+    // 的红条常驻，而任务永远不会再跑。
+    //
+    // ⚠️ 判据按**周期长度**（`MAX_CRON_INTERVAL_DAYS = 366`）而不是按日期形态 ——
+    // cron 五字段里间隔 > 一年的情况只有闰日一种，但按周期判将来加秒字段也不会漏。
+    for (const referenceAt of [
+      Date.UTC(2027, 5, 1),   // 下一个闰日在窗口内 ⇒ 修之前能建
+      Date.UTC(2028, 0, 1),   // 同上
+    ]) {
+      const result = calculateNextRunAt(cron('0 0 29 2 *'), referenceAt);
+      expect(result.ok, new Date(referenceAt).toISOString()).toBe(false);
+      expect(result.ok ? null : result.error.code).toBe('schedule_too_sparse');
+    }
+
+    // 时区无关：闰日在任何时区都拒。
+    for (const timezone of ['UTC', 'Asia/Shanghai', 'America/New_York', 'Australia/Sydney']) {
+      const result = calculateNextRunAt(cron('0 0 29 2 *', timezone), Date.UTC(2028, 0, 1));
+      expect(result.ok, timezone).toBe(false);
+    }
+
+    // ⚠️ **「每年一次」必须放行** —— 间隔 365/366 天，正好在上界以内。
+    // 这条是反面自检：判据写宽了（比如上限取 365）会误拒它。
+    for (const referenceAt of [
+      Date.UTC(2026, 9, 28),
+      Date.UTC(2027, 5, 1),
+      Date.UTC(2028, 0, 1),
+    ]) {
+      const result = calculateNextRunAt(cron('0 0 1 1 *'), referenceAt);
+      expect(result.ok, new Date(referenceAt).toISOString()).toBe(true);
+    }
+
+    // 每月 / 每周 / 每天都不受影响。
+    for (const expression of ['0 0 1 * *', '0 9 * * 1', '0 9 * * *', '0 0 1 1,7 *']) {
+      expect(calculateNextRunAt(cron(expression), Date.UTC(2026, 9, 28)).ok, expression).toBe(true);
     }
   });
 
@@ -285,6 +393,39 @@ describe('minimum interval guard', () => {
     expect(calculateNextRunAt(rrule('FREQ=MINUTELY;INTERVAL=15'), referenceAt).ok).toBe(true);
   });
 
+  it('gives the same verdict regardless of the reference time', () => {
+    // ⚠️ 频率是**表达式自身的属性**，不该随「此刻几点」变。这条用例守两个后果：
+    // ① **校验不稳定** —— 早先的判据从 referenceAt 起数头两次命中，`0,10 9 * * *`
+    //    （09:00 与 09:10 相隔 10 分钟）在 08:00 被拒、在 09:05 被放行；
+    // ② **建成后每天只有 10 分钟有效** —— 收尾时用完成时刻重算下一次，
+    //    越过 09:10 之后一律判 too_frequent、`nextRunAt` 被打回 null。
+    const verdicts = new Map<string, Set<boolean>>();
+    const expressions = [
+      '0,10 9 * * *',
+      '0,10 * * * *',
+      '0 9 * * *',
+      '*/30 * * * *',
+      '5,35 * * * *',
+      '* * * * *',
+    ];
+    // 一天里均匀取样，覆盖「命中前后」与「离命中很远」两类参考点。
+    for (let minute = 0; minute < 24 * 60; minute += 7) {
+      const referenceAt = Date.UTC(2026, 9, 28) + minute * MINUTE_MS;
+      for (const expression of expressions) {
+        const ok = calculateNextRunAt(cron(expression), referenceAt).ok;
+        const seen = verdicts.get(expression) ?? new Set<boolean>();
+        seen.add(ok);
+        verdicts.set(expression, seen);
+      }
+    }
+    for (const [expression, seen] of verdicts) {
+      expect(seen.size, `${expression} 的结论随参考点变化了`).toBe(1);
+    }
+    // 并且方向要对：过密的拒、正常的放行。
+    expect(calculateNextRunAt(cron('0,10 9 * * *'), Date.UTC(2026, 9, 28, 9, 5)).ok).toBe(false);
+    expect(calculateNextRunAt(cron('0 9 * * *'), Date.UTC(2026, 9, 28, 9, 5)).ok).toBe(true);
+  });
+
   it('validates a schedule end to end', () => {
     expect(validateAutomationSchedule(cron('0 9 * * *'), Date.UTC(2026, 8, 23)).ok).toBe(true);
     expect(validateAutomationSchedule(cron('bad'), Date.UTC(2026, 8, 23)).ok).toBe(false);
@@ -298,7 +439,36 @@ describe('minimum interval guard', () => {
   });
 });
 
-/** 逐分钟暴力扫描（改造前的判定逻辑），仅用于密集表达式的对照。 */
+/** 从 `start` 起连续取 `count` 次命中。 */
+function collectRuns(
+  expression: string,
+  timezone: string,
+  start: number,
+  count: number,
+): number[] {
+  const runs: number[] = [];
+  let cursor = start;
+  for (let index = 0; index < count; index += 1) {
+    const next = nextCronRun(expression, timezone, cursor);
+    if (next === null) throw new Error(`no run for ${expression} after ${cursor}`);
+    runs.push(next);
+    cursor = next;
+  }
+  return runs;
+}
+
+/**
+ * 逐分钟暴力扫描，仅用于密集表达式的对照。
+ *
+ * ⚠️⚠️ **它验的是「扫描有没有漏拍」，验不了「`n/step` 的解释对不对」。**
+ * 下面 `expand` 里那段 `end = endRaw == null ? (stepPart == null ? start : max) : …`
+ * 与生产 `parseCronToken` 是**同一套解释**（被本轮的 `n/step` 修复同步改过）——
+ * 两侧同源 ⇒ 生产把 `n/step` 解释错了，这里会跟着错、对照照样绿
+ * （**A 与 B 同源，断言恒真**）。
+ *
+ * ⇒ **`n/step` 的语义由单独用例守**（`treats "n/step" as "from n up to the field max…"`，
+ * 直接钉 `0 9/3 * * *` → 9,12,15,18）。别把这条 oracle 当成那个语义的守卫。
+ */
 function bruteForceNextCronRun(
   expression: string,
   timezone: string,
@@ -328,7 +498,10 @@ function bruteForceNextCronRun(
       } else {
         const [startRaw, endRaw] = (rangePart as string).split('-');
         start = Number.parseInt(startRaw as string, 10);
-        end = endRaw == null ? start : Number.parseInt(endRaw, 10);
+        // `n/step` 的终点是字段上界（标准 cron 语义），纯数字仍是单值。
+        end = endRaw == null
+          ? (stepPart == null ? start : max)
+          : Number.parseInt(endRaw, 10);
       }
       for (let value = start; value <= end; value += step) values.add(normalize(value));
     }

@@ -33,6 +33,7 @@ export const tool = {
     invalidType: 'type must be user, feedback, topic, or reference',
     invalidName: 'name must be a non-empty string',
     invalidContent: 'content must be a non-empty string',
+    invalidContentTooLong: 'content is too long; a single memory holds at most {max} characters',
     invalidTags: 'tags must be an array of strings',
     invalidId: 'Invalid ID',
     notFound: 'Memory not found',

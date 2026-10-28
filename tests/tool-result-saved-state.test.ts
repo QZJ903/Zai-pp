@@ -76,6 +76,17 @@ describe('areMemoriesImported', () => {
       .toBe(true);
   });
 
+  it('treats full-width and composed forms as the same content', () => {
+    // ⚠️ 只做小写 + 空白折叠会漏掉这几组：全角括号 / 全角字母数字 / NFC 与 NFD。
+    // 漏掉的后果是「同一段记忆换个来源粘贴就被判成新条目」，重复导入。
+    expect(areMemoriesImported([{ content: '记忆（重要）' }], [{ content: '记忆(重要)' }]))
+      .toBe(true);
+    expect(areMemoriesImported([{ content: 'ＡＢＣ１２３' }], [{ content: 'abc123' }]))
+      .toBe(true);
+    expect(areMemoriesImported([{ content: 'café' }], [{ content: 'café' }]))
+      .toBe(true);
+  });
+
   it('is false when the drafts have no comparable content', () => {
     expect(areMemoriesImported([], [{ content: 'alpha memory' }])).toBe(false);
     expect(areMemoriesImported([{ name: 'no content' }], [{ content: 'alpha memory' }]))

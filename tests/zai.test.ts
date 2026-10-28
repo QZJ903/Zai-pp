@@ -111,6 +111,92 @@ describe('zai signature', () => {
     );
     expect(result).toBeNull();
   });
+
+  it('resigns a relative completion URL against the supplied base origin', () => {
+    // ⚠️ fetch hook 拿到的就是相对路径。不传 baseUrl 时 `new URL()` 抛错 ⇒ 返回 null
+    // ⇒ 调用方沿用页面那份 X-Signature，而 body 里的 signature_prompt 已被增广改写。
+    const relative =
+      '/api/v2/chat/completions?timestamp=1700000000000&requestId=r1&user_id=u1';
+    const body = { model: 'x-preview-l', signature_prompt: 'hi' };
+    expect(resignZaiCompletionRequest(relative, body)).toBeNull();
+
+    const result = resignZaiCompletionRequest(relative, body, 'https://zchat.z.ai');
+    expect(result).not.toBeNull();
+    expect(result!.signature).toMatch(/^[0-9a-f]{64}$/);
+    expect(result!.url.startsWith('https://zchat.z.ai/api/v2/chat/completions?')).toBe(true);
+    // 与「同一个 URL 写成绝对形态」得到的签名必须一致 —— 相对/绝对只影响解析，不影响签名。
+    const absolute = resignZaiCompletionRequest(
+      `https://zchat.z.ai${relative}`,
+      body,
+    );
+    expect(result!.signature).toBe(absolute!.signature);
+  });
+
+  /**
+   * ⚠️⚠️ **重签名会把相对 URL 换成 `new URL()` 规范化后的绝对 href**，而那个 href
+   * 会被当作 fetch 实参（`fetch-hook.ts` 的 `signed.url || url`）。
+   * ⇒ 必须证明「规范化没有改动任何东西」，否则等于我们悄悄改了请求地址。
+   *
+   * **为什么能静态证明而不是靠真机**：completion URL 的六个已知参数
+   * （`timestamp` / `requestId` / `user_id` / `version` / `platform` /
+   * `signature_timestamp`）值全部落在 `[A-Za-z0-9._-]`，**不含空格、不含需要百分号
+   * 编码的字符** ⇒ `searchParams.toString()` 与原始 query 逐字相同。
+   */
+  describe('URL normalization after resigning', () => {
+    const BODY = { model: 'x-preview-l', signature_prompt: 'hi' };
+    const REAL_QUERY = 'timestamp=1793149200000&requestId=abc-123-def-456&user_id=u-1'
+      + '&version=0.0.1&platform=web&signature_timestamp=1793149199999';
+
+    it('keeps the real completion query byte-for-byte except signature_timestamp', () => {
+      const relative = `/api/v2/chat/completions?${REAL_QUERY}`;
+      const result = resignZaiCompletionRequest(relative, BODY, 'https://zchat.z.ai');
+      expect(result).not.toBeNull();
+
+      /**
+       * ⚠️⚠️ **判据是「整串相等」，不是「逐个 `searchParams.get` 相等」。**
+       *
+       * 只比解析后的值的话，`user_id=u-1` 被改写成 `user_id=%75-1`（语义相同、
+       * **字节不同**）照样全绿 —— 而这条用例声称要证明的是「我们没有悄悄改地址」。
+       * ⇒ 必须比整串，期望值由**手写**得出（唯一的改动是 `signature_timestamp`
+       * 被 `set` 成 `timestamp`），不是拿 `new URL()` 再算一遍（那是同义反复）。
+       */
+      const expected = 'https://zchat.z.ai/api/v2/chat/completions?'
+        + 'timestamp=1793149200000&requestId=abc-123-def-456&user_id=u-1'
+        + '&version=0.0.1&platform=web&signature_timestamp=1793149200000';
+      expect(result!.url).toBe(expected);
+    });
+
+    it('resolves to each site own origin and never crosses over', () => {
+      // 两站各有一个内容脚本实例，相对路径必须落回**它自己**那一站。
+      for (const origin of ['https://zchat.z.ai', 'https://chat.z.ai']) {
+        const result = resignZaiCompletionRequest(
+          `/api/v2/chat/completions?${REAL_QUERY}`,
+          BODY,
+          origin,
+        );
+        expect(new URL(result!.url).origin, origin).toBe(origin);
+      }
+      // 绝对 URL 传进来时 `new URL(abs, base)` 忽略 base ⇒ 不会被改成另一站。
+      const cross = resignZaiCompletionRequest(
+        `https://chat.z.ai/api/v2/chat/completions?${REAL_QUERY}`,
+        BODY,
+        'https://zchat.z.ai',
+      );
+      expect(new URL(cross!.url).origin).toBe('https://chat.z.ai');
+    });
+
+    it('normalizes query values that need percent-encoding (known, not reachable today)', () => {
+      // ⚠️ **这是规范化唯一会改东西的一类**：`searchParams` 把 `%20` 写成 `+`。
+      // 真实 completion 的参数值不含空格 ⇒ 生产上不触发。
+      // 钉住它是为了让「将来某个参数开始带空格」变成一条会红的断言，而不是静默改址。
+      const result = resignZaiCompletionRequest(
+        '/api/v2/chat/completions?timestamp=1&requestId=r&user_id=u&x=a%20b',
+        BODY,
+        'https://zchat.z.ai',
+      );
+      expect(result!.url).toContain('x=a+b');
+    });
+  });
 });
 
 describe('zai request codec', () => {

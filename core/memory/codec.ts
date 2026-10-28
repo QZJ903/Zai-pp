@@ -38,15 +38,6 @@ export function decodeStoredMemory(
   } as Omit<Memory, 'id'>;
 }
 
-export function decodeSyncMemory(
-  value: unknown,
-  path = 'memory',
-): Omit<Memory, 'id'> {
-  const object = objectValue(value, path);
-  const { id: _id, ...memory } = object;
-  return decodeStoredMemory(memory, path);
-}
-
 export function decodeImportedMemory(
   value: unknown,
   path = 'memory',

@@ -21,6 +21,7 @@
  */
 
 import type { ToolExecutionRecord } from '../types';
+import { isMissingRuntimeMessageReceiverError } from '../messaging/broadcast';
 import { buildZaiChatSessionUrl } from './chat-session';
 import { sleep } from './async';
 import {
@@ -454,6 +455,24 @@ export function createDomTaskCoordinator(
   ): Promise<{ ok: boolean; error?: string; phase?: 'tab' | 'bridge' }> {
     const deadline = Date.now() + (options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS);
     let attempt = 0;
+    /**
+     * 本轮握手里有几次是「接收端不存在」。
+     *
+     * ⚠️ 用来把**内容脚本缺失**与普通超时分开。两类成因都会让 `tabs.sendMessage`
+     * 一直抛「Receiving end does not exist」，重试多久都是同一个结果 ——
+     * 而用户看到的却是「请确认 Zai 标签页已打开」，而他明明就停在这个页面上。
+     * 这两类成因的处置不同，不能收敛成同一句话。
+     *
+     * ⚠️⚠️ **「接收端不存在」有**两个**成因，判据分不开，也不打算分**：
+     * ① **孤儿内容脚本** —— 扩展被重载后，已打开的 z.ai 标签页里那份脚本已经
+     *    不属于当前扩展实例；
+     * ② **新开的标签页还没注入** —— 页面还在加载，内容脚本尚未跑起来。
+     * 两者在「每一拍都缺接收端」这个判据上完全一致（②只要加载够快，后面就会应答、
+     * 自然落到 `dom_task_handshake_timeout` 那一档）。
+     * ⇒ 用户可见文案（`pageContentScriptMissing`）已经同时覆盖两种成因，
+     * 别把这段注释读成「只可能是孤儿」。
+     */
+    let missingReceiverAttempts = 0;
     while (Date.now() < deadline) {
       if (options.signal?.aborted) throw abortReason(options.signal);
       try {
@@ -475,14 +494,24 @@ export function createDomTaskCoordinator(
             phase: error === 'wrong_conversation' || error === 'busy' ? 'tab' : 'bridge',
           };
         }
-        // 无结构化响应：content 可能尚未注入 → 退避重试。
+        // 无结构化响应：内容脚本在、但没给出形状合法的答复（例如入站来源闸门拒了）
+        // → 退避重试。⚠️ **这一档不算「接收端缺失」**：它是另一类失效，重试有意义。
       } catch (error) {
-        // 「Receiving end does not exist」→ content 未注入（新开 tab 加载中）→ 退避重试。
+        // 「Receiving end does not exist」= 该标签页里没有活着的内容脚本
+        // （新开 tab 尚未加载完，或扩展重载后旧页面的脚本成了孤儿）→ 退避重试。
         if (options.signal?.aborted) throw abortReason(options.signal);
+        if (isMissingRuntimeMessageReceiverError(error)) missingReceiverAttempts += 1;
         void error;
       }
       await sleep(300 + attempt * 250);
       attempt += 1;
+    }
+    // ⚠️ **判据是「每一次投递都收不到接收端」，不是「至少一次」** —— 后者会把
+    // 「前几拍没加载完、后来应答了但内容不对」的新标签也判成孤儿，报错指向错误的成因。
+    // ⚠️ **`missingReceiverAttempts > 0` 不能省**：deadline 一进来就已过时循环一次都不跑，
+    // 两个数都是 0，`===` 照样成立，会把「根本没试过」判成孤儿。
+    if (missingReceiverAttempts > 0 && missingReceiverAttempts === attempt) {
+      return { ok: false, error: 'dom_task_content_script_missing', phase: 'bridge' };
     }
     return { ok: false, error: 'dom_task_handshake_timeout', phase: 'bridge' };
   }

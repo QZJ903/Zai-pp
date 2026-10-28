@@ -189,20 +189,26 @@ export function createZaiSignature(
 }
 
 /**
- * 为一条增强后的请求 body 重算签名：读取 body 里的 signature_prompt、
- * 以及 query 里的 timestamp/requestId/user_id，产出新的 X-Signature。
- * 若 body 没有 signature_prompt 则按非权威 prompt 计算（尽力而为）。
+ * 为一条增强后的请求 body 重算签名：读取 body 里的 `signature_prompt`、
+ * 以及 query 里的 `timestamp` / `requestId` / `user_id`，产出新的 `X-Signature`。
+ *
+ * 读不到 `signature_prompt`、或 URL 里缺这三个参数时返回 `null` —— 调用方据此
+ * **不重签名**、沿用页面自己那份 `X-Signature`。
+ *
+ * ⚠️ **`url` 可能是相对路径**（fetch hook 拿到的就是这种形态）⇒ 传 `baseUrl`
+ * 兜底；不传时只能解析绝对 URL，相对路径会走 `null` 那条路。
  */
 export function resignZaiCompletionRequest(
   url: string,
   body: Record<string, unknown>,
+  baseUrl?: string,
 ): { url: string; signature: string } | null {
   const prompt = typeof body.signature_prompt === 'string' ? body.signature_prompt : null;
   if (prompt === null) return null;
 
   let parsedUrl: URL;
   try {
-    parsedUrl = new URL(url);
+    parsedUrl = new URL(url, baseUrl);
   } catch {
     return null;
   }

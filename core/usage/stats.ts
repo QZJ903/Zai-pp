@@ -8,8 +8,6 @@ import type {
   UsageTurnRecord,
 } from './types';
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
 export function normalizeUsageRangeDays(value: unknown): UsageRangeDays {
   return value === 7 ? 7 : 30;
 }
@@ -37,7 +35,7 @@ export function summarizeUsage(
     if (!day) continue;
 
     const tokens = normalizeCount(record.totalTokens);
-    const messages = Math.max(0, Math.round(record.messageCount));
+    const messages = normalizeCount(record.messageCount);
     const sessionKey = getRecordSessionKey(record);
     const modelKey = getUsageModelKey(record.modelType);
     const modelLabel = getUsageModelLabel(record.modelType);
@@ -144,10 +142,25 @@ export function getUsageModelLabel(modelType: string | null | undefined): string
   return normalized || 'GLM Chat';
 }
 
+/**
+ * 最近 `rangeDays` 个**日历日**的键（末位是今天）。
+ *
+ * ⚠️⚠️ **必须在日历上回退，不能用 `now - offset * 86400000`** —— 夏令时前拨日
+ * 当地一天只有 23 小时，「减去 24 小时」会落回**前一天的 23:00**，`toLocalDayKey`
+ * 于是吐出前一天的键 ⇒ 那个日历日**整天从窗口里消失**，`summarizeUsage` 会把
+ * 它名下的记录当作「不在范围内」丢掉（`totalTokens` / `activeCount` / 连续天数一起少算）。
+ * 实测：America/New_York 2026-03-10 的 30 天窗口用时间戳减法会缺 `2026-03-08`。
+ *
+ * ⚠️ 构造 `new Date(y, m, d - offset)` 时若当天 00:00 不存在（少数时区在午夜切换），
+ * JS 会前移到当天最早的合法时刻 —— 日期仍是那一天，取键不受影响。
+ */
 function getRecentDayKeys(rangeDays: UsageRangeDays, now: number): string[] {
-  const today = dayKeyToTimestamp(toLocalDayKey(now));
+  const today = new Date(normalizeTimestamp(now, Date.now()));
+  const year = today.getFullYear();
+  const month = today.getMonth();
+  const date = today.getDate();
   return Array.from({ length: rangeDays }, (_, index) => (
-    toLocalDayKey(today - (rangeDays - index - 1) * DAY_MS)
+    toLocalDayKey(new Date(year, month, date - (rangeDays - index - 1)).getTime())
   ));
 }
 

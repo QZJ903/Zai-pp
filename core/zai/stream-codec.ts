@@ -153,6 +153,12 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
     if (content) {
       // 整体替换：`text` 被整段换掉，所有旧偏移作废 ⇒ 先清空区间。
       // 这段文本的归属由**本帧自己的相位**决定，不继承上一帧。
+      //
+      // ⚠️⚠️ **真机实测不产生这个帧** —— 两轮独立抓包（381 + 164 帧，含一次
+      // 「重新生成」）里 `content` 零命中。**保留不是死代码**：站点可能灰度 / 回滚到
+      // 「整体替换」形态（相位表见站点事实 §2.1），而真到那天没有这条分支
+      // 就会把整段正文丢掉（`delta_content` 分支只会追加，替换会变成拼接）。
+      // ⚠️ **别按「实测没跑过」删它。**
       excludedRanges.length = 0;
       text = content;
       if (nonAnswer) pushExcludedRange(0, text.length);
@@ -161,6 +167,11 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
     const ec = readString(d.edit_content);
     if (ec) {
       // edit_index 是 UTF-16 code-unit 偏移（浏览器字符串索引语义）。
+      //
+      // ⚠️⚠️ **同样实测不产生**（同上两轮抓包 `edit_content` 零命中）。
+      // 保留理由同 `content`：站点回滚到这一形态时，没有它正文会**整段错位**。
+      // ⚠️ 另有一处独立依赖：`stream-strip.ts` 遇 `edit_content` 会**关掉工具 XML 剥离**
+      // （绝对偏移在剥字符后会错位），那条防御以这个分支存在为前提。
       const editIndex = readFiniteNumber(d.edit_index) ?? 0;
       const prefix = utf16SafeSlice(text, 0, editIndex);
       // 被改写的只是 `[editIndex, 原长)` 那一段，**它前面的字符原样保留**。
@@ -263,6 +274,18 @@ export function createZaiStreamAccumulator(): ZaiStreamAccumulator {
  * 而 `assistantText` 是工具识别的输入（`extractAndNotifyToolCalls` 与兜底
  * `parseToolXml`），**模型写在思考里的工具 XML 会因此漏出去并真的被执行** ——
  * 单层时那种 XML 会随整块一起被剥掉，嵌套时这个保护就没了。
+ *
+ * ⚠️⚠️ **已知后果（不修，有意接受）**：「整个回答就是一个配平的嵌套块、且剥完没有正文」
+ * 那一档退回非贪婪后，**内层闭合标签之后**的工具 XML 仍会留在返回值里
+ * （`<details>a<details>b</details><shell_exec>…</shell_exec></details>`
+ * → `<shell_exec>…</shell_exec></details>`）。
+ * **为什么不修**：这一档分不清「思考被截断」与「答案本身就是 details 元素」，
+ * 硬判会把风险从一种换成另一种；而**当前站点形态下不可达** ——
+ * `thinking` 已是独立相位、内容是裸文本，整段累积里 `<details` 出现 **0 次**
+ * （见 `NON_ANSWER_PHASES` 那段说明），本函数在生产路径上是 no-op。
+ * ⚠️ **重新评估的触发条件**：若真机上 `<details` 在 `assistantText` 里出现非零次数，
+ * 说明站点回滚到内联形态 —— 那时要重估的是**整条思考分流链**（相位挖洞也会同时失效），
+ * 不只是补这一层。
  */
 export function stripZaiThinkingBlocks(text: string): string {
   if (!text || !text.toLowerCase().includes('<details')) return text;

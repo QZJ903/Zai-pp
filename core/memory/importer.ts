@@ -1,4 +1,5 @@
 import type { Memory, MemoryType, NewMemory } from '../types';
+import { MEMORY_CONTENT_MAX_CHARS } from '../constants';
 import { memoryDedupeKey } from './dedupe';
 
 export interface MemoryImportPreview {
@@ -158,7 +159,7 @@ function normalizeTitle(value: string): string {
 function requiredContent(value: string): string {
   const content = value.trim();
   if (!content) throw new Error('memory content cannot be empty');
-  return content.slice(0, 8000);
+  return content.slice(0, MEMORY_CONTENT_MAX_CHARS);
 }
 
 function dedupeKey(content: string): string {

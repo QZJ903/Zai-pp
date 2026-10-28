@@ -106,12 +106,6 @@ export interface IndexedDbQuery {
   reverse(): IndexedDbQuery;
 }
 
-export interface IndexedDbWhereQuery {
-  equals(value: IDBValidKey): {
-    delete(): Promise<number>;
-  };
-}
-
 export type IndexedDbCreatingHook = (
   primKey: IDBValidKey | undefined,
   obj: unknown,
@@ -134,7 +128,6 @@ export interface IndexedDbTable {
   bulkDelete(keys: readonly IDBValidKey[]): Promise<void>;
   count(): Promise<number>;
   orderBy(indexName: string): IndexedDbQuery;
-  where(indexName: string): IndexedDbWhereQuery;
   hook(
     event: 'creating',
     fn?: IndexedDbCreatingHook,
@@ -679,14 +672,6 @@ class IndexedDbTableImpl implements IndexedDbTable {
     return query('next');
   }
 
-  where(indexName: string): IndexedDbWhereQuery {
-    return {
-      equals: (value) => ({
-        delete: () => this.run('readwrite', (store) => deleteWhere(store, indexName, value)),
-      }),
-    };
-  }
-
   hook(event: 'creating', fn?: IndexedDbCreatingHook): { unsubscribe(fn?: IndexedDbCreatingHook): void } {
     if (event !== 'creating') {
       throw new Error(`Unsupported IndexedDb hook: ${event}`);
@@ -768,49 +753,6 @@ function readOrdered(
     };
     request.onerror = () => reject(request.error);
   });
-}
-
-function deleteWhere(
-  store: IDBObjectStore,
-  indexName: string,
-  value: IDBValidKey,
-): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const range = IDBKeyRange.only(value);
-    const keys: IDBValidKey[] = [];
-    const request = store.index(indexName).openKeyCursor(range);
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor) {
-        deleteKeys(store, keys, resolve, reject);
-        return;
-      }
-      keys.push(cursor.primaryKey);
-      cursor.continue();
-    };
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function deleteKeys(
-  store: IDBObjectStore,
-  keys: readonly IDBValidKey[],
-  resolve: (deleted: number) => void,
-  reject: (error: unknown) => void,
-): void {
-  let index = 0;
-  const next = () => {
-    if (index >= keys.length) {
-      resolve(keys.length);
-      return;
-    }
-    const key = keys[index];
-    index += 1;
-    const request = store.delete(key);
-    request.onsuccess = () => next();
-    request.onerror = () => reject(request.error);
-  };
-  next();
 }
 
 function transactionCompletion(tx: IDBTransaction): Promise<void> {

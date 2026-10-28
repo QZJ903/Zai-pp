@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LocaleMessageKey, MessageParams } from '../../../core/i18n';
+import { PAGE_CONTENT_SCRIPT_MISSING_CODE } from '../../../core/messaging/error-code';
 import type { SavedItem, SavedItemInput } from '../../../core/saved-items/types';
 import { createRequestGenerationFence } from '../async-state';
 import { formatRuntimeError } from '../runtime-response';
@@ -107,9 +108,25 @@ export function useSavedPageController(t: Translator, confirm: Confirm, feedback
       await libraryController.insertSavedPrompt(text);
       feedback.success(t('sidepanel.savedPage.inserted'));
     } catch (error) {
-      feedback.error(t('sidepanel.savedPage.insertFailed', {
-        error: formatRuntimeError(error, t, { bare: true }),
-      }));
+      /**
+       * ⚠️⚠️ **后台只能回码，文案在这一侧翻。**
+       *
+       * 「标签页里没有活着的内容脚本」（扩展刚重载 / 页面还没加载完）时
+       * `chrome.tabs.sendMessage` 抛的是**英文技术串**
+       * （`Could not establish connection. Receiving end does not exist.`），
+       * 而 `formatRuntimeError` 只翻「裸错误码」、自然语言原样透出
+       * ⇒ 用户看到一句英文，也不知道该刷新页面。
+       *
+       * ⚠️ 后台**不能**直接返回中文：`BACKGROUND_LOCALE_SECTIONS` 只含
+       * `content` / `background` / `tool` / `prompt` 四段，`common` 不在里面
+       * （那是把侧边栏资源挡在 service worker 包外的结构预算）。
+       * ⇒ 与自动化链同一套做法：**后台回码、侧边栏映射**。
+       */
+      const raw = formatRuntimeError(error, t, { bare: true });
+      const message = raw === PAGE_CONTENT_SCRIPT_MISSING_CODE
+        ? t('common.pageContentScriptMissing')
+        : raw;
+      feedback.error(t('sidepanel.savedPage.insertFailed', { error: message }));
     }
   }, [feedback, t]);
 

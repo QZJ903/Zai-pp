@@ -1,3 +1,21 @@
+/**
+ * 「半个标签」判据里允许的**连续空白**上限。
+ *
+ * ⚠️⚠️ **它与完整解析器的容忍度不同，这是有意保留的**：`parseCompleteXmlToolTag` 的
+ * `skipWhitespace` **没有上限**（`<` + 20 个空格 + `shell_exec` + `>` 照样识别），
+ * 而本判据只认 8 个。⇒ 若一帧恰好在「`<` + ≥9 个空格 + 半个工具名」处断开，
+ * 流式剥离那一层**不会扣住**它，那半截会被放行给页面。
+ *
+ * ⚠️ **为什么不统一**：要覆盖任意多空白，`getPartialXmlToolTagTailLength` 的
+ * `limit` 算法就得从「按名字长度估窗口」改成「从尾部往回找 `<`」，而它被
+ * `core/zai/stream-strip.ts` 的 `holdPoint` 依赖 —— 改错会让「扣住」变成
+ * 「扣太多（页面卡住不放行）」或「扣太少（漏剥）」，代价高于这一档的收益。
+ * 提示词教模型写的是无空白的 `<name>`，触发需要「写 ≥9 空格 + 帧恰好断在名字中间」两个条件。
+ *
+ * ⚠️ **现状有守卫**：`tests/prompt-output-contract.test.ts` 把
+ * `partialOpeningNineSpaces = 0` 与「9 空格仍能被完整识别」一起冻在黄金文件里 ——
+ * 改这个常量会让那两条断言同时红。
+ */
 const PARTIAL_TAG_WHITESPACE_LIMIT = 8;
 
 export interface XmlToolTagMatch {

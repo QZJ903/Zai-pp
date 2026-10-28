@@ -1,11 +1,13 @@
 import React from 'react';
 import { act } from 'react';
+import { readFileSync } from 'node:fs';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PROMPT_INJECTION_SETTINGS,
   type PromptInjectionSettings,
 } from '../core/prompt/settings';
+import { PAGE_CONTENT_SCRIPT_MISSING_CODE } from '../core/messaging/error-code';
 import PromptControlPanel from '../entrypoints/sidepanel/components/PromptControlPanel';
 import LocalSkillImportPanel from '../entrypoints/sidepanel/components/LocalSkillImportPanel';
 import SavedPage from '../entrypoints/sidepanel/pages/SavedPage';
@@ -124,6 +126,69 @@ describe('sidepanel interactions', () => {
     await clickButton('插入到对话');
 
     expect(container.textContent).toContain('插入到对话失败：请先在 chat.z.ai 登录，或刷新 Zai 页面后重试。');
+  });
+
+  it('renders the shared content-script-missing copy when the background returns that code', async () => {
+    // ⚠️⚠️ **这条守的是「后台回码、侧边栏翻文案」那条跨边界契约。**
+    //
+    // 内容脚本不在（扩展刚重载 / 页面还没加载完）时 `chrome.tabs.sendMessage` 抛的是
+    // 英文技术串（`Could not establish connection. Receiving end does not exist.`），
+    // 后台**不能**直接返回中文（`common` 段不在 `BACKGROUND_LOCALE_SECTIONS` 里），
+    // 所以回一个码 `page_content_script_missing`，由这一侧翻成
+    // `common.pageContentScriptMissing`。
+    //
+    // ⚠️ 码的字面量两侧必须同源 —— 生产端在 `entrypoints/background.ts`，
+    // 判定端在 `useSavedPageController.ts`，两侧都引
+    // `core/messaging/error-code.ts` 的 `PAGE_CONTENT_SCRIPT_MISSING_CODE`。
+    const sendMessage = vi.fn(async (message: { type: string; payload?: unknown }) => {
+      if (message.type === 'GET_SAVED_ITEMS') {
+        return [{
+          id: 'saved-1',
+          syncId: 'sync-1',
+          kind: 'snippet',
+          title: 'Review prompt',
+          content: 'Summarize this thread.',
+          tags: [],
+          createdAt: 1,
+          updatedAt: 1,
+        }];
+      }
+      if (message.type === 'INSERT_SAVED_PROMPT_INTO_CHAT') {
+        return { ok: false, error: PAGE_CONTENT_SCRIPT_MISSING_CODE };
+      }
+      return null;
+    });
+    stubChrome(sendMessage);
+
+    await renderElement(React.createElement(SavedPage));
+    await flushPromises();
+    await clickButton('插入到对话');
+
+    // 翻成了中文文案，而不是把裸码或英文技术串透给用户。
+    expect(container.textContent).toContain('Zai 页面里没有可用的扩展脚本');
+    expect(container.textContent).not.toContain(PAGE_CONTENT_SCRIPT_MISSING_CODE);
+    expect(container.textContent).not.toContain('Receiving end does not exist');
+  });
+
+  it('wires the production background to actually return that code', () => {
+    /**
+     * ⚠️⚠️ **上面那条只验「拿到码 → 翻文案」，验不了「后台真的会回这个码」。**
+     *
+     * `insertPromptIntoActiveZaiTab` 不导出、没有任何测试入口（全仓只在
+     * `entrypoints/background.ts` 里出现），所以「`isMissingRuntimeMessageReceiverError`
+     * 命中后回码」这个**生产分支**是零覆盖的。
+     *
+     * ⇒ 用源码断言补这一跳：钉住「`catch` 里那条 return 引的是常量、不是裸字面量」。
+     * ⚠️ 判据是**代码行**（剥掉注释后），不是「源码里出现过这个词」——
+     * 上面那一大段注释里就有这个常量名，直接搜全文会被自己的注释满足。
+     */
+    const source = readFileSync('entrypoints/background.ts', 'utf8');
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    expect(code).toMatch(/error:\s*PAGE_CONTENT_SCRIPT_MISSING_CODE/);
+    // 反面自检：不许写成裸字面量（那样两侧就不同源了）。
+    expect(code).not.toMatch(/error:\s*['"]page_content_script_missing['"]/);
   });
 
   it('shows saved-item repository failures instead of rendering a fake empty state', async () => {

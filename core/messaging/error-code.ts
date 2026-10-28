@@ -17,3 +17,20 @@ const LOOKS_LIKE_ERROR_CODE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 export function looksLikeErrorCode(value: string): boolean {
   return LOOKS_LIKE_ERROR_CODE.test(value);
 }
+
+/**
+ * 「标签页里没有活着的内容脚本」—— 后台把它回给侧边栏，由侧边栏翻成
+ * `common.pageContentScriptMissing`。
+ *
+ * ⚠️⚠️ **这个码是跨边界的，两处必须同源**：生产端在 `entrypoints/background.ts`
+ * （`getPromptInsertionErrorMessage` 判定 `chrome.tabs.sendMessage` 抛的错误串后返回它），
+ * 判定端在 `entrypoints/sidepanel/controllers/useSavedPageController.ts`
+ * （`insertPrompt` 拿它去查文案）。**两边各写一遍字面量就是「生产端与判定端各写一遍」
+ * 的老形态** —— 改一处另一处不报错，只会让那条文案静默退回英文技术串。
+ * （同族先例：`core/zai/contracts.ts` 的 `ZAI_DOM_TASK_CANCELLED_CODE`。）
+ *
+ * ⚠️ **为什么后台不直接返回中文**：`BACKGROUND_LOCALE_SECTIONS` 只含
+ * `content` / `background` / `tool` / `prompt` 四段，`common` 不在里面 ——
+ * 那是把侧边栏资源挡在 service worker 包外的结构预算。
+ */
+export const PAGE_CONTENT_SCRIPT_MISSING_CODE = 'page_content_script_missing';

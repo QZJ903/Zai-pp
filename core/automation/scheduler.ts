@@ -708,6 +708,29 @@ function isScheduledRun(run: AutomationRun): boolean {
   return run.trigger === 'schedule' || run.scheduledFor !== null;
 }
 
+/**
+ * 收尾时重算「下一次运行时刻」。**失败一律返回 `null`，不传播错误。**
+ *
+ * ⚠️⚠️ **这个「吞掉错误」是刻意的，但它依赖一个前提** —— 三个调用点里
+ * `createRecoveredNextRunAt`（`:616` 附近）**不写 `lastError`**，另外两处
+ * （`refreshAutomationFromExistingRun` 的失败分支、`createAutomationRuntimePatch`）
+ * 会写。所以这里吞掉的错误，在那条路径上要靠下一次扫描补上。
+ *
+ * **前提是「建得出来的排期，运行期不会失败」**：
+ * - `invalid_timezone` / `missing_expression` / `invalid_cron*` / `invalid_rrule*`
+ *   在创建时就被 `validateAutomationSchedule` 挡掉，而它们的输入（时区、表达式）
+ *   存进库之后不会再变；
+ * - `schedule_too_frequent` 与 `schedule_too_sparse` 都**与 `referenceAt` 无关**
+ *   （前者按固定锚点判、后者按周期长度判）⇒ 建得进就一直成立；
+ * - `cron_no_next_run` 在创建时同样判过 ⇒ 建不进来。
+ *
+ * ⚠️ **这个前提一旦被打破，后果不是「静默」而是「每分钟报错」**：
+ * `nextRunAt` 停在 null ⇒ `scanDueAutomations` 每分钟重算一次、失败一次、
+ * 写一次同样的 `lastError` ⇒ 卡片上「排期无法计算」的红条常驻，任务永不执行。
+ * **历史上闰日表达式正好能打破它**（建得进、跑完一次后重算扫不到），
+ * 现在由 `MAX_CRON_INTERVAL_DAYS` 在创建时拒掉。
+ * ⚠️ **若将来放开那个上界、或允许更稀疏的表达式，这里要改成传播错误。**
+ */
 function nextRunAfterCompletion(automation: Automation, completedAt: number): number | null {
   if (!isSchedulableAutomation(automation)) return null;
   const next = calculateNextRunAt(automation.schedule, completedAt);

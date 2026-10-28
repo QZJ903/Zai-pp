@@ -126,6 +126,7 @@ import {
 import { rememberActiveZaiSite } from '../core/zai/active-site';
 import { sleep } from '../core/zai/async';
 import { createSerialOperationQueue } from '../core/persistence/serial-operation-queue';
+import { USAGE_MESSAGE_COUNT } from '../core/constants';
 import { createToolInvocationCatalog } from '../core/tool/invocation';
 import { createLatestSyncGate } from '../core/tool/latest-sync';
 import { MCP_CAPABILITY_TOOL_PROVIDER_ID } from '../core/mcp/capability-contract';
@@ -1119,6 +1120,21 @@ function resolveActiveLocalSkill(
   return { resolved, activeLocalSkillDir };
 }
 
+/**
+ * 增广后的 prompt 文本 + **本轮实际注入给模型的记忆 id**。
+ *
+ * ⚠️ **`usedMemoryIds` 必须一路带到调用点** —— 它唯一的用途是让后台
+ * `touchMemories` 更新 `accessCount` / `lastAccessedAt`，而这两个字段是
+ * `decayScore`（记忆排序里「越常用越优先」那部分权重）与 `archiveStaleMemories`
+ * （90 天未访问且访问次数 < 3 就删）的输入。丢了它，记忆检索退化成纯关键词匹配，
+ * 且所有没 pin 的记忆会在创建 90 天后被**每次启动静默删掉**。
+ */
+interface AugmentedPrompt {
+  text: string;
+  /** 本轮注入的记忆 id（被截断的那条也算 —— 它确实进了提示词）。 */
+  usedMemoryIds: number[];
+}
+
 function augmentPrompt(
   originalPrompt: string,
   options: {
@@ -1134,7 +1150,7 @@ function augmentPrompt(
     /** 本轮的 Skill 激活结果，由调用方经 `resolveActiveLocalSkill` 算出（见其说明）。 */
     skillActivation: ActiveLocalSkill;
   },
-): string {
+): AugmentedPrompt {
   const isFirstMessage = options?.isFirstMessage ?? true;
   const modelFacing = options.toolDescriptors;
   const locale = currentContentLocale ?? DEFAULT_LOCALE;
@@ -1177,7 +1193,7 @@ function augmentPrompt(
         systemPromptEnabled,
         forceResponseLanguage,
       });
-      return result.augmented;
+      return { text: result.augmented, usedMemoryIds: result.usedMemoryIds };
     }
     const result = buildPromptAugmentation(resolved.combinedPrompt, {
       memories: scopedMemories,
@@ -1190,7 +1206,7 @@ function augmentPrompt(
       systemPromptEnabled,
       forceResponseLanguage,
     });
-    return result.augmented;
+    return { text: result.augmented, usedMemoryIds: result.usedMemoryIds };
   }
 
   const result = buildPromptAugmentation(originalPrompt, {
@@ -1202,7 +1218,7 @@ function augmentPrompt(
     systemPromptEnabled,
     forceResponseLanguage,
   });
-  return result.augmented;
+  return { text: result.augmented, usedMemoryIds: result.usedMemoryIds };
 }
 
 async function handleAugmentRequestBody(
@@ -1290,12 +1306,15 @@ async function handleAugmentRequestBody(
       // 首条（chats/new）始终增强：把工具目录 + 记忆注入，让模型在建会话
       // 那一刻就学会工具用法（shell 写文件、memory 等）。首条注入不会污染
       // parent 链（首条是会话起点，无 parent）。
+      // ⚠️ **这里刻意不发 `TOUCH_MEMORIES`** —— 首条之后紧跟的那次 completion
+      // 会独立再选一遍记忆并上报（那是同一条用户消息、同一批记忆），
+      // 两处都发会让首轮每条记忆 +2。上游也只有 completion 那一条上报路径。
       const augmented = parsed.userMessageTexts.map((text) =>
         augmentPrompt(text, {
           toolDescriptors: modelFacing,
           isFirstMessage: true,
           skillActivation,
-        }),
+        }).text,
       );
       const nextBody = rewriteZaiChatNewUserMessages(body, augmented);
 
@@ -1460,10 +1479,10 @@ async function handleAugmentRequestBody(
       skillActivation,
     });
     currentRequestMessageCount = isFirstMessage ? 1 : currentRequestMessageCount + 1;
-    const nextBody = rewriteZaiLastUserMessage(body, augmented);
+    const nextBody = rewriteZaiLastUserMessage(body, augmented.text);
     // 关键：signature_prompt 是服务端权威 prompt、参与续写链 parent 校验与历史存储，
     // 必须始终是「用户原文」。而模型读的是 messages.content（系统注入 + 标记包裹原文）。
-    const visibleOriginal = extractVisibleUserPrompt(augmented) ?? originalPrompt;
+    const visibleOriginal = extractVisibleUserPrompt(augmented.text) ?? originalPrompt;
     (nextBody as Record<string, unknown>).signature_prompt = visibleOriginal;
 
     // 模型覆写：请求归属到自动化任务时覆写 body 的 model。
@@ -1471,8 +1490,18 @@ async function handleAugmentRequestBody(
     // 且不同轮次是不同的 id ⇒ 模型字段是活的，不是「服务端自己装配」。
     applyZaiModelOverrideForRoute(nextBody, 'completion', matchedTask?.model ?? null);
 
-    // 记忆命中 → 后台 touch。
-    await sendRuntimeMessage({ type: 'TOUCH_MEMORIES', payload: { ids: [] } }).catch(() => undefined);
+    // 记忆命中 → 后台 touch（更新 `accessCount` / `lastAccessedAt`）。
+    // ⚠️⚠️ **必须传真实 id**：这两个字段是 `decayScore`（「越常用越优先」那部分权重）
+    // 与 `archiveStaleMemories`（90 天未访问且访问次数 < 3 就删）的唯一输入。
+    // 传空数组时后台什么都不写 ⇒ 记忆检索退化成纯关键词匹配，且所有没 pin 的
+    // 记忆会在创建 90 天后被**每次启动静默删掉**。
+    // ⚠️ 只有 completion 这一条上报路径（首条 chatNew 刻意不发，见那里的说明）。
+    if (augmented.usedMemoryIds.length > 0) {
+      await sendRuntimeMessage({
+        type: 'TOUCH_MEMORIES',
+        payload: { ids: augmented.usedMemoryIds },
+      }).catch(() => undefined);
+    }
 
     postToMainWorld({
       type: 'AUGMENT_REQUEST_BODY_RESULT',
@@ -1985,8 +2014,9 @@ async function handleUsageSnapshot(raw: unknown): Promise<void> {
         tps: snapshot.tps,
         speedSource: snapshot.speedSource,
         elapsedMs: snapshot.elapsedMs,
-        // 与 ds++ 一致：每条记录固定算一问一答。
-        messageCount: 2,
+        // 与 ds++ 一致：每条记录固定算一问一答（见 `USAGE_MESSAGE_COUNT` 的说明 ——
+        // 三处同值，改一处就会让「总消息数」与「总轮数」不一致）。
+        messageCount: USAGE_MESSAGE_COUNT,
       },
     });
   } catch (error) {

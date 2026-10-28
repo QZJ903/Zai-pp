@@ -180,7 +180,6 @@ export default function PresetSubPage() {
     <div className="space-y-5">
       <SettingsSection
         title={t('sidepanel.presetPage.title')}
-        description={t('sidepanel.presetPage.description')}
       >
         <div className="flex items-center justify-between gap-2">
           <span className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>

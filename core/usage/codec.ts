@@ -1,3 +1,4 @@
+import { USAGE_MESSAGE_COUNT } from '../constants';
 import { toLocalDayKey } from './stats';
 import type {
   UsageRecordSource,
@@ -72,7 +73,7 @@ function decodeUsageRecord(raw: unknown, path: string): UsageTurnRecord {
       ? 0
       : nonNegativeNumber(value.elapsedMs, `${path}.elapsedMs`),
     messageCount: value.messageCount === undefined
-      ? 2
+      ? USAGE_MESSAGE_COUNT
       : positiveInteger(value.messageCount, `${path}.messageCount`),
   } as UsageTurnRecord;
 }

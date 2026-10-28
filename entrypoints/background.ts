@@ -151,7 +151,8 @@ import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
 import { AUTH_READ_TIMEOUT_MS, loadZaiAuthFromStorage } from '../core/zai/auth';
 import { createZaiModelCatalog } from '../core/zai/models';
 import { createDomTaskRuntimeHandlers } from './background/dom-task-handlers';
-import { broadcastRuntimeUpdate } from '../core/messaging/broadcast';
+import { broadcastRuntimeUpdate, isMissingRuntimeMessageReceiverError } from '../core/messaging/broadcast';
+import { PAGE_CONTENT_SCRIPT_MISSING_CODE } from '../core/messaging/error-code';
 import { createBackgroundErrorResponse } from '../core/messaging/background-error';
 import {
   authorizeRuntimeMessage,
@@ -813,13 +814,21 @@ async function insertPromptIntoActiveZaiTab(
     return { ok: false, error: 'empty_prompt_text' };
   }
 
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs.find((item) => item.id != null && isZaiPageUrl(item.url));
-  if (!tab?.id) {
-    return { ok: false, error: backgroundT('background.auth.missingZai') };
-  }
-
+  /**
+   * ⚠️ **`tabs.query` 也放进 `try`** —— 它 reject 时（浏览器 API 异常）若留在外面，
+   * 整个 handler 会抛出、冒泡到后台的通用 catch，侧边栏拿到的是**原生英文 message**
+   * （`formatRuntimeError` 对自然语言原样透出）。放进来之后至少和下面那条走同一个出口。
+   *
+   * ⚠️ 但它**不归「内容脚本缺失」那一档** —— 那两档处置不同（这个该重试、那个该刷新页面），
+   * 所以它落进下面的通用分支，不映射成 `PAGE_CONTENT_SCRIPT_MISSING_CODE`。
+   */
   try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs.find((item) => item.id != null && isZaiPageUrl(item.url));
+    if (!tab?.id) {
+      return { ok: false, error: backgroundT('background.auth.missingZai') };
+    }
+
     const response = await chrome.tabs.sendMessage(tab.id, { type: 'INSERT_PROMPT_TEXT', text });
     if (response?.ok) return { ok: true };
     return {
@@ -827,6 +836,33 @@ async function insertPromptIntoActiveZaiTab(
       error: getPromptInsertionErrorMessage(response?.error),
     };
   } catch (error) {
+    /**
+     * ⚠️⚠️ **「内容脚本不在」这一档落在 `catch`，不落在上面那个
+     * `getPromptInsertionErrorMessage`** —— `tabs.sendMessage` 对**没有接收端**的标签页是
+     * **抛错**，不是回 `{ok:false}`。
+     *
+     * ⚠️ **但那个函数仍然是活的、不能删** —— 内容脚本自己回的
+     * `{ok:false, error:'prompt_input_not_found'}` / `'empty_prompt_text'`
+     * 走的是上面 `response?.ok` 那条分支。**两类失败形状不同、出口不同。**
+     *
+     * 抛出来的是英文技术串
+     * （`Could not establish connection. Receiving end does not exist.`），
+     * 直接透给侧边栏用户看不懂、也指不出该做什么（正确动作是刷新页面）。
+     *
+     * ⚠️ **这里只能回码、不能回中文** —— `BACKGROUND_LOCALE_SECTIONS` 只含
+     * `content` / `background` / `tool` / `prompt` 四段，`common.pageContentScriptMissing`
+     * 不在里面（那是把侧边栏资源挡在 service worker 包外的结构预算）。
+     * 文案由侧边栏翻，与自动化链同一套做法。
+     *
+     * ⚠️ **只接「接收端不存在」这一档**，另两档**刻意不接**：
+     * `The message port closed before a response was received`（接收端在、但没应答）与
+     * `No tab with id: N`（标签页没了）语义不同，处置也不同 —— 前者该刷新页面、
+     * 后者该重开标签。合并成一句话会把成因搞混，而这两档在「插入到对话」这条链上
+     * 都不可达（内容脚本的入站闸门拒绝时静默 return，不回响应，也不会让标签页消失）。
+     */
+    if (isMissingRuntimeMessageReceiverError(error)) {
+      return { ok: false, error: PAGE_CONTENT_SCRIPT_MISSING_CODE };
+    }
     return {
       ok: false,
       error: error instanceof Error ? error.message : String(error),

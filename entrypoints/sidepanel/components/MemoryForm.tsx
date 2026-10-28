@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Memory, MemoryType, NewMemory } from '../../../core/types';
+import { MEMORY_CONTENT_MAX_CHARS } from '../../../core/constants';
 import { MEMORY_TYPE_CONFIG } from '../constants';
 import { useI18n } from '../i18n';
 
@@ -72,6 +73,7 @@ export default function MemoryForm({ initial, onSave, onCancel }: Props) {
       <textarea
         placeholder={t('sidepanel.memory.form.contentPlaceholder')}
         rows={3}
+        maxLength={MEMORY_CONTENT_MAX_CHARS}
         value={content}
         onChange={(e) => {
           setContent(e.target.value);
