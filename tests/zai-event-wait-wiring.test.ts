@@ -612,7 +612,7 @@ describe('stop observer install robustness', () => {
    * ⚠️ z.ai 到底是哪一种未验实，所以两档都要开。
    */
   it('observes only childList on the stop observer', () => {
-    // ⛔ **这一档曾经加过 `attributes` + `attributeFilter`，已撤回**（2026-10-27）。
+    // ⛔ **这一档曾经加过 `attributes` + `attributeFilter`，已撤回**。
     // 依据是假的：那份「`childHits: 0` 说明不是删节点」的探针用的是**英文选择器**
     // `[aria-label="Stop"]`，而界面是中文（真实元素 `[aria-label="停止"]`）⇒
     // 从头到尾没匹配到过元素。真机重测：childList 662 : attributes 3，倾向删节点。

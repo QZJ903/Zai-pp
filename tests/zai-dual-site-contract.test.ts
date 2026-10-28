@@ -121,15 +121,6 @@ describe('manifest declarations cover every site', () => {
  * （那个站既没有这条会话、token 也不通用）。这几处都必须把站点作为参数/依赖传进来。
  */
 describe('site-less call sites thread the site explicitly', () => {
-  it('the conversation title resolver takes the site origin from its dependencies', () => {
-    const source = read('core/zai/conversation-title.ts');
-    expect(source, '解析器应当要求注入 resolveOrigin').toContain('resolveOrigin');
-    expect(
-      source.includes('${ZAI_WEB_ORIGIN}'),
-      '解析器不该再直接拼接 ZAI_WEB_ORIGIN（那是默认站，与当前页无关）',
-    ).toBe(false);
-  });
-
   it('the model catalog takes the site origin from its dependencies', () => {
     const source = read('core/zai/models.ts');
     expect(source, '抓取器应当要求注入 resolveOrigin').toContain('resolveOrigin');
@@ -201,18 +192,16 @@ describe('site-less call sites thread the site explicitly', () => {
  *
  * ⚠️ 这一组是**反向**的：它断言生产代码里**不再有**绕过站点表的 hostname 判据。
  * 历史上 `background.ts` 有两处 `hostname === 'chat.z.ai'`，它们会让国区站的会话页
- * 永远不被认出来（项目页抓不到「当前对话」），而**没有任何报错**。
+ * 永远不被认出来，而**没有任何报错**。
  */
 describe('no host-literal judgements outside the site table', () => {
   const productionFiles = [
     'entrypoints/background.ts',
-    'entrypoints/sidepanel/pages/ProjectsPage.tsx',
     'core/zai/request-codec.ts',
     'core/zai/fetch-hook.ts',
     'core/zai/chat-session.ts',
     'core/zai/dom-task-coordinator.ts',
     'core/zai/models.ts',
-    'core/zai/conversation-title.ts',
   ];
 
   it.each(productionFiles)('%s does not compare against a bare z.ai hostname', (path) => {

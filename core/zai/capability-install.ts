@@ -30,8 +30,6 @@
 
 /** 启动链需要的全部副作用 —— 由 `entrypoints/zai.content.ts` 传真实实现。 */
 export interface ZaiCapabilityDeps {
-  /** 高峰弹窗自动关闭（装一次，内部幂等）。 */
-  installPeakDialogAutoDismiss: () => void;
   /** Stop 按钮观察器（挑战页收尾靠它，见 zai.content.ts 的说明）。 */
   installStopObserver: () => void;
   /** 地址变化观察（切会话通知 + 后台任务归属）。 */
@@ -40,8 +38,6 @@ export interface ZaiCapabilityDeps {
   installBackgroundCapability: () => Promise<void>;
   /** 注入 UI 主题变量并跟随页面明暗切换。 */
   installInjectedThemeWatch: () => void;
-  /** 侧边栏「项目」面板。 */
-  installProjectPanel: () => void;
   /** 隐藏续跑 / nudge 模板气泡（我们自己注入的 prompt 被页面当用户消息渲染）。 */
   installContinuationBubbleHider: (options: { onHidden: (count: number) => void }) => void;
   /** 工具调用面板。**可选增强，调用方不 await**。 */
@@ -94,15 +90,13 @@ export interface ZaiCapabilityTeardownDeps {
  * ⚠️ 它现在清理**两样**：会话订阅 + 页面可见性监听（后者见 ⑧b）。
  */
 export function installZaiCapabilities(deps: ZaiCapabilityDeps): () => void {
-  // ① 高峰弹窗与 Stop 观察器最先装 —— 它们要覆盖「页面刚起来就弹窗 / 就有 Stop」的窗口。
-  deps.installPeakDialogAutoDismiss();
+  // ① Stop 观察器最先装 —— 它要覆盖「页面刚起来就有 Stop」的窗口。
   deps.installStopObserver();
   // ② 地址观察要在订阅之前装，否则「启动到装完」之间的那次导航会被漏掉。
   deps.installSessionWatch();
   // ③ 背景配置：**不 await** —— 拿不到只是「背景晚一点生效」。
   void deps.installBackgroundCapability();
   deps.installInjectedThemeWatch();
-  deps.installProjectPanel();
   // ④ 气泡隐藏：站点选择器写死在 core/zai/continuation-bubble.ts 里，
   //    选择器错了只是气泡照旧可见、不连累主流程。
   deps.installContinuationBubbleHider({
@@ -191,12 +185,10 @@ export function disposeZaiCapabilities(deps: ZaiCapabilityTeardownDeps): void {
  * 引用了真正的那些函数」，而接口在运行时不存在、拿不到键名。
  */
 export const ZAI_CAPABILITY_DEP_KEYS = [
-  'installPeakDialogAutoDismiss',
   'installStopObserver',
   'installSessionWatch',
   'installBackgroundCapability',
   'installInjectedThemeWatch',
-  'installProjectPanel',
   'installContinuationBubbleHider',
   'installToolPanel',
   'onSessionChange',

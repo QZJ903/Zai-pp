@@ -68,6 +68,11 @@ export interface IndexedDbUpgradeTable {
    * failed write aborts the versionchange transaction and rejects.
    */
   modifyAll(mutator: (record: Record<string, unknown>) => void): Promise<void>;
+  /**
+   * Deletes every row for which `shouldDelete` returns true. Resolves when
+   * the whole table has been visited.
+   */
+  deleteAll(shouldDelete: (record: Record<string, unknown>) => boolean): Promise<void>;
 }
 
 export interface IndexedDbUpgradeTx {
@@ -381,6 +386,7 @@ export class IndexedDb {
         await step.migrate({
           table: (name) => ({
             modifyAll: (mutator) => modifyAllRows(tx, name, mutator),
+            deleteAll: (shouldDelete) => deleteRows(tx, name, shouldDelete),
           }),
         });
       }
@@ -458,6 +464,51 @@ function modifyAllRows(
     request.onerror = () => {
       // The request error aborts the versionchange transaction.
       reject(request.error);
+    };
+  });
+}
+
+function deleteRows(
+  tx: IDBTransaction,
+  tableName: string,
+  shouldDelete: (record: Record<string, unknown>) => boolean,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const store = tx.objectStore(tableName);
+    const request = store.openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+      let matched: boolean;
+      try {
+        matched = shouldDelete({ ...(cursor.value as Record<string, unknown>) });
+      } catch (error) {
+        try {
+          tx.abort();
+        } catch {
+          // Already finished.
+        }
+        reject(error);
+        return;
+      }
+      const next = () => cursor.continue();
+      if (!matched) {
+        next();
+        return;
+      }
+      const deletion = cursor.delete();
+      deletion.onsuccess = next;
+      deletion.onerror = () => reject(deletion.error);
+    };
+    request.onerror = () => {
+      // ⚠️ **不能写成 `request.error && reject(...)`** —— `error` 为 null 时那个 promise
+      // 永远不 settle，`applyUpgrades` 会挂在 `await table.deleteAll(...)` 上，
+      // `onupgradeneeded` 的 try/catch 也走不到 abort 分支 ⇒ 表现从「升级失败且可见」
+      // 变成「打开数据库永久挂起」。与上面 `modifyAllRows` 同口径。
+      reject(request.error ?? new Error(`IndexedDB cursor request failed: ${tableName}`));
     };
   });
 }

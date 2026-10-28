@@ -23,7 +23,6 @@ const BEFORE = {
     skillSources: { present: false },
     presets: { present: true, value: [{ raw: 'preset' }] },
     activePreset: { present: true, value: 'preset-before' },
-    projectContext: { present: true, value: { schemaVersion: 99, raw: true } },
     savedItems: { present: false },
   },
 } satisfies SyncUndoPreimageV1;
@@ -33,7 +32,6 @@ const SNAPSHOT: SyncDataSnapshot = {
   skills: [],
   skillSources: [],
   presets: [],
-  projectContext: null,
   savedItems: null,
 };
 
@@ -52,18 +50,18 @@ describe('sync local apply coordinator', () => {
     expect(journal.events).toEqual(['read', 'write', 'clear']);
   });
 
-  it('reuses the same durable preimage and commit point for a project-memory cascade', async () => {
+  it('reuses the same durable preimage and commit point for a preset-memory cascade', async () => {
     const state = new FakeLocalState();
     const journal = new FakeJournal();
     const coordinator = createCoordinator(state, journal);
 
     await expect(coordinator.runMutation(async () => {
-      state.values.projectContext = 'target:projectContext';
+      state.values.presets = 'target:presets';
       state.values.memories = 'target:memories';
       return 3;
     })).resolves.toBe(3);
 
-    expect(state.values.projectContext).toBe('target:projectContext');
+    expect(state.values.presets).toBe('target:presets');
     expect(state.values.memories).toBe('target:memories');
     expect(journal.current).toBeNull();
     expect(journal.events).toEqual(['read', 'write', 'clear']);
@@ -75,10 +73,10 @@ describe('sync local apply coordinator', () => {
     const coordinator = createCoordinator(state, journal);
 
     await expect(coordinator.runMutation(async () => {
-      state.values.projectContext = 'target:projectContext';
+      state.values.presets = 'target:presets';
       state.values.memories = 'target:memories';
-      throw new Error('project Memory delete failed');
-    })).rejects.toThrow('project Memory delete failed');
+      throw new Error('preset Memory delete failed');
+    })).rejects.toThrow('preset Memory delete failed');
 
     expect(state.values).toEqual(beforeValues());
     expect(state.restoreCalls).toEqual([...SYNC_APPLY_STEP_ORDER].reverse());

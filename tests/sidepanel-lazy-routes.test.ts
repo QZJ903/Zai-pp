@@ -7,7 +7,6 @@ describe('sidepanel lazy route boundaries', () => {
 
     for (const page of [
       'LibraryPage',
-      'ProjectsPage',
       'SettingsPage',
       'CapabilitiesPage',
     ]) {

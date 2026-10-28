@@ -22,7 +22,6 @@ export interface PromptAugmentationOptions {
   // treated as visible user input (passive chit-chat) and ignored the disk-read instruction (Bug ②).
   skillSystemContext?: string | null;
   presetContent?: string | null;
-  projectContext?: string | null;
   toolDescriptors?: readonly ToolDescriptor[];
   locale?: SupportedLocale;
   memoryEnabled?: boolean;
@@ -45,7 +44,6 @@ export function buildPromptAugmentation(
     identityOnly = false,
     skillSystemContext = null,
     presetContent = null,
-    projectContext = null,
     locale = DEFAULT_LOCALE,
     memoryEnabled = true,
     systemPromptEnabled = true,
@@ -97,7 +95,6 @@ export function buildPromptAugmentation(
     // `systemPromptEnabled=false` 时 `systemChat` 整段不注入，沙箱段在那个模板里就没有
     // 落脚点了 —— 单独补一条，保持「沙箱段与 systemPrompt 开关无关」这个既有行为。
     systemPromptEnabled ? '' : sandboxHost,
-    renderProjectContext(projectContext),
     renderForcedResponseLanguage(forceResponseLanguage, locale),
   ].filter(Boolean).join('\n\n');
   // ⚠️ **预设已经填进 `{role}`，这里只兜「系统提示词总开关关掉」那一档** ——
@@ -112,11 +109,6 @@ export function buildPromptAugmentation(
     usedMemoryIds: selected.map((memory) => memory.id!).filter(Boolean),
     renderedToolCount: systemPromptEnabled ? toolDescriptors.length : 0,
   };
-}
-
-function renderProjectContext(projectContext?: string | null): string {
-  const trimmed = typeof projectContext === 'string' ? projectContext.trim() : '';
-  return trimmed;
 }
 
 function renderForcedResponseLanguage(

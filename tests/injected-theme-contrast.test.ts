@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { resolve as resolvePath } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { injectInjectedThemeStyles } from '../core/ui/injected-theme';
 
@@ -35,136 +33,11 @@ const DARK_SIDEBAR_BACKGROUND = '#2a2a2a';
  */
 const LIGHT_SIDEBAR_BACKGROUND = '#efefef';
 
-/**
- * 面板里靠 `opacity` 调暗的元素（名字 → 不透明度）。
- *
- * ⚠️⚠️ **这份清单不再手抄** —— 它由 `deriveDimmedElements()` 从
- * `core/zai/project-panel.ts` 的 CSS 派生，与 `DIMMED_ELEMENT_KINDS`（只标「文本 / 图标」
- * 这一维，CSS 里派生不出来）交叉校验。**新增调暗元素会强制你在这里登记**，不再是
- * 「改了 CSS 没人知道、那处静默失去守护」（曾漏过 `conversation-menu-button`，
- * 后来又漏过 `menu-item-svg` —— 手抄必然分叉）。
- *
- * ⚠️ **判据是「基态」**：`:hover` / `[data-active]` 这些状态态不纳入（它们是交互反馈，
- * 不是常态可读性），`deriveDimmedElements()` 会滤掉。
- */
-const DIMMED_ELEMENT_KINDS = {
-  'heading': 'text',
-  'empty': 'text',
-  'caret': 'text',
-  'project-count': 'text',
-  'conversation-age': 'text',
-  'more': 'text',
-  'icon-button': 'icon',
-  'conversation-menu-button': 'icon',
-  'menu-item-svg': 'icon',
-} as const;
-
-/**
- * 菜单项图标的真实底 —— 它坐在 `#MENU_ID` 的 `--zpp-ui-surface-raised` 上，
- * **不是**页面底色、也不是侧边栏底色。
- *
- * ⚠️ **断言要对着真实生效的那个面算** —— 对页面底色算会在深色下给出偏乐观的值
- * （4.83 vs 真实的 5.96 那一类偏差）。
- */
-const MENU_SURFACE_ELEMENTS = new Set(['menu-item-svg']);
-
-const PANEL_SOURCE = resolvePath(process.cwd(), 'core/zai/project-panel.ts');
-
-interface DimmedElement {
-  name: string;
-  opacity: number;
-}
-
-/**
- * 从 `core/zai/project-panel.ts` 的 CSS 模板串**派生**「基态 opacity<1」的元素。
- *
- * ⚠️ **模板插值（`${PANEL_ID}`）里含花括号，会让朴素的花括号配平解析错位** ——
- * 所以先把 `${…}` 整体消成占位符再配平。
- *
- * ⚠️ **必须做无损对账**（见调用点）—— 正则漏掉一条 `opacity` 声明时派生清单会少一项，
- * 而若期望表恰好也少，**双向比对都不报**，等于换了个地方静默。
- */
-function deriveDimmedElements(): DimmedElement[] {
-  const source = readFileSync(PANEL_SOURCE, 'utf8');
-  const template = /style\.textContent\s*=\s*`([\s\S]*?)`;\s*\n\s*document\.head\.append/.exec(source);
-  expect(template, 'project-panel.ts 里应当有 style.textContent 模板串').not.toBeNull();
-  // 消插值：${…} 里的花括号会破坏配平。
-  const css = template![1]!.replace(/\$\{[^}]*\}/g, 'X');
-
-  const elements: DimmedElement[] = [];
-  for (const [, selector, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    // 状态态（hover / active / focus）不纳入 —— 它们是交互反馈，不是常态可读性。
-    if (/:hover|:focus|\[data-active/.test(selector!)) continue;
-    const opacity = /opacity:\s*([\d.]+)/.exec(body!);
-    if (!opacity) continue;
-    const value = Number(opacity[1]);
-    if (!(value < 1)) continue;
-    const classNames = [...selector!.matchAll(/\.zpp-project-panel__([a-z-]+)/g)];
-    expect(classNames.length, `选择器里找不到面板类名：${selector}`).toBeGreaterThan(0);
-    let name = classNames[classNames.length - 1]![1]!;
-    if (/\bsvg\b/.test(selector!)) name = `${name}-svg`;
-    elements.push({ name, opacity: value });
-  }
-  return elements;
-}
-
-/** CSS 里**所有** `opacity:` 声明数（含状态态）—— 用于派生器的无损对账。 */
-function countOpacityDeclarations(): number {
-  return (readPanelCss().match(/opacity:\s*[\d.]+/g) ?? []).length;
-}
-
-/** 落在状态态块（`:hover` / `:focus` / `[data-active]`）里的 `opacity:` 声明数。 */
-function countStateOpacityDeclarations(): number {
-  let count = 0;
-  for (const [, selector, body] of readPanelCss().matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    if (!/:hover|:focus|\[data-active/.test(selector!)) continue;
-    count += (body!.match(/opacity:\s*[\d.]+/g) ?? []).length;
-  }
-  return count;
-}
-
-/** 面板 CSS 模板串的原文（消插值前的裸文本，够解析规则块用）。 */
-function readPanelCss(): string {
-  const source = readFileSync(PANEL_SOURCE, 'utf8');
-  const template = /style\.textContent\s*=\s*`([\s\S]*?)`;\s*\n\s*document\.head\.append/.exec(source);
-  expect(template, 'project-panel.ts 里应当有 style.textContent 模板串').not.toBeNull();
-  return template![1]!.replace(/\$\{[^}]*\}/g, 'X');
-}
-
-const DIMMED_TEXT_ELEMENTS = deriveDimmedElements()
-  .filter((element) => DIMMED_ELEMENT_KINDS[element.name as keyof typeof DIMMED_ELEMENT_KINDS] === 'text')
-  .map((element) => [element.name, element.opacity] as const);
-
-const DIMMED_ICON_ELEMENTS = deriveDimmedElements()
-  .filter((element) => DIMMED_ELEMENT_KINDS[element.name as keyof typeof DIMMED_ELEMENT_KINDS] === 'icon')
-  .map((element) => [element.name, element.opacity] as const);
-
 afterEach(() => {
   document.head.innerHTML = '';
 });
 
 describe('injected theme readability', () => {
-  it('derives the dimmed-element list from the panel CSS and matches the registered kinds', () => {
-    // ⚠️ **这条是「手抄必然分叉」的解药** —— 清单从 CSS 派生，与 `DIMMED_ELEMENT_KINDS`
-    // 交叉校验。双向都拦：
-    // - CSS 里新增了一个调暗元素、但没登记 kind → 第二处红（强制审阅）。
-    // - 登记表里留着一个 CSS 已删的元素 → 第二处红（强制清理）。
-    // ⚠️ **无损对账**：派生器漏解析一条 `opacity` 声明时清单会少一项，若期望表恰好也少
-    // 就双向都不报 —— 所以先断言「派生条数 + 状态态条数 == 原文声明总数」。
-    const derived = deriveDimmedElements();
-    const totalDeclarations = countOpacityDeclarations();
-    const stateDeclarations = countStateOpacityDeclarations();
-    expect(
-      derived.length + stateDeclarations,
-      `opacity 声明总数对不上（派生 ${derived.length} + 状态态 ${stateDeclarations} vs 原文 ${totalDeclarations}）`,
-    ).toBe(totalDeclarations);
-
-    const derivedNames = derived.map((element) => element.name).sort();
-    const registeredNames = Object.keys(DIMMED_ELEMENT_KINDS).sort();
-    expect(derivedNames, 'CSS 里的调暗元素必须与 DIMMED_ELEMENT_KINDS 完全一致（新增/删除都要登记）')
-      .toEqual(registeredNames);
-  });
-
   it('keeps both palettes key-for-key identical', () => {
     // ⚠️ 少一个键不会报错 —— 那一套主题下该处静默回落到继承值。
     const light = readVariableBlock('body {');
@@ -201,77 +74,6 @@ describe('injected theme readability', () => {
       contrast(resolve(light, '--zpp-ui-text'), LIGHT_SIDEBAR_BACKGROUND),
       '面板正文压在浅色侧边栏上也要够读',
     ).toBeGreaterThanOrEqual(4.5);
-  });
-
-  it('keeps the opacity-dimmed secondary text readable after compositing', () => {
-    // ⚠️ **面板里 9 处元素靠 `opacity` 调暗**，而 opacity 会与底色合成、直接决定
-    // 有效对比度 —— 只算 token 之间的比值会把这一整类漏掉。
-    //
-    // 判据分两档，与元素性质对应：
-    // - 次级**文本**（10~12px 元信息）：≥ 2.4。这不是 WCAG 的 4.5 —— 它们是刻意做淡的
-    //   元信息，**侧边栏自己的第三档 `--ds-text-tertiary` 也只有 2.64:1**，面板的
-    //   2.4~3.7 落在同一档里。这个阈值守的是「别调成看不见」。
-    // - **非文本图标**（常显按钮）：WCAG 1.4.11 的 3:1。它们是要点的东西，不是装饰。
-    for (const [block, background] of [
-      ['body {', PAGE_BACKGROUND.light],
-      ['body.zpp-theme-dark {', PAGE_BACKGROUND.dark],
-    ] as const) {
-      const vars = readVariableBlock(block);
-      const text = resolve(vars, '--zpp-ui-text');
-      for (const [name, opacity] of DIMMED_TEXT_ELEMENTS) {
-        expect(
-          contrast(composite(text, background, opacity), background),
-          `${block} 的 .zpp-project-panel__${name}（opacity ${opacity}）`,
-        ).toBeGreaterThanOrEqual(2.4);
-      }
-      for (const [name, opacity] of DIMMED_ICON_ELEMENTS) {
-        // ⚠️ **菜单项图标单独按真实面（surface-raised）核** —— 它的底不是页面底色，
-        // 见下面那条「reads the menu-item icon against the raised surface」。
-        if (MENU_SURFACE_ELEMENTS.has(name)) continue;
-        expect(
-          contrast(composite(text, background, opacity), background),
-          `${block} 的 .zpp-project-panel__${name}（图标，opacity ${opacity}）`,
-        ).toBeGreaterThanOrEqual(3);
-      }
-    }
-  });
-
-  it('keeps the dimmed elements visible on the worst-case sidebar background too', () => {
-    // ⚠️ 与 `--zpp-ui-text` 那条对称：**面板挂在 `#sidebar` 里**，而侧边栏底色与
-    // 页面底色不是同一个值（浅色更暗、深色更亮）。只对着页面底色核会漏掉最坏情况 ——
-    // `conversation-age`（0.4）压浅色侧边栏只有 2.394，比页面底色的 2.430 更低。
-    for (const [block, background] of [
-      ['body {', LIGHT_SIDEBAR_BACKGROUND],
-      ['body.zpp-theme-dark {', DARK_SIDEBAR_BACKGROUND],
-    ] as const) {
-      const vars = readVariableBlock(block);
-      const text = resolve(vars, '--zpp-ui-text');
-      // 最深的那一档（0.4）是这里的下限；它压最坏底色上仍要 ≥ 2.3。
-      const worst = Math.min(...DIMMED_TEXT_ELEMENTS.map(([, opacity]) => opacity));
-      expect(
-        contrast(composite(text, background, worst), background),
-        `${block} 的次级文字压最坏侧边栏底色（opacity ${worst}）`,
-      ).toBeGreaterThanOrEqual(2.3);
-    }
-  });
-
-  it('reads the menu-item icon against the raised surface it actually sits on', () => {
-    // ⚠️ **菜单项图标（`menu-item-svg`）的真实底是 `--zpp-ui-surface-raised`**（菜单底色），
-    // 不是页面底色、也不是侧边栏底色。上面两条合成断言都对着后两者算 —— 对这个元素
-    // 会给偏乐观的值（深色下对着页底算是 5.96，对着真实菜单底是 4.83 那一类偏差）。
-    // 所以单独按真实面核一次。
-    for (const block of ['body {', 'body.zpp-theme-dark {'] as const) {
-      const vars = readVariableBlock(block);
-      const text = resolve(vars, '--zpp-ui-text');
-      const raised = resolve(vars, '--zpp-ui-surface-raised');
-      for (const [name, opacity] of DIMMED_ICON_ELEMENTS) {
-        if (!MENU_SURFACE_ELEMENTS.has(name)) continue;
-        expect(
-          contrast(composite(text, raised, opacity), raised),
-          `${block} 的 .zpp-project-panel__${name} 压在菜单底 surface-raised 上`,
-        ).toBeGreaterThanOrEqual(3);
-      }
-    }
   });
 
   it('reads the error status line at body-copy contrast in both themes', () => {

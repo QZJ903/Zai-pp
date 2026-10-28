@@ -17,17 +17,24 @@ export const MEMORY_V2_RECORD = {
   syncId: '00000000-0000-4000-8000-000000000007',
 } as const;
 
+/** v3 历史形状：带 `scope`（项目功能已移除，但它仍是已发布的落盘形态）。 */
 export const MEMORY_V3_RECORD = {
   ...MEMORY_V2_RECORD,
   scope: 'global',
 } as const;
 
+/** v3 里属于项目作用域的记录 —— 升到 v4 时**整条删除**。 */
 export const MEMORY_V3_PROJECT_RECORD = {
   ...MEMORY_V2_RECORD,
   id: 8,
   syncId: '00000000-0000-4000-8000-000000000008',
   scope: 'project',
   projectId: 'project-v2',
+} as const;
+
+/** v4 形状：`scope` / `projectId` 已随项目功能移除。 */
+export const MEMORY_V4_RECORD = {
+  ...MEMORY_V2_RECORD,
 } as const;
 
 export const MEMORY_V1_ADDITIVE_RECORD = {
@@ -55,7 +62,7 @@ export const MEMORY_IMPORT_PREVIEW_RECORD = {
 } as const;
 
 export const MEMORY_HISTORICAL_EXPORT_RECORD = {
-  ...MEMORY_V3_RECORD,
+  ...MEMORY_V4_RECORD,
   id: 41,
   syncId: '00000000-0000-4000-8000-000000000041',
   name: 'Historical exported memory',
@@ -66,11 +73,17 @@ export const MEMORY_HISTORICAL_EXPORT_RECORD = {
   lastAccessedAt: 430,
 } as const;
 
+/**
+ * 一条**当前 schema 解不开**的原始记录 —— 用于守「损坏态下所有读写都失败、原样保留」。
+ *
+ * ⚠️ 坏在哪一格要选**当前 schema 仍然校验**的字段：项目功能删除后 `scope` 已被忽略，
+ * 拿它当损坏触发点会让这条记录变成合法记录（整组断言静默失效）。
+ */
 export const MEMORY_CORRUPT_RAW_RECORD = {
-  ...MEMORY_V3_RECORD,
+  ...MEMORY_V4_RECORD,
   id: 91,
   syncId: '00000000-0000-4000-8000-000000000091',
-  scope: 'future-scope',
+  type: 'future-type',
   recoveryOnlyField: { preserve: true },
 } as const;
 

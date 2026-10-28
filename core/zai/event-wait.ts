@@ -17,7 +17,7 @@
  * ## 判据：什么不受节流
  *
  * 官方文档只点名 `setTimeout` / `setInterval` / `scheduler.postTask` 被节流。
- * `MutationObserver` 回调**不走定时器队列** —— 真机实测（2026-10-26，后台标签 8 分钟）：
+ * `MutationObserver` 回调**不走定时器队列** —— 真机实测（后台标签 8 分钟）：
  *
  * | 通道 | 后台 p50 | 后台 min |
  * |---|---|---|

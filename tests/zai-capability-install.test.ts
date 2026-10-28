@@ -45,12 +45,10 @@ function buildDeps(overrides: Partial<ZaiCapabilityDeps> = {}): {
   const hiddenCounts: number[] = [];
 
   const deps: ZaiCapabilityDeps = {
-    installPeakDialogAutoDismiss: () => record('installPeakDialogAutoDismiss'),
     installStopObserver: () => record('installStopObserver'),
     installSessionWatch: () => record('installSessionWatch'),
     installBackgroundCapability: async () => { record('installBackgroundCapability'); },
     installInjectedThemeWatch: () => record('installInjectedThemeWatch'),
-    installProjectPanel: () => record('installProjectPanel'),
     installContinuationBubbleHider: (options) => {
       record('installContinuationBubbleHider');
       // 桩里立刻回调一次，验「onHidden 被接到了生产那个回调上」。
@@ -85,12 +83,10 @@ function buildDeps(overrides: Partial<ZaiCapabilityDeps> = {}): {
 
 describe('installZaiCapabilities: every install runs exactly once', () => {
   it.each([
-    'installPeakDialogAutoDismiss',
     'installStopObserver',
     'installSessionWatch',
     'installBackgroundCapability',
     'installInjectedThemeWatch',
-    'installProjectPanel',
     'installContinuationBubbleHider',
     'installToolPanel',
     'onSessionChange',
@@ -102,14 +98,11 @@ describe('installZaiCapabilities: every install runs exactly once', () => {
     expect(harness.count(name), `${name} 必须恰好被调一次`).toBe(1);
   });
 
-  it('installs the peak-dialog dismisser and the stop observer first', () => {
-    // ⚠️ 顺序是语义，不是随手排的：这两个要覆盖「页面刚起来就弹窗 / 就有 Stop」的窗口。
+  it('installs the stop observer first', () => {
+    // ⚠️ 顺序是语义，不是随手排的：它要覆盖「页面刚起来就有 Stop」的窗口。
     const harness = buildDeps();
     installZaiCapabilities(harness.deps);
-    expect(harness.calls.slice(0, 2)).toEqual([
-      'installPeakDialogAutoDismiss',
-      'installStopObserver',
-    ]);
+    expect(harness.calls[0]).toBe('installStopObserver');
   });
 
   it('installs the session watcher before subscribing to it', () => {

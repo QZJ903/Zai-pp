@@ -28,7 +28,6 @@ import {
   shouldInjectPresetForTurn,
   type PromptInjectionSettings,
 } from '../core/prompt/settings';
-import { filterMemoriesByProjectScope } from '../core/memory/scope';
 import {
   areMemoriesImported,
   isSkillDraftSaved,
@@ -108,19 +107,8 @@ import {
   isBackgroundActive,
   patchContainerBackgrounds,
 } from '../core/zai/page-background';
-import {
-  startProjectPanel,
-  type ProjectPanelController,
-  type ProjectPanelLabels,
-} from '../core/zai/project-panel';
-import { decodeProjectContextState } from '../core/project/codec';
-import { selectPendingProjectPrompt } from '../core/project/prompt-context';
-import { PROJECT_UNTITLED_CONVERSATION } from '../core/project/title';
-import { buildZaiChatSessionUrl, readZaiChatSessionId } from '../core/zai/chat-session';
-import { navigateToZaiConversation } from '../core/zai/project-nav';
+import { readZaiChatSessionId } from '../core/zai/chat-session';
 import { findZaiToolXmlBlocks } from '../core/zai/tool-xml';
-import { createZaiConversationTitleResolver } from '../core/zai/conversation-title';
-import { ZAI_AGENT_HOME_PATH } from '../core/zai/mode';
 import { isRuntimeFailure, RuntimeCommandError } from '../core/messaging/runtime-response';
 import {
   BACKGROUND_RUNTIME_PATHNAMES,
@@ -159,8 +147,6 @@ import {
   type ToolHistoryRecordLike,
 } from '../core/zai/tool-panel';
 import {
-  AUTH_READ_TIMEOUT_MS,
-  loadZaiAuthFromStorage,
   mergeZaiAuthFromCapture,
   readZaiUserIdFromToken,
 } from '../core/zai/auth';
@@ -214,8 +200,6 @@ const augProgressWaiters = createWaiterRegistry();
  */
 let lastAutomationSendErrorKind: string | null = null;
 let extensionContextValid = true;
-/** 侧边栏「项目」面板控制器（见 installProjectPanel）。 */
-let projectPanelController: ProjectPanelController | null = null;
 /**
  * requestId → 该请求已执行过的 toolCall 签名（防 TOOL_CALL 通道重复执行同一 XML）。
  *
@@ -558,26 +542,6 @@ function readCurrentAssistantMessageId(): string | null {
   return lastMessage ? readZaiMessageId(lastMessage) : null;
 }
 
-/**
- * 取当前会话的标题，**读侧边栏里被选中那一行**。
- *
- * ⚠️ **这是二手源，只作兜底** —— 侧边栏只是服务端列表的投影：页面收到 WebSocket
- * 的 `chat:title` 之后还要再重拉一次列表才会换名，而那一跳**不保证每次都成立**。
- * 需要可靠标题的地方走 `core/zai/conversation-title.ts`（直接问服务端）。
- *
- * ⚠️ **没有 `document.title` 兜底** —— z.ai 的站点标题是固定的
- * 「Z.ai - Advanced AI Chatbot & Agent powered by …」，不随会话变，拿它当会话名
- * 只会让每个会话同名。侧边栏还没渲染出来时**如实返回占位串**：
- * 它是 `PROJECT_UNTITLED_CONVERSATION`，被 `isPlaceholderProjectConversationTitle`
- * 认作占位 → 不会被当成真实标题落库，也不会挡住之后拿到的真名字。
- */
-function getCurrentConversationTitle(): string {
-  const selected = document.querySelector<HTMLElement>(
-    'button[data-selected="true"] div.text-left.self-center.min-w-0',
-  );
-  return selected?.textContent?.replace(/\s+/g, ' ').trim() || PROJECT_UNTITLED_CONVERSATION;
-}
-
 function isContinuationRequest(text: string): boolean {
   return isZaiContinuationPrompt(text);
 }
@@ -887,54 +851,6 @@ async function loadAndSyncRuntimeState(): Promise<LoadedRuntimeState> {
   return { descriptors, fresh: descriptors.length > 0 };
 }
 
-interface ResolvedProjectAugmentationContext {
-  projectId: string;
-  context: string | null;
-}
-
-/**
- * 解析当前会话的项目上下文（对应 ds++ 的 `resolveProjectContextForRequestBody`）。
- * z.ai 会话 id 从 location `/c/<id>` 读；首条消息 `bindPendingProject=true`。
- *
- * ⚠️ **title 与 url 都要传**（与上游一致）—— 后台拿它们写进 `ProjectConversation`：
- * - 少了 `title`，绑定那一刻只能落成占位串，且**之后没有别的机会回填**；
- * - 少了 `url`，侧边栏项目页的会话链接会落到空 href。
- *
- * 标题**用服务端缓存里的值**（`conversationTitleResolver.peek`），**不在这里等网络** ——
- * 这条是每次发消息都要走的路径，为标题多一个往返不值得。缓存空时退回侧边栏那行
- * （二手源，但此刻够用），同时**空跑一次解析**给下一轮预热。
- * 两者都没有就如实传占位串：后台的 `selectConversationTitle` 会拒绝它
- * （不会被落库，也不会挡住之后拿到的真名）。
- */
-async function resolveProjectContextForRequest(
-  chatSessionId: string | null,
-  bindPendingProject: boolean,
-): Promise<ResolvedProjectAugmentationContext | null> {
-  if (!chatSessionId) return null;
-  try {
-    const cachedTitle = conversationTitleResolver.peek(chatSessionId);
-    if (!cachedTitle) {
-      // 空跑预热：不 await —— 这条路径不为标题阻塞。
-      void conversationTitleResolver.resolve(chatSessionId);
-    }
-    const result = await sendRuntimeMessageStrict<ResolvedProjectAugmentationContext | null>({
-      type: 'GET_PROJECT_CONTEXT_FOR_CONVERSATION',
-      payload: {
-        bindPendingProject,
-        conversation: {
-          conversationId: chatSessionId,
-          title: cachedTitle ?? getCurrentConversationTitle(),
-          url: buildZaiChatSessionUrl(chatSessionId, currentSiteOrigin()),
-        },
-      },
-    });
-    return result ?? null;
-  } catch (error) {
-    if (isExtensionInvalidatedError(error)) invalidateExtensionContext();
-    return null;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // 工具授权 + 执行中继
 // ---------------------------------------------------------------------------
@@ -1215,8 +1131,6 @@ function augmentPrompt(
      */
     toolDescriptors: readonly ToolDescriptor[];
     isFirstMessage?: boolean;
-    projectContext?: string | null;
-    projectId?: string | null;
     /** 本轮的 Skill 激活结果，由调用方经 `resolveActiveLocalSkill` 算出（见其说明）。 */
     skillActivation: ActiveLocalSkill;
   },
@@ -1224,13 +1138,7 @@ function augmentPrompt(
   const isFirstMessage = options?.isFirstMessage ?? true;
   const modelFacing = options.toolDescriptors;
   const locale = currentContentLocale ?? DEFAULT_LOCALE;
-  // 项目上下文**只由调用方显式传入**，没有模块级兜底：两个调用点（首条建会话读待绑项目、
-  // completion 读会话归属）各自拿得到正确的源。用模块状态兜底会让「调用方明确传 null」
-  // 与「调用方没传」变成同一件事，首条建会话于是继承上一个会话的项目。
-  const projectId = options?.projectId ?? null;
-  const projectContext = options?.projectContext ?? null;
-  // 项目作用域记忆：只带全局 + 属于当前 project 的 project-scoped 记忆（ds++ filterMemoriesByProjectScope）。
-  const scopedMemories = filterMemoriesByProjectScope(currentMemories, projectId);
+  const scopedMemories = currentMemories;
 
   // 预设 + 强制回复语言：对齐 ds++ 的 augmentDecodedRequestBody 逻辑。
   const promptSettings = currentPromptSettings ?? DEFAULT_PROMPT_INJECTION_SETTINGS;
@@ -1264,7 +1172,6 @@ function augmentPrompt(
         toolDescriptors: modelFacing,
         skillSystemContext: buildLocalSkillSystemContext(resolved, activeLocalSkillDir, locale),
         presetContent,
-        projectContext,
         locale,
         memoryEnabled,
         systemPromptEnabled,
@@ -1278,7 +1185,6 @@ function augmentPrompt(
       toolDescriptors: modelFacing,
       visibleUserPrompt: originalPrompt,
       presetContent,
-      projectContext,
       locale,
       memoryEnabled,
       systemPromptEnabled,
@@ -1291,44 +1197,12 @@ function augmentPrompt(
     memories: scopedMemories,
     toolDescriptors: modelFacing,
     presetContent,
-    projectContext,
     locale,
     memoryEnabled,
     systemPromptEnabled,
     forceResponseLanguage,
   });
   return result.augmented;
-}
-
-/**
- * 首条建会话（`/chats/new`）时的项目上下文。
- *
- * ⚠️ **此刻地址栏还没有 `/c/<id>`** —— `resolveProjectContextForRequest` 第一条就是
- * `if (!chatSessionId) return null`，所以那条路在首条必然空转。唯一已知的是**待绑项目**
- * （`zai_pp_project_context` 的 `pendingProjectId`，「下一条新会话使用此项目」与面板的
- * 「在项目下开启新会话」都会先置它）。
- *
- * 漏了这一步的后果是**静默的**：首条没有项目指令、且 `projectId` 为 null 会把
- * **项目记忆整批过滤掉**（`filterMemoriesByProjectScope` 只保留 global），
- * 要等第二轮拿到 `/c/<id>` 才恢复。
- *
- * 读的是 `GET_PROJECT_CONTEXT_STATE`（已在内容脚本白名单里，无需新增命令）。
- * 失败一律当「没有项目」—— 与改动前行为一致，不会把请求搞砸。
- */
-async function resolvePendingProjectContextForFirstMessage(): Promise<ResolvedProjectAugmentationContext | null> {
-  try {
-    const raw = await sendRuntimeMessage<unknown>({ type: 'GET_PROJECT_CONTEXT_STATE' });
-    if (raw === undefined) return null;
-    const state = decodeProjectContextState(raw, 'firstMessageProjectState');
-    // 标题语言跟内容脚本自己的 locale 走（与提示词其它段落同一套资源）。
-    const selection = selectPendingProjectPrompt(state, currentContentLocale);
-    if (!selection) return null;
-    return { projectId: selection.projectId, context: selection.context };
-  } catch (error) {
-    if (isExtensionInvalidatedError(error)) invalidateExtensionContext();
-    else console.log('[Zai++] first-message project context failed', error);
-    return null;
-  }
 }
 
 async function handleAugmentRequestBody(
@@ -1410,11 +1284,6 @@ async function handleAugmentRequestBody(
       // `modelFacing`）做增广，而且它占着后台的 grant 名额（`MAX_ACTIVE_GRANTS = 32`，
       // 满了会让**之后所有**建授权抛 `tool_authorization_grant_limit`）。
       // 所以增广结果回传之后**显式关掉**它 —— 走 `closeToolAuthorizationGrant`（只关后台、不碰 Map）。
-      // 项目上下文（首条）：此刻**地址栏还没有 `/c/<id>`**，查不了会话归属，
-      // 唯一已知的是**待绑项目**（「下一条新会话使用此项目」与面板的「在项目下开启
-      // 新会话」都会先置 pending）。漏了这一步的后果是**静默的**：首条没有项目指令，
-      // 且 projectId 为 null 会把项目记忆整批过滤掉，要等第二轮才恢复。
-      const pendingProject = await resolvePendingProjectContextForFirstMessage();
       // 本请求的模型可见目录：**提示词、标签识别、兜底解析共用这一份**（见
       // `modelFacingDescriptorsFor`）。这里由授权返回的完整目录过滤而来。
       const modelFacing = modelFacingDescriptorsFor(authorization.descriptors);
@@ -1425,8 +1294,6 @@ async function handleAugmentRequestBody(
         augmentPrompt(text, {
           toolDescriptors: modelFacing,
           isFirstMessage: true,
-          projectContext: pendingProject?.context ?? null,
-          projectId: pendingProject?.projectId ?? null,
           skillActivation,
         }),
       );
@@ -1582,8 +1449,6 @@ async function handleAugmentRequestBody(
     // 它同时是「主世界认不认这个标签」与「兜底解析认不认这个块」的判据。
     const modelFacing = modelFacingDescriptorsFor(auth.descriptors);
     requestToolDescriptorsByRequestId.set(requestId, modelFacing);
-    // 项目上下文：ds++ 对首条消息才 bindPendingProject；z.ai 会话 id 从 /c/<id> 读，不需要 conversation title/url 也能拿到对话归属。
-    const project = await resolveProjectContextForRequest(chatSessionId, isFirstMessage);
     // 每轮都增强（含续写轮）。
     //
     // 这里历史上曾按「本轮是否联网」跳过续写轮注入（`searchMode === 'off' || isFirstMessage`），
@@ -1592,8 +1457,6 @@ async function handleAugmentRequestBody(
     const augmented = augmentPrompt(originalPrompt, {
       toolDescriptors: modelFacing,
       isFirstMessage,
-      projectContext: project?.context ?? null,
-      projectId: project?.projectId ?? null,
       skillActivation,
     });
     currentRequestMessageCount = isFirstMessage ? 1 : currentRequestMessageCount + 1;
@@ -2378,10 +2241,6 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
   // 由调用方在**串行队列之外**完成（见 `dispatchMainWorldMessage` 的同步探测区）。
   // 挪进来的话，它们会被排在这个分支前面的慢工具执行堵住，而 `armManualStopDetection`
   // 只有 4 秒宽限窗口 ⇒ 慢工具被误判成「用户手动停止」。
-  // 会话名要等**首答完成**才定下来（之前侧边栏那行是「新会话」这类临时名）。
-  // 这里再给项目面板一次补名机会 —— 它自己没法知道「回答结束了」这件事。
-  projectPanelController?.backfillNow();
-
   // 首条请求发出后，页面 SPA 可能已经从首页跳到 /c/<id>（新建会话场景）。
   // 把任务的最新会话 id 同步下来，这样回传 backend 的才是真实 id，而非首条注入时的 null。
   const liveTaskId = taskIdByRequestId.get(complete.requestId);
@@ -3722,40 +3581,6 @@ async function installBackgroundCapability(): Promise<void> {
 
 
 /**
- * 侧边栏「项目」面板：把项目与会话管到 z.ai 页面自己的侧边栏里。
- *
- * 只从项目存储渲染 —— **不读页面原生历史列表**（z.ai 的会话行上没有会话 id，
- * 认不出哪一行是哪个会话）。因此也不隐藏原生列表里的行：那需要行到 id 的映射，
- * 映射错位的表现是「对话从侧边栏消失」，代价远高于「同一对话出现两次」。
- */
-/**
- * 会话标题的**一手源**（服务端）。模块级单例：解析器内部有成功值缓存与在飞去重，
- * 每次装面板新建一个会让缓存失效、并发的两次触发各发一个请求。
- *
- * ⚠️ 内容脚本在隔离世界，它的 `fetch` **不是**页面那个被我们 hook 过的
- * `window.fetch` —— 不会被自己的 hook 拦到，所以不需要绕过标记。
- */
-const conversationTitleResolver = createZaiConversationTitleResolver({
-  // ⚠️ **按站点取**（站点来自下面那个 `resolveOrigin`，即本页所属站）——
-  // 两站的 token 互不认，用别站的 token 拉标题必然 401。
-  loadToken: async (origin) => {
-    // ⚠️ 读 token 要带上界：解析器的 `inFlight` 在 `fetchTitle` 之后才释放，
-    // 而 storage 半死时那个 await 永不落地 ⇒ 槽位永久占住、之后每次触发都落
-    // 「已尝试」跳过分支、**不自愈**。超时返回 null 后会走下面的 localStorage 兜底，
-    // 那是同步读、不受影响。
-    const auth = await loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS, origin);
-    if (auth?.token) return auth.token;
-    // 桶里没有就现读页面 localStorage（与 refreshZaiAuth 同一条兜底路径）。
-    // ⚠️ 页面 localStorage 属于**本页那一站**，所以这条兜底天然是站点正确的；
-    // 只要调用方给的 origin 就是本页站点（这里就是），它就是最后一道站内兜底。
-    return typeof localStorage === 'undefined' ? null : localStorage.getItem('token');
-  },
-  // 有页面上下文 ⇒ 就地判定当前站（标题请求要打到**本页所属**的那一站）。
-  resolveOrigin: currentSiteOrigin,
-  fetchImpl: (input, init) => fetch(input, init),
-});
-
-/**
  * 工具调用面板（一轮回答里执行过的工具收成一块可折叠列表）。
  *
  * ⚠️ **模块级单例**：它内部持有「已恢复记录」的 map 与待渲染集合 ——
@@ -3827,198 +3652,6 @@ function installInjectedThemeWatch(): void {
     attributes: true,
     attributeFilter: ['class'],
   });
-}
-
-function installProjectPanel(): void {
-  const labels = (): ProjectPanelLabels => ({
-    title: translate(currentContentLocale, 'content.projectPanel.title'),
-    empty: translate(currentContentLocale, 'content.projectPanel.empty'),
-    conversationCount: (count) => translate(
-      currentContentLocale,
-      'content.projectPanel.conversationCount',
-      { count },
-    ),
-    expandProject: (name) => translate(
-      currentContentLocale,
-      'content.projectPanel.expandProject',
-      { name },
-    ),
-    collapseProject: (name) => translate(
-      currentContentLocale,
-      'content.projectPanel.collapseProject',
-      { name },
-    ),
-    showMore: translate(currentContentLocale, 'content.projectPanel.showMore'),
-    showLess: translate(currentContentLocale, 'content.projectPanel.showLess'),
-    moveCurrentToProject: (name) => translate(
-      currentContentLocale,
-      'content.projectPanel.moveCurrentToProject',
-      { name },
-    ),
-    removeCurrentFromProject: (name) => translate(
-      currentContentLocale,
-      'content.projectPanel.removeCurrentFromProject',
-      { name },
-    ),
-    newConversationInProject: (name) => translate(
-      currentContentLocale,
-      'content.projectPanel.newConversationInProject',
-      { name },
-    ),
-    useNextConversation: (name) => translate(
-      currentContentLocale,
-      'content.projectPanel.useNextConversation',
-      { name },
-    ),
-    cancelNextConversation: (name) => translate(
-      currentContentLocale,
-      'content.projectPanel.cancelNextConversation',
-      { name },
-    ),
-    pendingBadge: translate(currentContentLocale, 'content.projectPanel.pendingBadge'),
-    conversationActions: translate(currentContentLocale, 'content.projectPanel.conversationActions'),
-    removeFromProjectNamed: (name) => translate(
-      currentContentLocale,
-      'content.projectPanel.removeFromProjectNamed',
-      { name },
-    ),
-    renameConversation: translate(currentContentLocale, 'content.projectPanel.renameConversation'),
-    operationFailed: (message) => translate(
-      currentContentLocale,
-      'content.projectPanel.operationFailed',
-      { message },
-    ),
-    age: (timestamp) => formatProjectPanelAge(timestamp),
-  });
-
-  projectPanelController = startProjectPanel({
-    async loadState() {
-      const raw = await sendRuntimeMessage<unknown>({ type: 'GET_PROJECT_CONTEXT_STATE' });
-      if (raw === undefined) return null;
-      try {
-        return decodeProjectContextState(raw, 'projectPanelState');
-      } catch (error) {
-        console.log('[Zai++] project panel state decode failed', error);
-        return null;
-      }
-    },
-    async addConversation({ projectId, conversation }) {
-      await sendRuntimeMessageStrict({
-        type: 'ADD_CONVERSATION_TO_PROJECT',
-        payload: { projectId, conversation },
-      });
-    },
-    async removeConversation(conversationId) {
-      await sendRuntimeMessageStrict({
-        type: 'REMOVE_CONVERSATION_FROM_PROJECT',
-        payload: { conversationId },
-      });
-    },
-    async renameConversation({ projectId, conversationId, title }) {
-      // 走 ADD（按会话 id upsert），带 titleEdited 闸门 —— 否则下一轮页面
-      // 自动回填标题就把手动改的名字盖掉了。
-      await sendRuntimeMessageStrict({
-        type: 'ADD_CONVERSATION_TO_PROJECT',
-        payload: {
-          projectId,
-          conversation: { conversationId, title, titleEdited: true },
-        },
-      });
-    },
-    async backfillConversationTitle({ projectId, conversationId, title }) {
-      // 补名走 ADD（按会话 id upsert），**不带 titleEdited** —— 这不是用户改名，
-      // 只是把占位串换成真名；后台的 selectConversationTitle 也只在已有值是
-      // 占位串时才会采用它。
-      //
-      // ⚠️ **url 按会话 id 重拼，不用 `location.href`** —— 补名可能发生在会话已经
-      // 切走之后（`backfillNow` 有 2.5 秒的延迟重试），那时地址栏指向的是**别的**
-      // 会话；写进去会让侧边栏项目页里这条会话的链接指向错误的对话。
-      await sendRuntimeMessageStrict({
-        type: 'ADD_CONVERSATION_TO_PROJECT',
-        payload: {
-          projectId,
-          conversation: { conversationId, title, url: buildZaiChatSessionUrl(conversationId, currentSiteOrigin()) },
-        },
-      });
-    },
-    async resolveConversationTitle(conversationId) {
-      return conversationTitleResolver.resolve(conversationId);
-    },
-    async setPending(projectId) {
-      await sendRuntimeMessageStrict({
-        type: 'SET_PENDING_PROJECT_CONTEXT',
-        payload: { projectId },
-      });
-    },
-    getCurrentConversation() {
-      const conversationId = getCurrentChatSessionId();
-      if (!conversationId) return null;
-      return {
-        conversationId,
-        title: getCurrentConversationTitle(),
-        url: location.href,
-      };
-    },
-    openConversation(conversation) {
-      // ⚠️ 跳转目标由 `navigateToZaiConversation` 决定（**站点取自记录本身**，
-      // 不是当前页）—— 一条国区站的会话在国际站的页面上也要跳得过去。
-      // 它同时挡掉存储里可能混进来的非站点值（同步快照导入不校验 url 形状），
-      // 所以这里不需要再自己判一次协议安全。
-      navigateToZaiConversation(conversation, {
-        currentOrigin: currentSiteOrigin(),
-        assign: (url) => window.location.assign(url),
-      });
-    },
-    startNewConversation() {
-      // 待绑已经在调用方置好；这里**固定去 agent 首页** —— 站点只剩 agent 模式，
-      // 不再做模式判定（判定依据 `#sidebar` 的 `data-active` 已被真机推翻，
-      // 见 `core/zai/mode.ts` 的说明）。
-      // 走 `/?mode=agent` 是页面自己的入口：它读到 query 后设置场景并删除该参数。
-      window.location.assign(ZAI_AGENT_HOME_PATH);
-    },
-    getLabels: labels,
-    onError(error) {
-      console.log('[Zai++] project panel operation failed', error);
-    },
-  });
-
-  // 面板状态变了（侧边栏增删改）→ 重拉重绘。
-  // ⚠️ 与入口那处监听**同一个闸门**（此处此前连 `sender` 参数都没声明）。
-  chrome.runtime.onMessage.addListener((message, sender) => {
-    if (!isAuthorizedInboundRuntimeMessage(message, sender)) return undefined;
-    if (message.type === 'PROJECT_CONTEXT_UPDATED') projectPanelController?.refresh();
-    return undefined;
-  });
-
-  // 切会话时「当前对话」的归属变了 → 重绘 + 重新安排补名。
-  // ⚠️ 必须走 installSessionWatch 的订阅，不能只听 popstate —— z.ai 切会话是
-  // **pushState**（SPA 导航），popstate 根本不触发。
-  // ⚠️ 这里用 `backfillNow()` 而不是只 `render()`：新建会话的侧边栏那行**先是临时名**、
-  // 等模型第一次回答完才换成真名，所以要给补名留重试窗口（见该方法的说明）。
-  onZaiSessionChange(() => {
-    projectPanelController?.render();
-    projectPanelController?.backfillNow();
-  });
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) projectPanelController?.refresh();
-  });
-}
-
-function formatProjectPanelAge(timestamp: number): string {
-  const minutes = Math.floor((Date.now() - timestamp) / 60_000);
-  if (minutes < 1) return translate(currentContentLocale, 'content.projectPanel.age.justNow');
-  if (minutes < 60) {
-    return translate(currentContentLocale, 'content.projectPanel.age.minutesAgo', { count: minutes });
-  }
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) {
-    return translate(currentContentLocale, 'content.projectPanel.age.hoursAgo', { count: hours });
-  }
-  return translate(
-    currentContentLocale,
-    'content.projectPanel.age.daysAgo',
-    { count: Math.floor(hours / 24) },
-  );
 }
 
 /**
@@ -4332,7 +3965,7 @@ function installStopObserver(): void {
   // ⚠️ **`observe()` 也可能抛**（body 在判断之后被换掉 / 被分离）——
   // 抛了就回滚「已安装」，让下一次调用重试，理由同上。
   //
-  // ⚠️⚠️ **只观察 `childList`，不观察 `attributes`** —— 真机实测（2026-10-27）：
+  // ⚠️⚠️ **只观察 `childList`，不观察 `attributes`** —— 真机实测：
   // Stop 消失那一刻 `childList` 记录 662 条、`attributes` 只有 3 条，**倾向删节点**。
   // ⇒ 节点增删这一档就够用。
   //
@@ -4855,52 +4488,6 @@ async function waitForSendEvidence(): Promise<{
 }
 
 // ---------------------------------------------------------------------------
-// 高峰弹窗自动关（data-dialog-close，MutationObserver 连点）
-// ---------------------------------------------------------------------------
-
-let dialogObserver: MutationObserver | null = null;
-let lastDialogAutoSendAt = 0;
-
-/** 高峰弹窗标题。只自动关这个标题的弹窗，避免误伤其它 dialog。 */
-const PEAK_DIALOG_TITLE = '目前处于高峰时段';
-
-function findPeakDialogCloseButton(): HTMLElement | null {
-  // 只匹配真正的弹窗容器（role=dialog + data-dialog-content），
-  // 且正文包含高峰标题才认，最后取容器内的关闭按钮。
-  const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"][data-dialog-content]');
-  for (const dialog of dialogs) {
-    if (!(dialog.textContent ?? '').includes(PEAK_DIALOG_TITLE)) continue;
-    const closer = dialog.querySelector<HTMLElement>('[data-dialog-close]');
-    if (closer) return closer;
-  }
-  return null;
-}
-
-function installPeakDialogAutoDismiss(): void {
-  if (dialogObserver) return;
-  dialogObserver = new MutationObserver(() => {
-    const closer = findPeakDialogCloseButton();
-    if (!closer) return;
-    if (!closer.offsetParent && closer.getClientRects().length === 0) return;
-    closer.click();
-    autoSendAfterDialogDismiss();
-  });
-  dialogObserver.observe(document.body, { childList: true, subtree: true, attributes: true });
-}
-
-function autoSendAfterDialogDismiss(): void {
-  const now = Date.now();
-  if (now - lastDialogAutoSendAt < 2_000) return;
-  if (domSendInFlight) return;
-  const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
-  if (!textarea || !textarea.value.trim()) return;
-  if (findStopButton()) return;
-  lastDialogAutoSendAt = now;
-  const send = document.querySelector<HTMLButtonElement>(SEND_BUTTON_SELECTOR);
-  send?.click();
-}
-
-// ---------------------------------------------------------------------------
 // 入口
 // ---------------------------------------------------------------------------
 
@@ -4975,27 +4562,6 @@ export default defineContentScript({
           );
         return true;
       }
-      if (message.type === 'GET_CURRENT_ZAI_CONVERSATION') {
-        const conversationId = getCurrentChatSessionId();
-        if (!conversationId) {
-          sendResponse({ ok: false, error: 'no_current_conversation' });
-          return true;
-        }
-        // 标题优先问服务端（侧边栏那行是二手源，见 conversationTitleResolver 的说明）；
-        // 拿不到再退回侧边栏，仍拿不到就是占位串 —— 后台的闸门会拒绝它，不会被落库。
-        void (async () => {
-          const resolved = await conversationTitleResolver.resolve(conversationId);
-          sendResponse({
-            ok: true,
-            conversation: {
-              conversationId,
-              title: resolved ?? getCurrentConversationTitle(),
-              url: buildZaiChatSessionUrl(conversationId, currentSiteOrigin()),
-            },
-          });
-        })();
-        return true;
-      }
       if (message.type === 'INSERT_PROMPT_TEXT') {
         const text = typeof message.text === 'string' ? message.text : '';
         sendResponse(insertPromptText(text));
@@ -5065,12 +4631,10 @@ export default defineContentScript({
     // 启动链的编排搬到了 `core/zai/capability-install.ts`（依赖注入、可被测试直接调用）。
     // ⚠️ **顺序与「哪几处不等 promise」都是契约的一部分**，理由逐条写在那边的注释里。
     installZaiCapabilities({
-      installPeakDialogAutoDismiss,
       installStopObserver,
       installSessionWatch: () => installSessionWatch(ctx),
       installBackgroundCapability,
       installInjectedThemeWatch,
-      installProjectPanel,
       installContinuationBubbleHider,
       installToolPanel: () => toolPanel.install(),
       onSessionChange: onZaiSessionChange,

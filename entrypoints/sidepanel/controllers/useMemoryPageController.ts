@@ -40,7 +40,7 @@ export function useMemoryPageController(t: Translator, confirm: Confirm, feedbac
     try {
       const next = await libraryController.getMemories();
       if (!requestFence.current.isCurrent(generation)) return;
-      setMemories(next.filter((memory) => memory.scope !== 'project'));
+      setMemories(next);
       setLoadFailed(false);
     } catch (error) {
       if (!requestFence.current.isCurrent(generation)) return;
@@ -59,7 +59,7 @@ export function useMemoryPageController(t: Translator, confirm: Confirm, feedbac
       setLoading(false);
       try {
         const next = decodeMemoryList(message.memories, 'memoryUpdate');
-        setMemories(next.filter((memory) => memory.scope !== 'project'));
+        setMemories(next);
         setLoadFailed(false);
       } catch (error) {
         setLoadFailed(true);

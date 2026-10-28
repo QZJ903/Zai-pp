@@ -11,6 +11,8 @@ import {
   MEMORY_TABLE_SCHEMAS,
   migrateMemoryV1RecordToV2,
   migrateMemoryV2RecordToV3,
+  migrateMemoryV3RecordToV4,
+  shouldDeleteMemoryV3Record,
 } from './schema';
 import {
   decodeImportedMemory,
@@ -18,8 +20,8 @@ import {
 } from './codec';
 
 // The IndexedDB version is the logical schema version x10 (the convention
-// dexie established internally): released databases live at 10/20/30 and
-// `assertCurrentMemoryDatabaseVersion` checks `backendDB().version === 30`.
+// dexie established internally): released databases live at 10/20/30/40 and
+// `assertCurrentMemoryDatabaseVersion` checks `backendDB().version === 40`.
 const db = new IndexedDb(MEMORY_DATABASE_NAME, [
   {
     version: 10,
@@ -41,6 +43,17 @@ const db = new IndexedDb(MEMORY_DATABASE_NAME, [
       return tx.table(MEMORY_TABLE_NAME).modifyAll((memory) => {
         Object.assign(memory, migrateMemoryV2RecordToV3(memory));
         delete memory.projectId;
+      });
+    },
+  },
+  {
+    version: 40,
+    stores: { [MEMORY_TABLE_NAME]: MEMORY_TABLE_SCHEMAS[4] },
+    async migrate(tx) {
+      const table = tx.table(MEMORY_TABLE_NAME);
+      await table.deleteAll(shouldDeleteMemoryV3Record);
+      await table.modifyAll((memory) => {
+        Object.assign(memory, migrateMemoryV3RecordToV4(memory));
       });
     },
   },
@@ -155,26 +168,6 @@ export async function deleteMemory(id: number): Promise<void> {
     await readValidatedMemoryRecords(tx);
     await tx.table(MEMORY_TABLE_NAME).delete(id);
   }));
-}
-
-export async function deleteMemoriesForProject(projectId: string): Promise<number> {
-  const trimmedProjectId = projectId.trim();
-  if (!trimmedProjectId) throw new Error('Project id is required.');
-  return withSyncLocalStateLock(() => deleteMemoriesForProjectAlreadyLocked(trimmedProjectId));
-}
-
-export async function deleteMemoriesForProjectAlreadyLocked(projectId: string): Promise<number> {
-  const trimmedProjectId = projectId.trim();
-  if (!trimmedProjectId) throw new Error('Project id is required.');
-  await assertCurrentMemoryDatabaseVersion();
-  return db.transaction('rw', memories, async (tx) => {
-    await readValidatedMemoryRecords(tx);
-    return tx.table(MEMORY_TABLE_NAME).where('projectId').equals(trimmedProjectId).delete();
-  });
-}
-
-export async function assertMemoryRecordsValidAlreadyLocked(): Promise<void> {
-  await readValidatedMemoryRecords();
 }
 
 export async function touchMemories(ids: number[]): Promise<void> {

@@ -442,7 +442,11 @@ function AutomationForm({
           />
         </label>
         <label className="space-y-1">
-          <span className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>{t('sidepanel.automationPage.form.model')}</span>
+          <span className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>
+            {form.fixedSession
+              ? t('sidepanel.automationPage.form.modelFixedSession')
+              : t('sidepanel.automationPage.form.model')}
+          </span>
           <select
             value={form.model}
             onChange={(e) => update('model', e.target.value)}

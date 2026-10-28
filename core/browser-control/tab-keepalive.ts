@@ -12,8 +12,7 @@
  * （`waitForSendButtonEnabled` 4 秒预算、`waitForSendEvidence` 5 秒预算），
  * 被节流到每秒一次之后，预算还没走完几轮就超时 ⇒ 判「没发出去」⇒ 收尾。
  *
- * ⚠️⚠️ **更正一条曾经的错误说法（2026-10-26）**：这里原先写「隐藏超过 5 分钟可能
- * **直接冻结**（定时器 / Promise 回调 / 事件处理全部暂停）」。查 Chromium 官方
+ * ⚠️⚠️ **这里曾经写「隐藏超过 5 分钟可能直接冻结」—— 那是错的，已更正**：查 Chromium 官方
  * [Page Freezing Opt-In and Opt-Out](https://chromium.googlesource.com/chromium/src/+/HEAD/chrome/browser/performance_manager/docs/freezing_opt_out_opt_in.md)
  * 之后确认：**`Freezing isn't enabled on Chrome for Desktop yet`** ——
  * 「隐藏 5 分钟就冻结」是 **Android** 的行为（M68 起），不是桌面版。

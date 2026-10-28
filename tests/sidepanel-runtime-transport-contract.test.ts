@@ -28,7 +28,6 @@ describe('Side Panel runtime transport contract', () => {
     for (const file of [
       'entrypoints/sidepanel/pages/AutomationPage.tsx',
       'entrypoints/sidepanel/pages/BrowserControlPage.tsx',
-      'entrypoints/sidepanel/pages/ProjectsPage.tsx',
     ]) {
       const source = readFileSync(file, 'utf8');
       expect(source, file).toContain('isSidepanelRuntimeEvent(');

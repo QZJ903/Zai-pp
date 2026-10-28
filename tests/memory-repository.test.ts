@@ -4,9 +4,9 @@ import type { Memory, NewMemory } from '../core/types';
 import { MEMORY_DATABASE_NAME, MEMORY_TABLE_NAME } from '../core/memory/schema';
 import {
   MEMORY_CORRUPT_RAW_RECORD,
+  MEMORY_V4_RECORD,
   MEMORY_HISTORICAL_EXPORT_RECORD,
   MEMORY_IMPORT_PREVIEW_RECORD,
-  MEMORY_V3_RECORD,
 } from './fixtures/persistence-contract/memory';
 import { deleteIndexedDb } from './helpers/indexeddb';
 
@@ -53,8 +53,6 @@ describe('Memory repository transaction and codec boundaries', () => {
         tags: [...MEMORY_IMPORT_PREVIEW_RECORD.tags],
         id: 1,
         syncId: generatedSyncId,
-        scope: 'global',
-        projectId: undefined,
         createdAt: 1_700_000_000_000,
         updatedAt: 1_700_000_000_000,
         accessCount: 0,
@@ -69,8 +67,6 @@ describe('Memory repository transaction and codec boundaries', () => {
         pinned: MEMORY_HISTORICAL_EXPORT_RECORD.pinned,
         id: 2,
         syncId: MEMORY_HISTORICAL_EXPORT_RECORD.syncId,
-        scope: 'global',
-        projectId: undefined,
         createdAt: 1_700_000_000_000,
         updatedAt: 1_700_000_000_000,
         accessCount: 0,
@@ -139,19 +135,19 @@ describe('Memory repository transaction and codec boundaries', () => {
     const corrupt = cloneRaw(MEMORY_CORRUPT_RAW_RECORD);
     await memories.add(corrupt as unknown as Memory);
 
-    await expect(getAllMemories()).rejects.toThrow('memories[0].scope');
+    await expect(getAllMemories()).rejects.toThrow('memories[0].type');
     await expect(saveMemory(draft('blocked-write', 'sync-blocked-write')))
-      .rejects.toThrow('memories[0].scope');
+      .rejects.toThrow('memories[0].type');
     await expect(updateMemory(cloneMemory({
-      ...MEMORY_V3_RECORD,
+      ...MEMORY_V4_RECORD,
       id: 99,
-      tags: [...MEMORY_V3_RECORD.tags],
-    }))).rejects.toThrow('memories[0].scope');
+      tags: [...MEMORY_V4_RECORD.tags],
+    }))).rejects.toThrow('memories[0].type');
     await expect(replaceAllMemoriesForSyncApply([cloneMemory({
-      ...MEMORY_V3_RECORD,
-      tags: [...MEMORY_V3_RECORD.tags],
+      ...MEMORY_V4_RECORD,
+      tags: [...MEMORY_V4_RECORD.tags],
     })]))
-      .rejects.toThrow('memories[0].scope');
+      .rejects.toThrow('memories[0].type');
     await expect(memories.toArray()).resolves.toEqual([corrupt]);
   });
 
@@ -159,8 +155,8 @@ describe('Memory repository transaction and codec boundaries', () => {
     const { db, updateMemory } = await import('../core/memory/store');
     const memories = db.table(MEMORY_TABLE_NAME);
     const withoutId = cloneMemory({
-      ...MEMORY_V3_RECORD,
-      tags: [...MEMORY_V3_RECORD.tags],
+      ...MEMORY_V4_RECORD,
+      tags: [...MEMORY_V4_RECORD.tags],
     });
     delete withoutId.id;
 
@@ -179,7 +175,7 @@ describe('Memory repository transaction and codec boundaries', () => {
 
     await expect(restoreRawMemoryRecordsForSyncRecovery([corrupt])).resolves.toBeUndefined();
     await expect(captureRawMemoryRecordsForSyncRecovery()).resolves.toEqual([corrupt]);
-    await expect(getAllMemories()).rejects.toThrow('memories[0].scope');
+    await expect(getAllMemories()).rejects.toThrow('memories[0].type');
   });
 });
 

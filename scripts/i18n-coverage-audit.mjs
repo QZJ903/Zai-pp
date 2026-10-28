@@ -19,7 +19,7 @@ const scanTargets = [
 const pathAllowlist = new Map([
   // z.ai 适配层的三处文件：中文是必需的，不是漏翻译。
   // - `core/zai/*` 与 `entrypoints/zai.content.ts` 含给模型的续跑/纠偏提示词、
-  //   z.ai 页面的中文 DOM 选择器（按钮 aria-label、高峰弹窗标题等），
+  //   z.ai 页面的中文 DOM 选择器（按钮 aria-label、停止按钮的 aria-label 候选等），
   //   以及工具执行的用户可见摘要。这些既不是 UI chrome（不走 i18n 资源），
   //   也不能翻译（选择器必须与页面逐字匹配）。
   ['core/zai', 'z.ai 适配层：续跑提示词、页面中文 DOM 选择器、工具执行摘要'],
@@ -36,31 +36,6 @@ const pathAllowlist = new Map([
 ]);
 
 const lineAllowlist = [
-  {
-    path: 'core/project/title.ts',
-    includes: '探索未至之境',
-    reason: 'default conversation title suffix detection',
-  },
-  {
-    path: 'core/project/title.ts',
-    includes: "'新会话'",
-    reason: 'z.ai new-conversation placeholder title matching data — must match the title the page writes into chats/new verbatim, so it cannot be locale-backed (same class as the local-skill scoring keywords below)',
-  },
-  {
-    path: 'core/project/title.ts',
-    includes: "'新对话'",
-    reason: 'z.ai new-conversation placeholder title matching data — must match the title the page writes into chats/new verbatim, so it cannot be locale-backed (same class as the local-skill scoring keywords below)',
-  },
-  {
-    path: 'core/project/title.ts',
-    includes: "'新聊天'",
-    reason: "z.ai new-conversation placeholder title matching data — this is the zh-CN projection of the page's own `New Chat` label, which is what `chat.title` actually carries on session creation (same class as the local-skill scoring keywords below)",
-  },
-  {
-    path: 'core/project/title.ts',
-    includes: "'新任务'",
-    reason: "z.ai new-conversation placeholder title matching data — this is the zh-CN projection of the page's own `New Task` label, used for agent-mode session creation (same class as the local-skill scoring keywords below)",
-  },
   {
     path: 'scripts/automation-contract-smoke.mjs',
     includes: "['Agent', '任务']",

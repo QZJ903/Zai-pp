@@ -27,7 +27,7 @@ describe('runtime update broadcasting', () => {
   });
 
   it('still notifies the sender tab directly when query fails and a sender tab exists', async () => {
-    const payload = { type: 'PROJECT_CONTEXT_UPDATED' };
+    const payload = { type: 'SAVED_ITEMS_UPDATED' };
     const sendTabMessage = vi.fn(async () => undefined);
 
     await broadcastRuntimeUpdate(payload, 12, {
@@ -66,7 +66,7 @@ describe('runtime update broadcasting', () => {
     const reportError = vi.fn();
     const missingReceiver = new Error('Could not establish connection. Receiving end does not exist.');
 
-    await broadcastRuntimeUpdate({ type: 'PROJECT_CONTEXT_UPDATED' }, undefined, {
+    await broadcastRuntimeUpdate({ type: 'SAVED_ITEMS_UPDATED' }, undefined, {
       tabUrlPattern: '*://chat.z.ai/*',
       sendRuntimeMessage: vi.fn().mockRejectedValue(missingReceiver),
       queryTabsByUrl: vi.fn(async () => [{ id: 42 }]),

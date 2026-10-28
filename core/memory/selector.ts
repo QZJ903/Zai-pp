@@ -127,8 +127,7 @@ function sanitizeContent(text: string): string {
 
 export function formatMemoryLine(m: Memory): string {
   const idPrefix = m.id != null ? `#${m.id} ` : '';
-  const scopePrefix = m.scope === 'project' ? 'project ' : '';
-  return `- ${idPrefix}[${scopePrefix}${m.type}] ${sanitizeContent(m.name)}: ${sanitizeContent(m.content)}`;
+  return `- ${idPrefix}[${m.type}] ${sanitizeContent(m.name)}: ${sanitizeContent(m.content)}`;
 }
 
 export function formatMemoriesBlock(

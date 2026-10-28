@@ -73,11 +73,10 @@ describe('WhatsNewPanel', () => {
     expect(container.textContent).toContain('版本更新内容');
     expect(container.textContent).toContain('v0.7.2');
     expect(container.textContent).toContain('记忆：对话中自动积累偏好与项目背景');
-    expect(container.textContent).toContain('项目：项目指令与项目记忆随该项目的对话自动进入上下文。');
 
     // 条目表与 i18n 键是一对：少一条渲染说明有一处对不上。
     expect(container.querySelectorAll('.ds-whats-new-item')).toHaveLength(WHATS_NEW_ITEMS.length);
-    expect(WHATS_NEW_ITEMS).toHaveLength(6);
+    expect(WHATS_NEW_ITEMS).toHaveLength(5);
 
     const button = container.querySelector('button');
     expect(button?.textContent).toBe('知道了');

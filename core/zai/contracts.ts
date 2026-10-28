@@ -201,17 +201,6 @@ export type ZaiSsePhase =
 export const ZAI_MSG_SOURCE = 'zai-pp';
 
 /**
- * 侧边栏「项目」面板的标记属性（面板根节点与项目 section 都带）。
- *
- * ⚠️ **面板自己的 DOM 靠它被认出来**（`core/zai/project-panel.ts` 把它绑成
- * `PANEL_BOUND_ATTR`，用于重挂时先卸旧的）。
- * ⚠️ 它**曾经还有一个用途**：让模式判定能把面板子树排除掉（面板的图标按钮激活时
- * 也写 `data-active`）。**那个用途已随模式判定一起删掉**（站点只剩 agent，
- * 见 `core/zai/mode.ts`）—— 但属性本身仍承重，**不能删**。
- */
-export const ZAI_PROJECT_PANEL_ATTR = 'data-zpp-project-panel';
-
-/**
  * 内容脚本用 `DOM_TASK_FAILED` 回传「用户主动停止」时带的错误码。
  *
  * ⚠️ **必须两处同源**：生产端（`zai.content.ts` 的 `terminateDomTaskAsStopped` 与

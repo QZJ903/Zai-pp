@@ -18,7 +18,6 @@ export const WHATS_NEW_ITEMS: WhatsNewItem[] = [
   { id: 'mcp', titleKey: 'sidepanel.whatsNew.items.mcp' },
   { id: 'browser-control', titleKey: 'sidepanel.whatsNew.items.browserControl' },
   { id: 'automation', titleKey: 'sidepanel.whatsNew.items.automation' },
-  { id: 'project', titleKey: 'sidepanel.whatsNew.items.project' },
 ];
 
 const LAST_SEEN_VERSION_KEY = 'zai_pp_whats_new_dismissed_version';

@@ -30,7 +30,6 @@ describe('sync-owned local-state mutation lock', () => {
     for (const path of [
       'core/memory/store.ts',
       'core/preset/store.ts',
-      'core/project/store.ts',
       'core/saved-items/store.ts',
       'core/skill/registry.ts',
     ]) {

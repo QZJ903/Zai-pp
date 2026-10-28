@@ -85,19 +85,12 @@ describe('browser sync local-state staging', () => {
       'presets',
     ]);
 
-    snapshot.projectContext = {
-      schemaVersion: 2,
-      projects: [],
-      conversations: [],
-      pendingProjectId: null,
-    };
     snapshot.savedItems = { schemaVersion: 1, items: [] };
     expect(stageSyncLocalApply(snapshot, before).applySteps).toEqual([
       'memories',
       'skills',
       'skillSources',
       'presets',
-      'projectContext',
       'savedItems',
     ]);
   });
@@ -120,7 +113,6 @@ function createSnapshot(memories: Memory[]): SyncDataSnapshot {
     skills: [],
     skillSources: [],
     presets: [],
-    projectContext: null,
     savedItems: null,
   };
 }
@@ -133,7 +125,6 @@ function createPreimage(memoryRecords: Record<string, unknown>[]): SyncUndoPreim
       skillSources: { present: false },
       presets: { present: false },
       activePreset: { present: false },
-      projectContext: { present: false },
       savedItems: { present: false },
     },
   };
@@ -142,7 +133,6 @@ function createPreimage(memoryRecords: Record<string, unknown>[]): SyncUndoPreim
 function memory(syncId: string): Memory {
   return {
     syncId,
-    scope: 'global',
     type: 'reference',
     name: syncId,
     content: `content:${syncId}`,

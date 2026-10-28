@@ -19,15 +19,12 @@ export function decodeStoredMemory(
   path = 'memory',
 ): Omit<Memory, 'id'> {
   const object = objectValue(value, path);
-  const scope = memoryScope(object.scope, `${path}.scope`);
-  const { id: _id, projectId: _projectId, ...additiveFields } = object;
+  // `scope` / `projectId` 是已退役字段：老记录里可能还带着，读时直接丢弃
+  // （它们只服务已删除的项目功能）。
+  const { id: _id, scope: _scope, projectId: _projectId, ...additiveFields } = object;
   return {
     ...additiveFields,
     syncId: nonEmptyString(object.syncId, `${path}.syncId`),
-    scope,
-    ...(scope === 'project'
-      ? { projectId: nonEmptyString(object.projectId, `${path}.projectId`) }
-      : {}),
     type: enumValue(object.type, MEMORY_TYPES, `${path}.type`),
     name: nonEmptyString(object.name, `${path}.name`),
     content: nonEmptyString(object.content, `${path}.content`),
@@ -47,10 +44,7 @@ export function decodeSyncMemory(
 ): Omit<Memory, 'id'> {
   const object = objectValue(value, path);
   const { id: _id, ...memory } = object;
-  return decodeStoredMemory({
-    ...memory,
-    scope: memory.scope ?? 'global',
-  }, path);
+  return decodeStoredMemory(memory, path);
 }
 
 export function decodeImportedMemory(
@@ -58,17 +52,10 @@ export function decodeImportedMemory(
   path = 'memory',
 ): NewMemory {
   const object = objectValue(value, path);
-  const scope = object.scope === undefined
-    ? 'global'
-    : memoryScope(object.scope, `${path}.scope`);
   return {
     syncId: object.syncId === undefined
       ? undefined
       : nonEmptyString(object.syncId, `${path}.syncId`),
-    scope,
-    projectId: scope === 'project'
-      ? nonEmptyString(object.projectId, `${path}.projectId`)
-      : undefined,
     type: enumValue(object.type, MEMORY_TYPES, `${path}.type`),
     name: nonEmptyString(object.name, `${path}.name`),
     content: nonEmptyString(object.content, `${path}.content`),
@@ -83,11 +70,6 @@ function objectValue(value: unknown, path: string): Record<string, unknown> {
     throw new Error(`${path} must be an object`);
   }
   return value as Record<string, unknown>;
-}
-
-function memoryScope(value: unknown, path: string): Memory['scope'] {
-  if (value === 'global' || value === 'project') return value;
-  throw new Error(`${path} must be global or project`);
 }
 
 function nonEmptyString(value: unknown, path: string): string {

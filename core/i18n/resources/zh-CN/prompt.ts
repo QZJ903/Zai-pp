@@ -9,9 +9,6 @@ export const prompt = {
    */
   defaultRole: '你是用户的私人 AI 助手，具有跨对话长期记忆能力。你能记住用户的身份、偏好、技术栈和历史对话中的关键信息，在后续对话中提供个性化的帮助。',
   standaloneMemories: '## 已有记忆\n{memories}',
-  projectContextHeader: '## 项目背景',
-  projectContextLabel: '项目：{name}',
-  projectInstructionsHeader: '### 项目指令',
   forceResponseLanguage: '## 回复语言\n请使用{language}回复。',
   responseLanguageChinese: '简体中文',
   responseLanguageEnglish: '英文',

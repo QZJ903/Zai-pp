@@ -135,36 +135,6 @@ export const sidepanel = {
       mode: '模式',
     },
   },
-  projectsPage: {
-    title: '项目',
-    description: '把 Zai 对话加入项目，项目指令和项目记忆会随这些对话自动进入上下文。',
-    summary: '{projects} 个项目，{conversations} 个项目对话',
-    createTitle: '创建项目',
-    namePlaceholder: '项目名称',
-    descriptionPlaceholder: '项目说明（可选）',
-    instructionsPlaceholder: '项目指令',
-    createProject: '创建项目',
-    projectCreated: '已创建项目「{name}」',
-    empty: '暂无项目',
-    emptyHelp: '创建项目后，可以把当前 Zai 对话加入项目，或让下一条新会话自动进入项目。',
-    deleteProject: '删除',
-    deleteConfirm: '确定删除项目“{name}”吗？',
-    conversationCount: '{count} 个对话',
-    pendingBadge: '下一条',
-    detailMeta: '{conversations} 个对话，{memories} 条项目记忆',
-    currentConversation: '当前对话',
-    noCurrentConversation: '当前活动标签页不是 Zai 对话。',
-    addCurrentConversation: '加入当前对话',
-    moveCurrentConversation: '移入当前项目',
-    useNextConversation: '下一条新会话使用此项目',
-    cancelNextConversation: '取消下一条新会话',
-    conversationsTitle: '项目对话',
-    emptyConversations: '还没有对话属于这个项目。',
-    memoriesTitle: '项目记忆',
-    emptyMemories: '还没有项目记忆。',
-    backendUnavailable: '项目后端不可用，请重新加载扩展后再试。',
-    operationFailed: '项目操作失败：{error}',
-  },
   savedPage: {
     title: '保存项',
     description: '保存常用 Prompt、回答片段和参考链接，之后可搜索、插入到对话或导出备份。',
@@ -198,7 +168,6 @@ export const sidepanel = {
       mcp: 'MCP：连接本机或远程 MCP 服务，把外部工具交给模型调用。',
       browserControl: '浏览器控制：通过 Debugger 控制你选中的标签页，可读页面、点击和填表。',
       automation: '自动化：把固定任务交给独立会话，手动触发或按 Cron / RRULE 定时执行。',
-      project: '项目：项目指令与项目记忆随该项目的对话自动进入上下文。',
     },
   },
   memoryPage: {
@@ -652,6 +621,14 @@ export const sidepanel = {
       name: '名称',
       namePlaceholder: '任务名称',
       model: '模型',
+      /**
+       * 固定会话下的模型标签。
+       *
+       * ⚠️ **补这一句是因为它会误导**：会话模型在**建会话那一刻**由 `/chats/new`
+       * 的 `chat.models` 定下，之后的 completion 只改**当轮请求体**、改不动会话记录。
+       * 用户实测过「以为切了、刷新后还是旧的」，误判成缺陷。
+       */
+      modelFixedSession: '模型（仅本次运行生效）',
       defaultModel: '默认',
       modelListFallback: '模型清单不是最新的，可能缺少新模型。',
       promptPlaceholder: '输入要定时发送到 Zai 的内容',

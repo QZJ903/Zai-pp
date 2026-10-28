@@ -50,8 +50,6 @@ describe('content request augmentation boundary', () => {
 
     for (const privileged of [
       'createToolAuthorization({',
-      'resolveProjectContextForRequest(',
-      'resolvePendingProjectContextForFirstMessage(',
       'activeToolAuthorizations.set(',
       'requestToolDescriptorsByRequestId.set(',
     ]) {

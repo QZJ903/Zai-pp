@@ -16,9 +16,6 @@ export interface PersistenceMutationBindingDependencies {
   stageDeleteSkillAlreadyLocked(name: string): Promise<() => Promise<void>>;
   stageDeleteSkillSourceAlreadyLocked(sourceId: string): Promise<() => Promise<void>>;
   stageDeletePresetAlreadyLocked(id: string): Promise<() => Promise<void>>;
-  stageDeleteProjectContextAndMemoriesAlreadyLocked(
-    projectId: string,
-  ): Promise<() => Promise<number>>;
   importGitHubSkillSource(
     request: GitHubSkillImportRequest,
     runner: LocalStateMutationRunner,
@@ -58,7 +55,6 @@ export interface PersistenceMutationBindings {
   updateGitHubSkillSource(sourceId: string): Promise<GitHubSkillImportResult>;
   deleteGitHubSkillSource(sourceId: string): Promise<void>;
   deletePreset(id: string): Promise<void>;
-  deleteProjectContext(projectId: string): Promise<number>;
 }
 
 export function createPersistenceMutationBindings(
@@ -97,9 +93,6 @@ export function createPersistenceMutationBindings(
     ),
     deletePreset: (id: string) => dependencies.runLocalStateMutation(
       () => dependencies.stageDeletePresetAlreadyLocked(id),
-    ),
-    deleteProjectContext: (projectId: string) => dependencies.runLocalStateMutation(
-      () => dependencies.stageDeleteProjectContextAndMemoriesAlreadyLocked(projectId),
     ),
   });
 }

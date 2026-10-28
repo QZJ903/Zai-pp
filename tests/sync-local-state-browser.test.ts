@@ -7,7 +7,6 @@ const mocks = vi.hoisted(() => ({
   restoreRawMemories: vi.fn(),
   replacePresets: vi.fn(),
   clearActivePreset: vi.fn(),
-  saveProject: vi.fn(),
   replaceSavedItems: vi.fn(),
   replaceSkills: vi.fn(),
   replaceSkillSources: vi.fn(),
@@ -24,11 +23,6 @@ vi.mock('../core/preset/store', () => ({
   PRESETS_STORAGE_KEY: 'zai_pp_presets',
   clearActivePresetForSyncApply: mocks.clearActivePreset,
   replacePresetCollectionForSyncApply: mocks.replacePresets,
-}));
-
-vi.mock('../core/project/store', () => ({
-  PROJECT_CONTEXT_STORAGE_KEY: 'zai_pp_project_context',
-  saveProjectContextStateForSyncApply: mocks.saveProject,
 }));
 
 vi.mock('../core/saved-items/store', () => ({
@@ -87,7 +81,6 @@ describe('browser sync local-state adapter', () => {
       [SYNC_RECOVERY_STORAGE_KEYS.skills]: { schemaVersion: 99, raw: true },
       [SYNC_RECOVERY_STORAGE_KEYS.skillSources]: null,
       [SYNC_RECOVERY_STORAGE_KEYS.presets]: [{ unknown: 'preserve' }],
-      [SYNC_RECOVERY_STORAGE_KEYS.projectContext]: { schemaVersion: 99 },
     };
 
     await expect(browserSyncLocalStatePort.captureUndoPreimage()).resolves.toEqual({
@@ -97,7 +90,6 @@ describe('browser sync local-state adapter', () => {
         skillSources: { present: true, value: null },
         presets: { present: true, value: [{ unknown: 'preserve' }] },
         activePreset: { present: false },
-        projectContext: { present: true, value: { schemaVersion: 99 } },
         savedItems: { present: false },
       },
     });
@@ -114,7 +106,6 @@ describe('browser sync local-state adapter', () => {
     expect(mocks.replaceSkillSources).toHaveBeenCalledWith(plan.snapshot.skillSources);
     expect(mocks.replacePresets).toHaveBeenCalledWith(plan.snapshot.presets);
     expect(mocks.clearActivePreset).toHaveBeenCalledOnce();
-    expect(mocks.saveProject).toHaveBeenCalledWith(plan.snapshot.projectContext);
     expect(mocks.replaceSavedItems).toHaveBeenCalledWith(plan.snapshot.savedItems);
   });
 
@@ -133,7 +124,6 @@ describe('browser sync local-state adapter', () => {
       [SYNC_RECOVERY_STORAGE_KEYS.skills]: { raw: 'skills' },
       [SYNC_RECOVERY_STORAGE_KEYS.presets]: [{ raw: 'presets' }],
       [SYNC_RECOVERY_STORAGE_KEYS.activePreset]: 'before-active',
-      [SYNC_RECOVERY_STORAGE_KEYS.projectContext]: { schemaVersion: 99 },
     });
     expect(storageRemove).toHaveBeenCalledWith(SYNC_RECOVERY_STORAGE_KEYS.skillSources);
     expect(storageRemove).toHaveBeenCalledWith(SYNC_RECOVERY_STORAGE_KEYS.savedItems);
@@ -147,12 +137,6 @@ function fullPlan(): SyncLocalApplyPlan {
       skills: [],
       skillSources: [],
       presets: [],
-      projectContext: {
-        schemaVersion: 2,
-        projects: [],
-        conversations: [],
-        pendingProjectId: null,
-      },
       savedItems: { schemaVersion: 1, items: [] },
     },
     applySteps: [...SYNC_APPLY_STEP_ORDER],
@@ -167,7 +151,6 @@ function rawPreimage(): SyncUndoPreimageV1 {
       skillSources: { present: false },
       presets: { present: true, value: [{ raw: 'presets' }] },
       activePreset: { present: true, value: 'before-active' },
-      projectContext: { present: true, value: { schemaVersion: 99 } },
       savedItems: { present: false },
     },
   };

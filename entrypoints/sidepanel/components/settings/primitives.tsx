@@ -409,7 +409,7 @@ export function SegmentedControl<T extends string>({
 
 /**
  * Unified empty state. Replaces `ds-empty-state` hand-usage and the bespoke
- * inline `text-[11px]` boxes in ProjectsPage.
+ * inline `text-[11px]` boxes that each page used to hand-roll.
  */
 export function EmptyState({
   title,

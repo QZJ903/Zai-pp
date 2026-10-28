@@ -11,10 +11,6 @@ import {
 } from '../preset/store';
 import { decodeActivePresetId } from '../preset/codec';
 import {
-  PROJECT_CONTEXT_STORAGE_KEY,
-  saveProjectContextStateForSyncApply,
-} from '../project/store';
-import {
   SAVED_ITEMS_STORAGE_KEY,
   replaceSavedItemsStateForSyncApply,
 } from '../saved-items/store';
@@ -40,7 +36,6 @@ export const SYNC_RECOVERY_STORAGE_KEYS = {
   skillSources: SKILL_SOURCES_STORAGE_KEY,
   presets: PRESETS_STORAGE_KEY,
   activePreset: ACTIVE_PRESET_STORAGE_KEY,
-  projectContext: PROJECT_CONTEXT_STORAGE_KEY,
   savedItems: SAVED_ITEMS_STORAGE_KEY,
 } as const;
 
@@ -67,7 +62,6 @@ async function captureUndoPreimage(): Promise<SyncUndoPreimageV1> {
       skillSources: captureStorageValue(rawStorage, SKILL_SOURCES_STORAGE_KEY),
       presets: captureStorageValue(rawStorage, PRESETS_STORAGE_KEY),
       activePreset: captureStorageValue(rawStorage, ACTIVE_PRESET_STORAGE_KEY),
-      projectContext: captureStorageValue(rawStorage, PROJECT_CONTEXT_STORAGE_KEY),
       savedItems: captureStorageValue(rawStorage, SAVED_ITEMS_STORAGE_KEY),
     },
   };
@@ -85,7 +79,6 @@ export function stageSyncLocalApply(
   const clearActivePreset = activePresetId !== null
     && !snapshot.presets.some((preset) => preset.id === activePresetId);
   if (clearActivePreset) applySteps.push('activePreset');
-  if (snapshot.projectContext) applySteps.push('projectContext');
   if (snapshot.savedItems) applySteps.push('savedItems');
 
   return {
@@ -111,10 +104,6 @@ async function applyStep(step: SyncApplyStep, plan: SyncLocalApplyPlan): Promise
       return;
     case 'activePreset':
       await clearActivePresetForSyncApply();
-      return;
-    case 'projectContext':
-      if (!snapshot.projectContext) throw new Error('Project context apply step was not staged');
-      await saveProjectContextStateForSyncApply(snapshot.projectContext);
       return;
     case 'savedItems':
       if (!snapshot.savedItems) throw new Error('Saved items apply step was not staged');
@@ -190,8 +179,6 @@ function memoryAdditiveFields(memory: Memory): Record<string, unknown> {
   const {
     id: _id,
     syncId: _syncId,
-    scope: _scope,
-    projectId: _projectId,
     type: _type,
     name: _name,
     content: _content,

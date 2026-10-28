@@ -230,6 +230,89 @@ describe('IndexedDb thin wrapper', () => {
     inspector.close();
   });
 
+  it('deletes only the rows the predicate matches, leaving the rest untouched', async () => {
+    const name = nextDbName();
+    await seedAt(name, 10, MEMORIES_SCHEMA_V1, { id: 1, type: 'keep', name: 'a' });
+    const seedMore = track(new IndexedDb(name, [
+      { version: 10, stores: { memories: MEMORIES_SCHEMA_V1 } },
+    ]));
+    await seedMore.open();
+    await seedMore.table('memories').add({ id: 2, type: 'drop', name: 'b' });
+    await seedMore.table('memories').add({ id: 3, type: 'keep', name: 'c' });
+    seedMore.close();
+
+    const db = track(new IndexedDb(name, [
+      { version: 10, stores: { memories: MEMORIES_SCHEMA_V1 } },
+      {
+        version: 20,
+        stores: { memories: MEMORIES_SCHEMA_V2 },
+        async migrate(tx) {
+          const table = tx.table('memories');
+          await table.deleteAll((row) => row.type === 'drop');
+          await table.modifyAll((row) => { row.stamped = true; });
+        },
+      },
+    ]));
+    await db.open();
+
+    // 只删掉匹配的那一行；其余两行保留**且**跟着后续 `modifyAll` 被改写
+    // （两条操作在同一事务里按顺序生效，与记忆库 v4 迁移的实际用法一致）。
+    expect(await db.table('memories').orderBy('id').toArray()).toEqual([
+      expect.objectContaining({ id: 1, type: 'keep', stamped: true }),
+      expect.objectContaining({ id: 3, type: 'keep', stamped: true }),
+    ]);
+    db.close();
+  });
+
+  it('keeps every row when the predicate matches none', async () => {
+    const name = nextDbName();
+    await seedAt(name, 10, MEMORIES_SCHEMA_V1, { id: 1, type: 'topic', name: 'a' });
+
+    const db = track(new IndexedDb(name, [
+      { version: 10, stores: { memories: MEMORIES_SCHEMA_V1 } },
+      {
+        version: 20,
+        stores: { memories: MEMORIES_SCHEMA_V2 },
+        migrate: (tx) => tx.table('memories').deleteAll(() => false),
+      },
+    ]));
+    await db.open();
+
+    expect(await db.table('memories').toArray()).toEqual([
+      { id: 1, type: 'topic', name: 'a' },
+    ]);
+    db.close();
+  });
+
+  it('aborts the upgrade when the delete predicate throws, preserving the original rows', async () => {
+    const name = nextDbName();
+    await seedAt(name, 10, MEMORIES_SCHEMA_V1, { id: 5, type: 'topic', name: 'untouched' });
+
+    const db = track(new IndexedDb(name, [
+      { version: 10, stores: { memories: MEMORIES_SCHEMA_V1 } },
+      {
+        version: 20,
+        stores: { memories: MEMORIES_SCHEMA_V2 },
+        migrate: (tx) => tx.table('memories').deleteAll(() => {
+          throw new Error('injected predicate failure');
+        }),
+      },
+    ]));
+    await expect(db.open()).rejects.toThrow('injected predicate failure');
+    expect(db.isOpen()).toBe(false);
+
+    // 原库必须原样保留：版本仍是 10、那一行一动没动。
+    const inspector = track(new IndexedDb(name, [
+      { version: 10, stores: { memories: MEMORIES_SCHEMA_V1 } },
+    ]));
+    await inspector.open();
+    expect(inspector.backendDB().version).toBe(10);
+    expect(await inspector.table('memories').orderBy('id').toArray()).toEqual([
+      { id: 5, type: 'topic', name: 'untouched' },
+    ]);
+    inspector.close();
+  });
+
   it('fails visibly when the existing version is not on a released upgrade step', async () => {
     const name = nextDbName();
     // A database at 15 cannot come from any released runtime.

@@ -1,6 +1,5 @@
 import type {
   BackgroundConfig,
-  CurrentZaiConversation,
   GitHubSkillImportResult,
   GitHubSkillPreview,
   GitHubSkillSource,
@@ -9,9 +8,6 @@ import type {
   LocalSkillPreview,
   Memory,
   MessageAction,
-  ProjectContext,
-  ProjectContextState,
-  ProjectConversation,
   SavedItem,
   Skill,
   SkillImportSource,
@@ -180,42 +176,6 @@ export interface PersistenceRuntimeCommandContracts {
   INSERT_SAVED_PROMPT_INTO_CHAT: {
     request: DeclaredRuntimeRequest<'INSERT_SAVED_PROMPT_INTO_CHAT'>;
     response: Ack | DomainFailure;
-  };
-  GET_PROJECT_CONTEXT_STATE: {
-    request: DeclaredRuntimeRequest<'GET_PROJECT_CONTEXT_STATE'>;
-    response: ProjectContextState;
-  };
-  CREATE_PROJECT_CONTEXT: {
-    request: DeclaredRuntimeRequest<'CREATE_PROJECT_CONTEXT'>;
-    response: ProjectContext;
-  };
-  UPDATE_PROJECT_CONTEXT: {
-    request: DeclaredRuntimeRequest<'UPDATE_PROJECT_CONTEXT'>;
-    response: ProjectContext;
-  };
-  DELETE_PROJECT_CONTEXT: {
-    request: DeclaredRuntimeRequest<'DELETE_PROJECT_CONTEXT'>;
-    response: { ok: true; deletedMemories: number };
-  };
-  ADD_CONVERSATION_TO_PROJECT: {
-    request: DeclaredRuntimeRequest<'ADD_CONVERSATION_TO_PROJECT'>;
-    response: { ok: true; conversation: ProjectConversation };
-  };
-  REMOVE_CONVERSATION_FROM_PROJECT: {
-    request: DeclaredRuntimeRequest<'REMOVE_CONVERSATION_FROM_PROJECT'>;
-    response: Ack;
-  };
-  SET_PENDING_PROJECT_CONTEXT: {
-    request: DeclaredRuntimeRequest<'SET_PENDING_PROJECT_CONTEXT'>;
-    response: Ack;
-  };
-  GET_CURRENT_ZAI_CONVERSATION: {
-    request: DeclaredRuntimeRequest<'GET_CURRENT_ZAI_CONVERSATION'>;
-    response: { ok: true; conversation: CurrentZaiConversation } | DomainFailure;
-  };
-  GET_PROJECT_CONTEXT_FOR_CONVERSATION: {
-    request: DeclaredRuntimeRequest<'GET_PROJECT_CONTEXT_FOR_CONVERSATION'>;
-    response: { projectId: string; context: string | null } | null;
   };
   GET_BACKGROUND: {
     request: DeclaredRuntimeRequest<'GET_BACKGROUND'>;

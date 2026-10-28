@@ -16,7 +16,6 @@ export const SYNC_APPLY_STEP_ORDER = [
   'skillSources',
   'presets',
   'activePreset',
-  'projectContext',
   'savedItems',
 ] as const;
 
@@ -29,7 +28,18 @@ export interface OpaqueStoragePreimage {
 
 export interface SyncUndoPreimageV1 {
   memoryRecords: Record<string, unknown>[];
-  storage: Record<Exclude<SyncApplyStep, 'memories'>, OpaqueStoragePreimage>;
+  storage: Record<Exclude<SyncApplyStep, 'memories'>, OpaqueStoragePreimage> & {
+    /**
+     * 已退役的槽位（原「项目」功能的 storage 快照）。
+     *
+     * ⚠️ **只为了读旧 journal 而保留** —— preimage 的校验和是对**整个** serialized
+     * preimage 算的，解析时把这个字段丢掉会让旧 journal 的 checksum 恒不匹配、
+     * 恢复链永久失败。它**不参与** `SYNC_APPLY_STEP_ORDER`，所以既不会被写入
+     * 也不会被回滚（那个 storage key 本身已随功能删除）。
+     * ⚠️ **位置必须留在 `activePreset` 与 `savedItems` 之间** —— 键序影响序列化字节。
+     */
+    projectContext?: OpaqueStoragePreimage;
+  };
 }
 
 export interface SyncLocalApplyPlan {
@@ -329,7 +339,11 @@ function parseUndoPreimage(value: unknown): SyncUndoPreimageV1 {
       skillSources: parseOpaqueStoragePreimage(storage.skillSources, 'skillSources'),
       presets: parseOpaqueStoragePreimage(storage.presets, 'presets'),
       activePreset: parseOpaqueStoragePreimage(storage.activePreset, 'activePreset'),
-      projectContext: parseOpaqueStoragePreimage(storage.projectContext, 'projectContext'),
+      // 旧 journal 里可能带着已退役的槽位（见 `SyncUndoPreimageV1` 的说明）：
+      // 有就原样带上，让 checksum 校验能对上；没有就不写这个键。
+      ...(storage.projectContext === undefined
+        ? {}
+        : { projectContext: parseOpaqueStoragePreimage(storage.projectContext, 'projectContext') }),
       savedItems: parseOpaqueStoragePreimage(storage.savedItems, 'savedItems'),
     },
   };

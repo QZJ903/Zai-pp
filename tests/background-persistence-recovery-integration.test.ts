@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { RuntimeMessageContext } from '../core/messaging/runtime-boundary';
 import {
   TYPED_RUNTIME_COMMAND_TYPES,
@@ -21,10 +21,6 @@ import {
 import {
   createPersistenceMutationBindings,
 } from '../entrypoints/background/persistence-mutation-bindings';
-import {
-  createProjectRuntimeHandlers,
-  type ProjectRuntimeHandlerDependencies,
-} from '../entrypoints/background/project-handlers';
 
 const context: RuntimeMessageContext = {
   runtimeId: 'extension-id',
@@ -36,11 +32,11 @@ const context: RuntimeMessageContext = {
 };
 
 describe('background persistence recovery composition', () => {
-  it('recovers a failed typed project deletion from its durable journal after restart', async () => {
-    const state = createProjectDeletionState();
+  it('recovers a failed typed preset deletion from its durable journal after restart', async () => {
+    const state = createDeletionState();
     const firstCoordinator = createSyncLocalApplyCoordinator(state.port, state.journal, {
       now: () => 10,
-      createOperationId: () => 'delete-project-first',
+      createOperationId: () => 'delete-preset-first',
     });
     const firstBarrier = createSyncRecoveryBarrier({
       recover: firstCoordinator.recover,
@@ -50,26 +46,24 @@ describe('background persistence recovery composition', () => {
       runWithRecovery: createRunWithRecovery(firstCoordinator),
       trackApply: (operation) => firstBarrier.trackApply(operation),
     });
-    const firstNotifications: string[] = [];
-    const firstRegistry = createProjectDeletionRegistry(
-      createProjectDeletionDependencies(state, firstRunner, firstNotifications),
+    const firstRegistry = createDeletionRegistry(
+      createDeletionBindings(state, firstRunner),
     );
 
     await expect(firstRegistry.dispatch({
-      type: 'DELETE_PROJECT_CONTEXT',
-      payload: { projectId: 'project-1' },
+      type: 'DELETE_PRESET',
+      payload: { id: 'preset-1' },
     }, context)).rejects.toThrow('Local-state mutation failed and recovery remains pending');
     await expect(firstBarrier.ensureReady()).rejects.toThrow('journal clear blocked');
 
-    expect(state.projectPresent).toBe(true);
+    expect(state.targetPresent).toBe(true);
     expect(state.currentJournal).not.toBeNull();
-    expect(firstNotifications).toEqual([]);
 
     state.clearBlocked = false;
     state.failMutation = false;
     const restartCoordinator = createSyncLocalApplyCoordinator(state.port, state.journal, {
       now: () => 20,
-      createOperationId: () => 'delete-project-restart',
+      createOperationId: () => 'delete-preset-restart',
     });
     const restartEvents: string[] = [];
     const restartBarrier = createSyncRecoveryBarrier({
@@ -82,36 +76,39 @@ describe('background persistence recovery composition', () => {
       runWithRecovery: createRunWithRecovery(restartCoordinator),
       trackApply: (operation) => restartBarrier.trackApply(operation),
     });
-    const restartRegistry = createProjectDeletionRegistry(
-      createProjectDeletionDependencies(state, restartRunner, restartEvents),
+    const restartRegistry = createDeletionRegistry(
+      createDeletionBindings(state, restartRunner),
     );
 
     await restartBarrier.ensureReady();
-    expect(state.projectPresent).toBe(true);
+    expect(state.targetPresent).toBe(true);
     expect(state.currentJournal).toBeNull();
     expect(restartEvents).toEqual(['recovered']);
 
     await expect(restartRegistry.dispatch({
-      type: 'DELETE_PROJECT_CONTEXT',
-      payload: { projectId: 'project-1' },
-    }, context)).resolves.toEqual({ ok: true, deletedMemories: 2 });
+      type: 'DELETE_PRESET',
+      payload: { id: 'preset-1' },
+    }, context)).resolves.toEqual({ ok: true });
 
-    expect(state.projectPresent).toBe(false);
+    expect(state.targetPresent).toBe(false);
     expect(state.currentJournal).toBeNull();
-    expect(restartEvents).toEqual(['recovered', 'project-notify', 'state-notify']);
   });
 });
 
-function createProjectDeletionRegistry(
-  dependencies: ProjectRuntimeHandlerDependencies,
+function createDeletionRegistry(
+  deletePreset: (id: string) => Promise<void>,
 ) {
-  const projectHandler = createProjectRuntimeHandlers(dependencies)
-    .find((handler) => handler.type === 'DELETE_PROJECT_CONTEXT');
-  if (!projectHandler) throw new Error('DELETE_PROJECT_CONTEXT handler is missing');
+  const presetHandler = {
+    type: 'DELETE_PRESET' as const,
+    async handle(envelope: { payload?: { id: string } }) {
+      await deletePreset((envelope.payload as { id: string }).id);
+      return { ok: true as const };
+    },
+  } as RuntimeCommandHandler;
 
   const typedHandlers = TYPED_RUNTIME_COMMAND_TYPES.map((type) => (
-    type === 'DELETE_PROJECT_CONTEXT'
-      ? projectHandler
+    type === 'DELETE_PRESET'
+      ? presetHandler
       : {
           type,
           handle: async () => null,
@@ -122,54 +119,28 @@ function createProjectDeletionRegistry(
   });
 }
 
-function createProjectDeletionDependencies(
-  state: ProjectDeletionState,
+function createDeletionBindings(
+  state: DeletionState,
   runLocalStateMutation: <T>(stage: LocalStateMutationStage<T>) => Promise<T>,
-  notifications: string[],
-): ProjectRuntimeHandlerDependencies {
-  const mutations = createPersistenceMutationBindings({
+) {
+  return createPersistenceMutationBindings({
     runLocalStateMutation,
-    stageDeleteProjectContextAndMemoriesAlreadyLocked: async (projectId) => {
-      expect(projectId).toBe('project-1');
+    stageDeletePresetAlreadyLocked: async (id) => {
+      expect(id).toBe('preset-1');
       return async () => {
-        state.projectPresent = false;
-        if (state.failMutation) throw new Error('project delete write failed');
-        return 2;
+        state.targetPresent = false;
+        if (state.failMutation) throw new Error('preset delete write failed');
       };
     },
     stageDeleteSkillAlreadyLocked: unusedMutationStage,
     stageDeleteSkillSourceAlreadyLocked: unusedMutationStage,
-    stageDeletePresetAlreadyLocked: unusedMutationStage,
     importGitHubSkillSource: async () => unusedDependency(),
     importLocalSkillSource: async () => unusedDependency(),
     updateLocalSkillSource: async () => unusedDependency(),
     relocateLocalSkillSource: async () => unusedDependency(),
     updateGitHubSkillSource: async () => unusedDependency(),
     executeLocalSkillImporterToolCall: async () => unusedDependency(),
-  });
-
-  return {
-    getProjectContextState: async () => unusedDependency(),
-    createProjectContext: async () => unusedDependency(),
-    updateProjectContext: async () => unusedDependency(),
-    deleteProjectContext: mutations.deleteProjectContext,
-    addConversationToProject: async () => unusedDependency(),
-    removeConversationFromProject: async () => unusedDependency(),
-    setPendingProjectContext: async () => unusedDependency(),
-    getCurrentZaiConversation: async () => unusedDependency(),
-    bindPendingProjectConversation: async () => unusedDependency(),
-    refreshProjectConversation: async () => unusedDependency(),
-    getProjectForConversation: async () => unusedDependency(),
-    getProjectPromptContextForConversation: async () => unusedDependency(),
-    formatProjectPromptContext: () => unusedDependency(),
-    getLocale: () => unusedDependency(),
-    notifyCommittedProjectContextUpdate: vi.fn(async () => {
-      notifications.push('project-notify');
-    }),
-    notifyCommittedStateUpdate: vi.fn(async () => {
-      notifications.push('state-notify');
-    }),
-  };
+  }).deletePreset;
 }
 
 function createRunWithRecovery(
@@ -194,8 +165,8 @@ function createRunWithRecovery(
   };
 }
 
-interface ProjectDeletionState {
-  projectPresent: boolean;
+interface DeletionState {
+  targetPresent: boolean;
   failMutation: boolean;
   clearBlocked: boolean;
   currentJournal: unknown | null;
@@ -203,23 +174,23 @@ interface ProjectDeletionState {
   journal: SyncLocalApplyJournalPort;
 }
 
-function createProjectDeletionState(): ProjectDeletionState {
+function createDeletionState(): DeletionState {
   const state = {
-    projectPresent: true,
+    targetPresent: true,
     failMutation: true,
     clearBlocked: true,
     currentJournal: null as unknown | null,
   };
-  const result: ProjectDeletionState = {
+  const result: DeletionState = {
     ...state,
     port: {
-      captureUndoPreimage: async () => createUndoPreimage(result.projectPresent),
+      captureUndoPreimage: async () => createUndoPreimage(result.targetPresent),
       stage: () => unusedDependency(),
       applyStep: async () => unusedDependency(),
       restoreStep: async (step, before) => {
-        if (step !== 'projectContext') return;
-        const value = before.storage.projectContext.value as { projectPresent?: unknown };
-        result.projectPresent = value.projectPresent === true;
+        if (step !== 'presets') return;
+        const value = before.storage.presets.value as { targetPresent?: unknown };
+        result.targetPresent = value.targetPresent === true;
       },
     },
     journal: {
@@ -236,15 +207,14 @@ function createProjectDeletionState(): ProjectDeletionState {
   return result;
 }
 
-function createUndoPreimage(projectPresent: boolean): SyncUndoPreimageV1 {
+function createUndoPreimage(targetPresent: boolean): SyncUndoPreimageV1 {
   return {
     memoryRecords: [],
     storage: {
       skills: { present: false },
       skillSources: { present: false },
-      presets: { present: false },
+      presets: { present: true, value: { targetPresent } },
       activePreset: { present: false },
-      projectContext: { present: true, value: { projectPresent } },
       savedItems: { present: false },
     },
   };

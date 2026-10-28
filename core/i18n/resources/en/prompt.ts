@@ -9,9 +9,6 @@ export const prompt = {
    */
   defaultRole: 'You are the user\'s personal AI assistant with long-term cross-conversation memory. You can remember the user\'s identity, preferences, technical stack, and key context from prior conversations so future replies are personalized and useful.',
   standaloneMemories: '## Existing Memories\n{memories}',
-  projectContextHeader: '## Project Context',
-  projectContextLabel: 'Project: {name}',
-  projectInstructionsHeader: '### Project Instructions',
   forceResponseLanguage: '## Response Language\nReply in {language}.',
   responseLanguageChinese: 'Simplified Chinese',
   responseLanguageEnglish: 'English',

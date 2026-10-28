@@ -109,7 +109,11 @@ const BASELINE = Object.freeze({
   // 实测 raw **340419** / gzip **107013** —— **+8892 raw / +3070 gzip**。
   // ⚠️ **这是单次涨幅最大的一档**，且两段都是**每轮注入**的提示词：
   // 加内容前先问「这句值不值每轮都付」。
-  initialShell: { raw: 340_419, gzip: 107_013 },
+  //
+  // ⚠️ **删掉「项目」功能后实测 raw 334010 / gzip 105575** —— **−6409 raw / −1438 gzip**。
+  // 来源：`content.projectPanel.*` 21 键 + `sidepanel.projectsPage.*` 28 键（中英各一份）
+  // 与 `prompt.projectContext*` 3 键全部移除，侧边栏项目页 chunk 也不再进初始 shell。
+  initialShell: { raw: 334_010, gzip: 105_575 },
   // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
   // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
   // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，
@@ -143,7 +147,12 @@ const BUDGET = Object.freeze({
   },
   routeChunks: {
     LibraryPage: { raw: 2_500, gzip: 1_200 },
-    MemoryPage: { raw: 6_000, gzip: 2_500 },
+    // ⚠️ **删掉「项目」功能后 `MemoryForm` 被内联进 MemoryPage** —— 它原来被
+    // MemoryPage 与 ProjectsPage 两个 chunk 共享，Rollup 因此把它提成独立 chunk
+    // （`MemoryPage 4545 + MemoryForm 5361`）；ProjectsPage 没了之后只剩一个消费者，
+    // 合并成单文件 9642 / 3061。**总字节是降的**（9906 / 3628 → 9642 / 3061），
+    // 与「entrypoint 数量决定切分」那条同源。预算按新的单文件实测抬到 10_500 / 3_500。
+    MemoryPage: { raw: 10_500, gzip: 3_500 },
     SavedPage: { raw: 10_000, gzip: 4_000 },
     CapabilitiesPage: { raw: 5_000, gzip: 2_000 },
     SkillPage: { raw: 60_000, gzip: 13_000 },

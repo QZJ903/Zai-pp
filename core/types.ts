@@ -8,13 +8,6 @@ import type {
   McpCapabilitySettings,
   McpCapabilitySettingsPatch,
 } from './mcp/capability-types';
-import type {
-  CurrentZaiConversation,
-  ProjectContextCreateInput,
-  ProjectContextState,
-  ProjectContextUpdateInput,
-  ProjectConversationInput,
-} from './project/types';
 import type { PromptInjectionSettings as PromptInjectionSettingsType } from './prompt/settings';
 import type { SkillAutoActivationSettings } from './skill/auto-activation-settings';
 import type {
@@ -93,17 +86,6 @@ export type {
 } from './tool/types';
 
 export type {
-  CurrentZaiConversation,
-  ProjectContext,
-  ProjectContextCreateInput,
-  ProjectContextState,
-  ProjectContextUpdateInput,
-  ProjectConversation,
-  ProjectConversationInput,
-  ProjectPromptContext,
-} from './project/types';
-
-export type {
   PromptInjectionSettings,
   PromptPresetCadence,
   ForcedResponseLanguage,
@@ -136,7 +118,6 @@ export type {
 } from './platform';
 
 export type MemoryType = 'user' | 'feedback' | 'topic' | 'reference';
-export type MemoryScope = 'global' | 'project';
 
 export interface BackgroundConfig {
   enabled: boolean;
@@ -149,8 +130,6 @@ export interface BackgroundConfig {
 export interface Memory {
   id?: number;
   syncId: string;
-  scope: MemoryScope;
-  projectId?: string;
   type: MemoryType;
   name: string;
   content: string;
@@ -165,11 +144,9 @@ export interface Memory {
 
 export type NewMemory = Omit<
   Memory,
-  'id' | 'syncId' | 'scope' | 'projectId' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessedAt'
+  'id' | 'syncId' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessedAt'
 > & {
   syncId?: string;
-  scope?: MemoryScope;
-  projectId?: string;
 };
 
 export type SkillSource = 'builtin' | 'custom' | 'remote';
@@ -484,15 +461,6 @@ export type MessageAction =
   | { type: 'GET_TOOL_CALL_HISTORY'; payload?: { limit?: number } }
   | { type: 'CLEAR_TOOL_CALL_HISTORY' }
   | { type: 'GET_PLATFORM_CAPABILITIES' }
-  | { type: 'GET_PROJECT_CONTEXT_STATE' }
-  | { type: 'CREATE_PROJECT_CONTEXT'; payload: ProjectContextCreateInput }
-  | { type: 'UPDATE_PROJECT_CONTEXT'; payload: { projectId: string; patch: ProjectContextUpdateInput } }
-  | { type: 'DELETE_PROJECT_CONTEXT'; payload: { projectId: string } }
-  | { type: 'ADD_CONVERSATION_TO_PROJECT'; payload: { projectId: string; conversation: ProjectConversationInput } }
-  | { type: 'REMOVE_CONVERSATION_FROM_PROJECT'; payload: { conversationId: string } }
-  | { type: 'SET_PENDING_PROJECT_CONTEXT'; payload: { projectId: string | null } }
-  | { type: 'GET_CURRENT_ZAI_CONVERSATION' }
-  | { type: 'GET_PROJECT_CONTEXT_FOR_CONVERSATION'; payload: { conversation: ProjectConversationInput; bindPendingProject?: boolean } }
   | { type: 'GET_CONFIG' }
   | { type: 'RECORD_USAGE_TURN'; payload: UsageTurnInputType }
   | { type: 'GET_USAGE_SUMMARY'; payload?: { rangeDays?: UsageRangeDaysType } }

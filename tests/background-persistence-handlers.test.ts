@@ -22,13 +22,6 @@ import type {
   SystemPromptPreset,
 } from '../core/types';
 import type { SavedItem } from '../core/saved-items/types';
-import type {
-  CurrentZaiConversation,
-  ProjectContext,
-  ProjectContextState,
-  ProjectConversation,
-  ProjectPromptContext,
-} from '../core/project/types';
 import {
   createLibraryRuntimeHandlers,
   type LibraryRuntimeHandlerDependencies,
@@ -43,10 +36,6 @@ import {
 } from '../entrypoints/background/memory-handlers';
 import { createPersistenceRuntimeHandlers } from '../entrypoints/background/persistence-handlers';
 import {
-  createProjectRuntimeHandlers,
-  type ProjectRuntimeHandlerDependencies,
-} from '../entrypoints/background/project-handlers';
-import {
   createSkillRuntimeHandlers,
   type SkillRuntimeHandlerDependencies,
 } from '../entrypoints/background/skill-handlers';
@@ -55,16 +44,12 @@ import {
  * 持久化处理器组（inventory 的 **Group B**）的**注册面与领域失败语义**。
  *
  * 从上游 `background-persistence-handlers.test.ts`（633 行）移植。改动清单：
- *  - inventory 标题串与计数：上游 `R4.1 / #360 — … (61)` → 本项目 `Group B — … (50)`
+ *  - inventory 标题串与计数：上游 `R4.1 / #360 — … (61)` → 本项目 `Group B — … (41)`
  *  - 删掉 5 组本项目已移除的命令：`GET_ARTIFACT`、`GET/SET_DEEPSEEK_THEME`、
  *    `GET/SET_MODEL_TYPE`、`GET/SAVE/CLEAR_PET`、voice 三项（`GET_VOICE_SETTINGS` /
  *    `SAVE_VOICE_SETTINGS` / `GET_VOICE_CAPABILITIES`）
  *  - `ArtifactRecord` / `PetConfig` 类型在本项目**不存在**，一并删掉
- *  - 依赖构造器改名：`getCurrentDeepSeekConversation` → `getCurrentZaiConversation`、
- *    `insertPromptIntoActiveDeepSeekTab` → `insertPromptIntoActiveZaiTab`
- *  - `formatProjectPromptContext` 在本项目是**两参**（多一个 locale），
- *    所以依赖里要补 `getLocale()`
- *  - 会话 URL 换成 z.ai 的 `/c/<id>` 形式
+ *  - 删掉「项目」整组（9 条命令随功能一起移除）
  *
  * ⚠️ **`memory-handlers.ts` / `skill-handlers.ts` / `persistence-handlers.ts` 两树逐字相同**，
  * 所以「Memory / Skill / Library 行为」那几条断言是**原样成立**的 —— 这也是本文件
@@ -86,7 +71,6 @@ const context: RuntimeMessageContext = {
 const memory: Memory = {
   id: 7,
   syncId: 'memory-sync-7',
-  scope: 'global',
   type: 'user',
   name: 'Contract memory',
   content: 'Remember this',
@@ -127,46 +111,19 @@ const savedItem: SavedItem = {
   updatedAt: 1,
 };
 
-const project: ProjectContext = {
-  id: 'project-1',
-  name: 'Project',
-  description: '',
-  instructions: 'Use project context.',
-  createdAt: 1,
-  updatedAt: 1,
-};
-
-const conversation: ProjectConversation = {
-  conversationId: 'conversation-1',
-  projectId: project.id,
-  title: 'Conversation',
-  // ⚠️ 本项目是 z.ai 的 `/c/<id>`（上游是 `/a/chat/s/<id>`）
-  url: 'https://chat.z.ai/c/conversation-1',
-  addedAt: 1,
-  lastSeenAt: 1,
-};
-
-const projectState: ProjectContextState = {
-  schemaVersion: 2,
-  projects: [project],
-  conversations: [conversation],
-  pendingProjectId: null,
-};
-
 describe('Group B persistence runtime handler ownership', () => {
-  it('creates exactly the 50 inventory-assigned handlers and completes the sole registry', async () => {
+  it('creates exactly the 41 inventory-assigned handlers and completes the sole registry', async () => {
     const handlers = createPersistenceRuntimeHandlers({
       memory: createMemoryDependencies(),
       skill: createSkillDependencies(),
       library: createLibraryDependencies(),
-      project: createProjectDependencies(),
       localPreference: createLocalPreferenceDependencies(),
     });
     const types = handlers.map((handler) => handler.type);
-    const expected = readInventoryCommands('Group B — Persistence, library, and local preferences (50)');
+    const expected = readInventoryCommands('Group B — Persistence, library, and local preferences (41)');
 
-    expect(types).toHaveLength(50);
-    expect(new Set(types).size).toBe(50);
+    expect(types).toHaveLength(41);
+    expect(new Set(types).size).toBe(41);
     expect([...types].sort()).toEqual([...expected].sort());
     for (const type of types) expect(getRuntimeCommandOwner(type)).toBe('typed-handler');
     const decodedTypes = Object.entries(RUNTIME_COMMAND_CONTRACTS)
@@ -175,7 +132,7 @@ describe('Group B persistence runtime handler ownership', () => {
       .filter((type) => expected.includes(type))
       .sort();
     // 与姊妹文件（Group C 的 21 个）同风格：显式钉住数量，再逐项等值比对。
-    expect(decodedTypes).toHaveLength(36);
+    expect(decodedTypes).toHaveLength(29);
     expect(Object.keys(PERSISTENCE_RUNTIME_PAYLOAD_DECODERS).sort()).toEqual(decodedTypes);
 
     const registry = createRuntimeCommandRegistry({
@@ -218,13 +175,6 @@ describe('Group B persistence runtime handler ownership', () => {
     })).rejects.toThrow('PREVIEW_LOCAL_SKILL_SOURCE.payload.rootPath must be a non-empty string');
     expect(skillDependencies.previewLocalSkillSource).not.toHaveBeenCalled();
 
-    const projectDependencies = createProjectDependencies();
-    const projectHandlers = createProjectRuntimeHandlers(projectDependencies);
-    await expect(dispatch(projectHandlers, {
-      type: 'DELETE_PROJECT_CONTEXT',
-      payload: { projectId: 7 },
-    })).rejects.toThrow('DELETE_PROJECT_CONTEXT.payload.projectId must be a non-empty string');
-    expect(projectDependencies.deleteProjectContext).not.toHaveBeenCalled();
   });
 });
 
@@ -368,56 +318,7 @@ describe('Skill and library handlers', () => {
   });
 });
 
-describe('Project and local preference handlers', () => {
-  it('preserves project-delete notification order and the Memory notification condition', async () => {
-    const dependencies = createProjectDependencies();
-    const events: string[] = [];
-    vi.mocked(dependencies.deleteProjectContext).mockImplementation(async () => {
-      events.push('delete');
-      return 2;
-    });
-    vi.mocked(dependencies.notifyCommittedProjectContextUpdate).mockImplementation(async () => {
-      events.push('project-notify');
-    });
-    vi.mocked(dependencies.notifyCommittedStateUpdate).mockImplementation(async () => {
-      events.push('state-notify');
-    });
-    const handlers = createProjectRuntimeHandlers(dependencies);
-
-    await expect(dispatch(handlers, {
-      type: 'DELETE_PROJECT_CONTEXT',
-      payload: { projectId: project.id },
-    })).resolves.toEqual({ ok: true, deletedMemories: 2 });
-    expect(events).toEqual(['delete', 'project-notify', 'state-notify']);
-
-    events.length = 0;
-    vi.mocked(dependencies.deleteProjectContext).mockResolvedValueOnce(0);
-    await dispatch(handlers, {
-      type: 'DELETE_PROJECT_CONTEXT',
-      payload: { projectId: project.id },
-    });
-    // 只删了 0 条记忆 ⇒ 不触发 Memory 那一侧的通知（少一次全量重扫）
-    expect(events).toEqual(['project-notify']);
-  });
-
-  it('preserves GET_PROJECT_CONTEXT_FOR_CONVERSATION as a conditional write', async () => {
-    const dependencies = createProjectDependencies();
-    const handlers = createProjectRuntimeHandlers(dependencies);
-    const input = { conversationId: conversation.conversationId };
-
-    await expect(dispatch(handlers, {
-      type: 'GET_PROJECT_CONTEXT_FOR_CONVERSATION',
-      payload: { conversation: input, bindPendingProject: true },
-    })).resolves.toEqual({
-      projectId: project.id,
-      context: '## Project Context\nProject: Project',
-    });
-    expect(dependencies.bindPendingProjectConversation).toHaveBeenCalledWith(input);
-    // 绑定分支**不能**同时走 refresh（那会让同一次调用写两遍）
-    expect(dependencies.refreshProjectConversation).not.toHaveBeenCalled();
-    expect(dependencies.notifyCommittedProjectContextUpdate).toHaveBeenCalledWith(17);
-  });
-
+describe('Local preference handlers', () => {
   it('keeps same-value background behavior and broadcasts on every committed write', async () => {
     const dependencies = createLocalPreferenceDependencies();
     const handlers = createLocalPreferenceRuntimeHandlers(dependencies);
@@ -524,39 +425,6 @@ function createLibraryDependencies(): LibraryRuntimeHandlerDependencies {
     )),
     broadcastStateUpdate: vi.fn(async () => undefined),
     broadcastSavedItemsUpdate: vi.fn(async () => undefined),
-  };
-}
-
-function createProjectDependencies(): ProjectRuntimeHandlerDependencies {
-  return {
-    getProjectContextState: vi.fn(async () => projectState),
-    createProjectContext: vi.fn(async () => project),
-    updateProjectContext: vi.fn(async () => project),
-    deleteProjectContext: vi.fn(async () => 0),
-    addConversationToProject: vi.fn(async () => conversation),
-    removeConversationFromProject: vi.fn(async () => undefined),
-    setPendingProjectContext: vi.fn(async () => undefined),
-    getCurrentZaiConversation: vi.fn(async () => ({
-      ok: true as const,
-      conversation: {
-        conversationId: conversation.conversationId,
-        title: conversation.title,
-        url: conversation.url,
-      } satisfies CurrentZaiConversation,
-    })),
-    bindPendingProjectConversation: vi.fn(async () => conversation),
-    refreshProjectConversation: vi.fn(async () => conversation),
-    getProjectForConversation: vi.fn(async () => project),
-    getProjectPromptContextForConversation: vi.fn(async () => ({
-      projectId: project.id,
-      projectName: project.name,
-      instructions: project.instructions,
-    } satisfies ProjectPromptContext)),
-    // ⚠️ 两参：第二个是 locale（本项目为了标题行的多语言多加的）
-    formatProjectPromptContext: vi.fn(() => '## Project Context\nProject: Project'),
-    getLocale: vi.fn(() => 'zh-CN' as const),
-    notifyCommittedProjectContextUpdate: vi.fn(async () => undefined),
-    notifyCommittedStateUpdate: vi.fn(async () => undefined),
   };
 }
 

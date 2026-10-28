@@ -82,20 +82,6 @@ import {
   saveTabKeepaliveSettings,
 } from '../core/browser-control';
 import {
-  addConversationToProject,
-  bindPendingProjectConversation,
-  createProjectContext,
-  stageDeleteProjectContextAndMemoriesAlreadyLocked,
-  formatProjectPromptContext,
-  getProjectContextState,
-  getProjectForConversation,
-  getProjectPromptContextForConversation,
-  refreshProjectConversation,
-  removeConversationFromProject,
-  setPendingProjectContext,
-  updateProjectContext,
-} from '../core/project';
-import {
   deleteSavedItem,
   getAllSavedItems,
   saveSavedItem,
@@ -201,7 +187,6 @@ import {
 } from '../core/i18n/store';
 import type {
   BackgroundConfig,
-  CurrentZaiConversation,
   ToolCall,
   ToolDescriptor,
   ToolExecutionTrigger,
@@ -254,7 +239,6 @@ const syncLocalRecoveryBarrier = createSyncRecoveryBarrier({
   async notifyRecovered() {
     await Promise.all([
       broadcastStateUpdate(),
-      broadcastProjectContextUpdate(),
       broadcastSavedItemsUpdate(),
     ]);
   },
@@ -274,7 +258,6 @@ const persistenceMutations = createPersistenceMutationBindings({
   stageDeleteSkillAlreadyLocked,
   stageDeleteSkillSourceAlreadyLocked,
   stageDeletePresetAlreadyLocked,
-  stageDeleteProjectContextAndMemoriesAlreadyLocked,
   importGitHubSkillSource,
   importLocalSkillSource,
   updateLocalSkillSource,
@@ -347,24 +330,6 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         insertPromptIntoActiveZaiTab,
         broadcastStateUpdate,
         broadcastSavedItemsUpdate,
-      },
-      project: {
-        getProjectContextState,
-        createProjectContext,
-        updateProjectContext,
-        deleteProjectContext: persistenceMutations.deleteProjectContext,
-        addConversationToProject,
-        removeConversationFromProject,
-        setPendingProjectContext,
-        getCurrentZaiConversation,
-        bindPendingProjectConversation,
-        refreshProjectConversation,
-        getProjectForConversation,
-        getProjectPromptContextForConversation,
-        formatProjectPromptContext,
-        getLocale: () => currentBackgroundLocale,
-        notifyCommittedProjectContextUpdate,
-        notifyCommittedStateUpdate,
       },
       localPreference: {
         broadcastStateUpdate,
@@ -571,6 +536,9 @@ export default defineBackground(() => {
       });
   };
   applyTabKeepaliveSettings();
+  // 退役功能的残留存储：项目功能已整体移除，那条记录不会再被任何代码读。
+  // 启动时清一次（幂等、不 await）—— 留着的唯一后果是白占一块 storage。
+  void chrome.storage.local.remove('zai_pp_project_context').catch(() => undefined);
   ensureAutomationWakeAlarm().catch((error) => reportBackgroundStartupError('automation_alarm_create_failed', error));
   syncLocalRecoveryBarrier.ensureReady()
     .then(() => scanDueAutomationsFromWake()
@@ -721,7 +689,6 @@ const QUIET_BACKGROUND_ERROR_CODES: ReadonlySet<string> = new Set([
   'whats_new_update_failed',
   'automation_session_persist_failed',
   'committed_state_broadcast_failed',
-  'committed_project_broadcast_failed',
   'broadcast_runtime_delivery_failed',
   'broadcast_tab_delivery_failed',
   'broadcast_tabs_query_failed',
@@ -837,61 +804,6 @@ async function broadcastBrowserControlUpdate(excludeTabId?: number) {
 
 async function broadcastToolCallHistoryUpdate(excludeTabId?: number) {
   await broadcastToTabs({ type: 'TOOL_CALL_HISTORY_UPDATED' }, excludeTabId);
-}
-
-async function broadcastProjectContextUpdate(excludeTabId?: number) {
-  const state = await getProjectContextState();
-  await broadcastToTabs({ type: 'PROJECT_CONTEXT_UPDATED', state }, excludeTabId);
-}
-
-async function notifyCommittedProjectContextUpdate(excludeTabId?: number): Promise<void> {
-  try {
-    await broadcastProjectContextUpdate(excludeTabId);
-  } catch (error) {
-    reportBackgroundStartupError('committed_project_broadcast_failed', error);
-  }
-}
-
-async function getCurrentZaiConversation(): Promise<
-  { ok: true; conversation: CurrentZaiConversation } | { ok: false; error: string }
-> {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs.find((item) => item.id != null && isChatConversationUrl(item.url));
-  if (!tab?.id) return { ok: false, error: 'no_active_zai_conversation' };
-
-  try {
-    const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_CURRENT_ZAI_CONVERSATION' });
-    if (response?.ok && response.conversation) {
-      return { ok: true, conversation: response.conversation as CurrentZaiConversation };
-    }
-    return { ok: false, error: response?.error ?? 'no_current_conversation' };
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-/**
- * 这个 URL 是不是「某条会话的页面」（两个站都认）。
- *
- * ⚠️ **origin 判据走 `isZaiSiteOrigin`（精确集合相等）**，不是
- * `hostname === 'chat.z.ai'` —— 后者会让国区站的会话页**永远不被认出来**
- * （项目页抓不到「当前对话」，面板上那一块恒空）。
- * ⚠️ 也**不是**后缀匹配：站点自己有 `zcode.z.ai` 之类的同域子站，放宽会把信任
- * 范围从一个站放大到一个域。
- */
-function isZaiChatUrl(url: string | undefined): boolean {
-  if (!url) return false;
-  try {
-    const parsed = new URL(url);
-    return isZaiSiteOrigin(parsed.origin) && /^\/c\//.test(parsed.pathname);
-  } catch {
-    return false;
-  }
-}
-
-/** 当前活跃对话 URL（两个站都认，项目页据此抓当前对话）。 */
-function isChatConversationUrl(url: string | undefined): boolean {
-  return isZaiChatUrl(url);
 }
 
 async function insertPromptIntoActiveZaiTab(

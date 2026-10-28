@@ -26,7 +26,6 @@ describe('prompt output compatibility contract', () => {
       memories: [],
       thinkingEnabled: false,
       presetContent: null,
-      projectContext: '## 项目上下文\n保持现有行为。',
       toolDescriptors: [],
       locale: 'zh-CN',
       forceResponseLanguage: 'zh-CN',
@@ -179,8 +178,6 @@ function mcpServer(
 
 function memory(
   id: number,
-  scope: Memory['scope'],
-  projectId: string | undefined,
   name: string,
   content: string,
   pinned = false,
@@ -188,8 +185,6 @@ function memory(
   return {
     id,
     syncId: `memory-${id}`,
-    scope,
-    projectId,
     type: 'reference',
     name,
     content,

@@ -6,20 +6,18 @@ import {
   ZAI_AUTH_STORAGE_KEY,
   loadZaiAuthFromStorage,
 } from '../core/zai/auth';
-import { createZaiConversationTitleResolver } from '../core/zai/conversation-title';
 import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-source';
 
 /**
  * 「读登录态」这条腿的上界。
  *
- * ⚠️ **要守的不是网络腿** —— `conversation-title.ts` 的 `AbortSignal.timeout`
- * 只盖住 `fetch`，而它前面还有一次 `chrome.storage.local.get`。扩展上下文半死时
+ * ⚠️ **要守的不是网络腿** —— 网络侧的上界（`AbortSignal.timeout`）只盖住 `fetch`，
+ * 而它前面还有一次 `chrome.storage.local.get`。扩展上下文半死时
  * 那个 promise **不是 reject，而是永不 settle**：外层 `try/catch` 接不到它，
  * 于是 `fetchTitle` 卡在第一个 await，`inFlight` 的 `finally` 永远走不到。
  *
- * 后果**不可自愈**：面板的 `backfillAttemptedIds` 与解析器的 `inFlight` 一起被占住，
- * 之后每次触发都落「已尝试」跳过分支。所以这里的断言是「上界内返回 + 槽位释放 +
- * 下一次还能重试」，不是「不报错」。
+ * 后果**不可自愈**：持有 `inFlight` 槽位的调用方（后台的模型清单抓取器）会被永久占住，
+ * 之后每次触发都落「已尝试」跳过分支。所以这里的断言是「上界内返回」，不是「不报错」。
  */
 
 const AUTH = {
@@ -100,45 +98,12 @@ describe('loadZaiAuthFromStorage timeout', () => {
   });
 });
 
-describe('conversation title resolver with a stalled auth read', () => {
-  it('releases the in-flight slot so the next attempt can still request', async () => {
-    let attempts = 0;
-    const resolver = createZaiConversationTitleResolver({
-      // 第一次读 token 永不落地；超时后这次调用应放弃并释放槽位。
-      // 形状与真实注入点一致（`zai.content.ts` 的 `loadToken`）。
-      loadToken: async () => {
-        attempts += 1;
-        if (attempts === 1) {
-          return (await loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS))?.token ?? null;
-        }
-        return 'tok-later';
-      },
-      fetchImpl: vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'c1', user_id: 'u1', title: '真实会话名', chat: { id: 'c1' } }),
-      })),
-      // 站点注入点：形状与 `zai.content.ts` 一致（有页面上下文 ⇒ 就地判定）。
-      resolveOrigin: () => 'https://chat.z.ai',
-    });
-
-    getImpl = () => new Promise<Record<string, unknown>>(() => {});
-
-    const first = resolver.resolve('c1');
-    await advancePastTimeout();
-    await expect(first).resolves.toBeNull();
-
-    // 槽位已释放 ⇒ 第二次触发能真的走到网络，而不是被 in-flight 合流吃掉。
-    await expect(resolver.resolve('c1')).resolves.toBe('真实会话名');
-  });
-});
-
 /**
  * 上面那组测的是「机制在」，这一组测「**接线在**」。
  *
  * ⚠️ 分开的理由：把注入点改回不传超时（`loadZaiAuthFromStorage()`），
- * 上面六条**全都还是绿的** —— 它们自己传了参数，测的是函数的行为，不是生产代码有没有用它。
- * 而「函数支持上界」与「两个注入点真的传了」是两件事，后者才是这次修复的目的。
+ * 上面那组**全都还是绿的** —— 它们自己传了参数，测的是函数的行为，不是生产代码有没有用它。
+ * 而「函数支持上界」与「注入点真的传了」是两件事，后者才是这次修复的目的。
  */
 describe('auth read deadline wiring', () => {
   function callArgsOfLoadZaiAuth(file: string): (t.Node | null | undefined)[][] {
@@ -167,10 +132,10 @@ describe('auth read deadline wiring', () => {
       && node.callee.name === 'currentSiteOrigin';
   }
 
-  it('passes the deadline at both token-reading call sites', () => {
-    // 两个有 inFlight 槽位的调用方：内容脚本的标题解析器、后台的模型清单抓取器。
+  it('passes the deadline at every token-reading call site', () => {
+    // 有 inFlight 槽位的调用方：后台的模型清单抓取器。
     // 少传任何一个，那一处的槽位就还会被永久占住。
-    for (const file of ['entrypoints/zai.content.ts', 'entrypoints/background.ts']) {
+    for (const file of ['entrypoints/background.ts']) {
       const calls = callArgsOfLoadZaiAuth(file);
       expect(calls.length, `${file} should read the auth record`).toBeGreaterThan(0);
       for (const args of calls) {
@@ -185,7 +150,7 @@ describe('auth read deadline wiring', () => {
     // ⚠️ 判据同时排除**字符串字面量**：站点必须来自由调用方判定的值
     //（内容脚本是 `currentSiteOrigin()`、后台是抓取器传进来的 `origin`），
     // 不能在调用点写死一个站 —— 那样另一站永远拿不到自己的 token。
-    for (const file of ['entrypoints/zai.content.ts', 'entrypoints/background.ts']) {
+    for (const file of ['entrypoints/background.ts']) {
       for (const args of callArgsOfLoadZaiAuth(file)) {
         expect(args[1], `${file} must pass a site origin`).toBeDefined();
         expect(t.isStringLiteral(args[1]), `${file} must not hard-code the site`).toBe(false);

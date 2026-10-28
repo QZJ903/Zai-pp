@@ -12,7 +12,7 @@ import {
   MEMORY_V2_RECORD,
   MEMORY_V3_PROJECT_ADDITIVE_RECORD,
   MEMORY_V3_PROJECT_RECORD,
-  MEMORY_V3_RECORD,
+  MEMORY_V4_RECORD,
 } from './fixtures/persistence-contract/memory';
 import {
   addIndexedDbRecords,
@@ -42,7 +42,7 @@ afterAll(() => {
 });
 
 describe('Memory historical IndexedDB compatibility', () => {
-  it('executes v1→v3 and v2→v3 upgrades while preserving additive fields across reopen', async () => {
+  it('executes v1→v4 and v2→v4 upgrades while preserving additive fields across reopen', async () => {
     await seedMemoryDatabase(1, MEMORY_V1_ADDITIVE_RECORD);
     const {
       captureRawMemoryRecordsForSyncRecovery,
@@ -54,13 +54,13 @@ describe('Memory historical IndexedDB compatibility', () => {
 
     await db.open();
     expect(await memories.toArray()).toEqual([{
-      ...MEMORY_V3_RECORD,
+      ...MEMORY_V4_RECORD,
       futureRecordField: MEMORY_V1_ADDITIVE_RECORD.futureRecordField,
     }]);
     db.close();
     await db.open();
     expect(await memories.toArray()).toEqual([{
-      ...MEMORY_V3_RECORD,
+      ...MEMORY_V4_RECORD,
       futureRecordField: MEMORY_V1_ADDITIVE_RECORD.futureRecordField,
     }]);
 
@@ -70,7 +70,7 @@ describe('Memory historical IndexedDB compatibility', () => {
 
     await db.open();
     expect(await memories.toArray()).toEqual([{
-      ...MEMORY_V3_RECORD,
+      ...MEMORY_V4_RECORD,
       futureRecordField: MEMORY_V2_ADDITIVE_RECORD.futureRecordField,
     }]);
     await memories.add({
@@ -82,7 +82,7 @@ describe('Memory historical IndexedDB compatibility', () => {
     await db.open();
     expect(await memories.orderBy('id').toArray()).toEqual([
       {
-        ...MEMORY_V3_RECORD,
+        ...MEMORY_V4_RECORD,
         futureRecordField: MEMORY_V2_ADDITIVE_RECORD.futureRecordField,
       },
       MEMORY_V3_PROJECT_ADDITIVE_RECORD,
@@ -90,9 +90,9 @@ describe('Memory historical IndexedDB compatibility', () => {
     expect(db.name).toBe(MEMORY_DATABASE_NAME);
     expect(memories.schema.primKey).toMatchObject({ name: 'id', auto: true });
 
-    await memories.update(MEMORY_V3_RECORD.id, { recoveryFutureField: { preserve: true } } as never);
+    await memories.update(MEMORY_V4_RECORD.id, { recoveryFutureField: { preserve: true } } as never);
     const rawBefore = await captureRawMemoryRecordsForSyncRecovery();
-    await replaceAllMemories([{ ...MEMORY_V3_RECORD, id: 99, tags: [...MEMORY_V3_RECORD.tags] }]);
+    await replaceAllMemories([{ ...MEMORY_V4_RECORD, id: 99, tags: [...MEMORY_V4_RECORD.tags] }]);
     await restoreRawMemoryRecordsForSyncRecovery(rawBefore);
     expect(await memories.orderBy('id').toArray()).toEqual(rawBefore);
     const { id: _id, ...newMemory } = MEMORY_V3_PROJECT_RECORD;
@@ -104,13 +104,40 @@ describe('Memory historical IndexedDB compatibility', () => {
     expect(nextIdAfterRollback).toBe(100);
   });
 
+  it('drops project-scoped rows and their scope fields when upgrading from v3', async () => {
+    await createIndexedDbAtVersion(MEMORY_DATABASE_NAME, 30, (db) => {
+      createStore(db, MEMORY_TABLE_NAME, memorySeedSpec(3));
+    });
+    await addIndexedDbRecords(MEMORY_DATABASE_NAME, MEMORY_TABLE_NAME, [
+      { ...MEMORY_V3_PROJECT_ADDITIVE_RECORD },
+    ]);
+
+    const { db } = await import('../core/memory/store');
+    const memories = db.table(MEMORY_TABLE_NAME);
+    await db.open();
+
+    // 项目作用域的记录整条消失；其余记录保留，`scope` 字段被剥掉。
+    expect(await memories.orderBy('id').toArray()).toEqual([]);
+
+    db.close();
+    await deleteIndexedDb(MEMORY_DATABASE_NAME);
+    await createIndexedDbAtVersion(MEMORY_DATABASE_NAME, 30, (db) => {
+      createStore(db, MEMORY_TABLE_NAME, memorySeedSpec(3));
+    });
+    await addIndexedDbRecords(MEMORY_DATABASE_NAME, MEMORY_TABLE_NAME, [
+      { ...MEMORY_V2_RECORD, scope: 'global' },
+    ]);
+    await db.open();
+    expect(await memories.toArray()).toEqual([MEMORY_V4_RECORD]);
+  });
+
   it('rejects a future database version without overwriting its raw rows', async () => {
     const futureRecord = {
-      ...MEMORY_V3_RECORD,
+      ...MEMORY_V4_RECORD,
       futureDatabaseField: { preserve: true },
     };
-    await createIndexedDbAtVersion(MEMORY_DATABASE_NAME, 40, (db) => {
-      createStore(db, MEMORY_TABLE_NAME, memorySeedSpec(3));
+    await createIndexedDbAtVersion(MEMORY_DATABASE_NAME, 50, (db) => {
+      createStore(db, MEMORY_TABLE_NAME, memorySeedSpec(4));
     });
     await addIndexedDbRecords(MEMORY_DATABASE_NAME, MEMORY_TABLE_NAME, [futureRecord]);
 
@@ -138,7 +165,7 @@ async function seedMemoryDatabase(version: 1 | 2, record: Record<string, unknown
   await addIndexedDbRecords(MEMORY_DATABASE_NAME, MEMORY_TABLE_NAME, [{ ...record }]);
 }
 
-function memorySeedSpec(version: 1 | 2 | 3): {
+function memorySeedSpec(version: 1 | 2 | 3 | 4): {
   keyPath: string;
   autoIncrement: boolean;
   indexes: readonly string[];

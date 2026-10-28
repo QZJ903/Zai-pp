@@ -19,7 +19,7 @@ import { resolveMessageIn } from '../core/i18n/runtime';
  * 随时可能加一句 `backgroundT(...)`，那时覆盖应当是自动的。**只有目录都不存在的条目才该清。**
  *
  * ⚠️⚠️ **`entrypoints/zai.content.ts` 必须在清单里** —— 它同样 import
- * `core/i18n/background` 的 `translate`，用着 21 个 `content.projectPanel.*` 键。
+ * `core/i18n/background` 的 `translate`，用着 `content.toolBlock.*` / `content.skillPopup.*` 那批键。
  * 它不在 `entrypoints/background*` 底下，所以容易被这份清单的写法漏掉：
  * 清单隐含假设「用切片的模块都在 `core/` 或 `entrypoints/background*` 下」，
  * 而本项目的**内容脚本就在 `entrypoints/` 根目录**，那个假设不成立。
@@ -43,7 +43,6 @@ const SCAN_PATHS = [
   'core/network',
   'core/interceptor',
   'core/ui',
-  'core/project',
   'core/saved-items',
   'core/usage',
   'core/background',

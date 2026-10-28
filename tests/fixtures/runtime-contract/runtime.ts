@@ -1,13 +1,13 @@
 export const RUNTIME_TOPOLOGY = {
-  liveCommands: 99,
-  declaredActions: 74,
-  shared: 72,
+  liveCommands: 90,
+  declaredActions: 65,
+  shared: 63,
   liveOnly: 27,
   declaredOnly: 2,
-  readsPayload: 67,
-  ignoresPayload: 32,
+  readsPayload: 60,
+  ignoresPayload: 30,
   directPayloadCasts: 0,
-  decodedPayloads: 64,
+  decodedPayloads: 57,
   delegatedPayloads: 0,
 } as const;
 
@@ -168,7 +168,6 @@ export const RUNTIME_NOTIFICATION_TYPES = [
   'TOOL_DESCRIPTORS_UPDATED',
   'BROWSER_CONTROL_UPDATED',
   'TOOL_CALL_HISTORY_UPDATED',
-  'PROJECT_CONTEXT_UPDATED',
   'SAVED_ITEMS_UPDATED',
   'AUTOMATIONS_UPDATED',
   'AUTOMATION_RUNS_UPDATED',
@@ -176,6 +175,5 @@ export const RUNTIME_NOTIFICATION_TYPES = [
 
 export const RUNTIME_TAB_RPC_TYPES = [
   'REFRESH_ZAI_AUTH',
-  'GET_CURRENT_ZAI_CONVERSATION',
   'INSERT_PROMPT_TEXT',
 ] as const;

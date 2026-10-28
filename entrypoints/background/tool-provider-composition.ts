@@ -4,7 +4,6 @@ import {
   saveMemory,
   updateMemory,
 } from '../../core/memory/store';
-import { getProjectForConversation } from '../../core/project';
 import {
   executeMcpToolCall,
   getMcpToolDescriptors,
@@ -69,11 +68,7 @@ export function createProductionToolProviderRegistry(): ToolProviderRegistry {
     createLocalProvider(
       MEMORY_TOOL_PROVIDER.id,
       ({ locale }) => createMemoryToolDescriptors(locale),
-      async (call, _descriptor, { locale }) => executeMemoryToolCall(
-        await createMemoryRuntime(call),
-        call,
-        locale,
-      ),
+      (call, _descriptor, { locale }) => executeMemoryToolCall(memoryRuntime, call, locale),
     ),
     createLocalProvider(
       SKILL_CREATOR_TOOL_PROVIDER.id,
@@ -170,24 +165,5 @@ function createMcpCapabilityProvider(): RuntimeToolProvider {
       executeMcpCapabilityToolCall,
     ),
     disambiguateInvocationNames: disambiguateMcpCapabilityToolDescriptors,
-  };
-}
-
-async function createMemoryRuntime(call: ToolCall): Promise<MemoryToolRuntime> {
-  const chatSessionId = call.source?.chatSessionId ?? null;
-  if (call.name !== 'memory_save' || !chatSessionId) return memoryRuntime;
-
-  const project = await getProjectForConversation(chatSessionId);
-  if (!project) return memoryRuntime;
-
-  return {
-    ...memoryRuntime,
-    async saveMemory(input: NewMemory) {
-      return memoryRuntime.saveMemory({
-        ...input,
-        scope: 'project',
-        projectId: project.id,
-      });
-    },
   };
 }

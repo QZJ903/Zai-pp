@@ -33,7 +33,6 @@ export const ZAI_ASSISTANT_MESSAGE_SELECTOR = '.chat-assistant';
 export const ZAI_INJECTED_UI_SELECTOR = [
   '.zpp-tool-block',
   '[data-zpp-hidden-continuation]',
-  '.zpp-project-panel',
 ].join(', ');
 
 /** 取页面上的全部助手消息（按 DOM 顺序）。 */

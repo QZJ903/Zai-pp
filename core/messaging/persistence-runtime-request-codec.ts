@@ -240,62 +240,6 @@ export const PERSISTENCE_RUNTIME_PAYLOAD_DECODERS: PersistenceRuntimePayloadDeco
       text: typeof payload.text === 'string' ? payload.text : '',
     });
   },
-  CREATE_PROJECT_CONTEXT(value) {
-    const payload = recordValue(value, 'CREATE_PROJECT_CONTEXT.payload');
-    nonEmptyString(payload.name, 'CREATE_PROJECT_CONTEXT.payload.name');
-    optionalString(payload.description, 'CREATE_PROJECT_CONTEXT.payload.description');
-    optionalString(payload.instructions, 'CREATE_PROJECT_CONTEXT.payload.instructions');
-    return typedPayload<'CREATE_PROJECT_CONTEXT'>(payload);
-  },
-  UPDATE_PROJECT_CONTEXT(value) {
-    const payload = recordValue(value, 'UPDATE_PROJECT_CONTEXT.payload');
-    nonEmptyString(payload.projectId, 'UPDATE_PROJECT_CONTEXT.payload.projectId');
-    const patch = recordValue(payload.patch, 'UPDATE_PROJECT_CONTEXT.payload.patch');
-    optionalString(patch.name, 'UPDATE_PROJECT_CONTEXT.payload.patch.name');
-    optionalString(patch.description, 'UPDATE_PROJECT_CONTEXT.payload.patch.description');
-    optionalString(patch.instructions, 'UPDATE_PROJECT_CONTEXT.payload.patch.instructions');
-    return typedPayload<'UPDATE_PROJECT_CONTEXT'>({ ...payload, patch });
-  },
-  DELETE_PROJECT_CONTEXT(value) {
-    return decodeNamedRecord<'DELETE_PROJECT_CONTEXT'>(
-      value,
-      'DELETE_PROJECT_CONTEXT.payload',
-      'projectId',
-    );
-  },
-  ADD_CONVERSATION_TO_PROJECT(value) {
-    const payload = recordValue(value, 'ADD_CONVERSATION_TO_PROJECT.payload');
-    nonEmptyString(payload.projectId, 'ADD_CONVERSATION_TO_PROJECT.payload.projectId');
-    const conversation = decodeProjectConversationInput(
-      payload.conversation,
-      'ADD_CONVERSATION_TO_PROJECT.payload.conversation',
-    );
-    return typedPayload<'ADD_CONVERSATION_TO_PROJECT'>({ ...payload, conversation });
-  },
-  REMOVE_CONVERSATION_FROM_PROJECT(value) {
-    return decodeNamedRecord<'REMOVE_CONVERSATION_FROM_PROJECT'>(
-      value,
-      'REMOVE_CONVERSATION_FROM_PROJECT.payload',
-      'conversationId',
-    );
-  },
-  SET_PENDING_PROJECT_CONTEXT(value) {
-    const payload = recordValue(value, 'SET_PENDING_PROJECT_CONTEXT.payload');
-    nullableNonEmptyString(payload.projectId, 'SET_PENDING_PROJECT_CONTEXT.payload.projectId');
-    return typedPayload<'SET_PENDING_PROJECT_CONTEXT'>(payload);
-  },
-  GET_PROJECT_CONTEXT_FOR_CONVERSATION(value) {
-    const payload = recordValue(value, 'GET_PROJECT_CONTEXT_FOR_CONVERSATION.payload');
-    const conversation = decodeProjectConversationInput(
-      payload.conversation,
-      'GET_PROJECT_CONTEXT_FOR_CONVERSATION.payload.conversation',
-    );
-    optionalBoolean(
-      payload.bindPendingProject,
-      'GET_PROJECT_CONTEXT_FOR_CONVERSATION.payload.bindPendingProject',
-    );
-    return typedPayload<'GET_PROJECT_CONTEXT_FOR_CONVERSATION'>({ ...payload, conversation });
-  },
   SAVE_BACKGROUND(value) {
     const payload = recordValue(value, 'SAVE_BACKGROUND.payload');
     booleanValue(payload.enabled, 'SAVE_BACKGROUND.payload.enabled');
@@ -324,18 +268,6 @@ function decodeNamedRecord<TType extends PersistencePayloadCommandType>(
   const payload = recordValue(value, path);
   nonEmptyString(payload[field], `${path}.${field}`);
   return typedPayload<TType>(payload);
-}
-
-function decodeProjectConversationInput(value: unknown, path: string): Record<string, unknown> {
-  const conversation = recordValue(value, path);
-  nonEmptyString(conversation.conversationId, `${path}.conversationId`);
-  optionalString(conversation.title, `${path}.title`);
-  optionalString(conversation.url, `${path}.url`);
-  // 手动改名的标记：只有内容端显式传 true 才算，其余一律当自动回填。
-  if (conversation.titleEdited !== undefined && typeof conversation.titleEdited !== 'boolean') {
-    throw new Error(`${path}.titleEdited must be a boolean`);
-  }
-  return conversation;
 }
 
 function typedPayload<TType extends PersistencePayloadCommandType>(

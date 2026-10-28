@@ -90,15 +90,15 @@ export interface ZaiAuthCaptureInput {
  * ⚠️ **必须有它**：扩展上下文半死时 `chrome.storage.local.get` 的 promise
  * **不是 reject，而是永不 settle** —— 外层的 `try/catch` 接不到一个不落地的 promise，
  * 于是所有 `await` 它的地方都会永久挂住。两个有 `inFlight` 槽位的调用方
- * （标题解析器、模型清单抓取器）会把槽位一直占着，之后每次触发都落「已跳过」分支、
+ * （模型清单抓取器）会把槽位一直占着，之后每次触发都落「已跳过」分支、
  * **不会自愈**。信号式上界（`AbortSignal.timeout`）对 storage 无效，只能用竞速。
  *
  * ⚠️ **写路径刻意不传它** —— `mergeZaiAuthFromCapture` 要读旧记录再覆盖写，
  * 读到 null 会把 `userId` / `feVersion` / `deviceId` / `expiresAt` 一起写成 null。
  * 「读不到就当没有」对只取 token 的调用方是对的，对合并写是错的。
  *
- * 取值与 `conversation-title.ts` 的 `TITLE_REQUEST_TIMEOUT_MS` 同量级 ——
- * 那一处的 5 秒上界只盖住网络腿，这是它前面的那条腿。
+ * 取 5 秒：与网络侧的上界（`AbortSignal.timeout`）同量级 —— 那条只盖住 `fetch`，
+ * 这是它前面的那条腿。
  */
 export const AUTH_READ_TIMEOUT_MS = 5_000;
 

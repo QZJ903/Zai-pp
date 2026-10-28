@@ -298,9 +298,6 @@ function decodePromptContext(raw: unknown, path: string): AutomationPromptContex
     ...(value.presetContent === undefined
       ? {}
       : { presetContent: nullableString(value.presetContent, `${path}.presetContent`) }),
-    ...(value.projectContext === undefined
-      ? {}
-      : { projectContext: nullableString(value.projectContext, `${path}.projectContext`) }),
     ...(toolDescriptors === undefined ? {} : { toolDescriptors }),
   } as AutomationPromptContext;
 }

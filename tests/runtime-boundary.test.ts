@@ -182,7 +182,7 @@ describe('runtime sender and envelope boundary', () => {
   it('authorizes only the frozen content command surface before routing', () => {
     const extensionContext = createRuntimeMessageContext(EXTENSION_SENDER, POLICY);
     const contentContext = createRuntimeMessageContext(ZAI_SENDER, POLICY);
-    expect(ZAI_CONTENT_RUNTIME_COMMANDS.size).toBe(25);
+    expect(ZAI_CONTENT_RUNTIME_COMMANDS.size).toBe(20);
     expect(() => authorizeRuntimeMessage({ type: 'GET_MEMORIES' }, contentContext)).not.toThrow();
     expect(() => authorizeRuntimeMessage({ type: 'GET_SYNC_CONFIG' }, contentContext))
       .toThrow('not authorized for content runtime');
@@ -241,7 +241,7 @@ describe('runtime sender and envelope boundary', () => {
     //
     // ⚠️ 它守的是闸门**误拒后台广播**这个最危险的失效形态：若后台发消息时 `sender.url`
     // 不是 `/background.js`，闸门会把 STATE_UPDATED / BACKGROUND_UPDATED /
-    // TOOL_DESCRIPTORS_UPDATED / PROJECT_CONTEXT_UPDATED 全部静默拒掉
+    // TOOL_DESCRIPTORS_UPDATED / SAVED_ITEMS_UPDATED 全部静默拒掉
     // （表现：侧边栏改了记忆/技能/背景，页面不更新、要刷新才生效）。
     // ⚠️ **这条测的是「判据对这类 sender 的判定」**，不是「真机投递时 url 确实是这个值」——
     // 后者只有真机能验。
@@ -295,7 +295,7 @@ describe('runtime sender and envelope boundary', () => {
     });
 
     // 数量断言：多一处或少一处都说明有人新加了未守的接收端（或删掉了已守的）。
-    expect(listeners).toHaveLength(2);
+    expect(listeners).toHaveLength(1);
 
     // ② 每一处的回调体里都必须出现闸门调用
     for (const listener of listeners) {

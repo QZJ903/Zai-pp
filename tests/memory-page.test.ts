@@ -100,7 +100,6 @@ function createMemory(name: string): Memory {
   return {
     id: 1,
     syncId: 'sync-1',
-    scope: 'global',
     type: 'topic',
     name,
     content: 'content',
