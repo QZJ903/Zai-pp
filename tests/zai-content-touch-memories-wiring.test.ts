@@ -8,8 +8,11 @@ import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-sourc
  *
  * ⚠️⚠️ **这条守的是接线，不是规则** —— 「哪些记忆算用过」由
  * `buildPromptAugmentation` 的 `usedMemoryIds` 算（有 `prompt-used-memory-ids.test.ts`
- * 那组行为用例守着），但**内容脚本有没有把它发出去**是另一件事，
- * 纯函数测试覆盖不到（[[zai-code-guardrails]] B15 / B21）。
+ * 那组行为用例守着），但**内容脚本有没有把它发出去**是另一件事。
+ * 而**位置类断言（AST / 字符串扫描）永远测不到函数体里的分支** —— 被断言过「调用在这里」
+ * 的函数，仍可能没有任何一条用例喂过它真实输入；同理，AST 断言本身也有已知的绕过形态
+ * （把真身挪进死函数、同名重新绑定、末尾补同名壳等），只能靠「真调一次、断言副作用」
+ * 的行为测试兜底。接线与规则必须分开守，缺一半就会静默。
  *
  * **为什么值得为它写一条 AST 断言**：那行曾经是
  * `payload: { ids: [] }`（硬编码），而 `ids` 一路喂到后台 `touchMemories`，

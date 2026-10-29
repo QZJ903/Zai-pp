@@ -16,6 +16,7 @@ import {
   projectMcpCapabilityDescriptors,
   rankMcpCapabilityDescriptors,
 } from '../core/mcp/capability-projection';
+import { normalizeMcpToolDescriptor } from '../core/mcp';
 import { renderToolSchemas } from '../core/prompt/augmentation';
 import type { McpCapabilitySettings, ToolDescriptor } from '../core/types';
 
@@ -120,7 +121,15 @@ describe('MCP capability projection', () => {
       usesCatalog: true,
     });
     expect(projection.descriptors.map((descriptor) => descriptor.invocationName))
-      .toEqual(['local_status', 'beta_write', 'mcp_discover', 'mcp_describe', 'mcp_invoke']);
+      // ⚠️ 生产形态：MCP 工具的调用名带 `mcp_<serverId>_` 前缀（`server-1` 被
+      // sanitize 成 `server_1`）。用裸名断言等于在测一个生产不会出现的形状。
+      .toEqual([
+        'local_status',
+        'mcp_server_1_beta_write',
+        'mcp_discover',
+        'mcp_describe',
+        'mcp_invoke',
+      ]);
   });
 
   it('hides all configured on-demand schemas but leaves no raw target-name proxy', () => {
@@ -191,6 +200,32 @@ describe('MCP capability projection', () => {
     const renderedBytes = new TextEncoder().encode(renderToolSchemas([descriptor], 'en')).byteLength;
     expect(estimateMcpCapabilityPromptBytes(descriptor)).toBeGreaterThanOrEqual(renderedBytes);
   });
+
+  it('the estimate is NOT what the adaptive budget uses any more', () => {
+    // ⚠️⚠️ **这条是给下一个人看的，不是测行为** —— 上面那条「估算 ≥ 渲染」只对普通工具成立；
+    // 对 native Shell 工具它**反而低估**（实测 `shell_exec` 估算 1322 / 渲染 1826）。
+    // 而真正的预算裁剪已经改成真渲染量字节（`measureToolSchemaBytes`），
+    // 所以那个估算器**留着只为兼容，不参与任何裁剪决策**。
+    //
+    // 判据是「两者对 native 工具的结论相反」，用它把这条事实钉在测试里：
+    // 只要还有人想拿 `estimateMcpCapabilityPromptBytes` 当预算判据，这条会提醒他别这么做。
+    const nativeShellExec: ToolDescriptor = {
+      ...createMcpDescriptor('shell-local', 'shell_exec'),
+      provider: { ...createMcpDescriptor('shell-local', 'shell_exec').provider, transport: 'native_messaging' },
+      inputSchema: {
+        type: 'object',
+        properties: { command: { type: 'string', description: 'Shell command' } },
+        required: ['command'],
+        additionalProperties: false,
+      },
+    };
+
+    const renderedBytes = new TextEncoder().encode(renderToolSchemas([nativeShellExec], 'en')).byteLength;
+    expect(
+      estimateMcpCapabilityPromptBytes(nativeShellExec),
+      '估算器对 native Shell 工具是低估的（它没算整段 shell hint）',
+    ).toBeLessThan(renderedBytes);
+  });
 });
 
 describe('MCP capability settings storage', () => {
@@ -241,22 +276,46 @@ function createSettings(overrides: Partial<McpCapabilitySettings> = {}): McpCapa
   };
 }
 
+/**
+ * 一个「生产形态」的 MCP 描述符夹具。
+ *
+ * ⚠️⚠️ **必须走生产的 `normalizeMcpToolDescriptor`，别手抄对象字面量。**
+ * 手抄的第一版把 `invocationName` 直接写成裸工具名，而生产**永远**带
+ * `mcp_<serverId>_` 前缀（`createMcpInvocationName`，`core/mcp/descriptor-identity.ts`）
+ * ⇒ 那些用例走的是生产不会出现的名字形态，判别力弱于看起来的样子。
+ *
+ * ⚠️ 改这一处会连带一条断言：`uses deterministic adaptive selection` 里钉调用名清单的
+ * 那条——期望值现在必须写成 `mcp_server_1_beta_write`（`server-1` 的连字符被 sanitize
+ * 成下划线），而不是裸的 `beta_write`。
+ */
 function createMcpDescriptor(serverId: string, name: string): ToolDescriptor {
-  return {
-    id: `mcp:${serverId}:${name}`,
-    provider: {
-      kind: 'mcp',
+  return normalizeMcpToolDescriptor(
+    {
+      version: 1,
       id: serverId,
       displayName: `MCP ${serverId}`,
-      transport: 'streamable_http',
+      enabled: true,
+      transport: { kind: 'streamable_http', url: `https://example.test/${serverId}` },
+      headers: [],
+      secrets: [],
+      timeouts: { connectMs: 5_000, requestMs: 60_000, discoveryMs: 10_000 },
+      limits: { maxResultBytes: 128_000, maxToolCount: 64 },
+      allowlist: { mode: 'all', toolNames: [] },
+      execution: { mode: 'auto', enabled: true },
+      status: 'ready',
+      lastConnectedAt: 0,
+      lastError: null,
+      createdAt: 0,
+      updatedAt: 0,
     },
-    name,
-    invocationName: name,
-    title: name,
-    description: `${name} capability`,
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    execution: { mode: 'auto', enabled: true, risk: 'low' },
-  };
+    {
+      name,
+      title: name,
+      description: `${name} capability`,
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { risk: 'low' },
+    },
+  );
 }
 
 function createLocalDescriptor(): ToolDescriptor {

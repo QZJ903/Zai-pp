@@ -21,7 +21,7 @@ import { walkSourceAst } from './helpers/typescript-source';
  * ⚠️⚠️ **实测过：删掉任一 `notify()`，全量测试仍然全绿** —— 所以这两条断言补的是
  * 一个真实的覆盖空洞，不是为了凑数。
  *
- * ## 判据为什么这么写（B4 四条齐 + B21 六族绕过的教训）
+ * ## 判据为什么这么写（接线断言必须四条同时成立，且 AST 断言有已知绕过形态）
  *
  * 光断言「源码里出现过 `x.notify()`」**一点用都没有**（把调用挪进死函数照样过）。
  * 这里钉的是三件事：
@@ -568,7 +568,9 @@ describe('stop observer install robustness', () => {
    * **上面那条不够**（Sonnet 复核指出、已实测复现）：
    * 把置位改成 `if (!document.body) { stopObserverInstalled = true; return; }`
    * —— 那**就是原缺陷本身**，而位置比较照样绿（写在 `if` 块内，`node.start` 仍大于 `if` 的 start）。
-   * 这正是守则 **B5「扫得宽」**：位置比较碰不到「同一语句内部」的语义。
+   * 这正是源码级断言的一个通病：**位置比较只能定位到语句边界，碰不到「同一语句内部」的语义**
+   * —— 判据扫得越宽（比如只比 `node.start` 的先后），越容易被同一语句里的写法骗过；
+   * 反过来收得太窄又会漏掉合法写法。所以断言的目标必须收窄到**承载语义的那一行 / 那个属性**上。
    *
    * ⇒ 这条补两件事：① 门必须**恰好**是 `if (!document.body) return;`（裸 return，不许块）；
    *   ② `stopObserverInstalled` 的任何写入都**不得落在门的 start..end 区间内**。

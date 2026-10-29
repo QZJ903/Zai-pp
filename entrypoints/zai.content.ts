@@ -21,7 +21,6 @@ import type {
   BackgroundConfig,
 } from '../core/types';
 import { buildPromptAugmentation } from '../core/prompt';
-import { extractVisibleUserPrompt } from '../core/prompt/visibility';
 import {
   DEFAULT_PROMPT_INJECTION_SETTINGS,
   normalizePromptInjectionSettings,
@@ -1482,8 +1481,15 @@ async function handleAugmentRequestBody(
     const nextBody = rewriteZaiLastUserMessage(body, augmented.text);
     // 关键：signature_prompt 是服务端权威 prompt、参与续写链 parent 校验与历史存储，
     // 必须始终是「用户原文」。而模型读的是 messages.content（系统注入 + 标记包裹原文）。
-    const visibleOriginal = extractVisibleUserPrompt(augmented.text) ?? originalPrompt;
-    (nextBody as Record<string, unknown>).signature_prompt = visibleOriginal;
+    //
+    // ⚠️⚠️ **直接写 `originalPrompt`，不要从增广文本反推** —— 这里曾经是
+    // 「用 extractVisibleUserPrompt 反推 augmented.text」再接 `?? originalPrompt`，而它从 START 切到
+    // **第一个** END：用户原文里若恰好含 `<!-- zai-visible-user-prompt:end -->` 字面量
+    // （例如他在问这个标记是什么），切点会落在那个假的 END 上 ⇒ 权威 prompt 被截断
+    // （实测 `请解释 <!-- …:end --> 这个字符串` 会变成 `请解释 `）。
+    // ⚠️ **两者本来就恒等**：三个增广分支都把这个 `originalPrompt` 原样写进标记对
+    // （或写进 metadata 行），所以反推除了引入这个 bug 之外没有任何作用。
+    (nextBody as Record<string, unknown>).signature_prompt = originalPrompt;
 
     // 模型覆写：请求归属到自动化任务时覆写 body 的 model。
     // ⚠️ **agent 轮同样覆写** —— 真机实测 agent 的 completion body 带顶层 `model`，
@@ -4674,6 +4680,14 @@ export default defineContentScript({
       handleSessionChange: () => {
         reclaimLoopOnSessionChange();
         toolPanel.handleSessionChange();
+        // ⚠️ **轮数必须跟着会话归零** —— 它是「预设注入频率」判据里的 `messageCount`
+        // （`default` 档靠 `messageCount % 10` 决定这一轮注不注入），而它只在
+        // `augmentPrompt` 里递增、**从不重置**。
+        // 不归零的后果：切到新会话后，第一轮的 `messageCount` 会带着上一个会话的累计值
+        // ⇒ 注入频率整体错位（本该第 1 轮注入的档，可能第 3 轮才命中）。
+        // ⚠️ 新会话首条走 chatNew，`isFirstMessage=true` 本来就会把它重置成 1；这里兜的是
+        // **首条没被我们 hook 到**那一档（刷新页面后页面自己发的首条）。
+        currentRequestMessageCount = 0;
       },
       refreshAuth: refreshZaiAuth,
       // 「最近活跃站」（A 兜底）：内容脚本是唯一知道页面在哪一站的上下文，

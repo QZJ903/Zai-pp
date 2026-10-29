@@ -928,7 +928,10 @@ async function getPromptToolDescriptors(
     getRuntimeToolDescriptors(locale),
     getMcpCapabilitySettings(),
   ]);
-  return projectMcpCapabilityDescriptors({ descriptors, settings, intent }).descriptors;
+  // ⚠️ **`locale` 要往下传** —— 它决定 adaptive 预算里那两段 hint 的字节数
+  // （中英长度不同，实测 12 个 shell 工具时 zh 2172 / en 2329）。不传会恒按 zh-CN 量，
+  // 而 en 下 hint 更长 ⇒ **少扣** ⇒ 预算可被轻微突破。
+  return projectMcpCapabilityDescriptors({ descriptors, settings, intent, locale }).descriptors;
 }
 
 

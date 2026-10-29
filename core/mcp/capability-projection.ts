@@ -1,4 +1,11 @@
 import type { ToolDescriptor } from '../tool/types';
+import { createToolInvocationCatalog } from '../tool/invocation';
+import { DEFAULT_LOCALE, type SupportedLocale } from '../i18n/background';
+import {
+  TOOL_SCHEMA_JOINER_BYTES,
+  measureToolHintBytes,
+  measureToolSchemaBytes,
+} from '../prompt/augmentation';
 import { isExtensionInternalTool } from './internal-tools';
 import {
   getMcpCapabilityServerSettings,
@@ -23,6 +30,74 @@ export interface McpCapabilityProjectionInput {
   descriptors: readonly ToolDescriptor[];
   settings: McpCapabilitySettings;
   intent: string;
+  /**
+   * 当前界面语言 —— **只影响 adaptive 预算里那两段 hint 的字节数**
+   * （`renderShellMcpHint` / `renderPythonMcpHint` 会 `translate`）。
+   *
+   * ⚠️ 不传时按 `DEFAULT_LOCALE`（zh-CN）算。**中英差异是百字节量级、不是几十**：
+   * 实测 12 个 shell 工具时 zh 2172 字节 / en 2329 字节（en 反而更长）——
+   * 所以恒用 zh 是**少扣**，预算可被轻微突破。
+   */
+  locale?: SupportedLocale;
+}
+
+/**
+ * 把 `intent` 命中的 MCP 描述符按**真实渲染字节**预算裁剪出来。
+ *
+ * ⚠️⚠️ **这里量的是真值，不是估算** —— 见 `measureToolSchemaBytes` 的说明。
+ * 原先那个「描述符文本 + schema×2 + 固定 1024」的估算器实测系统性高估 2–3 倍，
+ * 导致默认 24000 预算下只放出 13/40 个工具，而按真实字节能放 31 个。
+ *
+ * ⚠️ **catalog 必须按「整批」建** —— 同名工具会被加上 `mcp_<serverId>_` 前缀，
+ * 用单元素 catalog 量出来的名字更短、字节数偏小。
+ *
+ * ⚠️⚠️ **hint 只按「adaptive 额外造成的增量」扣，不按整批扣** ——
+ * 这是修过一个真问题的：`direct` / `on_demand` 里的 native 工具**本来就会**（或本来就不会）
+ * 出现在提示词里，它们的 hint 不属于 adaptive 的选择成本。按整批扣会**串账**：
+ * 实测「Shell 走 direct + 另一个服务走 adaptive + 预算 2000」时，那个**完全无关**的
+ * adaptive 服务会因为 Shell 的 2172 字节 hint 而一个工具都拿不到。
+ * 现在用 `整批 hint − 不含 adaptive/on_demand 时的 hint` 求边际量。
+ *
+ * ⚠️ **兜底**：hint 单独就超过预算时（预算下限 2000 < 两段 hint 约 2172），
+ * 若不兜底会选出 0 个 —— 静默给 0 比轻微超预算糟得多，所以至少给排名第一那条。
+ */
+function selectAdaptiveDescriptors(
+  descriptors: readonly ToolDescriptor[],
+  catalogDescriptors: readonly ToolDescriptor[],
+  /** 一定会进最终提示词的那批（`direct` 模式 + 非 MCP 的本地工具）—— 用来求 hint 的边际量。 */
+  alwaysVisibleDescriptors: readonly ToolDescriptor[],
+  intent: string,
+  pinnedDescriptorIds: ReadonlySet<string>,
+  maxTools: number,
+  maxBytes: number,
+  locale: SupportedLocale,
+): ToolDescriptor[] {
+  const selected: ToolDescriptor[] = [];
+  // ⚠️ 目录按**整批**建（与最终 `renderToolSchemas` 的口径一致）。
+  const catalog = createToolInvocationCatalog(catalogDescriptors);
+  const marginalHintBytes = Math.max(
+    0,
+    measureToolHintBytes(catalogDescriptors, locale)
+      - measureToolHintBytes(alwaysVisibleDescriptors, locale),
+  );
+  let consumedBytes = marginalHintBytes;
+  for (const descriptor of rankMcpCapabilityDescriptors(descriptors, intent, pinnedDescriptorIds)) {
+    // ⚠️ **`maxTools` 判据必须在量字节之前** —— 满了就该停，不该继续给剩下的候选
+    // 每个渲染一遍 schema + 示例 payload 再丢掉（默认 8 个、候选可能上百）。
+    if (selected.length >= maxTools) break;
+    const bytes = measureToolSchemaBytes(descriptor, catalog)
+      + (selected.length > 0 ? TOOL_SCHEMA_JOINER_BYTES : 0);
+    if (consumedBytes + bytes > maxBytes) continue;
+    selected.push(descriptor);
+    consumedBytes += bytes;
+  }
+  // ⚠️ **兜底：hint 单独就吃光预算时至少给一条** —— 否则那个 adaptive 服务
+  // 一个工具都不出现、且没有任何报错（用户看不出是预算太小还是服务坏了）。
+  if (selected.length === 0 && descriptors.length > 0) {
+    const [first] = rankMcpCapabilityDescriptors(descriptors, intent, pinnedDescriptorIds);
+    if (first) selected.push(first);
+  }
+  return selected;
 }
 
 /**
@@ -47,10 +122,22 @@ export function projectMcpCapabilityDescriptors(
   );
   const selectedAdaptive = selectAdaptiveDescriptors(
     adaptive,
+    // ⚠️ **catalog 按整批建**（与最终渲染同口径）—— 同名工具会带 `mcp_<serverId>_` 前缀，
+    // 用单元素 catalog 量出来的名字更短、字节数偏小。
+    input.descriptors,
+    // ⚠️ 「一定会进提示词」的那批 = 非 MCP 的本地工具 + `direct` 模式的 MCP 工具。
+    // 用来求 hint 的**边际量**（见 `selectAdaptiveDescriptors` 的说明）。
+    [
+      ...input.descriptors.filter(
+        (descriptor) => !isMcpDescriptor(descriptor) && !isMcpCapabilityDescriptor(descriptor),
+      ),
+      ...direct,
+    ],
     input.intent,
     pinned,
     input.settings.adaptiveMaxDirectTools,
     input.settings.adaptiveMaxPromptBytes,
+    input.locale ?? DEFAULT_LOCALE,
   );
   const selectedIds = new Set([...direct, ...selectedAdaptive].map((descriptor) => descriptor.id));
   const hidden = [...onDemand, ...adaptive.filter((descriptor) => !selectedIds.has(descriptor.id))];
@@ -116,6 +203,17 @@ export function rankMcpCapabilityDescriptors(
     .map((entry) => entry.descriptor);
 }
 
+/**
+ * ⚠️⚠️ **已不再用于预算裁剪 —— 保留只为兼容旧断言，别再拿它当判据。**
+ *
+ * 它是「描述符文本 + schema×2 + 固定 1024」的**估算**，实测系统性高估 2–3 倍：
+ * 示例 payload 只有 required 字段的短值（远小于一整份 schema），而每个描述符的
+ * 真实框架开销只有 40–213 字节、不是 1024。用它裁剪的实际后果是
+ * 默认 24000 预算下只放出 13/40 个工具（按真实字节能放 31 个）。
+ *
+ * ⇒ 预算裁剪现在走 `measureToolSchemaBytes` / `measureToolHintBytes`（真渲染量字节），
+ * 见 `selectAdaptiveDescriptors`。
+ */
 export function estimateMcpCapabilityPromptBytes(descriptor: ToolDescriptor): number {
   const descriptorText = [
     descriptor.invocationName,
@@ -159,24 +257,6 @@ export function isExecutableMcpDescriptor(descriptor: ToolDescriptor): boolean {
     && !isInternalDescriptor(descriptor)
     && descriptor.execution.enabled
     && descriptor.execution.mode !== 'disabled';
-}
-
-function selectAdaptiveDescriptors(
-  descriptors: readonly ToolDescriptor[],
-  intent: string,
-  pinnedDescriptorIds: ReadonlySet<string>,
-  maxTools: number,
-  maxBytes: number,
-): ToolDescriptor[] {
-  const selected: ToolDescriptor[] = [];
-  let consumedBytes = 0;
-  for (const descriptor of rankMcpCapabilityDescriptors(descriptors, intent, pinnedDescriptorIds)) {
-    const bytes = estimateMcpCapabilityPromptBytes(descriptor);
-    if (selected.length >= maxTools || consumedBytes + bytes > maxBytes) continue;
-    selected.push(descriptor);
-    consumedBytes += bytes;
-  }
-  return selected;
 }
 
 function scoreDescriptor(

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import * as t from '@babel/types';
 import { ZAI_CAPABILITY_DEP_KEYS } from '../core/zai/capability-install';
@@ -578,6 +579,46 @@ describe('session change: reclaim the continuation loop', () => {
     expect(panelAt, 'handleSessionChange 里应当仍然调面板那处').not.toBeNull();
     expect(reclaimAt!, '先收循环、再换面板记录').toBeLessThan(panelAt!);
   });
+
+  it('切会话时把预设注入的轮数计数器归零', () => {
+    // ⚠️ **为什么必须守这一条**：`currentRequestMessageCount` 是「预设注入频率」判据里的
+    // `messageCount`（`default` 档靠 `messageCount % 10` 决定注不注入），而它只在
+    // `augmentPrompt` 里递增、**从不重置**。不归零时，切到新会话后第一轮会带着上一个
+    // 会话的累计值 ⇒ 注入频率整体错位，而**表现是静默的**（只是某一轮该注入没注入）。
+    //
+    // ⚠️ 这是**接线**，`zai.content.ts` 加载即执行 `defineContentScript`、不能 import
+    // ⇒ 行为测试够不到，只能在这里做源码级断言。
+    const program = readContentProgram();
+    const mainBody = findMainBodyOf(program);
+    expect(mainBody, 'main() 不该消失').toBeDefined();
+
+    let handleBody: t.Node | undefined;
+    walkReachable(mainBody, (node) => {
+      if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+      if (node.callee.name !== 'installZaiCapabilities') return;
+      const [options] = node.arguments;
+      if (!t.isObjectExpression(options)) return;
+      const property = options.properties.find((entry): entry is t.ObjectProperty => (
+        t.isObjectProperty(entry) && t.isIdentifier(entry.key, { name: 'handleSessionChange' })
+      ));
+      const value = property?.value;
+      if (t.isArrowFunctionExpression(value) || t.isFunctionExpression(value)) {
+        handleBody = value.body;
+      }
+    });
+    expect(handleBody, '没找到 handleSessionChange 的函数体').toBeDefined();
+
+    // 判据是「函数体里有 `currentRequestMessageCount = 0` 这个赋值」，
+    // 不是「源码里出现过这个标识符」—— 后者在声明与读取处都恒真。
+    let zeroed = false;
+    walkReachable(handleBody!, (node) => {
+      if (!t.isAssignmentExpression(node) || node.operator !== '=') return;
+      const { left, right } = node;
+      if (!t.isIdentifier(left, { name: 'currentRequestMessageCount' })) return;
+      if (t.isNumericLiteral(right) && right.value === 0) zeroed = true;
+    });
+    expect(zeroed, '切会话时必须把 currentRequestMessageCount 归零').toBe(true);
+  });
 });
 
 /**
@@ -668,5 +709,32 @@ describe('tab keepalive: release carries an ownership token', () => {
     const alternate = source.slice(branch!.alternate?.start ?? 0, branch!.alternate?.end ?? 0);
     expect(alternate, '顶替分支里必须交还所有权').toContain('keepAliveOwner');
     expect(alternate, '顶替分支里不许发 STOP').not.toContain('releaseTabKeepAlive');
+  });
+});
+
+/**
+ * **`signature_prompt` 必须直接写用户原文，不许从增广文本反推。**
+ *
+ * ⚠️⚠️ 缺陷形态：原来那行是
+ * `extractVisibleUserPrompt(augmented.text) ?? originalPrompt`，而那个函数从 START 标记
+ * 切到**第一个** END 标记 ⇒ 用户原文里若恰好含 `<!-- zai-visible-user-prompt:end -->`
+ * 字面量（比如他在问这个标记是什么意思），切点会落在那个假的 END 上、
+ * **服务端权威 prompt 被截断**（实测 `请解释 <!-- …:end --> 这个字符串` → `请解释 `）。
+ *
+ * ⚠️ **为什么用源码断言而不是行为测试**：`zai.content.ts` 加载即执行
+ * `defineContentScript`、不能被 import；而这个 bug 的等价性又是结构性的
+ * （三个增广分支都把 `originalPrompt` 原样写进标记对 / metadata 行）——
+ * 行为测试够不到、只能在这儿钉住「那一行没退回去」。
+ *
+ * ⚠️ **判据是「没有调用」，不是「出现过这个名字」** —— 文件里有一处注释提到它
+ * （解释这段历史），所以 `not.toContain('extractVisibleUserPrompt')` 会假红。
+ * 只查带括号的调用形态。
+ */
+describe('signature_prompt is taken from the user text, not reverse-engineered', () => {
+  it('never calls extractVisibleUserPrompt on the augmented text', () => {
+    const source = readFileSync(resolve(process.cwd(), 'entrypoints/zai.content.ts'), 'utf8');
+    expect(source).not.toContain('extractVisibleUserPrompt(');
+    // 正面判据：那一行直接写 `originalPrompt`。
+    expect(source).toContain('signature_prompt = originalPrompt');
   });
 });

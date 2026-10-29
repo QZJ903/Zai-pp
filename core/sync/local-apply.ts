@@ -37,6 +37,15 @@ export interface SyncUndoPreimageV1 {
      * 恢复链永久失败。它**不参与** `SYNC_APPLY_STEP_ORDER`，所以既不会被写入
      * 也不会被回滚（那个 storage key 本身已随功能删除）。
      * ⚠️ **位置必须留在 `activePreset` 与 `savedItems` 之间** —— 键序影响序列化字节。
+     *
+     * ⚠️⚠️ **失败形态是不可恢复的，这是它值得留的全部理由**：`recover()` 在**每一次**
+     * 持久化变更之前都会跑（`withSyncLocalStateLock` 第一步），所以 checksum 一旦对不上，
+     * 删 skill / 导入 skill / 删 preset 会**全部**失败，而且 journal 永远清不掉
+     * （清它的是恢复成功之后那一步）⇒ 没有自愈路径，只能手动去 IndexedDB 删行。
+     *
+     * ⚠️ **可达性很窄**：只有「升级前某次持久化变更失败、且升级后一次恢复都没跑过」
+     * 才会留下带这个槽位的 journal（正常路径下 journal 写完就清）。窄 ≠ 可以赌 ——
+     * 代价是「不可恢复」，而收益只是少六行可选字段。
      */
     projectContext?: OpaqueStoragePreimage;
   };

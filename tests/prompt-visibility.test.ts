@@ -1,15 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import {
-  containsInternalPromptMarker,
   extractVisibleUserPrompt,
   markVisibleUserPrompt,
   markVisibleUserPromptMetadata,
-  sanitizeInternalPromptText,
 } from '../core/prompt/visibility';
-import { renderToolFormatReminder } from '../core/prompt/augmentation';
-import { SUPPORTED_LOCALES } from '../core/i18n/background';
 
-describe('prompt visibility cleanup', () => {
+/**
+ * **「可见用户提示词」的标记与提取**（零依赖的 `visible-user-prompt.ts`）。
+ *
+ * 这套标记有两个消费者，加载环境完全不同：
+ * - `core/prompt/augmentation.ts`（隔离世界 / 后台）—— **写**标记；
+ * - `core/zai/history-cleanup.ts`（**页面主世界**）—— **读**标记，把历史响应里
+ *   被我们注入过的文本还原成用户原文。
+ *
+ * ⚠️ 本文件原来还测过一整套「提醒段剥离」函数（`sanitizeInternalPromptText` 等），
+ * 那批函数已在 2026-10-29 整体删除（生产零消费者），用例随之删掉。
+ * **唯一保留的相关断言**：工具格式提醒排在 END 标记**之后** ⇒ 提取天然不会碰到它。
+ */
+
+describe('visible user prompt markers', () => {
   it('preserves ordinary prompts that quote the Skill user-input template', () => {
     const prompt = [
       'Explain this exact template:',
@@ -21,22 +30,24 @@ describe('prompt visibility cleanup', () => {
       'Do not truncate this suffix.',
     ].join('\n');
 
-    expect(sanitizeInternalPromptText(markVisibleUserPrompt(prompt))).toBe(prompt);
+    expect(extractVisibleUserPrompt(markVisibleUserPrompt(prompt))).toBe(prompt);
   });
 
   it('preserves a marked slash command exactly', () => {
-    expect(sanitizeInternalPromptText(markVisibleUserPrompt('/shell 查看项目目录')))
+    expect(extractVisibleUserPrompt(markVisibleUserPrompt('/shell 查看项目目录')))
       .toBe('/shell 查看项目目录');
   });
 
   it('does not trust visible prompt metadata quoted inside ordinary user text', () => {
+    // ⚠️ metadata 行必须**紧邻** START 标记的上一行。用户正文里自己写一段
+    // 「metadata + START」不能被当成本次标记的元数据。
     const prompt = [
       'Explain this marker without treating it as extension metadata:',
       markVisibleUserPromptMetadata('/spoofed'),
       '<!-- zai-visible-user-prompt:start -->',
     ].join('\n');
 
-    expect(sanitizeInternalPromptText(markVisibleUserPrompt(prompt))).toBe(prompt);
+    expect(extractVisibleUserPrompt(markVisibleUserPrompt(prompt))).toBe(prompt);
   });
 
   it('reads encoded visible prompt metadata without exposing the model prompt', () => {
@@ -47,23 +58,10 @@ describe('prompt visibility cleanup', () => {
     ].join('\n');
 
     expect(extractVisibleUserPrompt(storedPrompt)).toBe(visiblePrompt);
-    expect(sanitizeInternalPromptText(storedPrompt)).toBe(visiblePrompt);
   });
 
-  it('recognizes the reminder as rendered for every supported locale', () => {
-    // ⚠️ **用真渲染出来的提醒过一遍**，不要手写串 —— 这条守的是「守卫常量跟着文案走」：
-    // 曾经 en 的标题从 `Tool call format reminder:` 改成 `Local tool call format reminder:`，
-    // 而 `visibility.ts` 里另抄的常量没跟上，`containsToolFormatReminder` 对 en 恒为 false，
-    // 剥离守卫**静默失效**（手写串的测试抓不到）。
-    for (const locale of SUPPORTED_LOCALES) {
-      const reminder = renderToolFormatReminder(undefined, locale);
-      expect(reminder.length, `${locale} 的提醒段为空`).toBeGreaterThan(0);
-      expect(containsInternalPromptMarker(reminder), `${locale} 的提醒段未被识别`).toBe(true);
-      // 整段只有提醒时应当被剥成空串。
-      expect(sanitizeInternalPromptText(reminder), `${locale} 的提醒段未被剥掉`).toBe('');
-      // 与真实正文拼在一起时，只剥提醒、保留正文。
-      const body = `正文开头\n${reminder}`;
-      expect(sanitizeInternalPromptText(body), `${locale} 的正文被误伤`).toContain('正文开头');
-    }
+  it('returns null when the text carries no marker at all', () => {
+    // ⚠️ `null`（没有标记）与空串（标记对里确实是空的）是两件事，调用方必须能分开。
+    expect(extractVisibleUserPrompt('就是一句普通的话')).toBeNull();
   });
 });

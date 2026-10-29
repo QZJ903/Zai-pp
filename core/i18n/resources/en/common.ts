@@ -30,7 +30,6 @@ export const common = {
   pageContentScriptMissing: 'The Zai page has no usable extension script (it may still be loading, or the extension was just reloaded) — reload the page and retry',
   preview: 'Preview',
   refresh: 'Refresh',
-  remove: 'Remove',
   save: 'Save',
   saveChanges: 'Save changes',
   test: 'Test',

@@ -32,7 +32,6 @@ export const common = {
   pageContentScriptMissing: 'Zai 页面里没有可用的扩展脚本（页面可能还没加载完，或扩展刚被重新加载过），请刷新该页面后重试',
   preview: '预览',
   refresh: '刷新',
-  remove: '移除',
   save: '保存',
   saveChanges: '保存更改',
   test: '测试',
