@@ -20,6 +20,19 @@ export interface ZaiSiteDefinition {
 }
 
 /**
+ * 站点表的形态约束：**每一格的 `id` 必须等于它自己的键**。
+ *
+ * ⚠️⚠️ **不能写成 `Record<ZaiSiteId, ZaiSiteDefinition>`** —— 那样 `id` 的类型是宽的
+ * `ZaiSiteId`，把 `cn` 那格写成 `id: 'global'` 时 **`tsc` 不报错**，而所有按
+ * `ZAI_SITES[id]` 派生的东西（`origin` / `homeUrl` / `tabUrlPattern` / auth 分桶键）
+ * 都会拿到**另一站的值** —— 没有报错、没有日志。这里的 mapped type 把「键 == 身份字段」
+ * 编码进类型，写错即编译失败。
+ */
+type ZaiSiteTable = {
+  readonly [Id in ZaiSiteId]: ZaiSiteDefinition & { readonly id: Id };
+};
+
+/**
  * 站点表。
  *
  * ⚠️ **两个站点跑的是同一份前端产物**（同一个 CDN 路径下的 `prod-fe-*` 资源），
@@ -32,7 +45,7 @@ export interface ZaiSiteDefinition {
  * 站点自己有 `zcode.z.ai`、`space-z.ai` 之类的同域子站，后缀匹配会把信任范围
  * 从「两个站」放大到「整个 z.ai 域」。
  */
-export const ZAI_SITES: Readonly<Record<ZaiSiteId, ZaiSiteDefinition>> = {
+export const ZAI_SITES: ZaiSiteTable = {
   cn: {
     id: 'cn',
     origin: 'https://zchat.z.ai',

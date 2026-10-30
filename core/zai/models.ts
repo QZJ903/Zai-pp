@@ -13,6 +13,8 @@
  * 无需改代码。
  */
 
+import { createAbortScope } from '../network/abort';
+
 export interface ZaiModelOption {
   id: string;
   label: string;
@@ -32,8 +34,19 @@ export interface ZaiModelList {
 /** 模型清单端点（与 completion / chats/new 同源）。 */
 export const ZAI_MODEL_LIST_PATH = '/api/models';
 
-/** 清单缓存时长。5 分钟内重复打开表单不再打网络，但仍能覆盖服务端上新。 */
+/** 模型清单缓存时长。5 分钟内重复打开表单不再打网络，但仍能覆盖服务端上新。 */
 export const ZAI_MODEL_LIST_TTL_MS = 5 * 60_000;
+
+/**
+ * 抓清单这次请求的上界。
+ *
+ * ⚠️ **单独一个常量，不复用 MCP 那边的 `requestMs`** —— 那是每个 MCP 服务各自的配置，
+ * 改一个服务的超时会连带影响这里；而模型清单是一次简单的 GET，两者的合理量级不同。
+ *
+ * ⚠️⚠️ **超时必须同时盖住 `fetch` 与 `response.json()`** —— 只包 `fetch` 的话，
+ * 「响应头到了、body 迟迟不来」这一段没有上界，而它同样会让下面的 `inFlight` 槽位被占住。
+ */
+export const ZAI_MODEL_LIST_TIMEOUT_MS = 10_000;
 
 /**
  * 兜底清单：从未抓到过服务端清单（未登录 / 网络不可达 / 接口变更）时用。
@@ -170,6 +183,11 @@ export interface ZaiModelCatalogDependencies {
    *
    * ⚠️ **站点的来源是 `resolveOrigin()`，不是 token 自己** —— 两站的 token 互不认，
    * 拿别站的 token 打这一站只会 401。所以这里收站点、再由实现去取那一站的桶。
+   *
+   * ⚠️⚠️ **实现必须自带超时** —— `fetchLive` 外面那个 `inFlight` 槽位是在 `finally` 里释放的，
+   * 而这两次读排在 `fetch` 的 abort scope **之前**（scope 只罩网络腿）⇒ 它们挂住会让槽位
+   * 永久占住、清单再也刷不出来，且**没有任何报错**。
+   * 现成的用法是 `loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS, origin)`。
    */
   loadToken(origin: string): Promise<string | null>;
   fetchImpl(input: string, init: RequestInit): Promise<Pick<Response, 'ok' | 'status' | 'json'>>;
@@ -178,10 +196,13 @@ export interface ZaiModelCatalogDependencies {
    *
    * ⚠️ **必须注入、不能吃 `ZAI_WEB_ORIGIN`** —— 后者是**默认站点**（国区站）。
    * 这个抓取器跑在**后台**、没有页面上下文，所以它的选择只有两个：
-   * ① 跟随「最近活跃站」（`readActiveZaiSiteOrigin()`，跨上下文记录，见
-   *    `core/zai/active-site.ts`）；
+   * ① 跟随「用户此刻在看哪一站」（`readCurrentZaiSiteOrigin()` —— 实时查当前标签页，
+   *    查不到才退回内容脚本记下的历史值，见 `core/zai/current-site.ts`）；
    * ② 记录里带的站点（自动化那条链有明确归属时）。
-   * 这里是 ① —— 清单服务的是**自动化表单的下拉**，用户眼下在用哪个站就该列哪个站的模型。
+   * 这里是 ① —— 清单服务的是**自动化表单的下拉**，用户眼下在看哪个站就该列哪个站的模型。
+   *
+   * ⚠️⚠️ **实现必须自带超时**，理由同 `loadToken` —— 它也排在 abort scope 之前。
+   * 现成的用法是 `readCurrentZaiSiteOrigin(CURRENT_SITE_READ_TIMEOUT_MS)`。
    */
   resolveOrigin(): Promise<string>;
   now?(): number;
@@ -195,6 +216,13 @@ export interface ZaiModelCatalog {
 /**
  * 模型清单抓取器（带缓存与兜底）。并发调用共享同一次在飞请求，避免表单
  * 反复打开时打出一串重复请求。
+ *
+ * ⚠️⚠️ **缓存是跨站点的单一槽** —— 前提是**两站在 `/api/models` 上返回同一份清单**
+ * （实测两站完全相同）。所以 TTL 命中时**不重新解析站点**，那是有意的：
+ * 若将来两站分叉，这里会拿**另一站**的清单（表现是下拉里出现该站没有的模型、
+ * 选了发出去失败），而**没有任何报错指向这个缓存**。真要分叉了，
+ * 就得把 `cached` 换成按 origin 分桶的 Map —— 代价是 TTL 命中不再是零 I/O
+ * （每次都要先解析站点，那是一次 `chrome.storage.local` 读）。
  */
 export function createZaiModelCatalog(
   dependencies: ZaiModelCatalogDependencies,
@@ -209,23 +237,32 @@ export function createZaiModelCatalog(
     const origin = await dependencies.resolveOrigin();
     const token = await dependencies.loadToken(origin);
     if (!token) return { models: [...ZAI_FALLBACK_MODEL_OPTIONS], source: 'fallback' };
-    const response = await dependencies.fetchImpl(`${origin}${ZAI_MODEL_LIST_PATH}`, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        authorization: `Bearer ${token}`,
-      },
-      credentials: 'omit',
-      cache: 'no-store',
-    });
-    if (!response.ok) {
-      throw new Error(`Model list request failed with status ${response.status}.`);
+    // ⚠️⚠️ **上界必须罩住「取响应 + 读 body」整段**（见 `ZAI_MODEL_LIST_TIMEOUT_MS`）——
+    // 挂住时 `inFlight` 的 `finally` 走不到，槽位会被永久占住：之后每次 `list()` 都返回
+    // 同一个未完成的 promise，下拉一直是空的、连「不是最新」的提示都不出现。
+    const scope = createAbortScope(null, ZAI_MODEL_LIST_TIMEOUT_MS);
+    try {
+      const response = await dependencies.fetchImpl(`${origin}${ZAI_MODEL_LIST_PATH}`, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          authorization: `Bearer ${token}`,
+        },
+        credentials: 'omit',
+        cache: 'no-store',
+        signal: scope.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`Model list request failed with status ${response.status}.`);
+      }
+      const models = parseZaiUpstreamModels(await response.json());
+      if (models.length === 0) {
+        throw new Error('Model list response contained no usable entries.');
+      }
+      return { models, source: 'live' };
+    } finally {
+      scope.cleanup();
     }
-    const models = parseZaiUpstreamModels(await response.json());
-    if (models.length === 0) {
-      throw new Error('Model list response contained no usable entries.');
-    }
-    return { models, source: 'live' };
   };
 
   return Object.freeze({

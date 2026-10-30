@@ -66,7 +66,7 @@ function buildDeps(overrides: Partial<ZaiCapabilityDeps> = {}): {
     handleSessionChange: () => record('handleSessionChange'),
     refreshAuth: async () => { record('refreshAuth'); return true; },
     // 站点记录：与另外两处「可选增强」一样是 `void` 调用（写不进去只是兜底退回默认站）。
-    rememberActiveSite: async () => { record('rememberActiveSite'); return true; },
+    rememberViewedSite: async () => { record('rememberViewedSite'); return true; },
     syncRuntimeState: async () => { record('syncRuntimeState'); },
     onContinuationBubblesHidden: (count) => { hiddenCounts.push(count); },
     ...overrides,
@@ -91,7 +91,7 @@ describe('installZaiCapabilities: every install runs exactly once', () => {
     'installToolPanel',
     'onSessionChange',
     'refreshAuth',
-    'rememberActiveSite',
+    'rememberViewedSite',
   ])('calls %s', (name) => {
     const harness = buildDeps();
     installZaiCapabilities(harness.deps);
@@ -129,12 +129,12 @@ describe('installZaiCapabilities: every install runs exactly once', () => {
     expect(harness.unsubscribe).toHaveBeenCalledTimes(1);
   });
 
-  it('refreshes the active site when the page becomes visible again', () => {
-    // ⚠️ 只在加载时写的话，「最近活跃站」实际是「最近**加载过**的站」—— 一个后台
-    // 放着的国区站标签页刷新过一次，就能把活跃站长期钉在国区站。
+  it('refreshes the remembered site when the page becomes visible again', () => {
+    // ⚠️ 那条记录只是读侧的兜底。它要答的是「上一次用户真正看着哪一站」，
+    // 所以「切回这一站」这一刻必须补写一次。
     const harness = buildDeps();
     const cleanup = installZaiCapabilities(harness.deps);
-    const before = harness.count('rememberActiveSite');
+    const before = harness.count('rememberViewedSite');
 
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
@@ -142,21 +142,21 @@ describe('installZaiCapabilities: every install runs exactly once', () => {
     });
     try {
       document.dispatchEvent(new Event('visibilitychange'));
-      expect(harness.count('rememberActiveSite')).toBe(before + 1);
+      expect(harness.count('rememberViewedSite')).toBe(before + 1);
 
       // 卸载之后不再写（为将来的热卸载保留：清理函数必须把监听一起卸掉）。
       cleanup();
       document.dispatchEvent(new Event('visibilitychange'));
-      expect(harness.count('rememberActiveSite')).toBe(before + 1);
+      expect(harness.count('rememberViewedSite')).toBe(before + 1);
     } finally {
       Reflect.deleteProperty(document, 'visibilityState');
     }
   });
 
-  it('does not refresh the active site while the page is hidden', () => {
+  it('does not refresh the remembered site while the page is hidden', () => {
     const harness = buildDeps();
     const cleanup = installZaiCapabilities(harness.deps);
-    const before = harness.count('rememberActiveSite');
+    const before = harness.count('rememberViewedSite');
 
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
@@ -164,9 +164,29 @@ describe('installZaiCapabilities: every install runs exactly once', () => {
     });
     try {
       document.dispatchEvent(new Event('visibilitychange'));
-      expect(harness.count('rememberActiveSite')).toBe(before);
+      expect(harness.count('rememberViewedSite')).toBe(before);
     } finally {
       cleanup();
+      Reflect.deleteProperty(document, 'visibilityState');
+    }
+  });
+
+  it('does not remember the site on load while the page is hidden', () => {
+    // ⚠️⚠️ **这一条守的是加载时那一处也判可见性** —— 后台标签页刷新一次也会跑到启动链，
+    // 不门控就会把记录钉在后台那一站（用户在国际站看着、后台那个国区站标签页刷新了）。
+    // 只看「⑧b 有没有门控」是不够的：两处各写一遍，漏一处就静默写歪。
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    });
+    try {
+      const harness = buildDeps();
+      installZaiCapabilities(harness.deps);
+      expect(
+        harness.count('rememberViewedSite'),
+        '隐藏页面加载时不该写「上一次看着的站」',
+      ).toBe(0);
+    } finally {
       Reflect.deleteProperty(document, 'visibilityState');
     }
   });
@@ -188,7 +208,7 @@ describe('installZaiCapabilities: every install runs exactly once', () => {
       'installBackgroundCapability',
       'installToolPanel',
       'refreshAuth',
-      'rememberActiveSite',
+      'rememberViewedSite',
     ]) {
       expect(harness.count(name), `${name} 必须在同步阶段就被发起（不能被 await 挂住）`).toBe(1);
     }

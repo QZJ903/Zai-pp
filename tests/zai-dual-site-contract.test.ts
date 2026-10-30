@@ -45,6 +45,21 @@ describe('site table: the two sites stay in sync with everything derived from it
     expect(new Set(ZAI_TAB_URL_PATTERNS).size).toBe(ZAI_TAB_URL_PATTERNS.length);
   });
 
+  it('keeps each site row’s `id` equal to its own key', () => {
+    // ⚠️⚠️ **这条是「身份字段与键同源」的运行时兜底**。那一层约束现在由类型层的
+    // mapped type 表达（`id` 写错会编译失败），但类型可以被 `as` 绕过，而它一旦被绕过，
+    // 后果是**静默**的：`zaiAuthStorageKeyForSite` 会把国区站的 token 写进 `global` 桶、
+    // 读回来又是另一站 —— 没有报错、没有日志，表现只是「某站偶尔 401」。
+    //
+    // ⚠️ 判据是「每一行的 id 恰好等于它自己的键」，不是「两个 id 互不相同」
+    // ——两个都写成 `'global'` 时后者照样成立。
+    for (const [key, site] of Object.entries(ZAI_SITES)) {
+      expect(site.id, `ZAI_SITES.${key}.id 必须等于键名 "${key}"`).toBe(key);
+    }
+    // 反向：键集合本身也得是完整的那两个站（漏一个会让派生常量少一站）。
+    expect(Object.keys(ZAI_SITES).sort()).toEqual(['cn', 'global']);
+  });
+
   it('derives each tab pattern from its own site origin', () => {
     // 手抄 pattern 时最容易出的错是「两个站共用同一个 pattern」（复制粘贴没改），
     // 表现是**其中一站永远查不到标签页**。这条从 origin 反推把两者钉在一起。
@@ -132,7 +147,7 @@ describe('site-less call sites thread the site explicitly', () => {
 
   it('the model catalog origin follows the active site, not the default one', () => {
     const source = read('entrypoints/background.ts');
-    expect(source, '后台的抓取器应当跟随最近活跃站').toContain('resolveOrigin: () => readActiveZaiSiteOrigin()');
+    expect(source, '后台的抓取器应当跟随当前所在的站').toContain('resolveOrigin: () => readCurrentZaiSiteOrigin(CURRENT_SITE_READ_TIMEOUT_MS)');
   });
 
   it('the background trust policy accepts both sites', () => {

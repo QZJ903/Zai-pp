@@ -146,7 +146,7 @@ import {
   isZaiSiteOrigin,
   resolveZaiSiteOrigin,
 } from '../core/zai/contracts';
-import { readActiveZaiSiteOrigin } from '../core/zai/active-site';
+import { readCurrentZaiSiteOrigin, CURRENT_SITE_READ_TIMEOUT_MS } from '../core/zai/current-site';
 import { buildZaiChatSessionUrl } from '../core/zai/chat-session';
 import { AUTH_READ_TIMEOUT_MS, loadZaiAuthFromStorage } from '../core/zai/auth';
 import { createZaiModelCatalog } from '../core/zai/models';
@@ -214,14 +214,16 @@ const domTaskCoordinator = createDomTaskCoordinator({
   reportError: reportBackgroundStartupError,
 });
 // 模型清单：token 取自内容脚本捕获的登录态；抓不到就退回内置清单。
-// ⚠️ 读 token 要带上界：`inFlight` 槽位在 `fetchLive` 的 `finally` 里释放，
-// 而 storage 半死时那个 await 永不落地 ⇒ 槽位永久占住、清单再也刷不出来。
+// ⚠️ 两处读都要带上界：`inFlight` 槽位在 `fetchLive` 的 `finally` 里释放，
+// 而 storage 或标签页查询挂住时那个 await 不落地 ⇒ 槽位永久占住、清单再也刷不出来。
+// （站点解析的上界见 `current-site.ts` 的 `CURRENT_SITE_READ_TIMEOUT_MS`。）
 const zaiModelCatalog = createZaiModelCatalog({
   // ⚠️ **按站点取** —— 抓取器先定站点（下面那个 `resolveOrigin`）再把站点传进来。
   // 取别站的 token 打这一站只会 401（两站 token 互不认）。
   loadToken: async (origin) => (await loadZaiAuthFromStorage(AUTH_READ_TIMEOUT_MS, origin))?.token ?? null,
-  // A 兜底：后台没有页面上下文，「抓哪个站的清单」跟随最近活跃站。
-  resolveOrigin: () => readActiveZaiSiteOrigin(),
+  // 后台没有页面上下文，「抓哪个站的清单」跟随「用户此刻在看哪一站」
+  // （实时查当前标签页，查不到才退回内容脚本记下的历史值）。
+  resolveOrigin: () => readCurrentZaiSiteOrigin(CURRENT_SITE_READ_TIMEOUT_MS),
   fetchImpl: (input, init) => fetch(input, init),
 });
 const externalPayloadAuthorizationCache = new ExternalPayloadAuthorizationCache();
@@ -823,7 +825,10 @@ async function insertPromptIntoActiveZaiTab(
    * 所以它落进下面的通用分支，不映射成 `PAGE_CONTENT_SCRIPT_MISSING_CODE`。
    */
   try {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    // ⚠️ **判据写 `lastFocusedWindow`** —— 这里要的是「用户正在看的那个窗口的当前标签」。
+    // 在 service worker 里 `currentWindow` 结果相同（SW 没有窗口、会回落成最后聚焦窗口），
+    // 但它依赖那条隐含回落；明确写出来才不会让人以为这是「后台自己的窗口」。
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const tab = tabs.find((item) => item.id != null && isZaiPageUrl(item.url));
     if (!tab?.id) {
       return { ok: false, error: backgroundT('background.auth.missingZai') };

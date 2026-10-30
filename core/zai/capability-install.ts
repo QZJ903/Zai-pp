@@ -49,13 +49,14 @@ export interface ZaiCapabilityDeps {
   /** 把页面 localStorage 的登录态 token 推进 chrome.storage。**调用方不 await**。 */
   refreshAuth: () => Promise<boolean>;
   /**
-   * 记下「当前页面属于哪个站」（A 兜底用的跨上下文记录）。
+   * 记下「当前页面属于哪个站」—— **只在页面是可见的时候调**（见 `installZaiCapabilities`
+   * 的 ⑧ / ⑧b）。
    *
    * ⚠️ **不 await** —— 写不进去只是那几条没有页面上下文的兜底链路退回默认站
-   * （侧边栏兜底拼会话链接、后台抓模型清单），不该拖住启动。
+   * （后台抓模型清单、自动化兜底选站），不该拖住启动。
    * ⚠️ **只有内容脚本知道这个事实**（后台读不到 `location`），所以必须由它写。
    */
-  rememberActiveSite: () => Promise<boolean>;
+  rememberViewedSite: () => Promise<boolean>;
   /**
    * 同步运行时状态（记忆 / 技能 / 工具目录 / 预设 / 联网开关）。**这一步要 await**。
    *
@@ -123,21 +124,21 @@ export function installZaiCapabilities(deps: ZaiCapabilityDeps): () => void {
   //    **不 await**：拿不到 token 只是那条兜底链失效，不该拖住启动。
   void deps.refreshAuth();
 
-  // ⑧ 记下「当前页面属于哪个站」（A 兜底用的跨上下文记录）。
+  // ⑧ 记下「当前页面属于哪个站」（读侧的兜底用）。
+  //    ⚠️⚠️ **必须判可见性** —— 只在**这个页面就是用户眼前那一页**时写。后台放着的
+  //    标签页刷新一次也会跑到这里，无条件写会把记录钉在后台那一站（用户在国际站看着、
+  //    后台那个国区站标签页刷新了，记录就变成国区站）。
   //    ⚠️ **不 await** —— 写不进去只是那几条没有页面上下文的兜底链路退回默认站。
-  //    ⚠️ 放在启动链里而不是别处：页面每次加载都会跑一次，正好覆盖「用户切站后
-  //    第一次打开该站页面」这个时点。
-  void deps.rememberActiveSite();
+  if (document.visibilityState === 'visible') void deps.rememberViewedSite();
 
-  // ⑧b 页面**重新可见**时再记一次。
-  //    ⚠️ 只在加载时写的话，「最近活跃站」实际是「最近**加载过**的站」—— 一个后台
-  //    放着的国区站标签页刷新过一次，就能把活跃站长期钉在国区站，而用户此刻明明
-  //    在国际站。可见性变化是最接近「用户在用哪个站」的信号。
-  //    ⚠️ **不 await**，与 ⑧ 同口径：写不进去只是活跃站停在旧值。
+  // ⑧b 页面**重新可见**时再记一次 —— 那是「用户切回这一站」的那一刻，正是要记的时点。
+  //    ⚠️ 「变隐藏」时**不写**：那一刻用户已经不在看这个站，而记录停在旧值恰好就是
+  //    「沿用上一次」想要的语义（读侧优先实时查询，这份记录只是兜底）。
+  //    ⚠️ **不 await**，与 ⑧ 同口径：写不进去只是兜底停在旧值。
   //    ⚠️ 本函数只从内容脚本的 `main()` 调一次（每个页面一个新 document），
   //    所以这里不另加幂等守卫。
   const handleVisibilityChange = () => {
-    if (document.visibilityState === 'visible') void deps.rememberActiveSite();
+    if (document.visibilityState === 'visible') void deps.rememberViewedSite();
   };
   document.addEventListener('visibilitychange', handleVisibilityChange);
 
@@ -194,7 +195,7 @@ export const ZAI_CAPABILITY_DEP_KEYS = [
   'onSessionChange',
   'handleSessionChange',
   'refreshAuth',
-  'rememberActiveSite',
+  'rememberViewedSite',
   'syncRuntimeState',
   'onContinuationBubblesHidden',
 ] as const satisfies readonly (keyof ZaiCapabilityDeps)[];

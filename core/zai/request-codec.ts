@@ -45,7 +45,7 @@ const ZAI_CHAT_ID_LITERAL_SEGMENTS: readonly string[] = [
 ];
 
 /** 单个路径段（不含 `/`），且不是上面那几个字面量。 */
-const ZAI_CHAT_ID_SEGMENT = `(?!${ZAI_CHAT_ID_LITERAL_SEGMENTS.join('|')}(?:/|$))[^/]+`;
+const ZAI_CHAT_ID_SEGMENT = `(?!${ZAI_CHAT_ID_LITERAL_SEGMENTS.map((segment) => `${segment}(?:/|$)`).join('|')})[^/]+`;
 
 /**
  * 把 `ZAI_WEB_ROUTES` 里的路径模板编译成匹配 `pathname` 的正则。
@@ -67,6 +67,18 @@ function escapeRegExp(value: string): string {
 }
 
 /**
+ * `ZAI_ROUTE_POLICY` 的形态约束：**每一格的 `route` 必须等于它自己的键**。
+ *
+ * ⚠️⚠️ **不能写成 `Record<ZaiWebRouteName, ZaiRoutePolicy>`** —— 那样 `route` 的类型是宽的
+ * `ZaiWebRouteName`，把 `completion` 那格写成 `route: 'chatNew'` 时 **`tsc` 不报错**，
+ * 而 `matchZaiWebRoute` 会拿错的名字去查 pattern ⇒ 那条路由**静默匹配不上**（返回 `null`）。
+ * 这里的 mapped type 把「键 == 身份字段」这条关系编码进类型，写错即编译失败。
+ */
+type ZaiRoutePolicyTable = {
+  readonly [Route in ZaiWebRouteName]: ZaiRoutePolicy & { readonly route: Route };
+};
+
+/**
  * 可增强路由的**策略表** —— 路由名 → 路径 + 方法。
  *
  * ⚠️ **这是路由匹配的唯一真源**：`matchZaiWebRoute` 遍历它，新增一条路由只改这张表。
@@ -74,13 +86,13 @@ function escapeRegExp(value: string): string {
  * 函数，两张函数体逐字相同、只差一个路径常量（漏改一处的表现是**两条路由互相认领
  * 对方的请求**，且不报错）。
  */
-const ZAI_ROUTE_POLICY: Record<ZaiWebRouteName, ZaiRoutePolicy> = {
+const ZAI_ROUTE_POLICY = {
   completion: { route: 'completion', method: 'POST' },
   chatNew: { route: 'chatNew', method: 'POST' },
   // 历史路由：页面用 GET 拉会话详情、用 POST 批量取消息正文。
   chatDetail: { route: 'chatDetail', method: 'GET' },
   chatMessages: { route: 'chatMessages', method: 'POST' },
-};
+} as const satisfies ZaiRoutePolicyTable;
 
 const ZAI_ROUTE_PATTERNS: ReadonlyMap<ZaiWebRouteName, RegExp> = new Map(
   (Object.keys(ZAI_ROUTE_POLICY) as ZaiWebRouteName[])
@@ -235,9 +247,54 @@ export interface ZaiChatNewBody {
 }
 
 /**
+ * 找出 `/chats/new` body 里装 user 消息的那个**字典容器**，以及里面的文本。
+ *
+ * ⚠️⚠️ **读侧与写侧必须共用这一个入口** —— 曾经两边各判一遍：解析容忍三种形状
+ * （`chat.history.messages` → `chat.messages` → `body.messages`），而重写只认第一种
+ * ⇒ 收到兜底形状时**解析拿得到文本、重写却写不进去**，表现是首条消息**静默不增广**
+ * （提示词与记忆都不进 body），而建授权、模型覆写照常发生。两处各判一遍时不会报错。
+ *
+ * 取值顺序（与页面真实形状一致，真机形态是第一种）：
+ *   1. `chat.history.messages`；
+ *   2. `chat.messages`；
+ *   3. `body.messages`。
+ * 前一层**存在但没有可识别文本**时继续往下找 —— 否则「空壳容器」会把后面的真容器挡住。
+ */
+function findChatNewMessageContainer(
+  body: Record<string, unknown>,
+  chat: Record<string, unknown>,
+): { container: Record<string, unknown>; texts: string[] } | null {
+  const history = readRecord(chat.history);
+  const nested = history ? readRecord(history.messages) : null;
+  const nestedTexts = nested ? collectMessageTexts(nested) : [];
+  if (nestedTexts.length > 0) return { container: nested!, texts: nestedTexts };
+
+  // ⚠️⚠️ **两条兜底必须各判一次，不能写成 `chat.messages ?? body.messages`** ——
+  // `??` 只在**左侧是 null/undefined** 时才看右边，而「`chat.messages` 存在但是空壳 `{}`」
+  // 是一个真值 ⇒ 会把后面那个真正装着文本的 `body.messages` 整个挡住。
+  // 失败方向是**静默的**：解析返回 `null`、首条消息不增广，没有任何报错。
+  for (const candidate of [readRecord(chat.messages), readRecord(body.messages)]) {
+    if (!candidate) continue;
+    const texts = collectMessageTexts(candidate);
+    if (texts.length > 0) return { container: candidate, texts };
+  }
+
+  return null;
+}
+
+function collectMessageTexts(container: Record<string, unknown>): string[] {
+  const texts: string[] = [];
+  for (const value of Object.values(container)) {
+    const message = readRecord(value);
+    if (message && typeof message.content === 'string') texts.push(message.content);
+  }
+  return texts;
+}
+
+/**
  * 解析 /api/v1/chats/new body，找出要增强的首条 user 消息文本。
  * 结构（真机抓包）：`{ chat: { history: { messages: { <id>: { content: "..." } } }, type, flags } }`
- * 容忍多种嵌套形状。
+ * 容忍多种嵌套形状 —— 但**只在这一处判形状**，重写侧走同一个入口（见 `findChatNewMessageContainer`）。
  */
 export function parseZaiChatNewBody(body: Record<string, unknown>): ZaiChatNewBody | null {
   const chat = readRecord(body.chat);
@@ -247,29 +304,13 @@ export function parseZaiChatNewBody(body: Record<string, unknown>): ZaiChatNewBo
     chat.type === ZAI_AGENT_FLAG ||
     (Array.isArray(chat.flags) && chat.flags.includes(ZAI_AGENT_FLAG));
 
-  const history = readRecord(chat.history);
-  const messages = history ? readRecord(history.messages) : null;
-  const texts: string[] = [];
-  if (messages) {
-    for (const value of Object.values(messages)) {
-      const message = readRecord(value);
-      if (message && typeof message.content === 'string') {
-        texts.push(message.content);
-      }
-    }
-  }
-  if (texts.length === 0) {
-    // 兜底：直接挂 chat.messages / body.messages。
-    const direct = readRecord(chat.messages ?? body.messages);
-    if (direct) {
-      for (const value of Object.values(direct)) {
-        const message = readRecord(value);
-        if (message && typeof message.content === 'string') texts.push(message.content);
-      }
-    }
-  }
-  if (texts.length === 0) return null;
-  return { userId: typeof chat.user_id === 'string' ? chat.user_id : null, userMessageTexts: texts, isAgent };
+  const found = findChatNewMessageContainer(body, chat);
+  if (!found) return null;
+  return {
+    userId: typeof chat.user_id === 'string' ? chat.user_id : null,
+    userMessageTexts: found.texts,
+    isAgent,
+  };
 }
 
 /** 重写 /chats/new body 的首条 user 消息（原样保留其它字段）。 */
@@ -280,9 +321,9 @@ export function rewriteZaiChatNewUserMessages(
   const next = JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
   const chat = readRecord(next.chat);
   if (chat) {
-    const history = readRecord(chat.history);
-    const messages = history ? readRecord(history.messages) : null;
-    if (messages) writeMessageTexts(messages, nextTexts);
+    // ⚠️ 在**克隆**上找容器（改的是 `next`，不是入参）—— 但用的是与解析同一个入口。
+    const found = findChatNewMessageContainer(next, chat);
+    if (found) writeMessageTexts(found.container, nextTexts);
   }
   return next;
 }
@@ -340,18 +381,20 @@ export function applyZaiModelOverride(
 /**
  * 覆写 `/api/v1/chats/new` body 的模型（原地写，返回是否写入）。
  *
- * **建会话的模型不在顶层**，而是**同一个值出现在三个落点**（真机抓包确认三者始终同值）：
- *   - `chat.models`（数组）
- *   - 首条 user 消息自己的 `models`（数组）
- *   - `features.models`（数组）
+ * **建会话的模型不在顶层**，而是同一个值出现在这几处：
+ *   - `chat.models`（数组）—— **权威落点**，会话模型由它定；
+ *   - 首条 user 消息自己的 `models`（数组）；
+ *   - `features.models`（数组）—— ⚠️ **当前真机上这个落点不可达**，见下。
  *
- * ⇒ **三处一起写**。少写任何一处都会**亲手制造不一致**（页面自己始终让它们同值），
- * 而服务端读哪一个没有公开依据。
+ * ⚠️⚠️ **`/chats/new` 的 body 里没有 `features` 对象**（真机三处同读确认：`features` 根本不存在；
+ * `agent` 标志与模型都在 `chat` 里）。所以 `features.models` 那一支**当前走不到** ——
+ * 但它**刻意保留**：它是「只在字段已存在时覆写」这条通则的自然结果，删掉反而要为一个不该特殊的地方
+ * 写特例；且站点改版可能让它重新出现。**别因为「真机没有」就删它。**
  *
  * ⚠️ **这一步不能省。** 会话模型是**建会话那一刻**定下的：只在 completion 阶段写
  * `model` 改不动已有会话，页面仍显示默认模型。
  *
- * 三处都只在字段已存在时覆写 —— 页面没发过的字段不凭空造。
+ * 每一处都只在字段已存在时覆写 —— 页面没发过的字段不凭空造。
  */
 export function applyZaiChatNewModelOverride(
   body: Record<string, unknown>,
@@ -369,10 +412,10 @@ export function applyZaiChatNewModelOverride(
     changed = true;
   }
   // 首条 user 消息自带一份 models，与 chat.models 保持同值（页面自身也这么发）。
-  const history = readRecord(chat.history);
-  const messages = history ? readRecord(history.messages) : null;
-  if (messages) {
-    for (const value of Object.values(messages)) {
+  // ⚠️ 容器用与增广同一个入口找 —— 否则「增广认得那种形状、模型覆写不认」会再分叉一次。
+  const container = findChatNewMessageContainer(body, chat)?.container ?? null;
+  if (container) {
+    for (const value of Object.values(container)) {
       const message = readRecord(value);
       if (!message || !Array.isArray(message.models)) continue;
       if (isSingleModel(message.models, next)) continue;
@@ -380,7 +423,7 @@ export function applyZaiChatNewModelOverride(
       changed = true;
     }
   }
-  // 第三个落点：`features.models`。页面把它与上面两处写成同值，漏掉就是不一致。
+  // `features.models` 落点：当前真机上 `/chats/new` 没有 `features`，这一支不可达。
   const features = readRecord(body.features);
   if (features && Array.isArray(features.models) && !isSingleModel(features.models, next)) {
     features.models = [next];

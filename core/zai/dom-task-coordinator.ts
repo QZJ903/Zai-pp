@@ -7,8 +7,10 @@
  *
  *   1. resolveTab：找/开 z.ai 标签页（优先复用空闲后台 tab，busy 一 tab 一任务；
  *      **两个站点都查**，站点归属按「显式指定 → 当前活动标签页 → 已开着的标签页
- *      → 最近活跃站 → 默认站」定下，见 `resolveDomTab`）；
- *   2. startTask：握手（RUN_DOM_TASK，退避重试）→ 登记 pending → 等终态事件；
+ *      → 上一次看着的站 → 默认站」定下，见 `resolveDomTab`）；
+ *   2. startTask：**先在 `signal` / `deadlineAt` 的约束下解析标签页**
+ *      （`resolveDomTabWithBounds`）→ 握手（RUN_DOM_TASK，退避重试）→ 登记 pending
+ *      → 等终态事件；
  *   3. on*Event：消费 content 回传的 DOM_TASK_STARTED/COMPLETE/FAILED。
  *
  * 取消只有一条路：`startTask` 收到的 `signal` 被 abort 时发 `CANCEL_DOM_TASK`，
@@ -32,7 +34,7 @@ import {
   ZAI_WEB_ORIGIN,
   resolveZaiSiteOrigin,
 } from './contracts';
-import { readActiveZaiSiteOrigin } from './active-site';
+import { CURRENT_SITE_READ_TIMEOUT_MS, readCurrentZaiSiteOrigin } from './current-site';
 
 export type DomTaskKind = 'automation';
 
@@ -68,7 +70,7 @@ export interface DomTaskFailedEvent {
  * （那是它自己挑的/自己开的），所以把结论**随结果带回来**，而不是让下游去猜
  * 「当前站是哪个」。
  *
- * ⚠️ **为什么不读「最近活跃站」**：一条固定会话的自动化任务可能一直跑在 A 站，
+ * ⚠️ **为什么不读「上一次看着的站」**：一条固定会话的自动化任务可能一直跑在 A 站，
  * 而用户此刻在 B 站看别的东西 —— 跟随「活跃站」会让那条记录的链接在用户切站时
  * 跳到另一个站（那个站既没有这条会话、token 也不通用 ⇒ 打开是 401）。
  * 「这条任务跑在哪」是**这条任务自己的属性**，只能由跑它的那一刻决定。
@@ -127,7 +129,7 @@ export interface DomTaskStartInput {
    * ⚠️ **只有「复用已有会话」的任务才带它** —— 会话 id 在两站之间不通用
    * （token 也互不认），拿错站去拼 `/c/<id>` 会打开一个 401 或「会话不存在」的页面。
    * 其余情况传 null：协调器按「用户当前所在的标签页 → 已开着的标签页 →
-   * 最近活跃站 → 默认站」判定（见 `resolveDomTab`）。
+   * 上一次看着的站 → 默认站」判定（见 `resolveDomTab`）。
    * 输入侧是这里，输出侧是 `DomTaskOutcome.siteOrigin`。
    */
   siteOrigin?: string | null;
@@ -150,7 +152,7 @@ export interface DomTaskStartOptions {
    * 运行的站点」，首次运行时那个值是 null ⇒ 会拼成默认站的链接（国际站上跑任务时
    * 点开是 401）。
    * ⚠️ 站点在 `resolveDomTab` 挑中标签页时就已经定下（`entry.siteOrigin`），
-   * 信息是齐的，**不许让消费者去猜**（也不要让它读「最近活跃站」—— 那条路在
+   * 信息是齐的，**不许让消费者去猜**（也不要让它读「上一次看着的站」—— 那条路在
    * 「任务跑在 A 站、用户正在看 B 站」时必然给错）。
    */
   onSessionStarted?(chatSessionId: string, siteOrigin: DomTaskSiteOrigin): void;
@@ -166,10 +168,12 @@ export interface DomTaskCoordinatorDeps {
    */
   tabUrlPatterns?: readonly string[];
   /**
-   * 读「最近活跃站」（A 兜底）。不传时用 `readActiveZaiSiteOrigin`。
+   * 读「上一次用户真正看着的那个站」（兜底）。不传时用 `readCurrentZaiSiteOrigin`。
    *
    * ⚠️ **只有在「显式站点」与「已开着的标签页」都给不出结论时才读它** ——
    * 见 `resolveDomTab` 的判定顺序说明。
+   * ⚠️ 默认实现的**第一段**就是实时查「最后聚焦窗口的当前标签页」，所以这一级在
+   * 「用户正在看某一站」时不会退到那份历史记录上。
    */
   readActiveSiteOrigin?: () => Promise<string>;
   queryTabs?(query: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab[]>;
@@ -227,7 +231,11 @@ export function createDomTaskCoordinator(
   const createTab = deps.createTab ?? ((props) => chrome.tabs.create(props));
   const updateTab = deps.updateTab ?? ((tabId, props) => chrome.tabs.update(tabId, props));
   const sendTabMessage = deps.sendTabMessage ?? ((tabId, message) => chrome.tabs.sendMessage(tabId, message));
-  const readActiveSiteOrigin = deps.readActiveSiteOrigin ?? readActiveZaiSiteOrigin;
+  // ⚠️ **默认实现要带上界** —— 与 `background.ts` 那处同一口径。
+  // 不带的话，外层 `resolveDomTabWithBounds` 虽然不再等它，但底层那次 `tabs.query`
+  // 会一直悬着；带上界至少能让它自己收干净。
+  const readActiveSiteOrigin =
+    deps.readActiveSiteOrigin ?? (() => readCurrentZaiSiteOrigin(CURRENT_SITE_READ_TIMEOUT_MS));
   const reportError = deps.reportError ?? ((code, error) => console.error(`[Zai++] ${code}`, error));
 
   /** tabId → taskId：一 tab 同一时刻只跑一个后台任务（busy 锁）。 */
@@ -286,14 +294,15 @@ export function createDomTaskCoordinator(
   /**
    * 用户**此刻正在看的那个标签页**属于哪个站；不是站点集合里的页面就返回 `null`。
    *
-   * ⚠️ **从 service worker 里查 `currentWindow` 拿到的是「最后聚焦的那个窗口」** ——
-   * 与 `background.ts` 的「读当前对话」「插入提示词」两处用的是同一个假设。
+   * ⚠️ **判据写 `lastFocusedWindow` 而不是 `currentWindow`** —— 两者在 service worker 里
+   * 结果相同（SW 没有「当前窗口」，`currentWindow` 会回落成最后聚焦窗口），但前者是
+   * **明确要求**、后者依赖那条隐含回落。这里判的是「用户在看哪个窗口」，就该写它。
    * ⚠️ 查失败**不抛**：这只是「更贴近用户意图」的一层偏好，失败后退回后面的
-   * 主页扫描 / 活跃站 / 默认站，不该让整次解析失败。
+   * 主页扫描 / 最近看着的站 / 默认站，不该让整次解析失败。
    */
   async function readActiveTabSiteOrigin(): Promise<string | null> {
     try {
-      const tabs = await queryTabs({ active: true, currentWindow: true });
+      const tabs = await queryTabs({ active: true, lastFocusedWindow: true });
       for (const tab of tabs) {
         const origin = resolveZaiSiteOrigin(tab.url);
         if (origin) return origin;
@@ -317,8 +326,10 @@ export function createDomTaskCoordinator(
    *    `cn` 在前，两个站的主页都开着时会**永远选国区站**，与用户此刻所在的站无关。
    * 3. **已有的空闲标签页**：续用会话时按精确 URL 在两站里找；新对话时按两站的主页找。
    *    命中哪个站就用哪个站 —— 复用用户已经开着的页面，比新开一个更少打扰。
-   * 4. **「最近活跃站」**（`deps.readActiveSiteOrigin`，跨上下文记录）：前几条都没结论时，
-   *    用户眼下在用哪个站就去哪个站。
+   * 4. **「上一次看着的站」**（`deps.readActiveSiteOrigin`，跨上下文记录 + 实时查询）：
+   *    前几条都没结论时，用户眼下在看哪个站就去哪个站 —— 默认实现先实时问浏览器
+   *    「最后聚焦窗口的当前标签页」，问不到才退回内容脚本记下的历史值
+   *    （见 `core/zai/current-site.ts`）。
    * 5. **默认站**（国区站）收口。
    *
    * ⚠️ **顺序不可颠倒**：把 4 提到 1 前面会让固定会话任务跟着用户切站乱跑；
@@ -332,6 +343,7 @@ export function createDomTaskCoordinator(
   async function resolveDomTab(
     chatSessionId: string | null,
     requestedSiteOrigin: string | null,
+    options: DomTaskStartOptions = {},
   ): Promise<{
     tabId: number;
     chatSessionId: string | null;
@@ -374,10 +386,13 @@ export function createDomTaskCoordinator(
       }
       // 找不到精确 tab：**新开目标会话 tab**（固定会话场景），而不是降级新会话。
       // 让用户即使关掉了原会话窗口，后续运行也能找回同一个对话继续。
-      // 站点取「显式给的」→「最近活跃站」→「默认站」。
+      // 站点取「显式给的」→「上一次看着的站」→「默认站」。
       const siteOrigin = requestedSiteOrigin
         ? (resolveZaiSiteOrigin(requestedSiteOrigin) ?? await fallbackSiteOrigin())
         : await fallbackSiteOrigin();
+      // ⚠️ 真正执行**之前**必须复查一次 —— 前面的 `await` 可能已经耗掉了整段预算，
+      // 而开标签页是**有副作用**的：不复查就会在超时之后照样开出一个没人认领的孤儿标签页。
+      throwIfDomTaskAborted(options);
       const created = await createTab({ url: buildSessionUrl(sessionId, siteOrigin), active: false });
       if (created.id == null) throw new Error('zai_tab_create_failed');
       return { tabId: created.id, chatSessionId: sessionId, siteOrigin, isNewlyCreated: true };
@@ -404,6 +419,7 @@ export function createDomTaskCoordinator(
           };
         }
         // 当前标签页不是主页（比如正停在某个会话里）⇒ 在同一个站新开一个主页 tab。
+        throwIfDomTaskAborted(options);
         const created = await createTab({ url: activeSite.homeUrl, active: false });
         if (created.id == null) throw new Error('zai_tab_create_failed');
         return {
@@ -429,6 +445,7 @@ export function createDomTaskCoordinator(
     const siteOrigin = requestedSiteOrigin
       ? (resolveZaiSiteOrigin(requestedSiteOrigin) ?? await fallbackSiteOrigin())
       : await fallbackSiteOrigin();
+    throwIfDomTaskAborted(options);
     const created = await createTab({ url: homeUrlFor(siteOrigin), active: false });
     if (created.id == null) throw new Error('zai_tab_create_failed');
     return { tabId: created.id, chatSessionId: null, siteOrigin, isNewlyCreated: true };
@@ -520,6 +537,100 @@ export function createDomTaskCoordinator(
     return sendTabMessage(tabId, { type: 'CANCEL_DOM_TASK', taskId }).catch(() => undefined);
   }
 
+  /**
+   * 在 `signal` 与 `deadlineAt` 的约束下解析标签页。
+   *
+   * ⚠️⚠️ **这一步必须自己受上界约束** —— 它里面要查标签页、查浏览器 API、可能要开新标签页，
+   * 而 `startTask` 的 `deadlineTimer` 与 abort 监听都挂在**它之后**才建立的 promise 执行器里
+   * ⇒ 不在这里兜的话，这一整段**没有任何超时或取消覆盖**：它一旦不返回，
+   * `startTask` 就永不 settle，而 `startTask` 的调用方（自动化执行器）被租约的
+   * `finally` 等着 ⇒ 那条 run 会永久停在 running、该自动化之后不再运行，且没有日志。
+   *
+   * ⚠️ 这里**不需要**发 `CANCEL_DOM_TASK` —— 此刻还没向内容脚本登记任务（`pending` 未写入），
+   * 也没有 tabId 可取消。超时/取消直接抛，由调用方按 `'tab'` 阶段失败处理。
+   */
+  /**
+   * 把一条异步操作纳入 `signal` / `deadlineAt` 的约束。
+   *
+   * ⚠️⚠️ **被放弃的那次操作仍会跑完，没有任何取消手段** —— 这两个上界只决定「我们等不等它」。
+   * 所以凡是**有副作用**的操作（`createTab` / `updateTab` 这类），除了走这个 race，
+   * 还必须在**真正执行之前**复查一次（见 `throwIfDomTaskAborted`），否则超时后它照样会落地。
+   *
+   * ⚠️ 被放弃那次操作的 rejection 必须吞掉 —— 否则会变成 unhandled rejection 进错误面板。
+   */
+  async function withDomTaskBounds<T>(
+    operation: Promise<T>,
+    options: DomTaskStartOptions,
+  ): Promise<T> {
+    operation.catch(() => undefined);
+    const { signal, deadlineAt } = options;
+    const racers: Promise<never>[] = [];
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let abortCleanup: (() => void) | undefined;
+
+    if (signal) {
+      racers.push(new Promise<never>((_, reject) => {
+        const onAbort = () => reject(abortReason(signal));
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+        abortCleanup = () => signal.removeEventListener('abort', onAbort);
+      }));
+    }
+    if (deadlineAt != null) {
+      racers.push(new Promise<never>((_, reject) => {
+        deadlineTimer = setTimeout(
+          () => reject(createDomTaskDeadlineError()),
+          Math.max(0, deadlineAt - Date.now()),
+        );
+      }));
+    }
+
+    try {
+      return racers.length === 0 ? await operation : await Promise.race([operation, ...racers]);
+    } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      abortCleanup?.();
+    }
+  }
+
+  /** 解析标签页，并把整个过程纳入上界（见上一条注释的说明）。 */
+  async function resolveDomTabWithBounds(
+    chatSessionId: string | null,
+    requestedSiteOrigin: string | null,
+    options: DomTaskStartOptions,
+  ): Promise<{
+    tabId: number;
+    chatSessionId: string | null;
+    siteOrigin: DomTaskSiteOrigin;
+    isNewlyCreated: boolean;
+  }> {
+    return withDomTaskBounds(
+      resolveDomTab(chatSessionId, requestedSiteOrigin, options),
+      options,
+    );
+  }
+
+  /**
+   * 激活新开的标签页。
+   *
+   * ⚠️ **激活失败不致命**（`try/catch` 吞掉）—— 但**挂住致命**：它排在 `busyTabs.set` 之前，
+   * 一旦不返回，`startTask` 永不完结而 tab 已被锁住。所以它必须走上界。
+   */
+  async function activateNewTabWithBounds(
+    tabId: number,
+    options: DomTaskStartOptions,
+  ): Promise<void> {
+    try {
+      await withDomTaskBounds(updateTab(tabId, { active: true }), options);
+    } catch {
+      /* 激活失败不致命，继续握手；但内部抛的超时/取消要放行 */
+      throwIfDomTaskAborted(options);
+    }
+  }
+
   async function startTask(
     input: DomTaskStartInput,
     options: DomTaskStartOptions = {},
@@ -539,27 +650,39 @@ export function createDomTaskCoordinator(
     let siteOrigin: DomTaskSiteOrigin;
     let isNewlyCreated = false;
     try {
-      const resolved = await resolveDomTab(input.chatSessionId, input.siteOrigin ?? null);
+      const resolved = await resolveDomTabWithBounds(
+        input.chatSessionId,
+        input.siteOrigin ?? null,
+        options,
+      );
       tabId = resolved.tabId;
       effectiveChatSessionId = resolved.chatSessionId;
       siteOrigin = resolved.siteOrigin;
       isNewlyCreated = resolved.isNewlyCreated;
+
+      // 只对新开的 tab 激活一次（首次加载需要前台才能完成初始化）；
+      // 复用已有 tab 时绝不抢用户焦点，避免把用户正在看的前台页面切走。
+      //
+      // ⚠️⚠️ **这一段必须在同一个上界里** —— 它排在 `busyTabs.set` 之前，而
+      // `busyTabs` 一写就把这个 tab 锁给本 taskId：`tabs.update` 若挂住，
+      // `startTask` 永不完结、tab 却已被锁 ⇒ 之后所有落在该 tab 的任务全判 busy，
+      // 那条 run 永久停在 running。所以它走同一个 race，而不是裸 `await`。
+      if (isNewlyCreated) {
+        await activateNewTabWithBounds(tabId, options);
+      }
     } catch (error) {
+      // ⚠️ **取消/超时要原样抛出去，不能收成 `'tab'` 阶段失败** —— 前者是「这次运行被叫停」，
+      // 后者是「挑不到标签页」，两者的处置与用户可见面完全不同（后者会回一条失败结果，
+      // 前者必须让调用方按租约的停止语义处理）。
+      if (isDomTaskDeadlineExceeded(error)) {
+        throw error;
+      }
+      if (signal?.aborted) throw abortReason(signal);
       // ⚠️ `'tab'` 阶段失败时**站点未知** —— 这里还没挑中任何标签页。
       // 下游按「null = 不知道」处理（退回记录里的站点或默认站），不当成「不属于任何站」。
       return { ok: false, taskId, error: errorMessage(error), phase: 'tab', siteOrigin: null };
     }
     busyTabs.set(tabId, taskId);
-
-    // 只对新开的 tab 激活一次（首次加载需要前台才能完成初始化）；
-    // 复用已有 tab 时绝不抢用户焦点，避免把用户正在看的前台页面切走。
-    if (isNewlyCreated) {
-      try {
-        await updateTab(tabId, { active: true });
-      } catch {
-        /* 激活失败不致命，继续握手 */
-      }
-    }
 
     return new Promise<DomTaskOutcome>((resolve, reject) => {
       const entry: PendingDomTask = {
@@ -594,7 +717,7 @@ export function createDomTaskCoordinator(
         const waitMs = Math.max(0, options.deadlineAt - Date.now());
         entry.deadlineTimer = setTimeout(() => {
           void cancelDomTaskMessage(tabId, taskId);
-          failEntry(entry, new Error('dom_task_deadline_exceeded'));
+          failEntry(entry, createDomTaskDeadlineError());
         }, waitMs);
       }
 
@@ -685,6 +808,51 @@ function abortReason(signal: AbortSignal): unknown {
   if (signal.reason instanceof Error) return signal.reason;
   if (signal.reason !== undefined && signal.reason !== null) return signal.reason;
   return new DOMException('The operation was aborted.', 'AbortError');
+}
+
+/**
+ * 「这次运行超出上界」的**唯一错误身份**。
+ *
+ * ⚠️⚠️ **不能用 `message` 字符串当身份** —— 构造点、判定点、调用方的 catch 三处各写一遍字面量，
+ * 改一处漏一处的表现是静默的：要么取消/超时又被收成 `'tab'` 阶段失败，要么判定端的判据永远不命中。
+ * 这里用带 `name` 的专用错误类，判据走 `instanceof`。
+ */
+const DOM_TASK_DEADLINE_EXCEEDED_NAME = 'DomTaskDeadlineExceededError';
+
+export class DomTaskDeadlineExceededError extends Error {
+  constructor() {
+    super('dom_task_deadline_exceeded');
+    this.name = DOM_TASK_DEADLINE_EXCEEDED_NAME;
+  }
+}
+
+function createDomTaskDeadlineError(): DomTaskDeadlineExceededError {
+  return new DomTaskDeadlineExceededError();
+}
+
+/**
+ * 这个错误是不是「超出上界」。
+ *
+ * ⚠️ 同时认 `instanceof` 与 `name` —— 跨 realm（测试与浏览器不是同一个 realm）时
+ * `instanceof` 会静默失效，而 `name` 不受影响。
+ */
+export function isDomTaskDeadlineExceeded(error: unknown): boolean {
+  return error instanceof DomTaskDeadlineExceededError ||
+    (error instanceof Error && error.name === DOM_TASK_DEADLINE_EXCEEDED_NAME);
+}
+
+/**
+ * **有副作用的操作真正执行之前**的复查点。
+ *
+ * ⚠️⚠️ 上界只是「我们不再等它」，**不会取消已经发起的那次调用** —— 所以凡是
+ * `createTab` 这类会留下痕迹的动作，都要在落地前再问一次「还该做吗」。否则超时之后
+ * 仍会开出一个没人认领的孤儿标签页。
+ */
+function throwIfDomTaskAborted(options: DomTaskStartOptions): void {
+  if (options.signal?.aborted) throw abortReason(options.signal);
+  if (options.deadlineAt != null && Date.now() >= options.deadlineAt) {
+    throw createDomTaskDeadlineError();
+  }
 }
 
 function errorMessage(error: unknown): string {

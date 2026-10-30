@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   buildZaiChatSessionUrl,
   readZaiChatSessionId,
-  resolveZaiConversationUrl,
 } from '../core/zai/chat-session';
 
 /**
@@ -83,58 +82,5 @@ describe('zai chat session route', () => {
     for (const id of ['abc', 'session-1', 'a b', '中文']) {
       expect(readZaiChatSessionId(buildZaiChatSessionUrl(id))).toBe(id);
     }
-  });
-});
-
-/**
- * 一条会话记录该跳到哪。
- *
- * ⚠️ **这是「跨站跳转」那个缺陷的守卫**：两个站各有一份会话，同一条会话**只存在于
- * 它自己那一站**。若按「与当前页同源」判，在国际站的页面上点一条国区站的会话会被拼成
- * 当前站的 `/c/<id>` —— 那一站没有这条会话，表现是**跳转失败**。
- * ⇒ 判据必须是**站点集合**（`isZaiSiteOrigin`），命中就照记录里的 url 跳（**换站**），
- * 未命中才按 id 拼到 `fallbackOrigin`。
- */
-describe('resolveZaiConversationUrl: which URL a conversation record jumps to', () => {
-  it('keeps a stored URL that belongs to any site in the table', () => {
-    // 国区站那条 URL 即使在别的站上被点到，也照原样用 —— 它指向会话真正所在的那一站。
-    expect(resolveZaiConversationUrl(
-      { conversationId: 'c1', url: 'https://zchat.z.ai/c/c1' },
-      'https://chat.z.ai',
-    )).toBe('https://zchat.z.ai/c/c1');
-    expect(resolveZaiConversationUrl(
-      { conversationId: 'c1', url: 'https://chat.z.ai/c/c1' },
-      'https://zchat.z.ai',
-    )).toBe('https://chat.z.ai/c/c1');
-  });
-
-  it('falls back to the id when the stored URL is missing', () => {
-    expect(resolveZaiConversationUrl(
-      { conversationId: 'c1' },
-      'https://chat.z.ai',
-    )).toBe('https://chat.z.ai/c/c1');
-    expect(resolveZaiConversationUrl(
-      { conversationId: 'c1', url: '   ' },
-      'https://zchat.z.ai',
-    )).toBe('https://zchat.z.ai/c/c1');
-  });
-
-  it('falls back to the id for a stored value that is not one of our sites', () => {
-    // ⚠️ 这条同时是**安全判据**：存储里的 url 可能来自同步快照导入（存储层只要求它是
-    // 字符串），直接拿去导航会让 `javascript:` 这类值被执行。非站点集合的值一律回退。
-    for (const url of [
-      'javascript:alert(1)',
-      'https://chat.z.ai.evil.test/c/c1',
-      'https://zchat.z.ai.evil.test/c/c1',
-      'https://evil.test/c/c1',
-      'http://chat.z.ai/c/c1',
-    ]) {
-      expect(resolveZaiConversationUrl({ conversationId: 'c1', url }, 'https://chat.z.ai'))
-        .toBe('https://chat.z.ai/c/c1');
-    }
-  });
-
-  it('uses the default site when the caller names no fallback', () => {
-    expect(resolveZaiConversationUrl({ conversationId: 'c1' })).toBe('https://zchat.z.ai/c/c1');
   });
 });

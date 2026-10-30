@@ -122,7 +122,7 @@ import {
   ZAI_WEB_ORIGIN,
   resolveZaiSiteOrigin,
 } from '../core/zai/contracts';
-import { rememberActiveZaiSite } from '../core/zai/active-site';
+import { rememberViewedZaiSite } from '../core/zai/viewed-site';
 import { sleep } from '../core/zai/async';
 import { createSerialOperationQueue } from '../core/persistence/serial-operation-queue';
 import { USAGE_MESSAGE_COUNT } from '../core/constants';
@@ -4690,10 +4690,11 @@ export default defineContentScript({
         currentRequestMessageCount = 0;
       },
       refreshAuth: refreshZaiAuth,
-      // 「最近活跃站」（A 兜底）：内容脚本是唯一知道页面在哪一站的上下文，
-      // 由它把这个事实写进 storage 供没有页面上下文的链路（侧边栏兜底拼链接、
-      // 后台抓模型清单）读取。**不 await** —— 写不进去只是那条兜底退回默认站。
-      rememberActiveSite: () => rememberActiveZaiSite(location.origin),
+      // 「上一次用户看着的站」（读侧的兜底）：内容脚本是唯一知道页面在哪一站的上下文，
+      // 由它把这个事实写进 storage 供没有页面上下文的链路（后台抓模型清单、
+      // 自动化兜底选站）读取。**不 await** —— 写不进去只是那条兜底退回默认站。
+      // ⚠️ 调用时机会被 `installZaiCapabilities` 按可见性门控（后台加载不写）。
+      rememberViewedSite: () => rememberViewedZaiSite(location.origin),
       syncRuntimeState: loadAndSyncRuntimeState,
       // ⚠️ **`onContinuationBubblesHidden` 刻意不传** —— 它存在的唯一用途是打一条
       // 「隐藏了几条气泡」的日志，而那是**正常路径上的成功事件**（每轮续跑都会发生）。

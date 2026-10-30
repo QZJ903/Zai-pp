@@ -423,6 +423,27 @@ describe('zai request codec', () => {
     ).toBe('chatDetail');
   });
 
+  // ⚠️⚠️ **排除清单的判据是「整段相等」，不是「前缀」** —— `(?!all|subagents|…(?:/|$))` 这种写法
+  // 里 `(?:/|$)` 只作用在**最后一个**分支上（`|` 的优先级），其余几个是纯前缀否定
+  // ⇒ 一条以 `all` / `new` / `remix` / `subagents` 开头的**合法会话 id** 会被误当成字面量段排除，
+  // 表现是**该会话的历史请求静默不剥**（工具 XML 与增广文本留在正文里）。
+  // 当前真机 id 是 UUID、撞不上，但站点换 id 形态时这条会真的生效，所以必须钉住。
+  it('excludes the literal chat sub-paths exactly, not by prefix', () => {
+    for (const sampleId of [
+      'allocation-7f3a',
+      'newest-chat',
+      'remixed',
+      'subagents2',
+      'newchat',
+      'archivedx',
+    ]) {
+      expect(
+        matchZaiWebRoute({ url: `https://chat.z.ai/api/v1/chats/${sampleId}`, method: 'GET' }),
+        `${sampleId} 是一条合法会话 id，不该被排除清单吃掉`,
+      ).toBe('chatDetail');
+    }
+  });
+
   // ⚠️ **两个历史端点的后缀不能互相认领** —— `/chats/{id}` 与 `/chats/{id}/messages/batch`
   // 只差一个后缀，模板写错（漏后缀 / 多后缀）的表现是**其中一条静默不剥**。
   it('keeps the two history endpoints apart', () => {
@@ -476,6 +497,30 @@ describe('zai request codec', () => {
     expect(parsed!.userMessageTexts).toEqual(['hello from first message']);
   });
 
+  it('reads the agent flag from chat, which is where the real body carries it', () => {
+    // ⚠️⚠️ **这是真机形状**（agent 模式的 `/chats/new`）：agent 标志在 `chat.type` 与
+    // `chat.flags` 上，**`features` 对象整个不存在**。
+    // 判据只有一条：**这两个字段就是生产代码读的那两个** —— 别改成读 `features.flags`
+    // （那条路在本项目里没有证据支撑，曾经的「标志在 features」结论来自一个只读了
+    // `features.flags` 的探针）。
+    const realBody = {
+      chat: {
+        type: 'general_agent',
+        flags: ['general_agent'],
+        models: ['glm-5.2'],
+        history: {
+          messages: { 'msg-1': { role: 'user', content: 'hi', models: ['glm-5.2'] } },
+          currentId: 'msg-1',
+        },
+      },
+    };
+    const parsed = parseZaiChatNewBody(realBody);
+    expect(parsed!.isAgent, '真机形态下 isAgent 必须是 true').toBe(true);
+    expect(parsed!.userMessageTexts).toEqual(['hi']);
+    // 这份 body 没有 `features` —— 断言一下，免得有人把夹具改回去而不自知。
+    expect(Object.hasOwn(realBody, 'features')).toBe(false);
+  });
+
   it('rewrites chatNew user messages', () => {
     const body = {
       chat: {
@@ -527,6 +572,24 @@ describe('zai site table', () => {
     expect(isZaiSiteOrigin('')).toBe(false);
     expect(isZaiSiteOrigin('not a url')).toBe(false);
   });
+
+  it('rejects non-web schemes, including javascript:', () => {
+    // ⚠️ **这条守的是「别把它当成可导航目标」** —— 存储里的 url 可能来自同步快照导入
+    // （存储层只要求它是字符串），直接赋给 `location` 会让 `javascript:` 被执行。
+    // 判据是 origin 的**集合相等**：`new URL('javascript:alert(1)')` 的 origin 是 `null`，
+    // 于是必然不在集合里。⚠️ 别把它与「这一站受不受信任」混为一谈 —— 这里判的是
+    // 「能不能当作 z.ai 的站点」，任何非 http(s) 方案都一起否掉。
+    for (const hostile of [
+      'javascript:alert(1)',
+      'javascript:void(0)',
+      'data:text/html,<script>alert(1)</script>',
+      'vbscript:msgbox(1)',
+      'file:///c:/windows/system32/',
+    ]) {
+      expect(isZaiSiteOrigin(hostile), `${hostile} 不该被当成站点`).toBe(false);
+      expect(resolveZaiSiteOrigin(hostile), `${hostile} 不该被反查出站点`).toBeNull();
+    }
+  });
 });
 
 describe('zai model override', () => {
@@ -558,18 +621,16 @@ describe('zai model override', () => {
 
 describe('zai chatNew model override', () => {
   /**
-   * 真机抓包的精简版建会话 body：模型在**三个落点**同值 ——
-   * `chat.models`、首条 user 消息的 `models`、`features.models`。
-   * ⚠️ 三处必须一起改：页面自己始终让它们同值，少改一处就是**亲手制造不一致**。
+   * **真机形态**的建会话 body（2026-10-30 抓包）：模型在**两个**落点同值 ——
+   * `chat.models` 与首条 user 消息的 `models`；**`features` 对象整个不存在**，
+   * agent 标志在 `chat.type` / `chat.flags` 上。
+   *
+   * ⚠️⚠️ **这份夹具必须与真机一致** —— 曾经它带着一个 `features` 对象（含 `models`），
+   * 于是「第三个落点」那条用例测的是一个**不会发生的形状**：它一直是绿的，
+   * 却从没证明过真机上那个分支可达。夹具写错时最坏的情况不是红，是**绿得没有意义**。
    */
   function chatNewBody(models: string[] = ['x-preview-l']): Record<string, unknown> {
     return {
-      features: {
-        auto_web_search: false,
-        flags: ['general_agent'],
-        mcp_servers: [],
-        models: [...models],
-      },
       chat: {
         id: '',
         title: '新聊天',
@@ -589,38 +650,62 @@ describe('zai chatNew model override', () => {
           },
           currentId: 'msg-1',
         },
-        flags: [],
+        flags: ['general_agent'],
         auto_web_search: false,
         message_version: 1,
-        type: 'default',
+        type: 'general_agent',
       },
     };
   }
 
-  it('rewrites all three model carriers: chat.models, the first message, and features.models', () => {
+  /**
+   * **带 `features` 的假想形态** —— 当前真机上不出现，只为覆盖 `features.models` 那一支。
+   *
+   * ⚠️ 那个分支**刻意保留**（它是「只在字段已存在时覆写」这条通则的自然结果），
+   * 所以要单独测它 —— 但**别把它当成真机形状**去断言其它字段。
+   */
+  function chatNewBodyWithFeatures(models: string[] = ['x-preview-l']): Record<string, unknown> {
+    return {
+      ...chatNewBody(models),
+      features: {
+        auto_web_search: false,
+        flags: ['general_agent'],
+        mcp_servers: [],
+        models: [...models],
+      },
+    };
+  }
+
+  it('rewrites both carriers the real body has: chat.models and the first message', () => {
     const body = chatNewBody();
     expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(true);
     const chat = body.chat as Record<string, unknown>;
     expect(chat.models).toEqual(['glm-5.2']);
     const messages = (chat.history as { messages: Record<string, { models: string[] }> }).messages;
     expect(messages['msg-1']!.models).toEqual(['glm-5.2']);
-    // ⚠️ 第三个落点：漏掉它就会留下「前两处是用户选的、features 还是页面默认」的不一致。
-    expect((body.features as Record<string, unknown>).models).toEqual(['glm-5.2']);
     expect(readZaiChatNewModel(body)).toEqual(['glm-5.2']);
   });
 
-  it('leaves features untouched when it carries no models array', () => {
+  it('never invents a features object on the real body', () => {
+    // ⚠️ 真机 `/chats/new` 没有 `features`。写模型时**不能**凭空造出它 ——
+    // 「凭空加字段」是这个项目历史上 400 的来源那一类操作。
     const body = chatNewBody();
+    applyZaiChatNewModelOverride(body, 'glm-5.2');
+    expect(Object.hasOwn(body, 'features')).toBe(false);
+  });
+
+  it('rewrites the features carrier when the body does carry one', () => {
+    // 这一支当前真机不可达，但只要站点把 `features` 带回来它就得生效。
+    const body = chatNewBodyWithFeatures();
+    expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(true);
+    expect((body.features as Record<string, unknown>).models).toEqual(['glm-5.2']);
+  });
+
+  it('leaves features untouched when it carries no models array', () => {
+    const body = chatNewBodyWithFeatures();
     delete (body.features as Record<string, unknown>).models;
     expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(true);
     expect(Object.hasOwn(body.features as object, 'models')).toBe(false);
-  });
-
-  it('leaves the body without a features object alone', () => {
-    const body = chatNewBody();
-    delete body.features;
-    expect(applyZaiChatNewModelOverride(body, 'glm-5.2')).toBe(true);
-    expect(Object.hasOwn(body, 'features')).toBe(false);
   });
 
   it('trims the requested id and skips no-op writes', () => {
