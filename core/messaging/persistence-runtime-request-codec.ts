@@ -219,7 +219,6 @@ export const PERSISTENCE_RUNTIME_PAYLOAD_DECODERS: PersistenceRuntimePayloadDeco
   SAVE_SAVED_ITEM(value) {
     const payload = recordValue(value, 'SAVE_SAVED_ITEM.payload');
     optionalNonEmptyString(payload.id, 'SAVE_SAVED_ITEM.payload.id');
-    optionalNonEmptyString(payload.syncId, 'SAVE_SAVED_ITEM.payload.syncId');
     enumValue(payload.kind, ['snippet', 'bookmark'], 'SAVE_SAVED_ITEM.payload.kind');
     nonEmptyString(payload.title, 'SAVE_SAVED_ITEM.payload.title');
     nonEmptyString(payload.content, 'SAVE_SAVED_ITEM.payload.content');

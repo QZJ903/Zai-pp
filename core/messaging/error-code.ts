@@ -34,3 +34,13 @@ export function looksLikeErrorCode(value: string): boolean {
  * 那是把侧边栏资源挡在 service worker 包外的结构预算。
  */
 export const PAGE_CONTENT_SCRIPT_MISSING_CODE = 'page_content_script_missing';
+
+/**
+ * 「要更新的那条记忆已经不在了」—— 记忆写入口在 `update()` 返回 0 时抛它。
+ *
+ * ⚠️⚠️ **生产端与判定端必须同源**：生产端在 `core/memory/store.ts` 的
+ * `updateMemory`，判定端在侧边栏 `useMemoryPageController` 的保存失败分支
+ * （拿它换一条可读文案）。两边各写一遍字面量就是「生产端与判定端各写一遍」
+ * 的老形态 —— 改一处另一处不报错，只会让那条文案静默退回英文技术串。
+ */
+export const MEMORY_RECORD_MISSING_CODE = 'memory_record_missing';

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LocaleMessageKey, MessageParams } from '../../../core/i18n';
+import { MEMORY_RECORD_MISSING_CODE } from '../../../core/messaging/error-code';
 import type { Memory, NewMemory } from '../../../core/types';
 import { createRequestGenerationFence } from '../async-state';
-import { formatRuntimeError } from '../runtime-response';
+import { formatRuntimeError, getRuntimeErrorMessage } from '../runtime-response';
 import { decodeMemoryList, libraryController } from './library-controller';
 
 type Translator = (key: LocaleMessageKey, params?: MessageParams) => string;
@@ -91,11 +92,18 @@ export function useMemoryPageController(t: Translator, confirm: Confirm, feedbac
     try {
       feedback.clear();
       await libraryController.deleteMemory(id);
+      // ⚠️ **删掉正在编辑的那条时必须收掉表单** —— 否则表单还开着、`editingMemory`
+      // 还指着那条已不存在的记录，再点保存就会撞上「行不在了」。
+      // 与技能页的「删掉正在编辑的技能就关表单」同一口径。
+      if (editingMemory?.id === id) {
+        setShowForm(false);
+        setEditingMemory(null);
+      }
       await load();
     } catch (error) {
       showOperationError(error);
     }
-  }, [confirm, feedback, load, showOperationError, t]);
+  }, [confirm, editingMemory?.id, feedback, load, showOperationError, t]);
 
   const save = useCallback(async (memory: NewMemory) => {
     try {
@@ -113,7 +121,17 @@ export function useMemoryPageController(t: Translator, confirm: Confirm, feedbac
       setEditingMemory(null);
       await load();
     } catch (error) {
-      showOperationError(error);
+      // ⚠️ **「那条记忆已经不在了」要有自己的文案** —— 通用那条是
+      // 「记忆操作失败：{error}」，而这里 `error` 是一个裸码（`memory_record_missing`），
+      // 直接拼进去用户看到的是蛇形标识符。⚠️ 别把这条判据搬进
+      // `showOperationError`：它服务记忆页全部失败，加码表会让每条链路都多一层分派。
+      if (getRuntimeErrorMessage(error) === MEMORY_RECORD_MISSING_CODE) {
+        feedbackRef.current.error(translatorRef.current('sidepanel.memoryPage.recordMissing'));
+      } else {
+        showOperationError(error);
+      }
+      // ⚠️ **不清 `editingMemory` / `showForm`** —— 表单里还是用户刚敲的内容，
+      // 关掉就没了；留着至少还能自己复制走。
     }
   }, [editingMemory, feedback, load, showOperationError]);
 

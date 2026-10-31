@@ -1,9 +1,12 @@
 /**
  * Native IndexedDB thin wrapper for the background persistence layer.
  *
- * Replaces the dexie dependency with
- * with the exact API surface the three production stores use, translated
- * 1:1 onto the IndexedDB specification:
+ * Covers the operations the memory store and the sync-recovery journal use,
+ * translated 1:1 onto the IndexedDB specification. Some members
+ * (`isOpen` / `orderBy` / `hook` / `bulkAdd` / `clear`) have no production
+ * caller today — they exist as the observation surface for the wrapper's own
+ * tests, so removing them would weaken those assertions rather than simplify
+ * the runtime.
  *
  * - Dexie schema strings (e.g. `'++id, type, name'`) are translated at
  *   construction time: the first token is the in-line primary key (`++`
@@ -18,8 +21,9 @@
  *   each step first reconciles the object-store schema (create missing
  *   stores/indexes, drop stale indexes) and then runs its row migration via
  *   cursor updates, which preserve every unknown/additive field. A fresh
- *   database is created directly at the target version (dexie behavior:
- *   intermediate upgrade callbacks never run against empty data).
+ *   database is created at the target version, and the declared steps still
+ *   run against it — but only as schema reconciliation, since every row
+ *   migration is a no-op on an empty table.
  * - A database at a HIGHER version than the target is opened without a
  *   version (dexie behavior: open() succeeds and the store-level version
  *   assertion reports the unsupported version). Its raw rows are never
@@ -455,8 +459,11 @@ function modifyAllRows(
       }
     };
     request.onerror = () => {
-      // The request error aborts the versionchange transaction.
-      reject(request.error);
+      // The request error aborts the versionchange transaction. ⚠️ **兜底不能省** ——
+      // `error` 为 null 时裸 reject 出去的 promise 永远不 settle，`applyUpgrades`
+      // 会挂在 `await table.modifyAll(...)` 上，`onupgradeneeded` 的 try/catch 也走不到
+      // abort 分支 ⇒ 表现从「升级失败且可见」变成「打开数据库永久挂起」。
+      reject(request.error ?? new Error(`IndexedDB cursor request failed: ${tableName}`));
     };
   });
 }

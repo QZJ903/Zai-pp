@@ -4,7 +4,6 @@ export type SavedItemKind = 'snippet' | 'bookmark';
 
 export interface SavedItem {
   id: string;
-  syncId: string;
   kind: SavedItemKind;
   title: string;
   content: string;
@@ -14,9 +13,8 @@ export interface SavedItem {
   updatedAt: number;
 }
 
-export type SavedItemInput = Omit<SavedItem, 'id' | 'syncId' | 'createdAt' | 'updatedAt'> & {
+export type SavedItemInput = Omit<SavedItem, 'id' | 'createdAt' | 'updatedAt'> & {
   id?: string;
-  syncId?: string;
   createdAt?: number;
   updatedAt?: number;
 };

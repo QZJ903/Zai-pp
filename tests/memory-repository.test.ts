@@ -1,6 +1,7 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Memory, NewMemory } from '../core/types';
+import { MEMORY_RECORD_MISSING_CODE } from '../core/messaging/error-code';
 import { MEMORY_DATABASE_NAME, MEMORY_TABLE_NAME } from '../core/memory/schema';
 import {
   MEMORY_CORRUPT_RAW_RECORD,
@@ -123,12 +124,12 @@ describe('Memory repository transaction and codec boundaries', () => {
     ]);
   });
 
-  it('blocks ordinary reads, writes, and sync replacement when raw state is corrupt', async () => {
+  it('blocks ordinary reads, writes, and bulk mutations when raw state is corrupt', async () => {
     const {
       db,
       getAllMemories,
-      replaceAllMemoriesForSyncApply,
       saveMemory,
+      touchMemories,
       updateMemory,
     } = await import('../core/memory/store');
     const memories = db.table(MEMORY_TABLE_NAME);
@@ -143,11 +144,9 @@ describe('Memory repository transaction and codec boundaries', () => {
       id: 99,
       tags: [...MEMORY_V4_RECORD.tags],
     }))).rejects.toThrow('memories[0].type');
-    await expect(replaceAllMemoriesForSyncApply([cloneMemory({
-      ...MEMORY_V4_RECORD,
-      tags: [...MEMORY_V4_RECORD.tags],
-    })]))
-      .rejects.toThrow('memories[0].type');
+    // 「整表替换」那条写路径已随云同步落地链删除，这里换成本项目仍在用的
+    // 另一条「先整表校验再写」的路径 —— 它守的是同一条不变式。
+    await expect(touchMemories([1])).rejects.toThrow('memories[0].type');
     await expect(memories.toArray()).resolves.toEqual([corrupt]);
   });
 
@@ -162,6 +161,18 @@ describe('Memory repository transaction and codec boundaries', () => {
 
     await expect(updateMemory(withoutId))
       .rejects.toThrow('memory.id must be a positive safe integer');
+    await expect(memories.toArray()).resolves.toEqual([]);
+  });
+
+  it('rejects an update whose row no longer exists instead of reporting a no-op success', async () => {
+    const { db, updateMemory } = await import('../core/memory/store');
+    const memories = db.table(MEMORY_TABLE_NAME);
+    // id 合法、但那一行已经不在了 —— 与「缺 id」是两种不同的 no-op，必须同样报出来。
+    await expect(updateMemory(cloneMemory({
+      ...MEMORY_V4_RECORD,
+      id: 4242,
+      tags: [...MEMORY_V4_RECORD.tags],
+    }))).rejects.toThrow(MEMORY_RECORD_MISSING_CODE);
     await expect(memories.toArray()).resolves.toEqual([]);
   });
 

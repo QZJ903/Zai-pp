@@ -16,6 +16,63 @@ afterEach(() => {
 });
 
 describe('automation storage contract', () => {
+  it('accepts a record that predates fixedSession while keeping error.retryable strict', async () => {
+    // `fixedSession` 是后加字段 ⇒ 缺省视为 false。
+    const rawAutomation = makeAutomation();
+    delete (rawAutomation.promptOptions as { fixedSession?: boolean }).fixedSession;
+
+    const decoded = decodeAutomationStorageState({
+      version: 1,
+      automations: [rawAutomation],
+      runs: [],
+    });
+    expect(decoded.automations[0].promptOptions.fixedSession).toBe(false);
+
+    // `schedule.enabled` 缺省时按 `kind` 兜底（两者在写入侧是派生关系）——
+    // 取 `false` 会让一条 `kind: 'cron'` 的任务**永不排期**，且看不出异常。
+    const withoutEnabled = makeAutomation();
+    withoutEnabled.schedule = {
+      ...withoutEnabled.schedule,
+      kind: 'cron',
+      expression: '0 * * * *',
+    };
+    delete (withoutEnabled.schedule as { enabled?: boolean }).enabled;
+    expect(decodeAutomationStorageState({
+      version: 1,
+      automations: [withoutEnabled],
+      runs: [],
+    }).automations[0].schedule.enabled).toBe(true);
+
+    const manualWithoutEnabled = makeAutomation();
+    delete (manualWithoutEnabled.schedule as { enabled?: boolean }).enabled;
+    expect(decodeAutomationStorageState({
+      version: 1,
+      automations: [manualWithoutEnabled],
+      runs: [],
+    }).automations[0].schedule.enabled).toBe(false);
+
+    // ⚠️ 而「给了个非布尔值」仍然必须判 corrupt —— 宽容只覆盖「缺省」这一档。
+    const badEnabled = makeAutomation();
+    (badEnabled.schedule as { enabled: unknown }).enabled = 'yes';
+    expect(() => decodeAutomationStorageState({
+      version: 1,
+      automations: [badEnabled],
+      runs: [],
+    })).toThrow(AutomationStorageContractError);
+
+    // `error.retryable` 也一直必填 ⇒ 缺了必须判 corrupt。
+    const withoutRetryable = makeRun({
+      status: 'failed',
+      result: { ok: false, chatSessionId: null, siteOrigin: null, error: { code: 'x', message: 'y', phase: 'runner', at: 1 }, completedAt: 2 } as never,
+    });
+    delete ((withoutRetryable.result as { error: { retryable?: boolean } }).error).retryable;
+    expect(() => decodeAutomationStorageState({
+      version: 1,
+      automations: [],
+      runs: [withoutRetryable],
+    })).toThrow(AutomationStorageContractError);
+  });
+
   it('treats only a missing key as empty and performs no eager write', async () => {
     const { chromeStub } = createChromeStub();
     vi.stubGlobal('chrome', chromeStub);

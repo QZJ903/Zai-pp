@@ -68,6 +68,7 @@ export const sidepanel = {
       instructionsLabel: '指令（Markdown 格式，告诉 AI 如何执行）',
       instructionsPlaceholder: '你是一位...\n\n## 核心原则\n- ...',
       memoryInjectionLabel: '启用记忆注入',
+      nameTaken: '这个名字已被其它 Skill 使用（含内置与已导入）。名字是激活命令的身份，不能重复。',
     },
     sources: {
       builtin: '内置',
@@ -179,6 +180,7 @@ export const sidepanel = {
     count: '共 {count} 条记忆',
     deleteConfirm: '确定删除这条记忆吗？',
     operationFailed: '记忆操作失败：{error}',
+    recordMissing: '这条记忆已经不在了（可能刚被删除），表单里的内容没有保存。',
   },
   presetPage: {
     title: '系统提示词预设',

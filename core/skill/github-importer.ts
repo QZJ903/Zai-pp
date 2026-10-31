@@ -17,6 +17,7 @@ import {
   updateGitHubSkillSourceLastCheckedAt,
   type SkillCollisionCandidate,
 } from './registry';
+import { slugifySkillName } from './slug';
 
 const GITHUB_API_BASE = 'https://api.github.com';
 const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com';
@@ -887,7 +888,7 @@ function parentDirectory(path: string): string {
 }
 
 function normalizeSkillName(name: string): string {
-  const normalized = name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const normalized = slugifySkillName(name);
   if (!normalized) throw new Error('GitHub Skill 缺少有效名称');
   return normalized;
 }

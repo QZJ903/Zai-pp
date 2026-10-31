@@ -38,7 +38,6 @@ export async function saveSavedItem(input: SavedItemInput): Promise<SavedItem> {
     const now = Date.now();
     const item: SavedItem = {
       id: input.id ?? createId(),
-      syncId: input.syncId ?? createId(),
       kind: input.kind === 'bookmark' ? 'bookmark' : 'snippet',
       title: requireNonEmptyString(input.title, 'title'),
       content: requireNonEmptyString(input.content, 'content'),
@@ -61,10 +60,6 @@ export async function deleteSavedItem(id: string): Promise<void> {
     const state = await savedItemsRepository.readAlreadyLocked();
     await writeSavedItems(state, state.items.filter((item) => item.id !== id));
   });
-}
-
-export async function replaceSavedItemsStateForSyncApply(state: SavedItemsState): Promise<void> {
-  await savedItemsRepository.replaceAlreadyLocked(state);
 }
 
 async function writeSavedItems(state: SavedItemsState, items: SavedItem[]): Promise<void> {

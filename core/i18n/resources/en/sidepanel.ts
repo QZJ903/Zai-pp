@@ -68,6 +68,7 @@ export const sidepanel = {
       instructionsLabel: 'Instructions (Markdown, tell AI how to execute)',
       instructionsPlaceholder: 'You are a...\n\n## Core principles\n- ...',
       memoryInjectionLabel: 'Enable memory injection',
+      nameTaken: 'That name is already used by another Skill (built-in or imported). The name is the activation command identity, so it must be unique.',
     },
     sources: {
       builtin: 'Built-in',
@@ -179,6 +180,7 @@ export const sidepanel = {
     count: '{count} memories total',
     deleteConfirm: 'Delete this memory?',
     operationFailed: 'Memory operation failed: {error}',
+    recordMissing: 'This memory no longer exists (it may have just been deleted). Nothing was saved; the form content is kept.',
   },
   presetPage: {
     title: 'System prompt presets',

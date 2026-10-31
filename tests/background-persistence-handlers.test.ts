@@ -102,7 +102,6 @@ const preset: SystemPromptPreset = {
 
 const savedItem: SavedItem = {
   id: 'saved-1',
-  syncId: 'saved-sync-1',
   kind: 'snippet',
   title: 'Saved',
   content: 'Text',

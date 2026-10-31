@@ -1,40 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SYNC_APPLY_STEP_ORDER, type SyncLocalApplyPlan, type SyncUndoPreimageV1 } from '../core/sync/local-apply';
+import { SYNC_APPLY_STEP_ORDER, type SyncUndoPreimageV1 } from '../core/sync/local-apply';
 
 const mocks = vi.hoisted(() => ({
   captureRawMemories: vi.fn(),
-  replaceMemories: vi.fn(),
   restoreRawMemories: vi.fn(),
-  replacePresets: vi.fn(),
-  clearActivePreset: vi.fn(),
-  replaceSavedItems: vi.fn(),
-  replaceSkills: vi.fn(),
-  replaceSkillSources: vi.fn(),
 }));
 
 vi.mock('../core/memory/store', () => ({
   captureRawMemoryRecordsForSyncRecovery: mocks.captureRawMemories,
-  replaceAllMemoriesForSyncApply: mocks.replaceMemories,
   restoreRawMemoryRecordsForSyncRecovery: mocks.restoreRawMemories,
 }));
 
 vi.mock('../core/preset/store', () => ({
   ACTIVE_PRESET_STORAGE_KEY: 'zai_pp_active_preset_id',
   PRESETS_STORAGE_KEY: 'zai_pp_presets',
-  clearActivePresetForSyncApply: mocks.clearActivePreset,
-  replacePresetCollectionForSyncApply: mocks.replacePresets,
 }));
 
 vi.mock('../core/saved-items/store', () => ({
   SAVED_ITEMS_STORAGE_KEY: 'zai_pp_saved_items',
-  replaceSavedItemsStateForSyncApply: mocks.replaceSavedItems,
 }));
 
 vi.mock('../core/skill/registry', () => ({
   SKILLS_STORAGE_KEY: 'zai_pp_skills',
   SKILL_SOURCES_STORAGE_KEY: 'zai_pp_skill_sources',
-  replaceAllCustomSkillsForSyncApply: mocks.replaceSkills,
-  replaceAllSkillSourcesForSyncApply: mocks.replaceSkillSources,
 }));
 
 import {
@@ -66,7 +54,6 @@ beforeEach(() => {
       },
     },
   });
-  mocks.captureRawMemories.mockResolvedValue([{ id: 44, syncId: 'raw', future: true }]);
   for (const mock of Object.values(mocks)) mock.mockClear();
   mocks.captureRawMemories.mockResolvedValue([{ id: 44, syncId: 'raw', future: true }]);
 });
@@ -95,20 +82,6 @@ describe('browser sync local-state adapter', () => {
     });
   });
 
-  it('routes each staged target write through the existing domain primitive', async () => {
-    const plan = fullPlan();
-    for (const step of SYNC_APPLY_STEP_ORDER) {
-      await browserSyncLocalStatePort.applyStep(step, plan);
-    }
-
-    expect(mocks.replaceMemories).toHaveBeenCalledWith(plan.snapshot.memories);
-    expect(mocks.replaceSkills).toHaveBeenCalledWith(plan.snapshot.skills);
-    expect(mocks.replaceSkillSources).toHaveBeenCalledWith(plan.snapshot.skillSources);
-    expect(mocks.replacePresets).toHaveBeenCalledWith(plan.snapshot.presets);
-    expect(mocks.clearActivePreset).toHaveBeenCalledOnce();
-    expect(mocks.replaceSavedItems).toHaveBeenCalledWith(plan.snapshot.savedItems);
-  });
-
   it('restores raw memory rows, opaque values, and key absence exactly', async () => {
     storage = Object.fromEntries(
       Object.values(SYNC_RECOVERY_STORAGE_KEYS).map((key) => [key, `target:${key}`]),
@@ -129,19 +102,6 @@ describe('browser sync local-state adapter', () => {
     expect(storageRemove).toHaveBeenCalledWith(SYNC_RECOVERY_STORAGE_KEYS.savedItems);
   });
 });
-
-function fullPlan(): SyncLocalApplyPlan {
-  return {
-    snapshot: {
-      memories: [],
-      skills: [],
-      skillSources: [],
-      presets: [],
-      savedItems: { schemaVersion: 1, items: [] },
-    },
-    applySteps: [...SYNC_APPLY_STEP_ORDER],
-  };
-}
 
 function rawPreimage(): SyncUndoPreimageV1 {
   return {

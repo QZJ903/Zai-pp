@@ -1,5 +1,6 @@
 import { DEFAULT_LOCALE, translate, type SupportedLocale } from '../i18n/background';
 import type { JsonValue, Skill, ToolCall, ToolDescriptor, ToolProviderIdentity, ToolResult } from '../types';
+import { slugifySkillName } from './slug';
 
 export interface SkillDraftOutput {
   kind: 'skill_draft';
@@ -128,10 +129,8 @@ function requiredString(value: unknown, field: string): string {
 }
 
 function normalizeSkillName(name: string): string {
-  const normalized = name.toLowerCase()
-    .replace(/[^a-z0-9-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
+  const normalized = slugifySkillName(name);
   if (!normalized) throw new Error('Skill name cannot be empty');
+  // 起草工具的名字会进 `name` 字段并显示在卡片上，截断保留是为了不被超长名撑破界面。
   return normalized.slice(0, 64);
 }

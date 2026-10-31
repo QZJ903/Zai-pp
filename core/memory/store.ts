@@ -1,4 +1,5 @@
 import type { Memory, NewMemory } from '../types';
+import { MEMORY_RECORD_MISSING_CODE } from '../messaging/error-code';
 import { withSyncLocalStateLock } from '../persistence/local-state-lock';
 import {
   IndexedDb,
@@ -158,7 +159,17 @@ export async function updateMemory(mem: Memory): Promise<void> {
   await assertCurrentMemoryDatabaseVersion();
   await withSyncLocalStateLock(() => db.transaction('rw', memories, async (tx) => {
     await readValidatedMemoryRecords(tx);
-    await tx.table(MEMORY_TABLE_NAME).update(id, { ...validated, updatedAt: Date.now() });
+    const updated = await tx.table(MEMORY_TABLE_NAME)
+      .update(id, { ...validated, updatedAt: Date.now() });
+    // ⚠️ **「行不在了」必须报出来，不能当成功。**
+    //
+    // `update()` 的契约是「合并成功返回 1 / 键不存在返回 0」；不判它的话，
+    // 「id 合法但那行已被删」会静默走成功分支 —— 界面上表现为「保存成功、
+    // 关掉表单、那条记忆就没了」，而调用方没有任何线索。
+    //
+    // 这条路径在单窗口就可达：记忆页的表单与列表同时渲染，编辑某条的期间
+    // 在同一页把它删掉，表单里的 `id` 仍然合法。
+    if (updated === 0) throw new Error(MEMORY_RECORD_MISSING_CODE);
   }));
 }
 
@@ -186,23 +197,6 @@ export async function touchMemories(ids: number[]): Promise<void> {
         }));
       if (touched.length > 0) await tx.table(MEMORY_TABLE_NAME).bulkPut(touched);
     });
-  });
-}
-
-export async function replaceAllMemories(memoriesToReplace: readonly Memory[]): Promise<void> {
-  await withSyncLocalStateLock(() => replaceAllMemoriesForSyncApply(memoriesToReplace));
-}
-
-export async function replaceAllMemoriesForSyncApply(memoriesToReplace: readonly Memory[]): Promise<void> {
-  const validated = memoriesToReplace.map((memory, index) => (
-    decodePersistedMemoryRecord(memory, `memories[${index}]`)
-  ));
-  await assertCurrentMemoryDatabaseVersion();
-  await db.transaction('rw', memories, async (tx) => {
-    const table = tx.table(MEMORY_TABLE_NAME);
-    await readValidatedMemoryRecords(tx);
-    await table.clear();
-    await table.bulkAdd(validated);
   });
 }
 

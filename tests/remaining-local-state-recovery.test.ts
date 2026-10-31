@@ -2,13 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const memoryMocks = vi.hoisted(() => ({
   capture: vi.fn(async () => []),
-  replace: vi.fn(),
   restore: vi.fn(),
 }));
 
 vi.mock('../core/memory/store', () => ({
   captureRawMemoryRecordsForSyncRecovery: memoryMocks.capture,
-  replaceAllMemoriesForSyncApply: memoryMocks.replace,
   restoreRawMemoryRecordsForSyncRecovery: memoryMocks.restore,
 }));
 

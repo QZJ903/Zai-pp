@@ -23,6 +23,7 @@ import {
   type SkillCollisionCandidate,
 } from './registry';
 import { extractScenarioBlock } from './local-skill-scorer';
+import { slugifySkillName } from './slug';
 
 const MAX_SKILL_BYTES = 120_000;
 const ON_DEMAND_RESOURCE_READER_NAMES = new Set(['local_file_read', 'shell_exec']);
@@ -914,7 +915,7 @@ function parentDirectory(path: string): string {
 }
 
 function normalizeSkillName(name: string): string {
-  const normalized = name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const normalized = slugifySkillName(name);
   // Slug collision with non-ASCII names (Chinese titles, etc.) used to throw a
   // hard error and block local Skill import entirely. Fall back to
   // a stable hash-derived slug so the import always succeeds; the user can

@@ -185,8 +185,6 @@ function createDeletionState(): DeletionState {
     ...state,
     port: {
       captureUndoPreimage: async () => createUndoPreimage(result.targetPresent),
-      stage: () => unusedDependency(),
-      applyStep: async () => unusedDependency(),
       restoreStep: async (step, before) => {
         if (step !== 'presets') return;
         const value = before.storage.presets.value as { targetPresent?: unknown };

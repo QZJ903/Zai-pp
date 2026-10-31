@@ -94,13 +94,6 @@ export async function setActivePresetId(id: string | null): Promise<void> {
   });
 }
 
-export async function clearActivePresetForSyncApply(): Promise<void> {
-  const current = await activePresetStorage.read();
-  if (!current.present) return;
-  decodeActivePresetId(current.value, 'activePresetId');
-  await activePresetStorage.remove();
-}
-
 export async function getActivePreset(): Promise<SystemPromptPreset | null> {
   return withSyncLocalStateLock(async () => {
     const [activeId, presets] = await Promise.all([
@@ -110,13 +103,6 @@ export async function getActivePreset(): Promise<SystemPromptPreset | null> {
     if (!activeId) return null;
     return presets.find((preset) => preset.id === activeId) ?? null;
   });
-}
-
-export async function replacePresetCollectionForSyncApply(
-  presets: SystemPromptPreset[],
-): Promise<void> {
-  const decoded = decodePresetCollection(presets, 'presets');
-  await presetRepository.replaceAlreadyLocked(decoded);
 }
 
 function decodeActivePresetSlot(slot: RawStorageSlot): string | null {

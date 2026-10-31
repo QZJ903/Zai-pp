@@ -188,12 +188,20 @@ function decodeAutomationRun(raw: unknown, path: string): AutomationRun {
 
 function decodeSchedule(raw: unknown, path: string): AutomationSchedule {
   const value = recordValue(raw, path);
+  const kind = enumValue(value.kind, AUTOMATION_SCHEDULE_KINDS, `${path}.kind`);
   return {
     ...value,
-    kind: enumValue(value.kind, AUTOMATION_SCHEDULE_KINDS, `${path}.kind`),
+    kind,
     expression: nullableString(value.expression, `${path}.expression`),
     timezone: stringValue(value.timezone, `${path}.timezone`),
-    enabled: booleanValue(value.enabled, `${path}.enabled`),
+    // ⚠️ **缺省按 `kind` 兜底，不取 `false`** —— `enabled` 与 `kind` 在写入侧是
+    // 派生关系（`kind === 'manual'` ⇔ `!enabled`），所以缺这个字段的记录，
+    // 其真实意图已经从 `kind` 读得出来。取 `false` 会让一条 `kind: 'cron'` 的记录
+    // **静默永不排期**（`isSchedulableAutomation` 判否），而它看起来完全正常。
+    // ⚠️ **两个字段并存是刻意的**：`enabled` 将来可能允许「cron 但暂停」这种组合。
+    enabled: value.enabled === undefined
+      ? kind !== 'manual'
+      : booleanValue(value.enabled, `${path}.enabled`),
     minimumIntervalMinutes: nonNegativeNumber(
       value.minimumIntervalMinutes,
       `${path}.minimumIntervalMinutes`,
@@ -209,7 +217,13 @@ function decodePromptOptions(raw: unknown, path: string): AutomationPromptOption
     ...value,
     // 兼容缺省：模型选择是后加的字段，旧存储里没有 → 视为 null（跟随页面默认）。
     model: defaultedNullableString(value.model, `${path}.model`),
-    fixedSession: booleanValue(value.fixedSession, `${path}.fixedSession`),
+    // ⚠️ **宽容只开在这里，别下放到 `booleanValue`** —— 它是后加字段，
+    // 缺省 `false` 是本字段独有的向后兼容需求。共用 helper 一旦宽容，
+    // `schedule.enabled` / `error.retryable` 这些**一直必填**的字段也会跟着变宽容，
+    // 后果是「数据损坏」被静默换成「按缺省值行事」。
+    fixedSession: value.fixedSession === undefined
+      ? false
+      : booleanValue(value.fixedSession, `${path}.fixedSession`),
   } as AutomationPromptOptions;
 }
 
@@ -429,8 +443,9 @@ function defaultedNullableString(value: unknown, path: string): string | null {
 }
 
 function booleanValue(value: unknown, path: string): boolean {
-  // 兼容缺省：旧存储里没有 fixedSession 字段，缺省视为 false（向后兼容）。
-  if (value === undefined) return false;
+  // ⚠️ **严格**：缺省不在这里兜。宽容是**逐字段的需求**（见 `decodePromptOptions`
+  // 的 `fixedSession` 与 `decodeSchedule` 的 `enabled`），写进共用 helper 会让
+  // 一直必填的字段跟着变宽容。
   if (typeof value !== 'boolean') corrupt(path, 'Expected a boolean.');
   return value;
 }

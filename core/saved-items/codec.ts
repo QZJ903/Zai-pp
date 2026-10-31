@@ -48,7 +48,9 @@ export function decodeSavedItem(value: unknown, path = 'savedItem'): SavedItem {
   return {
     ...object,
     id: requiredString(object.id, `${path}.id`),
-    syncId: requiredString(object.syncId, `${path}.syncId`),
+    // ⚠️ `syncId` 是已退役字段：它当初只为云同步的跨设备匹配服务，
+    // 而本项目没有那条链路，写入侧也从来不让它跨次保存保持不变。
+    // 老记录里可能还带着它 —— `...object` 会原样保留、不报错、不读取。
     kind: kind as SavedItemKind,
     title: requiredString(object.title, `${path}.title`),
     content: requiredString(object.content, `${path}.content`),

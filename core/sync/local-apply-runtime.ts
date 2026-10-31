@@ -12,6 +12,17 @@ import {
 const coordinator = createSyncLocalApplyCoordinator(
   browserSyncLocalStatePort,
   indexedDbSyncLocalApplyJournal,
+  {
+    /**
+     * 有一份**读不出来**的 journal 被丢弃（那次未完成的变更失去了回滚依据）。
+     *
+     * ⚠️ **只能 `log`，不能 `error`** —— 打 error 会让扩展错误面板长期挂红，
+     * 而这件事不需要用户做任何事、也不影响任何后续操作。
+     */
+    onJournalDiscarded(error) {
+      console.log('[Zai++] discarded unreadable sync local-apply journal', error);
+    },
+  },
 );
 
 async function recoverCoordinatorAlreadyLocked(): Promise<void> {

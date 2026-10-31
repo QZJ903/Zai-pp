@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { LocaleMessageKey, MessageParams, SupportedLocale } from '../../../core/i18n';
 import type { GitHubSkillSource, GitHubSkillUpdatePreview, Skill, SkillImportSource } from '../../../core/types';
 import { DEFAULT_SKILL_AUTO_ACTIVATION_SETTINGS, normalizeSkillAutoActivationSettings, type SkillAutoActivationSettings } from '../../../core/skill/auto-activation-settings';
@@ -441,6 +441,17 @@ export default function SkillPage() {
   );
   const custom = skills.filter((s) => s.source === 'custom');
   const enabledCount = skills.filter((s) => s.enabled !== false).length;
+  /**
+   * 表单判重用的名字集合 —— **含全部来源**（builtin / custom / remote）。
+   *
+   * ⚠️ **名字是身份**：`/name` 激活只按名字找（`resolveSkills`），同名两条时
+   * 恒取列表里最前那条（顺序是 builtin → custom → remote）⇒ 后面的那条永远调不到。
+   * 所以判重要按「全仓唯一」，不能只跟自己那一档比。
+   */
+  const occupiedSkillNames = useMemo(
+    () => new Set(skills.map((skill) => skill.name)),
+    [skills],
+  );
 
   return (
     <div className="p-4 space-y-4">
@@ -522,7 +533,17 @@ export default function SkillPage() {
 
       {showForm && (
         <div className="animate-slide-down">
-          <SkillForm initialSkill={editingSkill} onSave={handleSave} onCancel={closeForm} />
+          {/*
+            Same reason as the memory page: remount on a different edit target so
+            the form's local state cannot stay on the previous record.
+          */}
+          <SkillForm
+            key={editingSkill?.name ?? 'new'}
+            initialSkill={editingSkill}
+            occupiedNames={occupiedSkillNames}
+            onSave={handleSave}
+            onCancel={closeForm}
+          />
         </div>
       )}
 

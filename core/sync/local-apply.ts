@@ -1,15 +1,20 @@
-import type { Memory } from '../types';
 import {
   assertSha256Checksum,
   createSha256Checksum,
   parseSha256Checksum,
   type Sha256Checksum,
 } from './checksum';
-import type { SyncDataSnapshot } from './snapshot';
 
 export const SYNC_LOCAL_APPLY_JOURNAL_KIND = 'zai-pp.sync-local-apply-journal' as const;
 export const SYNC_LOCAL_APPLY_JOURNAL_SCHEMA_VERSION = 1 as const;
 
+/**
+ * **回滚顺序**（按声明序倒着走）覆盖的存储槽。
+ *
+ * ⚠️ 名字里的 `APPLY` 是历史遗留：这里只剩「要恢复哪些槽」这一个用途
+ * —— 整份快照落地的写入方向已经不存在了（唯一的写入入口是
+ * `runMutation`，它执行的是调用方给的闭包）。
+ */
 export const SYNC_APPLY_STEP_ORDER = [
   'memories',
   'skills',
@@ -33,27 +38,19 @@ export interface SyncUndoPreimageV1 {
      * 已退役的槽位（原「项目」功能的 storage 快照）。
      *
      * ⚠️ **只为了读旧 journal 而保留** —— preimage 的校验和是对**整个** serialized
-     * preimage 算的，解析时把这个字段丢掉会让旧 journal 的 checksum 恒不匹配、
-     * 恢复链永久失败。它**不参与** `SYNC_APPLY_STEP_ORDER`，所以既不会被写入
-     * 也不会被回滚（那个 storage key 本身已随功能删除）。
+     * preimage 算的，解析时把这个字段丢掉会让旧 journal 的 checksum 恒不匹配。
+     * 它**不参与** `SYNC_APPLY_STEP_ORDER`，所以既不会被写入也不会被回滚
+     * （那个 storage key 本身已随功能删除）。
      * ⚠️ **位置必须留在 `activePreset` 与 `savedItems` 之间** —— 键序影响序列化字节。
      *
-     * ⚠️⚠️ **失败形态是不可恢复的，这是它值得留的全部理由**：`recover()` 在**每一次**
-     * 持久化变更之前都会跑（`withSyncLocalStateLock` 第一步），所以 checksum 一旦对不上，
-     * 删 skill / 导入 skill / 删 preset 会**全部**失败，而且 journal 永远清不掉
-     * （清它的是恢复成功之后那一步）⇒ 没有自愈路径，只能手动去 IndexedDB 删行。
-     *
-     * ⚠️ **可达性很窄**：只有「升级前某次持久化变更失败、且升级后一次恢复都没跑过」
-     * 才会留下带这个槽位的 journal（正常路径下 journal 写完就清）。窄 ≠ 可以赌 ——
-     * 代价是「不可恢复」，而收益只是少六行可选字段。
+     * ⚠️⚠️ **加槽位时的纪律：必须写成可选字段，并同步补进 `parseUndoPreimage`。**
+     * 那份解析是**白名单式重建**（只抄它认识的键），所以新增一个**必填**槽位会让
+     * 缺该键的旧 journal 在解析阶段直接抛错。抛错本身现在是安全的（`recover()` 会丢弃
+     * 读不出来的 journal），但丢弃意味着**那次未完成的变更失去了回滚依据** ——
+     * 能少丢一次就少丢一次。
      */
     projectContext?: OpaqueStoragePreimage;
   };
-}
-
-export interface SyncLocalApplyPlan {
-  snapshot: Omit<SyncDataSnapshot, 'memories'> & { memories: Memory[] };
-  applySteps: SyncApplyStep[];
 }
 
 export interface SyncLocalApplyJournalV1 {
@@ -67,8 +64,6 @@ export interface SyncLocalApplyJournalV1 {
 
 export interface SyncLocalStatePort {
   captureUndoPreimage(): Promise<SyncUndoPreimageV1>;
-  stage(snapshot: SyncDataSnapshot, before: SyncUndoPreimageV1): SyncLocalApplyPlan;
-  applyStep(step: SyncApplyStep, plan: SyncLocalApplyPlan): Promise<void>;
   restoreStep(step: SyncApplyStep, before: SyncUndoPreimageV1): Promise<void>;
 }
 
@@ -81,10 +76,15 @@ export interface SyncLocalApplyJournalPort {
 export interface SyncLocalApplyCoordinatorOptions {
   now?: () => number;
   createOperationId?: () => string;
-}
-
-export interface SyncLocalApplyResult {
-  operationId: string;
+  /**
+   * 有一份 **永远回滚不出来** 的 journal 被丢弃时调用。
+   *
+   * 判别标准见 `recover()` 的说明：**读不出来**（结构不合法 / 版本不认识 /
+   * 校验和不匹配）与 **回滚执行失败** 是两档，前者丢弃、后者阻塞。
+   * 丢弃是静默的数据库清理，所以必须留一条上报 —— 否则「有一次未完成的变更
+   * 被放弃」这件事只会出现在用户后来的数据差异里。
+   */
+  onJournalDiscarded?: (error: unknown) => void;
 }
 
 export interface SyncLocalRecoveryResult {
@@ -109,26 +109,42 @@ export function createSyncLocalApplyCoordinator(
   const now = options.now ?? Date.now;
   const createOperationId = options.createOperationId ?? defaultOperationId;
 
+  /**
+   * 收尾上一份未完成的变更。
+   *
+   * ⚠️⚠️ **失败必须分两档，处置相反：**
+   *
+   * | 档 | 判据 | 处置 |
+   * |---|---|---|
+   * | **读不出来** | `kind` / `schemaVersion` 不认识、结构不合法、校验和不匹配 | **丢弃这份 journal，继续** |
+   * | **回滚执行失败** | 读得出来、但恢复某一步时抛错 | **保留 journal，阻塞** |
+   *
+   * 前者的 preimage 根本解析不出来 ⇒ **它本来就不可能被用来回滚**，留着只会让
+   * `recover()` 永久失败；而 `recover()` 被 `withSyncLocalStateLock` 前置到**每一次**
+   * 加锁（含 `versioned-repository.read()` 这样的只读入口）⇒ 留着等于让整个本地状态
+   * **连读都读不了**，且清 journal 的动作排在恢复成功之后 ⇒ 没有任何自愈路径。
+   *
+   * 后者不同：状态确实不自洽、但下一轮可能自愈（比如磁盘暂时不可写），
+   * 丢掉 journal 就真的没有回滚依据了。
+   */
   async function recover(): Promise<SyncLocalRecoveryResult> {
-    const record = await readCurrentJournal(journal);
-    if (!record) return { recovered: false, operationId: null };
+    // ⚠️ **读失败不丢** —— 那是一次基础设施故障（磁盘忙、事务被打断），
+    // 下一轮完全可能读得出来，丢掉 journal 等于白白放弃唯一一份回滚依据。
+    const value = await journal.readCurrent();
+    if (value === null) return { recovered: false, operationId: null };
+
+    let record: SyncLocalApplyJournalV1;
+    try {
+      record = await validateSyncLocalApplyJournal(value);
+    } catch (parseError) {
+      await discardUnreadableJournal(journal, parseError);
+      options.onJournalDiscarded?.(parseError);
+      return { recovered: false, operationId: null };
+    }
 
     await restoreAllSteps(localState, record.preimage);
     await clearJournalAfterRollback(journal, record);
     return { recovered: true, operationId: record.operationId };
-  }
-
-  async function apply(snapshot: SyncDataSnapshot): Promise<SyncLocalApplyResult> {
-    await recover();
-
-    const before = await localState.captureUndoPreimage();
-    const plan = localState.stage(snapshot, before);
-    return runJournaledMutation(before, async (operationId) => {
-      for (const step of plan.applySteps) {
-        await localState.applyStep(step, plan);
-      }
-      return { operationId };
-    });
   }
 
   async function runMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -178,7 +194,7 @@ export function createSyncLocalApplyCoordinator(
     }
   }
 
-  return { apply, recover, runMutation };
+  return { recover, runMutation };
 }
 
 async function createJournalRecord(
@@ -238,6 +254,27 @@ async function clearJournalForCommit(
       );
     }
     throw clearError;
+  }
+}
+
+/**
+ * 丢弃一份**读不出来**的 journal。
+ *
+ * ⚠️ 这里的 `catch` 不是「尽力而为」——清不掉就是清不掉，不能再往上抛：
+ * 调用方已经确定这份 journal 回滚不出来，为「清理失败」再阻塞一次，
+ * 等于用同一个理由把系统锁死第二遍。失败只记在上报里。
+ */
+async function discardUnreadableJournal(
+  journal: SyncLocalApplyJournalPort,
+  parseError: unknown,
+): Promise<void> {
+  try {
+    await journal.clearCurrent();
+  } catch (clearError) {
+    console.log('[Zai++] unreadable sync journal could not be cleared', {
+      parseError,
+      clearError,
+    });
   }
 }
 

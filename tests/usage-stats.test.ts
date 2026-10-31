@@ -9,7 +9,12 @@ import {
   getUsageSummary,
   recordUsageTurn,
 } from '../core/usage/store';
-import type { UsageTurnRecord } from '../core/usage/types';
+import {
+  decodeUsageRecords,
+  encodeUsageRecords,
+} from '../core/usage/codec';
+import { normalizeUsageTurnInput } from '../core/usage/input-codec';
+import type { UsageTurnInput, UsageTurnRecord } from '../core/usage/types';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -188,6 +193,66 @@ describe('usage store', () => {
     expect(summary.totalTokens).toBe(3302);
     expect(summary.serverTokenRecordCount).toBe(1);
     expect(summary.mostUsedModel?.modelLabel).toBe('glm-5.2');
+  });
+});
+
+describe('usage write/read round trip', () => {
+  /**
+   * 写入侧（`normalizeUsageTurnInput`）产出的记录，落盘后过的是**读回侧**
+   * （`decodeUsageRecords`）的判据。两侧对「什么是合法整数」的分歧，
+   * 表现是「写进去了、读不出来」—— 而读回失败会抛 `UsageStorageContractError`
+   * 并且**刻意不改写**存储 ⇒ 整份 usage 打不开。
+   *
+   * ⇒ 这里直接串起来跑，输入挑两侧判据最容易分叉的那几个边界。
+   */
+  const EDGE_INPUTS: Array<[string, Partial<UsageTurnInput>]> = [
+    ['fractional messageCount', { messageCount: 0.4 }],
+    ['messageCount above safe range', { messageCount: 2 ** 53 }],
+    ['totalTokens above safe range', { totalTokens: 2 ** 53 }],
+    ['totalTokens at the huge end', { totalTokens: 1e300 }],
+    ['totalTokens fractional', { totalTokens: 0.5 }],
+    ['assistantMessageId above safe range', { assistantMessageId: 2 ** 53 }],
+    ['assistantMessageId fractional', { assistantMessageId: 1.5 }],
+    ['zero totalTokens', { totalTokens: 0 }],
+    ['negative tps', { tps: -3 }],
+  ];
+
+  for (const [label, override] of EDGE_INPUTS) {
+    it(`keeps ${label} readable whenever the write side accepts it`, () => {
+      const input: UsageTurnInput = {
+        id: `edge-${label}`,
+        source: 'glm-web',
+        totalTokens: 100,
+        tokenSource: 'estimated',
+        tps: 10,
+        speedSource: 'estimated',
+        elapsedMs: 1_000,
+        ...override,
+      };
+      let written: UsageTurnRecord;
+      try {
+        written = normalizeUsageTurnInput(input);
+      } catch {
+        // 写入侧直接拒收也是合法结局 —— 只要它**不会**把读回侧收不了的值写进去。
+        return;
+      }
+      // 契约：写侧产出的东西，读回侧必须收。
+      expect(() => decodeUsageRecords(encodeUsageRecords([written]))).not.toThrow();
+    });
+  }
+
+  it('round-trips a plain record unchanged', () => {
+    const written = normalizeUsageTurnInput({
+      id: 'plain',
+      source: 'glm-web',
+      totalTokens: 120,
+      tokenSource: 'server',
+      tps: 30,
+      speedSource: 'estimated',
+      elapsedMs: 4_000,
+      messageCount: 2,
+    });
+    expect(decodeUsageRecords(encodeUsageRecords([written]))).toEqual([written]);
   });
 });
 

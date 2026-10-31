@@ -7,15 +7,18 @@ import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-sourc
 import {
   PRESETS_STORAGE_KEY,
   getAllPresets,
-  replacePresetCollectionForSyncApply,
 } from '../core/preset/store';
+import { presetCollectionCodec } from '../core/preset/codec';
+import { createChromeStorageSlot, createVersionedRepository } from '../core/persistence/versioned-repository';
 import {
   getSavedItemsState,
   saveSavedItem,
   type SavedItemsState,
 } from '../core/saved-items';
 import {
-  replaceSavedItemsStateForSyncApply,
+  savedItemsCodec,
+} from '../core/saved-items/codec';
+import {
   SAVED_ITEMS_STORAGE_KEY,
 } from '../core/saved-items/store';
 
@@ -55,16 +58,29 @@ afterEach(() => {
 
 describe('versioned browser repositories', () => {
   it('guards sync replacements against overwriting local future state', async () => {
+    const presetRepo = createVersionedRepository({
+      label: 'presets',
+      createDefault: () => [],
+      codec: presetCollectionCodec,
+      storage: createChromeStorageSlot(PRESETS_STORAGE_KEY),
+    });
+    const savedItemsRepo = createVersionedRepository({
+      label: 'savedItems',
+      createDefault: () => ({ schemaVersion: 1 as const, items: [] }),
+      codec: savedItemsCodec,
+      storage: createChromeStorageSlot(SAVED_ITEMS_STORAGE_KEY),
+    });
+
     storage[PRESETS_STORAGE_KEY] = PRESETS_REJECTED_STATES.future;
-    // 同步替换是「先解码、解码过了才允许覆盖」：本地若是更高版本的未来态，
+    // 替换是「先解码、解码过了才允许覆盖」：本地若是更高版本的未来态，
     // 直接覆盖等于把用户在新版本里造的数据回滚掉，所以必须在写之前抛错。
-    await expect(withSyncLocalStateLock(() => replacePresetCollectionForSyncApply(
+    await expect(withSyncLocalStateLock(() => presetRepo.replaceAlreadyLocked(
       structuredClone(PRESETS_V1_STATE) as never,
     ))).rejects.toThrow('presets.schemaVersion is not supported');
     expect(storage[PRESETS_STORAGE_KEY]).toBe(PRESETS_REJECTED_STATES.future);
 
     storage[SAVED_ITEMS_STORAGE_KEY] = SAVED_ITEMS_REJECTED_STATES.future;
-    await expect(withSyncLocalStateLock(() => replaceSavedItemsStateForSyncApply(
+    await expect(withSyncLocalStateLock(() => savedItemsRepo.replaceAlreadyLocked(
       structuredClone(SAVED_ITEMS_V1_STATE) as unknown as SavedItemsState,
     ))).rejects.toThrow('savedItems.schemaVersion is not supported');
     expect(storage[SAVED_ITEMS_STORAGE_KEY]).toBe(SAVED_ITEMS_REJECTED_STATES.future);
@@ -72,18 +88,24 @@ describe('versioned browser repositories', () => {
     expect(storageSet).not.toHaveBeenCalled();
   });
 
-  it('persists Saved Items sync envelope additive fields without truncation', async () => {
+  it('persists Saved Items envelope additive fields without truncation', async () => {
+    const savedItemsRepo = createVersionedRepository({
+      label: 'savedItems',
+      createDefault: () => ({ schemaVersion: 1 as const, items: [] }),
+      codec: savedItemsCodec,
+      storage: createChromeStorageSlot(SAVED_ITEMS_STORAGE_KEY),
+    });
     storage[SAVED_ITEMS_STORAGE_KEY] = SAVED_ITEMS_V1_STATE;
     const remoteState = {
       ...SAVED_ITEMS_V1_STATE,
       additiveSyncField: { preserve: true },
     };
 
-    await withSyncLocalStateLock(() => replaceSavedItemsStateForSyncApply(
+    await withSyncLocalStateLock(() => savedItemsRepo.replaceAlreadyLocked(
       structuredClone(remoteState) as unknown as SavedItemsState,
     ));
 
-    // 同步信封上本版本不认识的附加字段必须整段落盘：远端多写的字段被截掉，
+    // 信封上本版本不认识的附加字段必须整段落盘：多写的字段被截掉，
     // 下次回传时对方就拿到了「数据被吞」的假象。
     expect(storage[SAVED_ITEMS_STORAGE_KEY]).toEqual(remoteState);
   });
@@ -114,19 +136,13 @@ describe('versioned browser repositories', () => {
     }
   });
 
-  it('keeps sync apply delegating domain validation to the owning store', () => {
+  it('keeps the sync layer from re-implementing domain decoding', () => {
     const syncFiles = listTypeScriptFiles('core/sync').map(toPosixPath);
-    const applyPath = 'core/sync/local-state-browser.ts';
 
-    // 委托：sync 的 apply 步骤必须调 store 的 *ForSyncApply（它们内部才做
-    // 「先解码现有原始值、再写入」—— 那条保护就是上面 `guards sync replacements…` 测的东西）。
-    const calls = calledNames(readFileSync(applyPath, 'utf8'), applyPath);
-    expect([...calls]).toEqual(expect.arrayContaining([
-      'replacePresetCollectionForSyncApply',
-      'replaceSavedItemsStateForSyncApply',
-    ]));
-
-    // 不重复实现：sync 层不得自己再解码一份领域状态（两份实现必然分叉）。
+    // 恢复链按**原始字节**回滚（`OpaqueStoragePreimage`）—— sync 层不得自己再
+    // 解码一份领域状态：那边只要有第二份解码实现，就会与 store 的 codec 分叉，
+    // 而分叉时没有任何报错。
+    expect(syncFiles.length).toBeGreaterThan(0);
     for (const path of syncFiles) {
       const syncCalls = calledNames(readFileSync(path, 'utf8'), path);
       expect(syncCalls.has('decodePresetCollection'), path).toBe(false);
@@ -159,9 +175,7 @@ describe('versioned browser repositories', () => {
     // 后写的那次把先写的整条记录覆盖掉（丢更新）。
     randomUUID
       .mockReturnValueOnce('saved-a')
-      .mockReturnValueOnce('sync-a')
-      .mockReturnValueOnce('saved-b')
-      .mockReturnValueOnce('sync-b');
+      .mockReturnValueOnce('saved-b');
 
     await Promise.all([
       saveSavedItem({ kind: 'snippet', title: 'A', content: 'A', tags: [] }),
@@ -224,7 +238,6 @@ const PRESETS_REJECTED_STATES = {
 
 const SAVED_ITEM = {
   id: 'saved-contract-1',
-  syncId: 'sync-saved-contract-1',
   kind: 'snippet',
   title: 'Reusable contract prompt',
   content: 'Preserve this saved item.',

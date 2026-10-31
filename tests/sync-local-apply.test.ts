@@ -10,11 +10,9 @@ import {
   type SyncApplyStep,
   type SyncLocalApplyJournalPort,
   type SyncLocalApplyJournalV1,
-  type SyncLocalApplyPlan,
   type SyncLocalStatePort,
   type SyncUndoPreimageV1,
 } from '../core/sync/local-apply';
-import type { SyncDataSnapshot } from '../core/sync/snapshot';
 
 const BEFORE = {
   memoryRecords: [{ id: 7, syncId: 'before-memory', futureField: { keep: true } }],
@@ -27,23 +25,17 @@ const BEFORE = {
   },
 } satisfies SyncUndoPreimageV1;
 
-const SNAPSHOT: SyncDataSnapshot = {
-  memories: [],
-  skills: [],
-  skillSources: [],
-  presets: [],
-  savedItems: null,
-};
-
 describe('sync local apply coordinator', () => {
   it('commits only by deleting the prepared journal after deterministic writes', async () => {
     const state = new FakeLocalState();
     const journal = new FakeJournal();
     const coordinator = createCoordinator(state, journal);
 
-    await expect(coordinator.apply(SNAPSHOT)).resolves.toEqual({ operationId: 'operation-1' });
+    await expect(coordinator.runMutation(async () => {
+      for (const step of SYNC_APPLY_STEP_ORDER) state.values[step] = `target:${step}`;
+      return { operationId: 'operation-1' };
+    })).resolves.toEqual({ operationId: 'operation-1' });
 
-    expect(state.applyCalls).toEqual(SYNC_APPLY_STEP_ORDER);
     expect(state.restoreCalls).toEqual([]);
     expect(state.values).toEqual(targetValues());
     expect(journal.current).toBeNull();
@@ -83,20 +75,23 @@ describe('sync local apply coordinator', () => {
     expect(journal.current).toBeNull();
   });
 
-  for (const step of SYNC_APPLY_STEP_ORDER) {
-    for (const mode of ['before', 'after'] as const) {
-      it(`restores the exact preimage when ${step} fails ${mode} its write`, async () => {
-        const state = new FakeLocalState({ applyFailure: { step, mode } });
-        const journal = new FakeJournal();
-        const coordinator = createCoordinator(state, journal);
+  for (const mode of ['before', 'after'] as const) {
+    it(`restores the exact preimage when a failed mutation rolled back the ${mode}-write window`, async () => {
+      const state = new FakeLocalState();
+      const journal = new FakeJournal();
+      const coordinator = createCoordinator(state, journal);
 
-        await expect(coordinator.apply(SNAPSHOT)).rejects.toThrow(`apply ${step} ${mode}`);
+      await expect(coordinator.runMutation(async () => {
+        // 模拟「写了一半」：先改一个槽，再抛。
+        state.values.skills = 'target:skills';
+        if (mode === 'after') state.values.presets = 'target:presets';
+        throw new Error(`mutation failed ${mode}`);
+      })).rejects.toThrow(`mutation failed ${mode}`);
 
-        expect(state.values).toEqual(beforeValues());
-        expect(state.restoreCalls).toEqual([...SYNC_APPLY_STEP_ORDER].reverse());
-        expect(journal.current).toBeNull();
-      });
-    }
+      expect(state.values).toEqual(beforeValues());
+      expect(state.restoreCalls).toEqual([...SYNC_APPLY_STEP_ORDER].reverse());
+      expect(journal.current).toBeNull();
+    });
   }
 
   it('accepts a journal prepare that committed before the storage API threw', async () => {
@@ -104,7 +99,10 @@ describe('sync local apply coordinator', () => {
     const journal = new FakeJournal({ writeMode: 'after' });
     const coordinator = createCoordinator(state, journal);
 
-    await expect(coordinator.apply(SNAPSHOT)).resolves.toEqual({ operationId: 'operation-1' });
+    await expect(coordinator.runMutation(async () => {
+      for (const step of SYNC_APPLY_STEP_ORDER) state.values[step] = `target:${step}`;
+      return { operationId: 'operation-1' };
+    })).resolves.toEqual({ operationId: 'operation-1' });
     expect(state.values).toEqual(targetValues());
     expect(journal.current).toBeNull();
   });
@@ -114,8 +112,8 @@ describe('sync local apply coordinator', () => {
     const journal = new FakeJournal({ writeMode: 'before' });
     const coordinator = createCoordinator(state, journal);
 
-    await expect(coordinator.apply(SNAPSHOT)).rejects.toThrow('journal write before');
-    expect(state.applyCalls).toEqual([]);
+    await expect(coordinator.runMutation(async () => state.values.skills = 'target:skills'))
+      .rejects.toThrow('journal write before');
     expect(state.restoreCalls).toEqual([]);
     expect(state.values).toEqual(beforeValues());
     expect(journal.current).toBeNull();
@@ -126,10 +124,8 @@ describe('sync local apply coordinator', () => {
     const journal = new FakeJournal({ writeMode: 'before', failReadAt: 2 });
     const coordinator = createCoordinator(state, journal);
 
-    await expect(coordinator.apply(SNAPSHOT)).rejects.toThrow(
-      'Sync local journal prepare outcome is unknown',
-    );
-    expect(state.applyCalls).toEqual([]);
+    await expect(coordinator.runMutation(async () => state.values.skills = 'target:skills'))
+      .rejects.toThrow('Sync local journal prepare outcome is unknown');
     expect(state.restoreCalls).toEqual([]);
     expect(state.values).toEqual(beforeValues());
   });
@@ -139,7 +135,10 @@ describe('sync local apply coordinator', () => {
     const journal = new FakeJournal({ clearModes: ['after'] });
     const coordinator = createCoordinator(state, journal);
 
-    await expect(coordinator.apply(SNAPSHOT)).resolves.toEqual({ operationId: 'operation-1' });
+    await expect(coordinator.runMutation(async () => {
+      for (const step of SYNC_APPLY_STEP_ORDER) state.values[step] = `target:${step}`;
+      return { operationId: 'operation-1' };
+    })).resolves.toEqual({ operationId: 'operation-1' });
     expect(state.values).toEqual(targetValues());
     expect(state.restoreCalls).toEqual([]);
     expect(journal.current).toBeNull();
@@ -150,7 +149,10 @@ describe('sync local apply coordinator', () => {
     const journal = new FakeJournal({ clearModes: ['before', 'success'] });
     const coordinator = createCoordinator(state, journal);
 
-    await expect(coordinator.apply(SNAPSHOT)).rejects.toThrow('journal clear before');
+    await expect(coordinator.runMutation(async () => {
+      for (const step of SYNC_APPLY_STEP_ORDER) state.values[step] = `target:${step}`;
+      return { operationId: 'operation-1' };
+    })).rejects.toThrow('journal clear before');
     expect(state.values).toEqual(beforeValues());
     expect(journal.current).toBeNull();
   });
@@ -160,9 +162,10 @@ describe('sync local apply coordinator', () => {
     const journal = new FakeJournal({ clearModes: ['before'], failReadAt: 2 });
     const coordinator = createCoordinator(state, journal);
 
-    await expect(coordinator.apply(SNAPSHOT)).rejects.toBeInstanceOf(
-      SyncLocalCommitOutcomeUnknownError,
-    );
+    await expect(coordinator.runMutation(async () => {
+      for (const step of SYNC_APPLY_STEP_ORDER) state.values[step] = `target:${step}`;
+      return { operationId: 'operation-1' };
+    })).rejects.toBeInstanceOf(SyncLocalCommitOutcomeUnknownError);
     expect(state.values).toEqual(targetValues());
     expect(state.restoreCalls).toEqual([]);
     expect(journal.current).not.toBeNull();
@@ -172,15 +175,25 @@ describe('sync local apply coordinator', () => {
     for (const mode of ['before', 'after'] as const) {
       it(`keeps the journal when rollback restore of ${failedRestoreStep} fails ${mode} commit`, async () => {
         const state = new FakeLocalState({
-          applyFailure: { step: 'savedItems', mode: 'after' },
           restoreFailure: { step: failedRestoreStep, mode },
         });
         const journal = new FakeJournal();
         const coordinator = createCoordinator(state, journal);
 
-        await expect(coordinator.apply(SNAPSHOT)).rejects.toThrow('rollback is incomplete');
+        await expect(coordinator.runMutation(async () => {
+          for (const step of SYNC_APPLY_STEP_ORDER) state.values[step] = `target:${step}`;
+          throw new Error('mutation failed');
+        })).rejects.toThrow('rollback is incomplete');
         expect(state.restoreCalls).toEqual([...SYNC_APPLY_STEP_ORDER].reverse());
         expect(journal.current).not.toBeNull();
+        // ⚠️ **两档要分别钉住** —— 不加这两条断言时，`before` 与 `after` 只在
+        // `FakeLocalState` 内部有区别，用例本身看不出来（变异注入「before 不抛」
+        // 能不能被抓住全靠这条）。判据是手写期望，不是「与另一档相等」：
+        //   before ⇒ 抛在赋值**之前**，该槽仍是上一次的值；
+        //   after  ⇒ 抛在赋值**之后**，该槽已经是回滚后的值。
+        expect(state.values[failedRestoreStep]).toBe(
+          mode === 'before' ? `target:${failedRestoreStep}` : `before:${failedRestoreStep}`,
+        );
 
         state.restoreFailure = null;
         const restarted = createCoordinator(state, journal, 'operation-2');
@@ -212,19 +225,27 @@ describe('sync local apply coordinator', () => {
     }
   });
 
-  it('retries the same snapshot idempotently after a rolled-back failure', async () => {
-    const state = new FakeLocalState({ applyFailure: { step: 'presets', mode: 'after' } });
+  it('retries the same mutation idempotently after a rolled-back failure', async () => {
+    const state = new FakeLocalState();
     const journal = new FakeJournal();
     const coordinator = createCoordinator(state, journal);
 
-    await expect(coordinator.apply(SNAPSHOT)).rejects.toThrow('apply presets after');
-    state.applyFailure = null;
-    await expect(coordinator.apply(SNAPSHOT)).resolves.toEqual({ operationId: 'operation-1' });
+    let shouldFail = true;
+    await expect(coordinator.runMutation(async () => {
+      state.values.presets = 'target:presets';
+      if (shouldFail) throw new Error('preset write failed');
+    })).rejects.toThrow('preset write failed');
+
+    shouldFail = false;
+    await expect(coordinator.runMutation(async () => {
+      for (const step of SYNC_APPLY_STEP_ORDER) state.values[step] = `target:${step}`;
+      return { operationId: 'operation-1' };
+    })).resolves.toEqual({ operationId: 'operation-1' });
     expect(state.values).toEqual(targetValues());
     expect(journal.current).toBeNull();
   });
 
-  it('preserves corrupt and future journals without touching local state', async () => {
+  it('discards an unreadable journal and continues instead of blocking every locked operation', async () => {
     const invalidRecords: unknown[] = [
       { ...(await createJournal('future')), schemaVersion: 2 },
       { ...(await createJournal('checksum')), preimageChecksum: { algorithm: 'sha256', value: '0'.repeat(64) } },
@@ -235,51 +256,58 @@ describe('sync local apply coordinator', () => {
       const state = new FakeLocalState();
       const journal = new FakeJournal();
       journal.current = structuredClone(record);
-      const coordinator = createCoordinator(state, journal);
+      const discarded: unknown[] = [];
+      const coordinator = createCoordinator(state, journal, 'operation-1', {
+        onJournalDiscarded: (error) => discarded.push(error),
+      });
 
-      await expect(coordinator.recover()).rejects.toThrow();
+      // 丢弃 + 继续，**不抛** —— 抛出去会让 `withSyncLocalStateLock` 前置的
+      // 恢复步骤拦住之后每一次加锁操作（含只读入口）。
+      await expect(coordinator.recover()).resolves.toEqual({
+        recovered: false,
+        operationId: null,
+      });
       expect(state.values).toEqual(beforeValues());
       expect(state.restoreCalls).toEqual([]);
-      expect(journal.current).toEqual(record);
+      // journal 被清掉了 ⇒ 下一轮不再卡住。
+      expect(journal.current).toBeNull();
+      expect(discarded).toHaveLength(1);
+      await expect(coordinator.recover()).resolves.toEqual({
+        recovered: false,
+        operationId: null,
+      });
     }
+  });
+
+  it('keeps a journal whose read failed, so a later attempt can still roll it back', async () => {
+    const state = new FakeLocalState();
+    const journal = new FakeJournal({ failReadAt: 1 });
+    journal.current = await createJournal('pending');
+    const discarded: unknown[] = [];
+    const coordinator = createCoordinator(state, journal, 'operation-1', {
+      onJournalDiscarded: (error) => discarded.push(error),
+    });
+
+    await expect(coordinator.recover()).rejects.toThrow('journal read failed');
+    // ⚠️ 读失败是基础设施故障、不是「读不出来」，journal 必须留着。
+    expect(journal.current).not.toBeNull();
+    expect(discarded).toEqual([]);
   });
 });
 
 class FakeLocalState implements SyncLocalStatePort {
   values = beforeValues();
-  applyCalls: SyncApplyStep[] = [];
   restoreCalls: SyncApplyStep[] = [];
-  applyFailure: { step: SyncApplyStep; mode: 'before' | 'after' } | null;
   restoreFailure: { step: SyncApplyStep; mode: 'before' | 'after' } | null;
 
   constructor(options: {
-    applyFailure?: { step: SyncApplyStep; mode: 'before' | 'after' };
     restoreFailure?: { step: SyncApplyStep; mode: 'before' | 'after' };
   } = {}) {
-    this.applyFailure = options.applyFailure ?? null;
     this.restoreFailure = options.restoreFailure ?? null;
   }
 
   async captureUndoPreimage() {
     return structuredClone(BEFORE);
-  }
-
-  stage(snapshot: SyncDataSnapshot): SyncLocalApplyPlan {
-    return {
-      snapshot: snapshot as SyncLocalApplyPlan['snapshot'],
-      applySteps: [...SYNC_APPLY_STEP_ORDER],
-    };
-  }
-
-  async applyStep(step: SyncApplyStep) {
-    this.applyCalls.push(step);
-    if (this.applyFailure?.step === step && this.applyFailure.mode === 'before') {
-      throw new Error(`apply ${step} before`);
-    }
-    this.values[step] = `target:${step}`;
-    if (this.applyFailure?.step === step && this.applyFailure.mode === 'after') {
-      throw new Error(`apply ${step} after`);
-    }
   }
 
   async restoreStep(step: SyncApplyStep) {
@@ -339,10 +367,12 @@ function createCoordinator(
   state: FakeLocalState,
   journal: FakeJournal,
   operationId = 'operation-1',
+  options: { onJournalDiscarded?: (error: unknown) => void } = {},
 ) {
   return createSyncLocalApplyCoordinator(state, journal, {
     now: () => 1_700_000_000_000,
     createOperationId: () => operationId,
+    ...options,
   });
 }
 

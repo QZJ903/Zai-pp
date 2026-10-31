@@ -47,7 +47,6 @@ describe('Memory historical IndexedDB compatibility', () => {
     const {
       captureRawMemoryRecordsForSyncRecovery,
       db,
-      replaceAllMemories,
       restoreRawMemoryRecordsForSyncRecovery,
     } = await import('../core/memory/store');
     const memories = db.table(MEMORY_TABLE_NAME);
@@ -92,7 +91,10 @@ describe('Memory historical IndexedDB compatibility', () => {
 
     await memories.update(MEMORY_V4_RECORD.id, { recoveryFutureField: { preserve: true } } as never);
     const rawBefore = await captureRawMemoryRecordsForSyncRecovery();
-    await replaceAllMemories([{ ...MEMORY_V4_RECORD, id: 99, tags: [...MEMORY_V4_RECORD.tags] }]);
+    // 「整表替换」这条写路径已随云同步落地链删除；这里改用直接写来造出
+    // 「落盘内容与 rawBefore 不同」的前置状态，恢复路径本身不受影响。
+    await memories.clear();
+    await memories.add({ ...MEMORY_V4_RECORD, id: 99, tags: [...MEMORY_V4_RECORD.tags] });
     await restoreRawMemoryRecordsForSyncRecovery(rawBefore);
     expect(await memories.orderBy('id').toArray()).toEqual(rawBefore);
     const { id: _id, ...newMemory } = MEMORY_V3_PROJECT_RECORD;

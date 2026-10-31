@@ -68,8 +68,13 @@ export function createVersionedRepository<T>(
     readAlreadyLocked,
     async replaceAlreadyLocked(value) {
       // A replacement is allowed only after the current raw value has been
-      // decoded successfully. Sync apply can therefore replace legal legacy
-      // state, but never overwrite an unsupported future/corrupt value.
+      // decoded successfully, so a legal legacy state can be replaced while an
+      // unsupported future/corrupt value never gets overwritten.
+      //
+      // ⚠️ No production caller today (the snapshot-apply path is gone), but it
+      // is the only implementation of that invariant and the tests use it as
+      // their observation surface — removing it would weaken them rather than
+      // simplify the runtime.
       await readAlreadyLocked();
       await writeAfterReadAlreadyLocked(value);
     },

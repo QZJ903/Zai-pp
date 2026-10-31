@@ -71,7 +71,15 @@ export default function MemoryPage() {
 
       {showForm && (
         <div className="animate-slide-down">
+          {/*
+            `key` is load-bearing: the form seeds its state from props once, at
+            mount. The form and the list render side by side, so editing A and
+            then clicking edit on B changes props without remounting — the form
+            would still hold A's content while saving into B's id. Changing the
+            key forces a remount and also clears the validation message.
+          */}
           <MemoryForm
+            key={editingMemory?.id ?? 'new'}
             initial={editingMemory}
             onSave={save}
             onCancel={cancelEdit}

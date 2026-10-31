@@ -1,9 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  createChromeStorageSlot,
+  createVersionedRepository,
+} from '../core/persistence/versioned-repository';
+import { withSyncLocalStateLock } from '../core/persistence/local-state-lock';
+import {
+  presetCollectionCodec,
+} from '../core/preset/codec';
+import { skillSourceCollectionCodec, userSkillCollectionCodec } from '../core/skill/codec';
+import {
   ACTIVE_PRESET_STORAGE_KEY,
   PRESETS_STORAGE_KEY,
   getActivePreset,
-  replacePresetCollectionForSyncApply,
   savePreset,
   setActivePresetId,
   stageDeletePresetAlreadyLocked,
@@ -11,8 +19,6 @@ import {
 import {
   SKILLS_STORAGE_KEY,
   SKILL_SOURCES_STORAGE_KEY,
-  replaceAllCustomSkillsForSyncApply,
-  replaceAllSkillSourcesForSyncApply,
   saveSkill,
   setSkillsEnabled,
   stageDeleteSkillAlreadyLocked,
@@ -114,7 +120,7 @@ describe('remaining local-state stores', () => {
     }]);
   });
 
-  it('cleans every linked source when historical duplicate Skill names are deleted', async () => {
+  it('refuses to delete a name that matches multiple records instead of removing them all', async () => {
     const secondSource = {
       ...LEGACY_GITHUB_SKILL_SOURCE,
       id: 'github:owner/other:main:.',
@@ -132,6 +138,9 @@ describe('remaining local-state stores', () => {
         path: 'other/SKILL.md',
       },
     };
+    // 历史重名数据：一条 custom 与两条 remote 共用同一个名字。
+    // 删除按名字匹配 ⇒ 一次会命中三条，还会把它们从各自的 source 里摘掉。
+    // 正确行为是**拒绝**，把「该删哪一条」交回给人。
     storage[SKILLS_STORAGE_KEY] = [
       { ...LEGACY_CUSTOM_SKILL, name: LEGACY_REMOTE_SKILL.name },
       LEGACY_REMOTE_SKILL,
@@ -139,14 +148,24 @@ describe('remaining local-state stores', () => {
     ];
     storage[SKILL_SOURCES_STORAGE_KEY] = [LEGACY_GITHUB_SKILL_SOURCE, secondSource];
 
+    await expect(stageDeleteSkillAlreadyLocked(LEGACY_REMOTE_SKILL.name))
+      .rejects.toThrow('cannot be deleted safely');
+    expect(storage[SKILLS_STORAGE_KEY]).toHaveLength(3);
+    expect(storage[SKILL_SOURCES_STORAGE_KEY]).toEqual([LEGACY_GITHUB_SKILL_SOURCE, secondSource]);
+  });
+
+  it('deletes a uniquely-named Skill together with its source link', async () => {
+    storage[SKILLS_STORAGE_KEY] = [LEGACY_CUSTOM_SKILL, LEGACY_REMOTE_SKILL];
+    storage[SKILL_SOURCES_STORAGE_KEY] = [LEGACY_GITHUB_SKILL_SOURCE];
+
     const operation = await stageDeleteSkillAlreadyLocked(LEGACY_REMOTE_SKILL.name);
     await operation();
 
-    expect(storage[SKILLS_STORAGE_KEY]).toEqual([]);
+    expect(storage[SKILLS_STORAGE_KEY]).toEqual([{ ...LEGACY_CUSTOM_SKILL, enabled: true }]);
     expect(storage[SKILL_SOURCES_STORAGE_KEY]).toEqual([]);
   });
 
-  it('rejects ambiguous duplicate-custom Skill edits without dropping released records', async () => {
+  it('rejects a self-named collision with an imported Skill instead of the ambiguous-custom path', async () => {
     const duplicateSkills = [
       { ...LEGACY_CUSTOM_SKILL, additiveField: { record: 1 } },
       { ...LEGACY_CUSTOM_SKILL, additiveField: { record: 2 } },
@@ -160,18 +179,69 @@ describe('remaining local-state stores', () => {
     expect(storage[SKILLS_STORAGE_KEY]).toEqual(duplicateSkills);
   });
 
-  it('applies name-keyed enabled changes to every released duplicate Skill record', async () => {
+  it('rejects a custom Skill whose name an imported Skill already uses', async () => {
+    storage[SKILLS_STORAGE_KEY] = [LEGACY_REMOTE_SKILL];
+
+    await expect(saveSkill({
+      ...LEGACY_CUSTOM_SKILL,
+      name: LEGACY_REMOTE_SKILL.name,
+    })).rejects.toThrow('Skill name is already used');
+    expect(storage[SKILLS_STORAGE_KEY]).toEqual([LEGACY_REMOTE_SKILL]);
+  });
+
+  it('rejects a custom Skill whose name a built-in Skill already uses', async () => {
+    storage[SKILLS_STORAGE_KEY] = [];
+
+    await expect(saveSkill({ ...LEGACY_CUSTOM_SKILL, name: 'shell' }))
+      .rejects.toThrow('Skill name is already used');
+    expect(storage[SKILLS_STORAGE_KEY]).toEqual([]);
+  });
+
+  it('rejects renaming a custom Skill onto a name an imported Skill already uses', async () => {
+    storage[SKILLS_STORAGE_KEY] = [LEGACY_CUSTOM_SKILL, LEGACY_REMOTE_SKILL];
+
+    await expect(saveSkill(
+      { ...LEGACY_CUSTOM_SKILL, name: LEGACY_REMOTE_SKILL.name },
+      LEGACY_CUSTOM_SKILL.name,
+    )).rejects.toThrow('Skill name is already used');
+    expect(storage[SKILLS_STORAGE_KEY]).toEqual([LEGACY_CUSTOM_SKILL, LEGACY_REMOTE_SKILL]);
+  });
+
+  it('still lets a Skill be edited in place while keeping its own name', async () => {
+    storage[SKILLS_STORAGE_KEY] = [LEGACY_CUSTOM_SKILL, LEGACY_REMOTE_SKILL];
+
+    await saveSkill({ ...LEGACY_CUSTOM_SKILL, description: 'edited in place' }, LEGACY_CUSTOM_SKILL.name);
+
+    expect(storage[SKILLS_STORAGE_KEY]).toEqual([
+      { ...LEGACY_CUSTOM_SKILL, description: 'edited in place', enabled: true },
+      LEGACY_REMOTE_SKILL,
+    ]);
+  });
+
+  it('applies name-keyed enabled changes to the matching released Skill record', async () => {
     storage[SKILLS_STORAGE_KEY] = [
       { ...LEGACY_CUSTOM_SKILL, enabled: false, additiveField: { record: 1 } },
-      { ...LEGACY_CUSTOM_SKILL, enabled: false, additiveField: { record: 2 } },
     ];
 
     await setSkillsEnabled([{ name: LEGACY_CUSTOM_SKILL.name, enabled: true }]);
 
     expect(storage[SKILLS_STORAGE_KEY]).toEqual([
       { ...LEGACY_CUSTOM_SKILL, enabled: true, additiveField: { record: 1 } },
-      { ...LEGACY_CUSTOM_SKILL, enabled: true, additiveField: { record: 2 } },
     ]);
+  });
+
+  it('refuses to toggle a name that matches multiple records', async () => {
+    const duplicates = [
+      { ...LEGACY_CUSTOM_SKILL, enabled: false, additiveField: { record: 1 } },
+      { ...LEGACY_CUSTOM_SKILL, enabled: false, additiveField: { record: 2 } },
+    ];
+    storage[SKILLS_STORAGE_KEY] = duplicates;
+
+    // 界面上每条技能是一张独立卡片，点其中一张的开关时预期只有它变；
+    // 按名字全改会让「我点了 A，B 也跟着变了」。
+    await expect(setSkillsEnabled([{ name: LEGACY_CUSTOM_SKILL.name, enabled: true }]))
+      .rejects.toThrow('cannot be toggled safely');
+    expect(storage[SKILLS_STORAGE_KEY]).toEqual(duplicates);
   });
 
   it('rejects malformed enabled mutations without defaulting them into a write', async () => {
@@ -230,7 +300,10 @@ describe('remaining local-state stores', () => {
     expect(storage[PRESETS_STORAGE_KEY]).toBeNull();
   });
 
-  it('does not let a valid sync snapshot overwrite unsupported local raw state', async () => {
+  it('does not let a repository replacement overwrite unsupported local raw state', async () => {
+    // 「先解码、解码过了才允许覆盖」这条不变式原来由 `*ForSyncApply` 一族承载，
+    // 那族随云同步落地链删除；它现在只活在 `createVersionedRepository` 里，
+    // 所以直接把被测对象换成那一层 —— 断言不变（未来态/损坏态不许被覆盖）。
     const futureSkills = { schemaVersion: 99, records: [] };
     const corruptSources = null;
     const futurePresets = { schemaVersion: 99, records: [] };
@@ -238,9 +311,34 @@ describe('remaining local-state stores', () => {
     storage[SKILL_SOURCES_STORAGE_KEY] = corruptSources;
     storage[PRESETS_STORAGE_KEY] = futurePresets;
 
-    await expect(replaceAllCustomSkillsForSyncApply([LEGACY_CUSTOM_SKILL])).rejects.toThrow();
-    await expect(replaceAllSkillSourcesForSyncApply([LEGACY_GITHUB_SKILL_SOURCE])).rejects.toThrow();
-    await expect(replacePresetCollectionForSyncApply([LEGACY_PRESET])).rejects.toThrow();
+    const skillRepo = createVersionedRepository({
+      label: 'skills',
+      createDefault: () => [],
+      codec: userSkillCollectionCodec,
+      storage: createChromeStorageSlot(SKILLS_STORAGE_KEY),
+    });
+    const sourceRepo = createVersionedRepository({
+      label: 'skillSources',
+      createDefault: () => [],
+      codec: skillSourceCollectionCodec,
+      storage: createChromeStorageSlot(SKILL_SOURCES_STORAGE_KEY),
+    });
+    const presetRepo = createVersionedRepository({
+      label: 'presets',
+      createDefault: () => [],
+      codec: presetCollectionCodec,
+      storage: createChromeStorageSlot(PRESETS_STORAGE_KEY),
+    });
+
+    await expect(withSyncLocalStateLock(
+      () => skillRepo.replaceAlreadyLocked([LEGACY_CUSTOM_SKILL]),
+    )).rejects.toThrow();
+    await expect(withSyncLocalStateLock(
+      () => sourceRepo.replaceAlreadyLocked([LEGACY_GITHUB_SKILL_SOURCE]),
+    )).rejects.toThrow();
+    await expect(withSyncLocalStateLock(
+      () => presetRepo.replaceAlreadyLocked([LEGACY_PRESET]),
+    )).rejects.toThrow();
 
     expect(storage[SKILLS_STORAGE_KEY]).toEqual(futureSkills);
     expect(storage[SKILL_SOURCES_STORAGE_KEY]).toBeNull();

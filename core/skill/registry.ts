@@ -6,6 +6,7 @@ import {
   createVersionedRepository,
 } from '../persistence/versioned-repository';
 import { BUILTIN_SKILLS, getLocalizedBuiltinSkills } from './builtin';
+import { slugifySkillName } from './slug';
 import {
   decodeGitHubSkillSource,
   decodeSkillImportSource,
@@ -74,13 +75,35 @@ export async function getUserSkillsAlreadyLocked(): Promise<Skill[]> {
 
 export async function saveSkill(skill: Skill, previousName?: string): Promise<void> {
   await withSyncLocalStateLock(async () => {
-    if (previousName !== undefined) requireNonEmptyString(previousName, 'Previous Skill name');
+    if (previousName !== undefined) requireNonEmptyString(previousName, 'Skill previousName');
     const incomingSkill = decodeUserSkill({
       ...skill,
       source: 'custom',
       enabled: skill.enabled === undefined ? true : skill.enabled,
     }, 'skill');
     const userSkills = await getUserSkillsAlreadyLocked();
+    /**
+     * ⚠️⚠️ **名字在整个技能库里必须唯一，不能只跟 custom 那一档比。**
+     *
+     * 名字是**身份**：激活走 `/name`，`resolveSkills` 只按名字取第一条
+     * （列表顺序 builtin → custom → remote），同名时后面的那条**永远调不到**。
+     *
+     * 判重分两步：
+     * ① **builtin / remote 占用的名字一律拒绝** —— 它们不在本次替换范围内，
+     *    写进去就是造出一条重名（`previousName` 除外：那条是**正在被替换的自己**）；
+     * ② **custom 里同名的那条属于「替换」而不是「冲突」** —— 这是
+     *    「按名字 upsert」的既有语义（保存技能草稿就靠它）。
+     *    同名 custom 多于一条时由下面的 `matchingIndexes` 判 ambiguous。
+     */
+    const replacedName = previousName ?? null;
+    const collides = [...BUILTIN_SKILLS, ...userSkills].some((candidate) => (
+      candidate.source !== 'custom'
+      && candidate.name === incomingSkill.name
+      && candidate.name !== replacedName
+    ));
+    if (collides) {
+      throw new Error(`Skill name is already used: ${incomingSkill.name}`);
+    }
     const custom = userSkills.filter((s) => s.source === 'custom');
     const namesToReplace = new Set<string>([incomingSkill.name]);
     if (previousName) namesToReplace.add(previousName);
@@ -119,6 +142,18 @@ export async function stageDeleteSkillAlreadyLocked(
     getAllSkillSourcesAlreadyLocked(),
   ]);
   const removedSkills = userSkills.filter((skill) => skill.name === name);
+  /**
+   * ⚠️⚠️ **重名时必须拒绝删除，不能「按名字全删」。**
+   *
+   * 落库顺序是 builtin → custom → remote，而删除只按名字匹配 ⇒ 重名时
+   * 一次会删掉**多条**，并且把 remote 那条从它所属 source 的
+   * `skillPaths` / `importedSkillNames` 里一并摘掉（等于「删一个自建技能，
+   * 把导入技能也删了」）。`saveSkill` 现在会拒绝产生新的重名，但**已有的**重名
+   * 数据仍可能存在于本机，这里必须给一个明确的失败而不是静默误删。
+   */
+  if (removedSkills.length > 1) {
+    throw new Error(`Skill name matches multiple records and cannot be deleted safely: ${name}`);
+  }
   const nextSkills = userSkills.filter((skill) => skill.name !== name);
   const nextSources = removedSkills.reduce((current, skill) => (
     skill.source === 'remote' && skill.remote
@@ -134,15 +169,6 @@ export async function stageDeleteSkillAlreadyLocked(
       await skillSourceRepository.writeAfterReadAlreadyLocked(nextSources);
     }
   };
-}
-
-export async function replaceAllCustomSkills(skills: Skill[]): Promise<void> {
-  await withSyncLocalStateLock(() => replaceAllCustomSkillsForSyncApply(skills));
-}
-
-export async function replaceAllCustomSkillsForSyncApply(skills: Skill[]): Promise<void> {
-  const userSkills = userSkillCollectionCodec.decode(skills, 'skills');
-  await userSkillRepository.replaceAlreadyLocked(userSkills);
 }
 
 export async function setSkillEnabled(name: string, enabled: boolean): Promise<void> {
@@ -166,6 +192,20 @@ async function setSkillsEnabledUnlocked(updates: Array<{ name: string; enabled: 
   }
 
   const userSkills = await getUserSkillsAlreadyLocked();
+  /**
+   * ⚠️ **重名时拒绝开关，不能「按名字全改」。**
+   *
+   * 界面上每条技能是一张独立的卡片，用户点其中一张的开关时预期只有它变。
+   * 而落库顺序是 builtin → custom → remote、开关只按名字匹配 ⇒ 重名时一次改掉多条，
+   * 用户看到的是「我点了 A，B 也跟着变了」。`saveSkill` 现在会拒绝产生新的重名，
+   * 这条守的是**已经在库里的**重名数据。
+   */
+  for (const name of updateByName.keys()) {
+    const matches = userSkills.filter((skill) => skill.name === name);
+    if (matches.length > 1) {
+      throw new Error(`Skill name matches multiple records and cannot be toggled safely: ${name}`);
+    }
+  }
   let userSkillsChanged = false;
   const matchedNames = new Set<string>();
   const next = userSkills.map((skill) => {
@@ -198,11 +238,6 @@ export async function getSkillSourceById(sourceId: string): Promise<SkillImportS
 export async function getGitHubSkillSourceById(sourceId: string): Promise<GitHubSkillSource | null> {
   const source = await getSkillSourceById(sourceId);
   return source?.provider === 'github' ? source : null;
-}
-
-export async function getLocalSkillSourceById(sourceId: string): Promise<LocalSkillSource | null> {
-  const source = await getSkillSourceById(sourceId);
-  return source?.provider === 'local' ? (source as LocalSkillSource) : null;
 }
 
 export async function updateGitHubSkillSourceLastCheckedAt(
@@ -339,15 +374,6 @@ export async function stageDeleteSkillSourceAlreadyLocked(
   };
 }
 
-export async function replaceAllSkillSources(sources: SkillImportSource[]): Promise<void> {
-  await withSyncLocalStateLock(() => replaceAllSkillSourcesForSyncApply(sources));
-}
-
-export async function replaceAllSkillSourcesForSyncApply(sources: SkillImportSource[]): Promise<void> {
-  const decoded = decodeSkillSourceCollection(sources, 'skillSources');
-  await skillSourceRepository.replaceAlreadyLocked(decoded);
-}
-
 function createUniqueSkillName(preferred: string, occupiedNames: Set<string>): string {
   const normalized = normalizeSkillName(preferred);
   if (!occupiedNames.has(normalized)) return normalized;
@@ -359,7 +385,7 @@ function createUniqueSkillName(preferred: string, occupiedNames: Set<string>): s
 }
 
 function normalizeSkillName(name: string): string {
-  const normalized = name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const normalized = slugifySkillName(name);
   if (!normalized) throw new Error('Skill name cannot be empty');
   return normalized;
 }
