@@ -120,12 +120,21 @@ describe('readTextFileWindow (宿主防 OOM)', () => {
     expect(totalChars).toBe(10);
   });
 
-  it('start 超出文件字符数返回空且 totalChars 正确', () => {
+  it('start 恰好等于文件字符数时返回空窗口，不是错误', () => {
     const s = 'abc';
     const path = makeTempFile(s);
-    const { content, totalChars } = readTextFileWindow(path, 100, 10);
+    const { content, totalChars, charsRead } = readTextFileWindow(path, 3, 10);
     expect(content).toBe('');
+    expect(charsRead).toBe(0);
     expect(totalChars).toBe(3);
+  });
+
+  // 越界与「读到末尾」是两件事：都回空串的话，调用方分不出「文件读完了」和
+  // 「偏移写错了」，会当成一次成功读取。
+  it('start 超出文件字符数时抛错，而不是返回空串的成功结果', () => {
+    const s = 'abc';
+    const path = makeTempFile(s);
+    expect(() => readTextFileWindow(path, 100, 10)).toThrow(/past the end/);
   });
 
   it('中等大文件（约 5MB）按需读取不整文件入内存，窗口正确', () => {
@@ -286,6 +295,26 @@ describe('callLocalFileReadAuto (扩展侧 auto 续读)', () => {
     ]);
     const result = await callLocalFileReadAuto(server, transport, { call } as never);
     expect(result.ok).toBe(false);
+  });
+
+  // The host answers a request-level failure (a `start` past the end of the file, an
+  // unreadable path) with `isError` + a text block and no `structuredContent`. The
+  // generic "could not parse the window" message drops the only sentence that says
+  // what actually went wrong.
+  it('surfaces the host error text when a window comes back as isError', async () => {
+    const transport = makeTransport([
+      {
+        isError: true,
+        content: [{ type: 'text', text: 'start 999999 is past the end of /x (10 characters).' }],
+      } as McpCallToolResult,
+    ]);
+    const overrunCall = { name: 'local_file_read', payload: { path: '/x', start: 999_999 } } as never;
+
+    const result = await callLocalFileReadAuto(server, transport, { call: overrunCall } as never);
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain('start 999999 is past the end of /x');
+    expect(result.detail).not.toContain('无法从工具结果解析窗口内容');
   });
 
   it('单窗调用失败时 fail-closed', async () => {

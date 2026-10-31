@@ -24,6 +24,12 @@ const MAX_LOCAL_RESOURCE_FILES_PER_SKILL = 16;
 const MAX_LOCAL_RESOURCE_BYTES_PER_SKILL = 100_000;
 const MAX_LOCAL_RESOURCE_FILE_BYTES = 40_000;
 const MAX_LOCAL_TOTAL_CONTENT_BYTES = 420_000;
+// A single native message is capped at 1 MiB and a preview has to leave room for
+// the JSON-RPC envelope, the source metadata and the warning list. The budget is
+// measured against the **serialized** response, because how much a Skill costs
+// after JSON escaping depends on its content (quotes/backslashes double, control
+// characters grow six-fold).
+const MAX_LOCAL_PREVIEW_FRAME_BYTES = 900_000;
 const LOCAL_TEXT_RESOURCE_EXTENSIONS = new Set(['.md', '.txt', '.yaml', '.yml', '.json', '.tex']);
 const LOCAL_SCRIPT_EXTENSIONS = new Set(['.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.sh', '.bash', '.zsh', '.ps1', '.rb', '.pl', '.php', '.lua', '.r']);
 const DEFAULT_SHELL = platform() === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/sh';
@@ -244,6 +250,7 @@ export {
   LOCAL_TEXT_RESOURCE_EXTENSIONS,
   MAX_LOCAL_FILE_READ_CHARS,
   MAX_LOCAL_FILE_WRITE_BYTES,
+  MAX_LOCAL_PREVIEW_FRAME_BYTES,
   MAX_LOCAL_RESOURCE_BYTES_PER_SKILL,
   MAX_LOCAL_RESOURCE_FILE_BYTES,
   MAX_LOCAL_RESOURCE_FILES_PER_SKILL,

@@ -38,7 +38,14 @@ export function createNativeEnvelopeDispatcher({
       // native responses by id, and an id:null error for a valid request would
       // otherwise hang until the request timeout instead of failing fast.
       const requestId = envelope?.message?.id ?? null;
-      await channel.writeMessage(jsonRpcError(requestId, -32603, message || 'Internal error'));
+      try {
+        await channel.writeMessage(jsonRpcError(requestId, -32603, message || 'Internal error'));
+      } catch (writeError) {
+        // The reply itself can fail (channel closed, or even the error text is too
+        // large to fit a frame). The request is already failed; do not let the
+        // failed reply become an unhandled rejection.
+        logger.logLine(`Failed to deliver error response: ${writeError instanceof Error ? writeError.message : String(writeError)}`);
+      }
     }
   }
 

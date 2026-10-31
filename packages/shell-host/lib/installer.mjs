@@ -117,7 +117,47 @@ function removeWindowsRegistry(browser) {
 
 function readManifest(manifestPath) {
   if (!existsSync(manifestPath)) return null;
-  return JSON.parse(readFileSync(manifestPath, 'utf8'));
+  let raw;
+  try {
+    raw = readFileSync(manifestPath, 'utf8');
+  } catch (error) {
+    throw new Error(`Unreadable Shell Host manifest at ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    // Same shape as the log-metadata error: name the file and say what is wrong,
+    // instead of surfacing a bare JSON.parse SyntaxError to the user.
+    throw new Error(`Invalid Shell Host manifest at ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// Windows registers every browser from one shared runtime directory, so removing it
+// would silently break whichever browsers are still installed.
+//
+// A manifest that exists but cannot be parsed is treated as **still using** the
+// runtime: "cannot confirm" must not delete files the other browser may need. The
+// uninstall command prints a note so the damaged manifest does not go unnoticed.
+function otherBrowserManifestsUsingInstallDir(browser, installDir) {
+  const stillUsing = [];
+  const unreadable = [];
+  for (const name of SUPPORTED_BROWSER_NAMES) {
+    if (name === browser) continue;
+    const manifestPath = getManifestPath(name);
+    if (!existsSync(manifestPath)) continue;
+    let manifest;
+    try {
+      manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    } catch {
+      unreadable.push(manifestPath);
+      stillUsing.push(name);
+      continue;
+    }
+    if (typeof manifest?.path === 'string' && resolve(dirname(manifest.path)) === resolve(installDir)) {
+      stillUsing.push(name);
+    }
+  }
+  return { stillUsing, unreadable };
 }
 
 function install(args) {
@@ -175,9 +215,21 @@ function status(args) {
 
 function uninstall(args) {
   const manifestPath = getManifestPath(args.browser);
+  const installDir = getHostInstallDir();
   rmSync(manifestPath, { force: true });
   if (platform() === 'win32') removeWindowsRegistry(args.browser);
-  rmSync(getHostInstallDir(), { recursive: true, force: true });
+
+  const { stillUsing, unreadable } = otherBrowserManifestsUsingInstallDir(args.browser, installDir);
+  if (unreadable.length > 0) {
+    // "Cannot confirm" must not delete files another browser may need.
+    for (const path of unreadable) {
+      console.log(`Kept the shared host runtime: could not read ${path}, so it may still be in use.`);
+    }
+  } else if (stillUsing.length > 0) {
+    console.log(`Kept the shared host runtime because these browsers still use it: ${stillUsing.join(', ')}.`);
+  } else {
+    rmSync(installDir, { recursive: true, force: true });
+  }
   console.log(`Removed Shell Native Host for ${args.browser}.`);
 }
 

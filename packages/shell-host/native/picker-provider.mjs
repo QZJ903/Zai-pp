@@ -123,8 +123,15 @@ function ensureTrailingPathSeparator(value) {
   return value.endsWith('/') ? value : `${value}/`;
 }
 
-function normalizeFolderPickerError(error) {
+export function normalizeFolderPickerError(error) {
   const message = error instanceof Error ? error.message : String(error);
+  // `execFile` reports the exit code on the error object, not inside the message
+  // (`message` is only `Command failed: <cmd>`). Without this check a user pressing
+  // Cancel sees the whole command line — including the base64 payload — instead of
+  // "cancelled".
+  if (error && typeof error === 'object' && error.code === 2) {
+    return 'Folder selection was cancelled.';
+  }
   return /User canceled|cancelled|canceled|exit code 2|The operation couldn.?t be completed/i.test(message)
     ? 'Folder selection was cancelled.'
     : message;

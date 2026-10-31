@@ -173,7 +173,13 @@ export function readTextFileWindow(filePath, startChar, maxChars) {
       if (charPos >= startChar) break;
     }
     if (charPos < startChar) {
-      return { content: '', totalChars: getTotalCharCount(fd, totalBytes, filePath, stat), charsRead: 0 };
+      const totalChars = getTotalCharCount(fd, totalBytes, filePath, stat);
+      // Past the end is not "read zero characters" — say so, otherwise the caller
+      // gets an empty success it cannot tell apart from an empty window.
+      if (startChar > totalChars) {
+        throw new Error(`start ${startChar} is past the end of ${filePath} (${totalChars} characters).`);
+      }
+      return { content: '', totalChars, charsRead: 0 };
     }
     // 达上限时仅淘汰最旧条目（FIFO），避免一次性清空所有热缓存导致频繁全扫。
     if (readWindowPosCache.size >= MAX_WINDOW_POS_CACHE) {

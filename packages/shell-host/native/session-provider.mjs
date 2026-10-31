@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir, platform } from 'node:os';
+import { StringDecoder } from 'node:string_decoder';
 import {
   DEFAULT_SHELL,
   DEFAULT_TIMEOUT_MS,
@@ -48,6 +49,7 @@ export function createSessionProvider({ logLine }) {
     const shellArgs = createPersistentShellArgs(requestedShell);
 
     let child;
+    let spawnError = null;
     try {
       // Run the session shell as its own process group leader so we can tear down
       // the whole tree — shell + resident grandchildren — with a single
@@ -78,6 +80,23 @@ export function createSessionProvider({ logLine }) {
       };
     }
 
+    // A failed spawn emits 'error' and never 'exit'. Without a listener that
+    // becomes an uncaught exception which takes the whole host down and leaves
+    // every other session's shell orphaned. Wait for 'spawn' so the response is
+    // only sent once the process actually exists.
+    const spawned = await new Promise((resolveSpawn) => {
+      const onSpawn = () => { child.off('error', onError); resolveSpawn(true); };
+      const onError = (error) => { child.off('spawn', onSpawn); spawnError = error; resolveSpawn(false); };
+      child.once('spawn', onSpawn);
+      child.once('error', onError);
+    });
+    if (!spawned) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `Failed to start persistent shell (${shellBin}): ${spawnError?.message ?? 'spawn failed'}` }],
+      };
+    }
+
     const sessionId = randomUUID();
     const session = {
       id: sessionId,
@@ -95,6 +114,15 @@ export function createSessionProvider({ logLine }) {
     // not attach a background drain listener — runInSession takes exclusive
     // ownership of stdout/stderr for the duration of each command. A second 'data'
     // listener here would race with it and swallow the marker bytes.
+    //
+    // stdin still needs an 'error' listener: writing to a shell that already died
+    // surfaces as an asynchronous EPIPE, and without a listener that becomes an
+    // uncaught exception which takes the whole host down — every open session with it.
+    child.stdin.on('error', (error) => {
+      logLine(`Session ${sessionId} stdin failed: ${error instanceof Error ? error.message : String(error)}`);
+      session.closed = true;
+      if (shellSessions.has(sessionId)) closeShellSession(sessionId, 'stdin_failed');
+    });
     child.on('exit', () => {
       session.closed = true;
       if (shellSessions.has(sessionId)) closeShellSession(sessionId, 'process_exited');
@@ -217,12 +245,10 @@ export function createSessionProvider({ logLine }) {
       const markerLine = buildSessionEndMarkerLine(token);
       const markerText = `${SESSION_MARKER_PREFIX}${token}__:`;
 
-      // One write: the user's command, then the exit-code marker. POSIX shells
-      // execute line by line; PowerShell in `-Command -` mode reads the whole
-      // stdin script but still runs statements in order.
-      const script = platform() === 'win32'
-        ? `${command}\n${markerLine}\n`
-        : `${command}\n${markerLine}\n`;
+      // One write: the user's command, then the exit-code marker. Both shells run
+      // the statements in order — POSIX line by line, PowerShell reads the whole
+      // stdin script in `-Command -` mode and still executes sequentially.
+      const script = `${command}\n${markerLine}\n`;
       try {
         child.stdin.write(script);
       } catch (err) {
@@ -230,8 +256,14 @@ export function createSessionProvider({ logLine }) {
         return;
       }
 
-      const stdoutChunks = [];
-      let stdoutBytes = 0;
+      // Decode incrementally: a UTF-8 character can straddle two pipe reads, and
+      // decoding each chunk on its own would turn the split character into U+FFFD.
+      const stdoutDecoder = new StringDecoder('utf8');
+      const stderrDecoder = new StringDecoder('utf8');
+      let stdoutText = '';
+      // Latches once anything was dropped. Once the buffer is capped, re-measuring
+      // it can never show an overflow again, so the flag has to be sticky.
+      let stdoutOverflowed = false;
       let stderrText = '';
       let stderrBytes = 0;
       let resolved = false;
@@ -252,25 +284,20 @@ export function createSessionProvider({ logLine }) {
 
       function onStderr(chunk) {
         if (stderrBytes < SESSION_MAX_OUTPUT_BYTES) {
-          const remaining = SESSION_MAX_OUTPUT_BYTES - stderrBytes;
-          stderrText += chunk.toString('utf8').slice(0, remaining);
+          stderrText = truncateUtf8Head(stderrText + stderrDecoder.write(chunk), SESSION_MAX_OUTPUT_BYTES);
         }
         stderrBytes += chunk.length;
       }
 
       function onStdout(chunk) {
-        const text = chunk.toString('utf8');
+        const text = stdoutDecoder.write(chunk);
         // Scan for the marker line; accumulate everything before it as stdout.
-        const combined = stdoutChunks.concat([text]).join('');
+        const combined = stdoutText + text;
         const markerIdx = combined.indexOf(markerText);
         if (markerIdx === -1) {
           // Not yet; keep what we have under the byte budget.
-          stdoutChunks.length = 0;
-          stdoutChunks.push(combined);
-          stdoutBytes = Buffer.byteLength(combined, 'utf8');
-          if (stdoutBytes > SESSION_MAX_OUTPUT_BYTES) {
-            stdoutChunks[0] = stdoutChunks[0].slice(0, SESSION_MAX_OUTPUT_BYTES);
-          }
+          if (Buffer.byteLength(combined, 'utf8') > SESSION_MAX_OUTPUT_BYTES) stdoutOverflowed = true;
+          stdoutText = truncateUtf8Head(combined, SESSION_MAX_OUTPUT_BYTES);
           return;
         }
 
@@ -287,7 +314,10 @@ export function createSessionProvider({ logLine }) {
         const exitMatch = exitToken.match(/^(-?\d+)/);
         const exitCode = exitMatch ? Number.parseInt(exitMatch[1], 10) : 0;
 
-        const stdout = before.replace(/\r?\n$/, '');
+        // The marker can arrive in the same read as the tail of a large output, so
+        // this branch has to enforce the budget too — not just the "not yet" one.
+        if (Buffer.byteLength(before, 'utf8') > SESSION_MAX_OUTPUT_BYTES) stdoutOverflowed = true;
+        const stdout = truncateUtf8Head(before.replace(/\r?\n$/, ''), SESSION_MAX_OUTPUT_BYTES);
         resolve({
           command,
           shell: session.shell,
@@ -295,7 +325,7 @@ export function createSessionProvider({ logLine }) {
           exitCode: timedOut ? -1 : exitCode,
           stdout,
           stderr: stderrText,
-          truncated: stdoutBytes > SESSION_MAX_OUTPUT_BYTES || stderrBytes > SESSION_MAX_OUTPUT_BYTES,
+          truncated: stdoutOverflowed || stderrBytes > SESSION_MAX_OUTPUT_BYTES,
           timedOut,
         });
       }
@@ -315,9 +345,9 @@ export function createSessionProvider({ logLine }) {
           shell: session.shell,
           session_id: session.id,
           exitCode: typeof exitCode === 'number' ? exitCode : 1,
-          stdout: stdoutChunks.join('').replace(/\r?\n$/, ''),
+          stdout: truncateUtf8Head(stdoutText.replace(/\r?\n$/, ''), SESSION_MAX_OUTPUT_BYTES),
           stderr: stderrText,
-          truncated: stdoutBytes > SESSION_MAX_OUTPUT_BYTES || stderrBytes > SESSION_MAX_OUTPUT_BYTES,
+          truncated: stdoutOverflowed || stderrBytes > SESSION_MAX_OUTPUT_BYTES,
           timedOut: false,
           shellExited: true,
         });
@@ -351,4 +381,16 @@ export function createSessionProvider({ logLine }) {
       }
     },
   };
+}
+
+// Keep at most `maxBytes` of UTF-8 behind the head of `text` without splitting a
+// character. `String.prototype.slice` counts UTF-16 units, so a "byte budget"
+// applied with it lets multi-byte output through several times over — and cutting
+// mid-character would decode to U+FFFD.
+function truncateUtf8Head(text, maxBytes) {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= maxBytes) return text;
+  let end = Math.max(0, Math.floor(maxBytes));
+  while (end > 0 && (bytes[end] & 0xC0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
 }

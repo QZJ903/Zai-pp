@@ -2,6 +2,7 @@ import { basename, dirname, join } from 'node:path';
 import {
   LOCAL_SCRIPT_EXTENSIONS,
   LOCAL_TEXT_RESOURCE_EXTENSIONS,
+  MAX_LOCAL_PREVIEW_FRAME_BYTES,
   MAX_LOCAL_RESOURCE_BYTES_PER_SKILL,
   MAX_LOCAL_RESOURCE_FILE_BYTES,
   MAX_LOCAL_RESOURCE_FILES_PER_SKILL,
@@ -65,31 +66,182 @@ function scanLocalSkillFolder(rootInput, selectedPaths) {
     warnings.push(`Found ${allSkillPaths.length} Skills; preview is limited to ${MAX_LOCAL_SKILLS}.`);
   }
 
-  const limitedPaths = allSkillPaths.slice(0, MAX_LOCAL_SKILLS);
-  const selected = selectedPaths
-    ? limitedPaths.filter(path => selectedPaths.has(path))
-    : limitedPaths;
-  if (selectedPaths && selected.length === 0) {
+  // Filter first, then cap: a path the caller named explicitly must not be lost to
+  // the preview limit — otherwise the import path reports "not found" for a Skill
+  // that is right there on disk.
+  const requestedPaths = selectedPaths
+    ? allSkillPaths.filter(path => selectedPaths.has(path))
+    : allSkillPaths;
+  if (selectedPaths && requestedPaths.length === 0) {
     throw new Error('Selected local Skill paths were not found under the root path.');
+  }
+  const selected = requestedPaths.slice(0, MAX_LOCAL_SKILLS);
+  if (selectedPaths && requestedPaths.length > MAX_LOCAL_SKILLS) {
+    warnings.push(`Selected ${requestedPaths.length} Skills; preview is limited to ${MAX_LOCAL_SKILLS}.`);
   }
 
   let totalContentBytes = 0;
   const skills = [];
+  const unreadablePaths = [];
   for (const skillPath of selected) {
-    const item = readLocalSkill(rootPath, skillPath, totalContentBytes);
+    let item;
+    try {
+      item = readLocalSkill(rootPath, skillPath, totalContentBytes);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      // One unreadable Skill must not abort a whole-folder preview — but an explicit
+      // selection must not degrade into "path not found" either. The import path
+      // turns a missing entry into `Selected local Skill paths were not found`, which
+      // points the user at the path when the real cause is the file itself.
+      if (selectedPaths) {
+        throw new Error(`Selected local Skill could not be read (${skillPath}): ${reason}`);
+      }
+      unreadablePaths.push(skillPath);
+      warnings.push(`${skillPath} was skipped: ${reason}`);
+      continue;
+    }
     totalContentBytes += item.contentBytes;
     skills.push(item.skill);
     warnings.push(...item.warnings);
   }
+  // Whole-folder preview where nothing at all could be read is not a useful empty
+  // result — say so instead of returning an empty list.
+  if (skills.length === 0 && unreadablePaths.length > 0) {
+    throw new Error(`No local Skill could be read under ${rootPath}: ${unreadablePaths.join(', ')}`);
+  }
+
+  const displayName = basename(rootPath) || rootPath;
+  const trimmed = fitSkillsToPreviewFrame({
+    rootPath,
+    displayName,
+    directoryName: displayName,
+    skills,
+    warnings,
+    requestedExplicitly: Boolean(selectedPaths),
+  });
 
   return {
     rootPath,
-    displayName: basename(rootPath) || rootPath,
-    directoryName: basename(rootPath) || rootPath,
-    skills,
-    warnings: dedupeStrings(warnings),
-    truncated: allSkillPaths.length > MAX_LOCAL_SKILLS || warnings.some(warning => warning.includes('content budget')),
+    displayName,
+    directoryName: displayName,
+    skills: trimmed.skills,
+    warnings: dedupeStrings(trimmed.warnings),
+    truncated: allSkillPaths.length > MAX_LOCAL_SKILLS
+      || requestedPaths.length > MAX_LOCAL_SKILLS
+      || unreadablePaths.length > 0
+      || trimmed.omittedPaths.length > 0
+      || trimmed.truncatedBodyPaths.length > 0
+      || warnings.some(warning => warning.includes('content budget')),
   };
+}
+
+/**
+ * Keep the response inside the native frame budget.
+ *
+ * The constraint is the serialized frame, and how much a Skill costs after JSON
+ * escaping depends on its content — quotes and backslashes double, control
+ * characters grow six-fold. A fixed byte budget on the raw text would either drop
+ * Skills that would have fit or still overflow on escape-heavy content, so this
+ * measures the real cost and drops from the tail.
+ *
+ * A preview (no explicit request) drops the overflow and says so. An explicit
+ * request is not silently shortened: the caller asked for those Skills by name, and
+ * the import path turns missing entries into "path not found".
+ */
+function fitSkillsToPreviewFrame({ rootPath, displayName, directoryName, skills, warnings, requestedExplicitly }) {
+  const frameCost = (list, warningList) => Buffer.byteLength(JSON.stringify({
+    rootPath,
+    displayName,
+    directoryName,
+    skills: list,
+    warnings: warningList,
+    truncated: true,
+  }), 'utf8');
+
+  const total = frameCost(skills, warnings);
+  if (total <= MAX_LOCAL_PREVIEW_FRAME_BYTES) {
+    return { skills, warnings, omittedPaths: [], truncatedBodyPaths: [] };
+  }
+
+  if (requestedExplicitly) {
+    throw new Error(
+      `Selected ${skills.length} Skills would produce a ${total} byte response, over the ${MAX_LOCAL_PREVIEW_FRAME_BYTES} byte preview limit. Import them in smaller batches.`,
+    );
+  }
+
+  // Cost each Skill once, then drop from the tail while the running total is over
+  // budget. Re-serializing the whole payload per drop would be quadratic.
+  const nextWarnings = [...warnings];
+  const skillCosts = skills.map(skill => Buffer.byteLength(JSON.stringify(skill), 'utf8') + 1);
+  let running = total;
+  const omittedPaths = [];
+  while (skills.length > 1 && running > MAX_LOCAL_PREVIEW_FRAME_BYTES) {
+    const index = skills.length - 1;
+    const dropped = skills.pop();
+    running -= skillCosts[index];
+    omittedPaths.unshift(dropped.path);
+    const before = Buffer.byteLength(JSON.stringify(nextWarnings), 'utf8');
+    nextWarnings.push(`${dropped.path} was omitted because the preview response would exceed the size limit.`);
+    running += Buffer.byteLength(JSON.stringify(nextWarnings), 'utf8') - before;
+  }
+
+  // A single Skill can still be over budget on its own (large body plus escape-heavy
+  // supporting files). Truncating that one is better than returning a frame the
+  // browser would reject — and the note belongs on the Skill itself so it survives
+  // into the import record.
+  const truncatedBodyPaths = [];
+  if (skills.length === 1 && running > MAX_LOCAL_PREVIEW_FRAME_BYTES) {
+    const only = skills[0];
+    const note = `${only.path} was truncated because the preview response would exceed the size limit.`;
+    // Both notes go in before measuring, so the amount shaved off the body covers
+    // the bytes the notes themselves add.
+    const before = Buffer.byteLength(JSON.stringify(nextWarnings), 'utf8');
+    nextWarnings.push(note);
+    running += Buffer.byteLength(JSON.stringify(nextWarnings), 'utf8') - before;
+    const costBefore = Buffer.byteLength(JSON.stringify(only), 'utf8');
+    only.warnings = [...(only.warnings ?? []), note];
+    running += Buffer.byteLength(JSON.stringify(only), 'utf8') - costBefore;
+    const shrinkBy = Math.max(0, running - MAX_LOCAL_PREVIEW_FRAME_BYTES);
+    only.content = truncateJsonBudget(only.content, shrinkBy);
+    only.bodyBytes = Buffer.byteLength(only.content, 'utf8');
+    truncatedBodyPaths.push(only.path);
+
+    // The body is not the only thing a Skill carries: `scriptFiles` / `omittedFiles`
+    // are path lists with no count cap, so emptying the body can still leave the
+    // frame over budget. Returning that would report success for a response that is
+    // silently cut off downstream — fail loudly instead.
+    const settled = Buffer.byteLength(JSON.stringify({
+      rootPath,
+      displayName,
+      directoryName,
+      skills,
+      warnings: nextWarnings,
+      truncated: true,
+    }), 'utf8');
+    if (settled > MAX_LOCAL_PREVIEW_FRAME_BYTES) {
+      throw new Error(
+        `${only.path} cannot be reduced under the ${MAX_LOCAL_PREVIEW_FRAME_BYTES} byte preview limit (${settled} bytes remain after truncating the body). This Skill lists too many supporting or script files — import it from a folder with fewer files.`,
+      );
+    }
+  }
+
+  return { skills, warnings: nextWarnings, omittedPaths, truncatedBodyPaths };
+}
+
+// Shrink `text` so its JSON-escaped form loses at least `shrinkBy` bytes, without
+// splitting a character. Binary-search the longest prefix that fits.
+function truncateJsonBudget(text, shrinkBy) {
+  const escapedBytes = (value) => Buffer.byteLength(JSON.stringify(value), 'utf8') - 2;
+  const target = Math.max(0, escapedBytes(text) - shrinkBy);
+  if (escapedBytes(text) <= target) return text;
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (escapedBytes(text.slice(0, mid)) <= target) low = mid;
+    else high = mid - 1;
+  }
+  return text.slice(0, low);
 }
 
 function findLocalSkillPaths(rootPath) {

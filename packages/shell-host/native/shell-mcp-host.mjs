@@ -40,6 +40,32 @@ const dispatcher = createNativeEnvelopeDispatcher({
   hostEnvironmentReady,
 });
 
+let shuttingDown = false;
+
+// Last-resort teardown. `main()` only covers the normal end-of-input path and
+// promise rejections; an uncaught exception or an explicit process.exit skips it
+// and every persistent session's shell would keep running with no owner.
+// `process.on('exit')` fires on all of those, and shutdown() is idempotent.
+function shutdownOnce(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    sessionProvider.shutdown();
+  } catch (error) {
+    logger.logLine(`Shutdown failed (${reason}): ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+process.on('exit', () => shutdownOnce('process_exit'));
+process.on('uncaughtException', (error) => {
+  logger.logLine(`Uncaught exception: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+  shutdownOnce('uncaught_exception');
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  logger.logLine(`Unhandled rejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`);
+});
+
 async function main() {
   while (true) {
     const envelope = await channel.readMessage();
@@ -47,12 +73,12 @@ async function main() {
     dispatcher.scheduleEnvelope(envelope);
   }
   await dispatcher.settle();
-  sessionProvider.shutdown();
+  shutdownOnce('end_of_input');
 }
 
 main().catch(error => {
   const message = error instanceof Error ? error.message : String(error);
   logger.logLine(`Fatal: ${message}`);
-  sessionProvider.shutdown();
+  shutdownOnce('fatal');
   process.exit(1);
 });

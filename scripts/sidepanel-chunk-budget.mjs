@@ -113,7 +113,18 @@ const BASELINE = Object.freeze({
   // ⚠️ **删掉「项目」功能后实测 raw 334010 / gzip 105575** —— **−6409 raw / −1438 gzip**。
   // 来源：`content.projectPanel.*` 21 键 + `sidepanel.projectsPage.*` 28 键（中英各一份）
   // 与 `prompt.projectContext*` 3 键全部移除，侧边栏项目页 chunk 也不再进初始 shell。
-  initialShell: { raw: 334_010, gzip: 105_575 },
+  //
+  // ⚠️⚠️ **2026-10-31 十八测（四批审计修复收口到 2.15.62）**：实测
+  // raw **335812** / gzip **106170** —— **+1802 raw / +595 gzip**。
+  // 来源是**净增 5 对键**（新增 11、删掉 6，中英各一份），且其中两条值本身较长：
+  // `nameTaken`（技能名判重，U7）、`keepaliveDescription`（保活开关的用户说明）。
+  // 其余 9 条是失败分档：`recordMissing` / `memoryTruncated` / `invalidContentTooLong`
+  // / `scheduleTooSparse` / `pageHandshakeTimeout` / `pageContentScriptMissing`
+  // / `generalDescription` / `keepaliveSectionDescription` / `aboutTagline`。
+  // ⚠️ **这 11 条没有一条是装饰性文案** —— 它们各自对应一条新加的失败分档或用户开关说明，
+  // 删掉就会退回到「静默失败」或「界面没说清」。所以这是**有意增长**，回写基线。
+  // ⚠️ 量级核对：净增 5 键 × 约 276 raw ≈ 1380，实测 1802，多出的 ~420 来自长句值。
+  initialShell: { raw: 335_812, gzip: 106_170 },
   // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
   // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
   // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，

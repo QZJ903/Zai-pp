@@ -536,6 +536,10 @@ function execProcess(command, args, { cwd, env, input, timeoutMs, maxOutputBytes
       });
     });
 
+    // Writing to a child that already exited surfaces as an asynchronous EPIPE on
+    // stdin; without a listener it becomes an uncaught exception that kills the
+    // host. The outcome is already reported by the 'close' handler below.
+    child.stdin.on('error', () => undefined);
     if (input != null) {
       child.stdin.end(input);
     } else {

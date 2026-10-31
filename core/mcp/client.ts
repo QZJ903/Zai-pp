@@ -294,6 +294,21 @@ export async function callLocalFileReadAuto(
       | undefined;
     const content = typeof data?.content === 'string' ? data.content : undefined;
     if (typeof content !== 'string') {
+      // The host reports request-level failures (a `start` past the end of the file,
+      // an unreadable path) as `isError` + a text block, with no `structuredContent`.
+      // Turning that into "could not parse the window" throws away the only sentence
+      // that says what actually went wrong.
+      if (windowResult.isError === true) {
+        return buildAutoReadResult(
+          server,
+          options,
+          startedAt,
+          contents,
+          totalChars,
+          false,
+          `第 ${contents.length + 1} 窗读取失败: ${extractMcpErrorMessage(windowResult, '未知原因')}`,
+        );
+      }
       return buildAutoReadResult(server, options, startedAt, contents, totalChars, false, '无法从工具结果解析窗口内容');
     }
     contents.push(content);
@@ -492,9 +507,14 @@ export function unwrapMcpResponse<TResult>(
   if (response.error) {
     throw new McpProtocolError(errorCode, response.error.message, {
       retryable: response.error.code === -32000 || response.error.code === -32603,
+      // `data` is only carried when the server actually sent one. Writing
+      // `data: undefined` would leave the key present with an undefined value,
+      // which the tool-history codec rejects (`undefined` is not a JSON value) —
+      // and that rejection replaces the real provider error with a confusing
+      // "history could not be persisted" failure.
       details: {
         jsonRpcCode: response.error.code,
-        data: response.error.data,
+        ...(response.error.data === undefined ? {} : { data: response.error.data }),
         externalOutcome: 'confirmed',
         retrySafe: false,
       },

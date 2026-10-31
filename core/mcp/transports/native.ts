@@ -35,7 +35,8 @@ interface NativePortState {
 const MAX_NATIVE_MESSAGE_BYTES = 1 * 1024 * 1024;
 // local_file_write content cap with headroom for the JSON-RPC envelope. Keep
 // models writing in chunks: write the first section, then append the rest
-// with append=true.
+// with append=true. This is a *content* cap — it does not replace the envelope
+// measurement below, because escaping can inflate the payload past the frame cap.
 const MAX_LOCAL_FILE_WRITE_BYTES = 900_000;
 
 const nativePortStates = new Map<string, NativePortState>();
@@ -224,7 +225,8 @@ async function createNativeEnvelope(
 function assertNativePayloadSize(nativeHost: string, envelope: McpNativeEnvelope): void {
   if (nativeHost !== SHELL_MCP_NATIVE_HOST) return;
   const writeContent = getLocalFileWriteContent(envelope.message);
-  if (writeContent !== null) {
+  const writesFile = writeContent !== null;
+  if (writesFile) {
     const contentBytes = new Blob([writeContent]).size;
     if (contentBytes > MAX_LOCAL_FILE_WRITE_BYTES) {
       throw new McpTransportError(
@@ -233,16 +235,20 @@ function assertNativePayloadSize(nativeHost: string, envelope: McpNativeEnvelope
         { retryable: false },
       );
     }
-    if (contentBytes <= MAX_LOCAL_FILE_WRITE_BYTES && contentBytes > MAX_NATIVE_MESSAGE_BYTES / 2) {
-      return;
-    }
   }
 
+  // The content cap above is not enough on its own: JSON escaping inflates it
+  // (quotes and backslashes double, control characters grow six-fold), so a
+  // payload that passes the content check can still overflow the frame. Always
+  // measure the real envelope — a frame past the cap is rejected by the browser
+  // and the host exits, which drops every open shell session.
   const envelopeBytes = new Blob([JSON.stringify(envelope)]).size;
   if (envelopeBytes > MAX_NATIVE_MESSAGE_BYTES) {
     throw new McpTransportError(
       'mcp_native_payload_too_large',
-      `Native MCP request is too large (${formatBytes(envelopeBytes)} > ${formatBytes(MAX_NATIVE_MESSAGE_BYTES)}). Reduce the request size or split the work into smaller tool calls.`,
+      writesFile
+        ? `Native MCP request is too large after escaping (${formatBytes(envelopeBytes)} > ${formatBytes(MAX_NATIVE_MESSAGE_BYTES)}). Write the file in chunks: send the first section now, then call local_file_write again with append=true for each remaining section.`
+        : `Native MCP request is too large (${formatBytes(envelopeBytes)} > ${formatBytes(MAX_NATIVE_MESSAGE_BYTES)}). Reduce the request size or split the work into smaller tool calls.`,
       { retryable: false },
     );
   }
