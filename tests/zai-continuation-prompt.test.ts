@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildZaiContinuationPrompt,
+  buildZaiMisuseNudgePrompt,
   buildZaiNudgePrompt,
   isZaiContinuationPrompt,
   ZAI_INLINE_AGENT_FULL_TOOL_RESULT_WINDOW,
 } from '../core/zai/continuation';
+import { ZAI_TEMPLATE_OPENING_LIST } from '../core/zai/continuation-marker';
 import type { ToolExecutionRecord } from '../core/types';
 
 const NO_EXECUTIONS = [] as const;
@@ -56,6 +58,14 @@ describe('zai continuation prompt recognition', () => {
     expect(isZaiContinuationPrompt(prompt)).toBe(true);
   });
 
+  it('recognizes the misuse-correction template', () => {
+    // ⚠️ **三个 builder 一个都不能漏** —— 严格档认的是「模板的固定开场话术」，
+    // 而这句话是**每个 builder 各自写的**。漏一个 ⇒ 那一轮不被认作续跑轮 ⇒
+    // 下一轮走原生轮分支、新建一个 `taskId` 为 null 的循环覆盖掉它，后台任务收不到终态。
+    const prompt = buildZaiMisuseNudgePrompt('do the thing', 'shell_exec', undefined, NO_EXECUTIONS);
+    expect(isZaiContinuationPrompt(prompt)).toBe(true);
+  });
+
   it('does not treat an ordinary user prompt as a continuation', () => {
     expect(isZaiContinuationPrompt('帮我读一下这个文件')).toBe(false);
     expect(isZaiContinuationPrompt('<original_task>only one tag</original_task>')).toBe(false);
@@ -64,6 +74,74 @@ describe('zai continuation prompt recognition', () => {
 
   it('does not treat a prompt that merely quotes the tags as a continuation', () => {
     expect(isZaiContinuationPrompt('explain the tag <tool_results> in isolation')).toBe(false);
+  });
+
+  /**
+   * ⚠️⚠️ **这条守的是「用户的消息不能消失」** —— 只认结构标签时，用户只要在消息里
+   * 同时提到那两个标签就会被判成我们注入的模板：历史清洗把它换成不可见占位符、
+   * 气泡隐藏给它加 `display:none` ⇒ **用户那条消息从对话里消失**，且没有任何东西会报错。
+   * 判据是「我们模板的固定开场话术」，用户不会说那句话。
+   */
+  it('does not treat a user message that mentions both tags as a continuation', () => {
+    expect(isZaiContinuationPrompt(
+      '请解释 <original_task> 和 <tool_results> 这两个标签是干什么的',
+    )).toBe(false);
+    expect(isZaiContinuationPrompt(
+      '我看了 `<original_task>` 和 `<tool_results>`，它们有什么区别？',
+    )).toBe(false);
+    // 反面对照：用户**贴一整段真模板**来问，仍然会命中 —— 这个面收窄不掉，如实钉住。
+    const pasted = buildZaiContinuationPrompt('任务', NO_EXECUTIONS, ['shell_exec']);
+    expect(isZaiContinuationPrompt(`我贴一段日志：\n${pasted}\n这段为什么被隐藏了？`)).toBe(true);
+  });
+
+  /**
+   * ⚠️⚠️ **反向守卫：清单里每一句都必须是「我们模板的身份句」，不能是用户会说的话。**
+   *
+   * 上面那几条守的是**正向**（改模板措辞 ⇒ 严格档失配 ⇒ 红）。而这一档要防的是**反向**：
+   * `ZAI_TEMPLATE_OPENINGS` 里**多认一句**普通的、用户可能打的字 ⇒ 那条用户消息会被
+   * 历史清洗换成占位符 + 气泡隐藏成 `display:none` ⇒ **从对话里消失且无报错**。
+   *
+   * 判据分两半：
+   * ① **每一句 + 两个标签 ⇒ true** —— 证明它确实在起「身份句」的作用（而不是加了一句没用过的）；
+   * ② **用户自然语言 + 同一句 + 两个标签 ⇒ false** —— 证明它前面加了正常的话也不会被误认。
+   *    ⚠️ 这是**弱判据**：`includes` 只看子串，用户只要原样打出那句就会被命中（与「贴整段真模板」
+   *    同一类残余，收窄不掉）。所以这一半钉的是「这句本身够不够独特」，不是「绝对不误判」。
+   */
+  it('每一句开场话术都是「模板身份句」，不是用户会说的话', () => {
+    const openings = ZAI_TEMPLATE_OPENING_LIST;
+    expect(openings.length, '清单不该是空的').toBeGreaterThan(0);
+    for (const opening of openings) {
+      // ① 它 + 两个结构标签 ⇒ 认得出（说明它确实在起作用）
+      expect(
+        isZaiContinuationPrompt(
+          `${opening}…\n<original_task>\n任务\n</original_task>\n<tool_results>\n[]\n</tool_results>`,
+        ),
+        `「${opening}」应当能单独撑起「这是我方模板」这个结论`,
+      ).toBe(true);
+      // ② 它不是任何一句常见用户提问的子串 —— 用一个**不含该句**的普通问法做对照
+      expect(
+        isZaiContinuationPrompt(
+          `帮我看看这个配置文件\n<original_task>\n任务\n</original_task>\n<tool_results>\n[]\n</tool_results>`,
+        ),
+        '不带开场话术、只提结构标签的文本必须判否（这是「用户消息不能消失」的底线）',
+      ).toBe(false);
+    }
+  });
+
+  it('清单里的每一句都真的出现在某个 builder 的输出里（没有僵尸条目）', () => {
+    // ⚠️ 反向的另一半：**只在清单里、没有任何 builder 产出过它** ⇒ 这一句是死判据
+    // （多认一句就多一分误判风险，而它一分收益也没有）。改模板措辞时这条会红。
+    const built = [
+      buildZaiContinuationPrompt('任务', NO_EXECUTIONS, ['shell_exec']),
+      buildZaiNudgePrompt('任务', '正文', NO_EXECUTIONS, 1, ['shell_exec']),
+      buildZaiMisuseNudgePrompt('任务', 'shell_exec', undefined, NO_EXECUTIONS),
+    ];
+    for (const opening of ZAI_TEMPLATE_OPENING_LIST) {
+      expect(
+        built.some((text) => text.includes(opening)),
+        `「${opening}」不在任何 builder 的输出里 —— 它是死条目，只增加误判风险`,
+      ).toBe(true);
+    }
   });
 });
 

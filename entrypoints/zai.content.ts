@@ -138,6 +138,7 @@ import { initSkillPopup, stopSkillPopup } from '../core/ui/skill-popup';
 import { wireSkillPopup } from '../core/ui/skill-popup-wiring';
 import { disposeZaiCapabilities, installZaiCapabilities, installZaiSessionWatch, notifyZaiSessionChange, syncRuntimeStateBeforeUse } from '../core/zai/capability-install';
 import { resolveZaiComposerInput, resolveZaiComposerShell } from '../core/zai/composer';
+import { captureComposerDraft as captureComposerDraftWith, type ComposerDraftGuard } from '../core/zai/composer-draft';
 import {
   listZaiAssistantMessages,
   readZaiMessageId,
@@ -436,8 +437,6 @@ const RETRYABLE_PRE_SEND_ERRORS: ReadonlySet<string> = new Set([
   'form_not_connected',
   'agent_not_idle',
 ]);
-/** 注入期间保存的用户输入文字（注入前复制，注入完成后恢复）。 */
-let pendingUserComposerRestore: string | null = null;
 
 /**
  * 后台发起的 DOM 任务登记：
@@ -461,17 +460,26 @@ const taskIdByPromptText = new Map<string, string>();
 
 interface ContinuationLoop {
   loopId: string;
-  chatSessionId: string | null;
+  /**
+   * 这条循环所属的会话 —— **恒非空**。
+   *
+   * ⚠️⚠️ **两条建循环路径都在建之前判过非空**（`getCurrentChatSessionId()` 返回 null 时
+   * 走 orphan 分支 return、`waitForChatSessionId()` 超时返回 false），所以这里收窄成
+   * `string` 而不是 `string | null`：
+   * ① 「放行 null ⇒ 把续跑 prompt 提进全新对话」这条路径在**类型层**就没有入口了
+   *    （`isSessionStillCurrent` 对 null 是放行的，那正是要禁的方向）；
+   * ② `reclaimLoopOnSessionChange` 里原先那条 `if (!loop.chatSessionId) return;`
+   *    恒不生效，收窄之后它连存在的意义都没有。
+   * ⚠️ **别再改回可空** —— 它守的是「把这一轮的工具结果送进另一个对话」，代价是一次真实计费。
+   */
+  chatSessionId: string;
   originalTask: string;
   toolExecutions: ToolExecutionRecord[];
   stepCount: number;
   status: 'running' | 'idle';
   activeRequestId: string | null;
-  pendingPrompt: string | null;
   /** 已用掉的 nudge（无工具调用纠偏）次数。 */
   nudgeCount: number;
-  /** 上一轮模型回复正文（供 nudge 时回看）。 */
-  lastVisibleText: string;
   /** 归属的后台 DOM 任务 id（手动聊天续跑为 null）。 */
   taskId: string | null;
   /** 续跑收尾时回传给后台的最终回复正文。 */
@@ -885,10 +893,25 @@ async function createToolAuthorization(input: {
    */
   localSkillDir?: string;
 }): Promise<ToolAuthorizationGrantSummary> {
-  const response = await sendRuntimeMessageStrict<unknown>({
-    type: 'CREATE_TOOL_AUTHORIZATION',
-    payload: { trigger: 'manual_chat', ...input },
-  });
+  let response: unknown;
+  try {
+    response = await sendRuntimeMessageStrict<unknown>({
+      type: 'CREATE_TOOL_AUTHORIZATION',
+      payload: { trigger: 'manual_chat', ...input },
+    });
+  } catch (error) {
+    // ⚠️⚠️ **把传输层的错误归一成语义化错误，否则整条重试链是死代码** ——
+    // 后台的领域失败（含 `unknown_tool_authorization_descriptor`）走
+    // `sendRuntimeMessageStrict` 会变成 `RuntimeCommandError`，而两个调用方判的都是
+    // `ToolAuthorizationRequestError`：
+    // ① `requestToolAuthorization` 的 catch（重试判据）—— 不归一 ⇒ 恒 false ⇒ 不重试；
+    // ② `executeDetected` 的 catch（错误码）—— 不归一 ⇒ 只能读 message。
+    // 失败方向是**静默**的：只打一行 console.error，那一轮工具全部不可用。
+    if (error instanceof RuntimeCommandError) {
+      throw new ToolAuthorizationRequestError(error.code);
+    }
+    throw error;
+  }
   const grant = response as { id?: unknown } | null | undefined;
   if (grant && typeof grant === 'object' && typeof grant.id === 'string' && grant.id) {
     return response as ToolAuthorizationGrantSummary;
@@ -1289,63 +1312,69 @@ async function handleAugmentRequestBody(
         toolIntent: firstText.slice(0, 16_000),
         localSkillDir: skillActivation.activeLocalSkillDir,
       });
-      // ⚠️ **这份 grant 既不进 `activeToolAuthorizations`、也不写
-      // `requestToolDescriptorsByRequestId`** —— chatNew 请求**没有终态事件**
-      // （`fetch-hook` 只在 completion 路由发 `onRequestTerminal`），而它与随后的 completion
-      // 是**两次独立 fetch、两个不同 requestId** ⇒ 写进任何一个 Map 都**无人释放**（孤儿增长）。
-      // 两个 Map 的读点读的也都是 completion 的 requestId ⇒ 写了**还无人读**：首条的工具标签
-      // 识别靠 completion 轮那份，`executeDetected` 也只可能被 completion 轮的 requestId 调到。
-      // ⚠️ 但 grant 本身**必须还**：它已经用来取 `authorization.descriptors`（再过滤成
-      // `modelFacing`）做增广，而且它占着后台的 grant 名额（`MAX_ACTIVE_GRANTS = 32`，
-      // 满了会让**之后所有**建授权抛 `tool_authorization_grant_limit`）。
-      // 所以增广结果回传之后**显式关掉**它 —— 走 `closeToolAuthorizationGrant`（只关后台、不碰 Map）。
-      // 本请求的模型可见目录：**提示词、标签识别、兜底解析共用这一份**（见
-      // `modelFacingDescriptorsFor`）。这里由授权返回的完整目录过滤而来。
-      const modelFacing = modelFacingDescriptorsFor(authorization.descriptors);
-      // 首条（chats/new）始终增强：把工具目录 + 记忆注入，让模型在建会话
-      // 那一刻就学会工具用法（shell 写文件、memory 等）。首条注入不会污染
-      // parent 链（首条是会话起点，无 parent）。
-      // ⚠️ **这里刻意不发 `TOUCH_MEMORIES`** —— 首条之后紧跟的那次 completion
-      // 会独立再选一遍记忆并上报（那是同一条用户消息、同一批记忆），
-      // 两处都发会让首轮每条记忆 +2。上游也只有 completion 那一条上报路径。
-      const augmented = parsed.userMessageTexts.map((text) =>
-        augmentPrompt(text, {
-          toolDescriptors: modelFacing,
-          isFirstMessage: true,
-          skillActivation,
-        }).text,
-      );
-      const nextBody = rewriteZaiChatNewUserMessages(body, augmented);
+      // ⚠️⚠️ **建完授权之后的一切都包进 `try/finally`** —— 这份 grant 刻意不进任何
+      // 请求级 Map（见下），只能靠这里**显式还**。而增广 / 重写 / 回传这几步一旦抛错，
+      // 会直接落到最外层 catch（那里只回 `ok:false`）⇒ grant 已经建好却没人关
+      // ⇒ 占着后台 32 个名额之一，直到 30 分钟 TTL 到期。
+      // 名额满了会让**之后所有**建授权抛 `tool_authorization_grant_limit`（静默降级）。
+      // ⚠️ **幂等**：后台 `closeToolAuthorization` 对已删除的 grant 返回
+      // `changed: false`、不抛 ⇒ 正常路径关过一次再走 finally 也安全。
+      try {
+        // ⚠️ **这份 grant 既不进 `activeToolAuthorizations`、也不写
+        // `requestToolDescriptorsByRequestId`** —— chatNew 请求**没有终态事件**
+        // （`fetch-hook` 只在 completion 路由发 `onRequestTerminal`），而它与随后的 completion
+        // 是**两次独立 fetch、两个不同 requestId** ⇒ 写进任何一个 Map 都**无人释放**（孤儿增长）。
+        // 两个 Map 的读点读的也都是 completion 的 requestId ⇒ 写了**还无人读**：首条的工具标签
+        // 识别靠 completion 轮那份，`executeDetected` 也只可能被 completion 轮的 requestId 调到。
+        // 本请求的模型可见目录：**提示词、标签识别、兜底解析共用这一份**（见
+        // `modelFacingDescriptorsFor`）。这里由授权返回的完整目录过滤而来。
+        const modelFacing = modelFacingDescriptorsFor(authorization.descriptors);
+        // 首条（chats/new）始终增强：把工具目录 + 记忆注入，让模型在建会话
+        // 那一刻就学会工具用法（shell 写文件、memory 等）。首条注入不会污染
+        // parent 链（首条是会话起点，无 parent）。
+        // ⚠️ **这里刻意不发 `TOUCH_MEMORIES`** —— 首条之后紧跟的那次 completion
+        // 会独立再选一遍记忆并上报（那是同一条用户消息、同一批记忆），
+        // 两处都发会让首轮每条记忆 +2。上游也只有 completion 那一条上报路径。
+        const augmented = parsed.userMessageTexts.map((text) =>
+          augmentPrompt(text, {
+            toolDescriptors: modelFacing,
+            isFirstMessage: true,
+            skillActivation,
+          }).text,
+        );
+        const nextBody = rewriteZaiChatNewUserMessages(body, augmented);
 
-      const chatNewTask = firstTaskId ? activeDomTasks.get(firstTaskId) : undefined;
-      // 模型覆写（chatNew 阶段）：会话模型在**建会话那一刻**定下 —— 落点是
-      // `chat.models`（与首条 user 消息的 `models` 同值），由路由决定，见
-      // `applyZaiModelOverrideForRoute`。这一步不能省：只在 completion 阶段写
-      // 改不动已有会话。
-      // ⚠️ **agent 轮同样覆写** —— 真机实测 agent 的请求体里模型字段是活的
-      // （同一会话不同轮次会带不同 id），用户选的模型能进 body；挡着它的只有
-      // 「服务端按 general_agent 装配」这个从未验证过的假设。
-      // 写函数自带「只在字段已存在时覆写」的守卫 ⇒ 页面发哪个字段就改哪个。
-      applyZaiModelOverrideForRoute(nextBody, 'chatNew', chatNewTask?.model ?? null);
-      postToMainWorld({
-        type: 'AUGMENT_REQUEST_BODY_RESULT',
-        id,
-        ok: true,
-        result: {
-          body: JSON.stringify(nextBody),
-          requestId,
-          // ⚠️ **回传本请求实际注入提示词的那份描述符名**（就是上面那份过滤后的
-          // `modelFacing`），不是全局 `currentCatalogNames`、也不是未过滤的
-          // `authorization.descriptors` —— 主世界识别 XML 标签时用这份，才能与提示词
-          // 严格同源。⚠️ 用未过滤的授权目录会让「模型可见目录里没有的工具」仍被识别并执行。
-          toolDescriptorNames: catalogNamesFor(modelFacing),
-        },
-      });
-      // 增广结果已经回传（主世界的 pending 请求在那一刻就 resolve 了），所以这里**不 await** ——
-      // 关 grant 是一次后台往返，没必要压在请求热路径上。
-      void closeToolAuthorizationGrant(authorization.id).catch((error: unknown) => {
-        console.error('[Zai++] closing the chatNew tool authorization failed', error);
-      });
+        const chatNewTask = firstTaskId ? activeDomTasks.get(firstTaskId) : undefined;
+        // 模型覆写（chatNew 阶段）：会话模型在**建会话那一刻**定下 —— 落点是
+        // `chat.models`（与首条 user 消息的 `models` 同值），由路由决定，见
+        // `applyZaiModelOverrideForRoute`。这一步不能省：只在 completion 阶段写
+        // 改不动已有会话。
+        // ⚠️ **agent 轮同样覆写** —— 真机实测 agent 的请求体里模型字段是活的
+        // （同一会话不同轮次会带不同 id），用户选的模型能进 body；挡着它的只有
+        // 「服务端按 general_agent 装配」这个从未验证过的假设。
+        // 写函数自带「只在字段已存在时覆写」的守卫 ⇒ 页面发哪个字段就改哪个。
+        applyZaiModelOverrideForRoute(nextBody, 'chatNew', chatNewTask?.model ?? null);
+        postToMainWorld({
+          type: 'AUGMENT_REQUEST_BODY_RESULT',
+          id,
+          ok: true,
+          result: {
+            body: JSON.stringify(nextBody),
+            requestId,
+            // ⚠️ **回传本请求实际注入提示词的那份描述符名**（就是上面那份过滤后的
+            // `modelFacing`），不是全局 `currentCatalogNames`、也不是未过滤的
+            // `authorization.descriptors` —— 主世界识别 XML 标签时用这份，才能与提示词
+            // 严格同源。⚠️ 用未过滤的授权目录会让「模型可见目录里没有的工具」仍被识别并执行。
+            toolDescriptorNames: catalogNamesFor(modelFacing),
+          },
+        });
+      } finally {
+        // 增广结果已经回传（主世界的 pending 请求在那一刻就 resolve 了），所以这里**不 await** ——
+        // 关 grant 是一次后台往返，没必要压在请求热路径上。
+        void closeToolAuthorizationGrant(authorization.id).catch((error: unknown) => {
+          console.error('[Zai++] closing the chatNew tool authorization failed', error);
+        });
+      }
       return;
     }
 
@@ -2353,10 +2382,9 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
       for (const execution of executedThisTurn) {
         if (!loop.toolExecutions.includes(execution)) loop.toolExecutions.push(execution);
       }
-      // 更新上一轮可见正文，供 nudge 回看。
-      loop.lastVisibleText = complete.assistantText;
       // ⚠️ **只在有正文时更新** —— 纯工具轮（模型只吐 XML）的 `assistantText` 是空串，
       // 无条件覆盖会让「跑到步数上限 / 纠错用尽」的收尾把最终正文写成空。
+      // 这是**唯一**一份「最后一次非空正文」：`finishContinuationLoop` 回传时直接用它。
       if (complete.assistantText) loop.finalAssistantText = complete.assistantText;
     }
 
@@ -2566,9 +2594,7 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     stepCount: 0,
     status: 'running',
     activeRequestId: null,
-    pendingPrompt: null,
     nudgeCount: 0,
-    lastVisibleText: complete.assistantText,
     taskId: taskIdByRequestId.get(complete.requestId) ?? null,
     finalAssistantText: complete.assistantText,
     model: resolveLoopModel(complete.requestId),
@@ -2638,33 +2664,23 @@ async function advanceContinuationLoop(): Promise<void> {
     loop.toolExecutions,
     toolNames,
   );
-  loop.pendingPrompt = prompt;
   loop.stepCount += 1;
   /** 看门狗要认「挂上时是哪一步」——见 `armAmbiguousSendWatchdog` 的五条复检。 */
   const armedAtStep = loop.stepCount;
   const armedAtNudge = loop.nudgeCount;
 
-  // 续跑注入策略（不丢弃用户输入）：
-  // 1. 注入前复制用户已有的输入文字；2. 注入时覆盖为续跑 prompt；3. 注入后恢复用户文字。
-  // 注入期间锁定输入，避免用户打字和注入交错。
-  const composerInput = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
-  if (composerInput && composerInput.value && composerInput.value.trim()) {
-    pendingUserComposerRestore = composerInput.value;
-  }
-
   // 主路：复用页面原生 form submit（send 函数路线）；兜底：DOM 点按钮（只在 unsent 时）。
   // 外层再包一层「只在瞬时出口上重试一次」——见 `submitContinuationWithRetry`。
+  //
+  // ⚠️ **用户草稿的保存与恢复不在这里** —— 它们已经搬进两个注入原语
+  // （`trySubmitViaFormRequestSubmit` / `sendPromptPrimitive`），理由：
+  // ① 这里保存**太早** —— 保存点与真正的改写点之间隔着「等输入框就绪（≤6 秒）+
+  //    等上一轮生成结束（≤8 秒）」，那段时间输入框是活的、用户打的字会被改写清掉；
+  // ② 只有这一条链有保存/恢复，而 nudge 分支与 `submitMisuseCorrection` 走的是
+  //    同一个 `submitContinuationWithRetry` ⇒ **它们今天完全不保护草稿**。
+  // 搬进原语之后三条链一起修好，且「重试时第二次进入会覆盖真草稿」那个陷阱自动消失
+  // （每次调用自己存自己还）。
   const { evidence, reason } = await submitContinuationWithRetry(prompt, loop);
-  const injected = pendingUserComposerRestore;
-  pendingUserComposerRestore = null;
-
-  // 注入完成后，恢复用户之前输入的草稿（如果有）。恢复时不要触发输入事件，避免误发。
-  if (injected !== null) {
-    const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
-    if (textarea) {
-      setTextareaValue(textarea, injected);
-    }
-  }
 
   // 发送期间循环可能已被收掉或顶替 —— 那一轮的终态已经由收掉它的那条路径负责。
   if (continuationLoop !== loop || loop.status !== 'running') return;
@@ -2859,9 +2875,7 @@ async function startMisuseCorrectionLoop(
     stepCount: 0,
     status: 'running',
     activeRequestId: null,
-    pendingPrompt: null,
     nudgeCount: 0,
-    lastVisibleText: '',
     taskId: taskIdByRequestId.get(complete.requestId) ?? null,
     finalAssistantText: '',
     model: resolveLoopModel(complete.requestId),
@@ -2940,6 +2954,13 @@ function hasActiveDomTaskRunning(): boolean {
  * 内部先同步一次运行时状态（记忆/技能/工具目录），再走自动化发送链。
  */
 async function submitDomTaskPrompt(taskId: string, prompt: string): Promise<boolean> {
+  // ⚠️⚠️ **复位失败码，必须在任何 await 之前** —— 这个变量是「**本次**发送」的失败码来源，
+  // 而发送链有三种失败出口**不写它**（`domSendInFlight` 早退 / 请求已发出但未归属 /
+  // 一个请求都没发出）。不复位 ⇒ 那三种会读到**上一次任务**留下的 kind：
+  // 上一次若失败于 `agent_not_idle`，这一次明明「请求已经发出去了」却会回传
+  // `agent_not_idle` ⇒ coordinator 判 `retrySafe` ⇒ scheduler **自动重跑** ⇒ 双会话。
+  // 复位后那三种退化成 `composer_inject_failed`（不重试）—— 那正是它们的正确档位。
+  lastAutomationSendErrorKind = null;
   await loadAndSyncRuntimeState();
   const submitted = await sendPromptViaPage(taskId, prompt);
   if (!submitted) {
@@ -2976,9 +2997,17 @@ async function submitDomTaskPrompt(taskId: string, prompt: string): Promise<bool
  *   1. 原生 value setter 写 prompt；
  *   2. 派发 input 事件让 Svelte bound-value 同步；
  *   3. 短稳定期后 form.requestSubmit()（页面自己发 /chats/new → 跳 /c/<id>）。
- * 关键：**不 disable 输入框、不等 send 按钮 enabled**。disable 会让首页的 Svelte 把
- * bound-value 判空 → send 按钮恒 disabled、requestSubmit 变空提交 → 不跳转。
- * 归属自检（waitForDomTaskRecognized）是 Zai++ 自己加的「成功判据」，取代不可信的
+ *
+ * ⚠️ **这里不禁用输入框、也不等 send 按钮 enabled** —— 这是**保守选择，不是必需的**：
+ * 真机实测（首页 `/` 与 `/c/<id>` 各一次）**`disabled = true` 之后 send 按钮仍会
+ * 变 enabled**；续跑链（`trySubmitViaFormRequestSubmit` / `sendPromptPrimitive`）
+ * 就是「先禁用再写值」的写法、长期可用。
+ * ⚠️ 原先这里写的是「disable 会让首页的 Svelte 把 bound-value 判空 → send 按钮恒
+ * disabled → requestSubmit 变空提交 → 不跳转」—— **那句已被真机推翻，别再当判据用**。
+ * 两条链真正的差别只在等待策略：这条链写值后固定 `sleep(120)` 再提交，
+ * 续跑链等按钮态（4 秒上界）。
+ *
+ * 归属自检（`waitForDomTaskRecognized`）是 Zai++ 自己加的「成功判据」，取代不可信的
  * 「输入框是否清空」。
  */
 async function submitAutomationPromptViaPage(
@@ -3021,7 +3050,8 @@ async function submitAutomationPromptViaPage(
       return false;
     }
 
-    // 原生 setter + input 事件（真机验证过的写法）。不 disable 输入框。
+    // 原生 setter + input 事件（真机验证过的写法）。**不禁用输入框** —— 保守选择，
+    // 不是必需（见函数头那段真机结论）。
     setTextareaValue(textarea, '');
     setTextareaValue(textarea, prompt);
 
@@ -3095,8 +3125,13 @@ async function submitAutomationPromptViaPage(
 async function sendPromptViaPage(taskId: string, prompt: string): Promise<boolean> {
   let lastObserved = false;
   for (let attempt = 0; attempt < AUTOMATION_SEND_MAX_ATTEMPTS; attempt += 1) {
-    const recognizedBefore = await waitForDomTaskRecognized(taskId, 0);
-    if (recognizedBefore) return true;
+    // ⚠️ **这里要的是「只查一次」，不是「等 0 毫秒」** —— 上一发若已经归属成功
+    // （例如它在自己的 5 秒等待里落地了），别再发一遍。
+    // ⚠️⚠️ **曾经写的是 `waitForDomTaskRecognized(taskId, 0)`，那条判据恒为 false**：
+    // 函数体是 `const endAt = Date.now() + timeoutMs; while (Date.now() < endAt)`，
+    // 传 0 时 `Date.now()` 已经 ≥ `endAt`，**循环体一次都不进**（实测 2000 次无一例外）
+    // ⇒ 这道「已归属就别再发」的短路判据完全失效 ⇒ 归属慢的那一发会被重发（双会话）。
+    if (isDomTaskRecognized(taskId)) return true;
     const sent = await submitAutomationPromptViaPage(taskId, prompt);
     if (sent) return true;
     lastObserved = sent;
@@ -3108,6 +3143,17 @@ async function sendPromptViaPage(taskId: string, prompt: string): Promise<boolea
     }
   }
   return lastObserved;
+}
+
+/**
+ * 这条任务**此刻**是否已被认领成 `running` —— **只查一次，不等待**。
+ *
+ * ⚠️ **与 `waitForDomTaskRecognized` 分开成两个入口**，别用「传 0 超时」表达「只查一次」：
+ * 那个函数的骨架是「先算 deadline、再 while」，传 0 时循环体一次都不进、恒返回 false。
+ * 两个入口的语义不同（一个查一次、一个等到超时），不该靠一个数值参数去区分。
+ */
+function isDomTaskRecognized(taskId: string): boolean {
+  return activeDomTasks.get(taskId)?.status === 'running';
 }
 
 /** 等这条 prompt 被 completion 请求归属（task.status === 'running'），最多等 timeoutMs。 */
@@ -3411,6 +3457,12 @@ async function trySubmitViaFormRequestSubmit(
    */
   let lockedTextarea: HTMLTextAreaElement | null = null;
   let wasDisabled = false;
+  /**
+   * 用户草稿的保护器（见 `captureComposerDraft`）。
+   *
+   * ⚠️ **必须在 `finally` 里也调一次** —— 正常出口各自调过（幂等），但中间抛错会跳过它们。
+   */
+  let draftGuard: ComposerDraftGuard | null = null;
   try {
     await waitForComposerReady();
     let textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
@@ -3431,6 +3483,10 @@ async function trySubmitViaFormRequestSubmit(
     textarea.disabled = true;
     lockedTextarea = textarea;
 
+    // ⚠️⚠️ **用户草稿的保存点就在这里** —— 上面那行 disable 之后用户打不进字了，
+    // 而再往前（等就绪 / 等空闲）输入框是活的、用户打的字会被下面那行清空动作抹掉。
+    draftGuard = captureComposerDraft(textarea, prompt);
+
     // ⚠️ 注入这段文本期间让它「看起来空着」（文字透明 + 高度冻住）—— 见
     // `maskComposerForInjection`：那段文本**必须**存在于 DOM 里（页面读的状态就是从它来的），
     // 但用户不需要看见它。撤销走本函数的 `finally`。
@@ -3445,6 +3501,8 @@ async function trySubmitViaFormRequestSubmit(
     const sendButton = await waitForSendButtonEnabled();
     if (!sendButton) {
       clearInjectedComposerText();
+      // 把草稿还回去（清空之后、交还之前）—— 三个 unsent 出口都要过这一手。
+      draftGuard?.restore();
       textarea.disabled = wasDisabled;
       return unsentSend('send_button_disabled');
     }
@@ -3458,6 +3516,7 @@ async function trySubmitViaFormRequestSubmit(
     // 此刻提交会把这一轮的续跑 prompt 送进**另一个对话**。
     if (!isSessionStillCurrent(expectedSessionId)) {
       clearInjectedComposerText();
+      draftGuard?.restore();
       textarea.disabled = wasDisabled;
       return unsentSend('session_changed');
     }
@@ -3466,6 +3525,7 @@ async function trySubmitViaFormRequestSubmit(
     const outcome = submitFormViaRequestSubmit(submitTarget);
     if (outcome !== 'ok') {
       clearInjectedComposerText();
+      draftGuard?.restore();
       textarea.disabled = wasDisabled;
       return unsentSend(submitFailureReason(outcome));
     }
@@ -3480,6 +3540,10 @@ async function trySubmitViaFormRequestSubmit(
     restoreComposerAppearance?.();
     textarea.disabled = wasDisabled;
 
+    // ⚠️ **成功路的草稿恢复放在 `finally` 里**（不要在这里提前还）—— 后面还有一段最长
+    // 5 秒的证据等待，而页面自己约 180ms 后也会清一次输入框；此刻还回去的草稿会被那一次
+    // 清掉。`finally` 在证据等待**之后**跑，与改动前 `advanceContinuationLoop` 的恢复时序一致。
+
     // 成功判据见 `waitForSendEvidence` —— 不能用「输入框被清空」（上面那行替页面满足了它）。
     // ⚠️ 这里**不再把三态压成布尔** —— 压掉之后调用方就分不清「能不能重发」了。
     const { evidence } = await waitForSendEvidence();
@@ -3489,6 +3553,8 @@ async function trySubmitViaFormRequestSubmit(
     restoreComposerAppearance?.();
     // ⚠️ **输入框的 `disabled` 同理** —— 正常出口在提交触发后就恢复了，但中间抛错会跳过它。
     if (lockedTextarea) lockedTextarea.disabled = wasDisabled;
+    // ⚠️ **草稿还在这里兜底** —— `unsent` 出口各自提前还过一次（幂等），成功路只走这一处。
+    draftGuard?.restore();
     domSendInFlight = false;
   }
 }
@@ -3823,10 +3889,12 @@ function failContinuationLoop(loop: ContinuationLoop, code: string): void {
  * **`current !== loop.chatSessionId`**（不是「`current` 非空且不等」）：
  * 放行 null 会让续跑 prompt 被提进一个**全新对话**（多一条没人认领的对话 + 一次真实计费）。
  *
- * ⚠️⚠️ **`loop.chatSessionId !== null` 是必需的守卫** —— `onZaiSessionChange` 是
- * 1 秒轮询驱动的，而页面刚加载时 `lastNotifiedSessionId` 的初值是 null、必然触发一次
- * 「假变化」；那一刻若循环刚建好，缺这条会被误杀。两条建循环路径都保证它非空，
- * 所以这条守卫不会挡住任何真实场景。
+ * ⚠️⚠️ **`loop.chatSessionId` 恒非空**（类型上是 `string`，两条建循环路径都在建之前判过）
+ * ⇒ **不需要「它为空就放行」的守卫**。这里曾经有一条 `if (!loop.chatSessionId) return;`，
+ * 它**恒不生效** —— 而它想守的「页面刚加载时 `lastNotifiedSessionId` 初值 null 触发假变化」
+ * 那一档，由**非空本身**就挡住了（假变化时 `current` 是 null、`loop.chatSessionId` 非空
+ * ⇒ `current !== loop.chatSessionId` ⇒ 仍然收），所以那条守卫既没用、也不能删得掉语义
+ * ——**语义已经由类型保证了**。
  *
  * ⚠️ **不设宽限窗口**：续跑只能活在它自己那条会话里 —— 切走那一刻，下一轮注入就会
  * 打进**另一个对话**，不存在「切回来继续」的状态。所以这里只有「立刻判失败」一个选项。
@@ -3834,7 +3902,6 @@ function failContinuationLoop(loop: ContinuationLoop, code: string): void {
 function reclaimLoopOnSessionChange(): void {
   const loop = continuationLoop;
   if (!loop || loop.status !== 'running') return;
-  if (!loop.chatSessionId) return;
   const current = getCurrentChatSessionId();
   if (current === loop.chatSessionId) return;
   console.log('[Zai++] continuation session changed; reclaiming the loop', {
@@ -3876,7 +3943,6 @@ function finishContinuationLoop(
   if (!options?.preserveKeepAlive) stopSustainedKeepAliveWatch();
   loop.status = 'idle';
   loop.activeRequestId = null;
-  loop.pendingPrompt = null;
   continuationLoop = null;
   // 循环结束了就把保活卸掉 —— 留一条挂着的 debugger 会话会让调试横幅一直挂着。
   // （正常情况下 `submitContinuationViaPage` 的 `finally` 已经卸过，这里兜底。）
@@ -3889,17 +3955,17 @@ function finishContinuationLoop(
   }
   // 后台 DOM 任务：续跑收尾 → 回传终态成功并清理归属。
   if (loop.taskId) {
-    const task = activeDomTasks.get(loop.taskId);
     // ⚠️ **会话 id 取这一轮自己跑的那个**（建循环时抓的），不是此刻地址栏里的 ——
     // 用户中途切走会话时，读现值会把这次运行记到**另一个对话**上。
-    // 地址栏只作兜底（循环的会话 id 在两条建循环路径上都必然非空，这一档是防御）。
-    const finalSessionId = loop.chatSessionId ?? getCurrentChatSessionId() ?? task?.chatSessionId ?? null;
+    // ⚠️ 这里**不再有 `??` 兜底**：`loop.chatSessionId` 在类型上就是 `string`（恒非空，
+    // 两条建循环路径都判过），再兜一层只会让「它其实是空」这件事重新变得可能。
+    const finalSessionId = loop.chatSessionId;
     clearActiveDomTask(loop.taskId);
     void sendRuntimeMessage({
       type: 'DOM_TASK_COMPLETE',
       taskId: loop.taskId,
       chatSessionId: finalSessionId,
-      assistantText: loop.finalAssistantText || loop.lastVisibleText,
+      assistantText: loop.finalAssistantText,
       toolExecutions: loop.toolExecutions,
       steps: loop.stepCount,
     });
@@ -4194,6 +4260,8 @@ async function sendPromptPrimitive(
    */
   let lockedTextarea: HTMLTextAreaElement | null = null;
   let wasDisabled = false;
+  /** 用户草稿的保护器（见 `captureComposerDraft`）。`finally` 里也要兜一次。 */
+  let draftGuard: ComposerDraftGuard | null = null;
   try {
     await waitForComposerReady();
     let textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
@@ -4212,6 +4280,10 @@ async function sendPromptPrimitive(
     textarea.disabled = true;
     lockedTextarea = textarea;
 
+    // ⚠️⚠️ **用户草稿的保存点**（与表单主路同口径）—— 上面那行 disable 之后用户打不进字，
+    // 再往前输入框是活的、用户打的字会被下面那行清空动作抹掉。
+    draftGuard = captureComposerDraft(textarea, prompt);
+
     // 与表单主路同一层「看不见」（见 `maskComposerForInjection`）—— 它只动外观，
     // 不碰任何读写语义，所以这条路也照用；撤销走本函数的 `finally`。
     restoreComposerAppearance = maskComposerForInjection(textarea);
@@ -4222,6 +4294,7 @@ async function sendPromptPrimitive(
     const sendButton = await waitForSendButtonEnabled();
     if (!sendButton) {
       clearInjectedComposerText();
+      draftGuard?.restore();
       textarea.disabled = wasDisabled;
       return unsentSend('send_button_disabled');
     }
@@ -4229,6 +4302,7 @@ async function sendPromptPrimitive(
     // ⚠️ **会话判据必须紧贴点击** —— 会话已切走时点下去，这一轮的工具结果会落进另一个对话。
     if (!isSessionStillCurrent(expectedSessionId)) {
       clearInjectedComposerText();
+      draftGuard?.restore();
       textarea.disabled = wasDisabled;
       return unsentSend('session_changed');
     }
@@ -4245,12 +4319,16 @@ async function sendPromptPrimitive(
     //   `unsent` 的四个出口（无 textarea / agent 不空闲 / 点前无发送按钮 / 会话已切走）
     //   都在点击**之前**，那几处已各自清过。
     textarea.disabled = wasDisabled;
+    // ⚠️ **成功路的草稿恢复也放在 `finally` 里**（不在这里提前还）—— 这条路提交后**不清空**，
+    // 页面约 180ms 后才自己清；此刻还回去的草稿会被那一次清掉。`finally` 在证据等待之后跑。
     return { evidence, reason: null };
   } finally {
     // ⚠️ **任何出口都要撤销那层「看不见」** —— 漏一次，用户的输入框会一直是透明的。
     restoreComposerAppearance?.();
     // ⚠️ **输入框的 `disabled` 同理** —— 正常出口在证据等待之后才恢复，中间抛错会跳过它。
     if (lockedTextarea) lockedTextarea.disabled = wasDisabled;
+    // ⚠️ **草稿还在这里兜底** —— `unsent` 出口各自提前还过一次（幂等），成功路只走这一处。
+    draftGuard?.restore();
     domSendInFlight = false;
   }
 }
@@ -4304,6 +4382,40 @@ function clearInjectedComposerText(): void {
   const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR);
   if (!textarea || textarea.value === '') return;
   setTextareaValue(textarea, '');
+}
+
+/**
+ * 调 `core/zai/composer-draft.ts` 的 `captureComposerDraft`，注入本文件的依赖。
+ *
+ * ## 为什么草稿保护必须「原语内部」而不是调用方
+ *
+ * 三个注入链（续跑推进 / nudge / 误用纠错）都经 `submitContinuationViaPage` →
+ * 两个原语，而**只有续跑推进那条链曾经在调用方保存/恢复草稿**
+ * （`advanceContinuationLoop`）⇒ nudge 与误用纠错**完全不保护草稿**，直接丢。
+ * 放进原语之后三条链一起修好，且「重试时第二次进入会覆盖真草稿」那个陷阱自动消失
+ * （每次调用自己存自己还）。
+ *
+ * ## 保存点为什么在 `disabled = true` 之后
+ *
+ * 再往前（`waitForComposerReady` ≤6 秒 / `waitForAgentIdle` ≤8 秒）输入框是**活的**，
+ * 用户在那段里打的字会被紧接着的 `setTextareaValue(textarea, '')` 清掉；
+ * 再往后就来不及了（值已经被我们覆盖）。`disabled = true` 那一刻是唯一正确的保存点。
+ *
+ * ⚠️⚠️ **判据本体已经搬进 `core/zai/composer-draft.ts`** —— 那个文件可以被测试
+ * import，所以「三档当前值该怎么处置」由**行为用例**钉住（`tests/zai-composer-draft.test.ts`），
+ * 这里只负责注入两个依赖（现取输入框 / 写值原语）。原先内联在这里的版本只能靠
+ * 「按结构数调用点」的 AST 断言盯着，而那锁的是形状、不是语义。
+ * ⚠️ `resolveInput` 用**现取**（`document.querySelector`）而不是复用注入期那个
+ * `textarea` 引用 —— 从注入到恢复之间页面可能把这一小块 DOM 重建掉。
+ */
+function captureComposerDraft(
+  textarea: HTMLTextAreaElement,
+  injected: string,
+): ComposerDraftGuard {
+  return captureComposerDraftWith(textarea, injected, {
+    resolveInput: () => document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR),
+    writeValue: setTextareaValue,
+  });
 }
 
 /**

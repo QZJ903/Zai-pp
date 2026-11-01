@@ -494,10 +494,12 @@ describe('session change: reclaim the continuation loop', () => {
     expect(callsInOrder(body, 'finishContinuationLoop')).toHaveLength(0);
   });
 
-  it('判据是地址栏会话，且必须有 `chatSessionId` 非空守卫', () => {
-    // ⚠️⚠️ 非空守卫挡的是**启动时的假变化**：`onZaiSessionChange` 由 1 秒轮询驱动，
-    // 而页面刚加载时 `lastNotifiedSessionId` 初值是 null、必然触发一次「变了」。
-    // 那一刻若循环刚建好，缺这条会被误杀。两条建循环路径都保证 `chatSessionId` 非空。
+  it('判据是地址栏会话，且「假会话变化」那一档由类型挡住', () => {
+    // ⚠️⚠️ 这一档原先靠 `if (!loop.chatSessionId) return;` 守 —— 而那条守卫**恒不生效**：
+    // 两条建循环路径都在建之前判过非空，所以 `loop.chatSessionId` 从来不是 null/空。
+    // 现在把它**收窄成 `string`**，语义从「运行时判空」升级成「类型层不可能为空」：
+    // 启动时那次假变化里 `current` 是 null、`loop.chatSessionId` 非空
+    // ⇒ `current === loop.chatSessionId` 为假 ⇒ 照常「不等就收」，守卫本来就是多余的。
     const program = readContentProgram();
     const source = readFileSync('entrypoints/zai.content.ts', 'utf8');
     const body = findFunctionBody(program, RECLAIM_FN);
@@ -507,12 +509,12 @@ describe('session change: reclaim the continuation loop', () => {
 
     const guards = body.body.filter((node): node is t.IfStatement => t.isIfStatement(node));
     const tests = guards.map((node) => source.slice(node.test.start ?? 0, node.test.end ?? 0));
-    // ⚠️ **非空守卫必须单独断言** —— 只判「出现过 `loop.chatSessionId`」会被后面那条
-    // 比较式喂饱，删掉非空守卫照样绿（实测）。
+    // ⚠️ **那条恒不生效的非空守卫不该回来** —— 它给人「这里已经防住了」的错觉，
+    // 而真正的防线是类型（`ContinuationLoop.chatSessionId: string`）。
     expect(
       tests.some((text) => text.includes('!loop.chatSessionId')),
-      '必须有 `if (!loop.chatSessionId) return;` —— 它挡的是启动时的假会话变化',
-    ).toBe(true);
+      '不该再有 `if (!loop.chatSessionId) return;` —— 它恒不生效，防线已经移到类型上',
+    ).toBe(false);
     expect(
       tests.some((text) => text.includes('current') && text.includes('loop.chatSessionId')),
       '必须比较「当前会话」与「循环的会话」',
@@ -528,6 +530,18 @@ describe('session change: reclaim the continuation loop', () => {
       tests.some((text) => text.includes('!current')),
       '不許有 `!current` 这类「读不到就放行」的短路',
     ).toBe(false);
+  });
+
+  it('ContinuationLoop.chatSessionId 在类型上是非空的 `string`', () => {
+    // ⚠️⚠️ **上面那条「守卫不该回来」的前提就是这条** —— 如果哪天有人把类型改回
+    // `string | null`，那条被删掉的非空守卫就必须回来。两条断言互为锁：
+    // 判据是「两者恰好成立一个」，不是各自为真。
+    const source = readFileSync('entrypoints/zai.content.ts', 'utf8');
+    const declaration = source.match(/interface ContinuationLoop \{[\s\S]*?\n\}/);
+    expect(declaration, '应当能定位 ContinuationLoop').not.toBeNull();
+    const text = declaration![0];
+    expect(text, 'chatSessionId 必须声明成非空 string').toMatch(/\n\s*chatSessionId: string;/);
+    expect(text, '不该再是 string | null').not.toMatch(/chatSessionId: string \| null;/);
   });
 
   it('isSessionStillCurrent 也不给 null 留放行', () => {

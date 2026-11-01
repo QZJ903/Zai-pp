@@ -143,6 +143,71 @@ describe('continuation request peek: 判据行为', () => {
     expect(isZaiContinuationRequestBody('')).toBe(false);
     expect(isZaiContinuationRequestBody('not json at all')).toBe(false);
   });
+
+  it('⚠️ 主判据说「不是模板」之后，粗判不能再翻案', () => {
+    // ⚠️⚠️ **这条守的是「用户消息不能消失」** —— 粗判拿的是**整个 body 串**，
+    // 而 body 里含**整段 messages**。会话历史里只要留着上一轮的续跑模板，
+    // 整串里就有模板的标签与开场话术 ⇒ 用户这一条普通提问也会被判成续跑。
+    // 后果链：历史清洗把这条消息换成不可见占位符 → 气泡隐藏给它 display:none
+    // → 这一轮不增广、`isContinuationTurn` 走 orphan 分支直接 return。
+    // **用户的消息从对话里消失，且没有任何东西会报错。**
+    const template = buildZaiContinuationPrompt('任务', [execution()], ['shell_exec']);
+    const withHistory = JSON.stringify({
+      model: 'glm-5.3',
+      messages: [
+        { role: 'user', content: '原始任务' },
+        { role: 'assistant', content: '…' },
+        { role: 'user', content: template },   // ← 历史里留着的旧模板
+        { role: 'assistant', content: '…' },
+        { role: 'user', content: '再帮我总结一下刚才的结果' },   // ← 这一条才是本轮
+      ],
+    });
+    expect(
+      isZaiContinuationRequestBody(withHistory),
+      '最后一条 user 是普通提问 ⇒ 主判据给出「不是模板」，粗判不许翻案',
+    ).toBe(false);
+  });
+
+  it('⚠️ 用户正文提到两个标签也不算（主判据 + 严格档两层都要挡住）', () => {
+    // 两层判据各挡一类：严格档挡「只提标签不提我们的话术」，主判据挡「历史里有真模板」。
+    expect(isZaiContinuationRequestBody(
+      completionBody('请解释 <original_task> 和 <tool_results> 这两个标签'),
+    )).toBe(false);
+  });
+
+  it('⚠️ `/chats/new` 路由：历史含旧模板时同样不能翻案（主判据的第二条腿）', () => {
+    // ⚠️⚠️ **这条是 ZCode 评审「需实测-2」的回归用例** —— 两个路由的 body 形状完全不同
+    // （[[zai-site]] §2.2 真机抓包）：completion 的 user 消息在**顶层 `messages[]`**，
+    // 而 `/chats/new` **顶层只有 `chat`**、消息在 `chat.history.messages.<id>.content`。
+    // ⇒ 只写 completion 那条腿的话，`readZaiLastUserMessageText` 对 chatNew 恒返回 `''`
+    // ⇒ 恒落粗判 ⇒ **历史里有旧模板时照样误判成续跑**（实测过：旧代码答 true）。
+    const template = buildZaiContinuationPrompt('任务', [execution()], ['shell_exec']);
+    const chatNewBody = JSON.stringify({
+      chat: {
+        type: 'general_agent',
+        flags: ['general_agent'],
+        models: ['glm-5.2'],
+        history: {
+          messages: {
+            m1: { content: '原始任务' },
+            m2: { content: template },            // ← 历史里留着的旧模板
+            m3: { content: '再帮我总结一下刚才的结果' },  // ← 这一条才是本轮
+          },
+          currentId: 'm3',
+        },
+      },
+    });
+    expect(
+      isZaiContinuationRequestBody(chatNewBody),
+      'chatNew 路由的最后一条 user 是普通提问 ⇒ 主判据必须给出「不是模板」',
+    ).toBe(false);
+
+    // 反面：chatNew 那一发**本身**就是模板（自动化首条注入形似续跑文本时）仍要认得出
+    const chatNewIsTemplate = JSON.stringify({
+      chat: { history: { messages: { m1: { content: template } }, currentId: 'm1' } },
+    });
+    expect(isZaiContinuationRequestBody(chatNewIsTemplate)).toBe(true);
+  });
 });
 
 describe('continuation request peek: 必须在串行队列之外', () => {

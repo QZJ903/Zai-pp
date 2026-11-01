@@ -321,16 +321,46 @@ const ZAI_PAST_MARKER = '(?!了|过|(?:完|好|成|毕)(?=[，。；！？、\\s
 /** 情态 / 意图词：出现在「我」之后，表明这是一个**尚未发生**的打算。 */
 const ZAI_INTENT_MODALS = '将|会|想|要|先|让|再|直接|现在|这就|马上|立刻|立即|继续|尝试|开始|需要|还需要|仍需|还要|打算|计划|准备|随后|稍后|先去|先来|接下来';
 
+/**
+ * 三条待办正则里的「中间隔多少字」窗口 —— **必须能跨行**。
+ *
+ * ⚠️⚠️ **`.{0,N}` 不匹配换行**，而模型把待办承诺写成多行是最常见的形态之一
+ * （分点 / 编号列表 / 冒号后换行）：
+ *
+ * ```
+ * 任务完成。
+ *
+ * 接下来我会：
+ * - 读取配置文件
+ * - 生成报告
+ * ```
+ *
+ * 用 `.{0,48}` 时上面这段**整条漏判** ⇒ `shouldNudgeZai` 返回 false ⇒ 循环按
+ * 「任务已完成」收尾，而模型其实承诺了还要继续。方向与本模块声明的
+ * 「宁可多 nudge，不可漏 nudge（漏判 = 任务提前收尾）」正好相反。
+ *
+ * ⚠️ **`[\s\S]` 是唯一正确的写法** —— 它匹配任意字符（含换行），且不需要 `s` flag
+ * （`s` flag 会让同一份正则在老环境里失效，而这里是模板串拼出来的）。
+ * ⚠️ **窗口宽度不变**（48 / 64 / 24）：换行只多占 1 个字符，不需要为它放大窗口。
+ * ⚠️ **尾部闸门 `ZAI_PENDING_ACTION_AFTER_MAX_CHARS` 不受影响** —— 它判的是
+ * 「命中之后还剩多少字」，与窗口能否跨行无关；多行列表实测未被它挡掉。
+ * ⚠️ **上游 `prompt.ts` 的 `PENDING_ACTION_RE` 逐字用的是 `.{0,48}`** ⇒ 这个缺陷上游也有。
+ * 判据不是「上游也这么写」，而是「判据方向与声明的方向一致」。
+ */
+const ZAI_PENDING_GAP_48 = '[\\s\\S]{0,48}';
+const ZAI_PENDING_GAP_64 = '[\\s\\S]{0,64}';
+const ZAI_PENDING_GAP_24 = '[\\s\\S]{0,24}';
+
 /** 强信号（有主语）：`我 + 情态词 + … + 动词`。主语必然是模型 ⇒ 无条件 nudge。 */
 const ZAI_PENDING_STRONG_RE = new RegExp(
   // 中文第一人称承诺。
-  `我(?:${ZAI_INTENT_MODALS}).{0,48}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`
+  `我(?:${ZAI_INTENT_MODALS})${ZAI_PENDING_GAP_48}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`
   // 「让我 / 先让我」：主语同样只能是模型。
-  + `|(?:让我|先让我).{0,48}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`
+  + `|(?:让我|先让我)${ZAI_PENDING_GAP_48}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`
   // 「为 / 帮你做 X」：动作是模型做的，第二人称只是受益者。
   + `|(?:(?:现在|这就|马上|随后|稍后|立即|立刻|先|直接))?(?:为|帮)(?:你|您)(?:创建|生成|制作|输出|编写|绘制|渲染)(?!了|好|完|成|过|的)`
   // 英文第一人称承诺（与中文同义，不合并成一条正则 —— 动词表完全不同）。
-  + `|(?:i(?:'ll| will|'m| am|'d| would| want to| should| have to| (?:still\\s+)?need to|'m going to| am going to|'m about to| am about to|'ve got to| have got to)|let me|let's|next,? (?:i|we)|we(?:'ll| will| need to| can)|(?:my|the) next step is to).{0,64}(?:${ZAI_ACTION_VERBS_EN})`,
+  + `|(?:i(?:'ll| will|'m| am|'d| would| want to| should| have to| (?:still\\s+)?need to|'m going to| am going to|'m about to| am about to|'ve got to| have got to)|let me|let's|next,? (?:i|we)|we(?:'ll| will| need to| can)|(?:my|the) next step is to)${ZAI_PENDING_GAP_64}(?:${ZAI_ACTION_VERBS_EN})`,
   'gi',
 );
 
@@ -345,13 +375,13 @@ const ZAI_PENDING_STRONG_RE = new RegExp(
  * 这个**巧合**才判对；一旦重排 `collect` 或换排序实现就会静默翻转。
  */
 const ZAI_PENDING_IMPERSONAL_RE = new RegExp(
-  `(?:马上|立刻|立即|这就|再试(?:一次)?|还需要|仍需|还要|继续).{0,24}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`,
+  `(?:马上|立刻|立即|这就|再试(?:一次)?|还需要|仍需|还要|继续)${ZAI_PENDING_GAP_24}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`,
   'gi',
 );
 
 /** 弱信号：`接下来 / 下一步 / 然后 / 现在 / 随后 / 稍后 + 动词`，可能只是在给用户建议。 */
 const ZAI_PENDING_WEAK_RE = new RegExp(
-  `(?:接下来|下一步|然后|现在|随后|稍后).{0,48}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`,
+  `(?:接下来|下一步|然后|现在|随后|稍后)${ZAI_PENDING_GAP_48}(?:${ZAI_ACTION_VERBS})${ZAI_PAST_MARKER}`,
   'gi',
 );
 

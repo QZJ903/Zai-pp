@@ -1338,3 +1338,101 @@ describe('chatNew does not write request-scoped state it can never release', () 
   });
 });
 
+
+/**
+ * **授权失败码必须能被重试判据认出来** —— 传输层的 `RuntimeCommandError` 要归一成
+ * `ToolAuthorizationRequestError`。
+ *
+ * ## 它修的是什么
+ *
+ * 后台的领域失败（含 `unknown_tool_authorization_descriptor`）走 `sendRuntimeMessageStrict`
+ * 会变成 `RuntimeCommandError`，而 `requestToolAuthorization` 的 catch 判的是
+ * `instanceof ToolAuthorizationRequestError` ⇒ **不归一就恒 false**，整条
+ * 「刷新目录再重试一次」的链是死代码，且失败方向是静默的（只打一行 console.error）。
+ *
+ * ⚠️ 判据只能落在这里（AST）—— `createToolAuthorization` 在内容脚本里、不可 import。
+ * 但它问的是**结构事实**：「抛出的那个类名是不是判据要认的那个」，不是「某个名字出现过」。
+ */
+describe('authorization failures are normalized to the semantic error type', () => {
+  it('createToolAuthorization converts RuntimeCommandError before rethrowing', () => {
+    const program = readContentProgram();
+    const body = findFunctionBody(program, 'createToolAuthorization');
+
+    // 找 `if (error instanceof RuntimeCommandError) { throw new ToolAuthorizationRequestError(...) }`
+    // ⚠️ **consequent 是 `BlockStatement`**（带花括号），不是裸的 `ThrowStatement` ——
+    // 直接判 `isThrowStatement(consequent)` 会永远为 false（第一版就是这么写错的，
+    // 而 `/tmp` 上用字符串匹配「模拟」判据时看不出来）。所以先拆一层块。
+    let normalized = false;
+    walkSourceAst(body!, (node) => {
+      if (!t.isIfStatement(node)) return;
+      const test = node.test;
+      if (!t.isBinaryExpression(test) || test.operator !== 'instanceof') return;
+      if (!t.isIdentifier(test.right, { name: 'RuntimeCommandError' })) return;
+      const consequent = node.consequent;
+      const statements = t.isBlockStatement(consequent) ? consequent.body : [consequent];
+      const throws = statements.find((statement) => t.isThrowStatement(statement));
+      if (!throws || !t.isThrowStatement(throws)) return;
+      const arg = throws.argument;
+      if (!t.isNewExpression(arg)) return;
+      if (!t.isIdentifier(arg.callee, { name: 'ToolAuthorizationRequestError' })) return;
+      normalized = true;
+    });
+    expect(
+      normalized,
+      'createToolAuthorization 必须把 RuntimeCommandError 转成 ToolAuthorizationRequestError —— '
+      + '不转的话 requestToolAuthorization 的重试判据恒 false，整条重试链是死代码',
+    ).toBe(true);
+  });
+
+  it('the retry guard still keys on the semantic type', () => {
+    // 反面守卫：别「修」成在 retry 那边也认 RuntimeCommandError —— 那样两处判据会各写一份，
+    // 而归一化的责任应该在**产生错误的那一侧**。
+    const program = readContentProgram();
+    const body = findFunctionBody(program, 'requestToolAuthorization');
+    const source = readFileSync(CONTENT_SOURCE, 'utf8').slice(body!.start ?? 0, body!.end ?? 0);
+    expect(
+      source.includes('instanceof ToolAuthorizationRequestError'),
+      'requestToolAuthorization 应当继续判 ToolAuthorizationRequestError',
+    ).toBe(true);
+  });
+});
+
+/**
+ * **chatNew 的 grant 必须在异常路径上也被还掉**。
+ *
+ * 它刻意不进任何请求级 Map（chatNew 没有终态事件），只能显式关；而增广 / 重写 / 回传
+ * 那几步一旦抛错会落到最外层 catch，grant 就漏了 ⇒ 占后台 32 个名额之一到 30 分钟 TTL。
+ * 判据：`closeToolAuthorizationGrant` 必须落在覆盖「建授权之后那段」的 `finally` 里。
+ */
+describe('the chatNew grant is released on the error path too', () => {
+  it('closes the grant inside a finally that covers the augmentation', () => {
+    const program = readContentProgram();
+    const body = findFunctionBody(program, 'handleAugmentRequestBody');
+
+    let covered = false;
+    walkSourceAst(body!, (node) => {
+      if (!t.isTryStatement(node) || !node.finalizer) return;
+      const block = node.block;
+      const inTry = (name: string) => {
+        let found = false;
+        walkSourceAst(block, (inner) => {
+          if (t.isCallExpression(inner) && t.isIdentifier(inner.callee, { name })) found = true;
+        });
+        return found;
+      };
+      if (!inTry('augmentPrompt') || !inTry('rewriteZaiChatNewUserMessages')) return;
+      let closes = false;
+      walkSourceAst(node.finalizer, (inner) => {
+        if (t.isCallExpression(inner) && t.isIdentifier(inner.callee, { name: 'closeToolAuthorizationGrant' })) {
+          closes = true;
+        }
+      });
+      if (closes) covered = true;
+    });
+    expect(
+      covered,
+      'chatNew 的增广段必须包在 try/finally 里，且 finally 里关掉 grant —— '
+      + '否则增广抛错时 grant 没人还，占满 32 个名额后所有工具静默不可用',
+    ).toBe(true);
+  });
+});

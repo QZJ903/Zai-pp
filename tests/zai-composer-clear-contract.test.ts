@@ -40,6 +40,26 @@ function context() {
   return { program, source: readFileSync(CONTENT_SOURCE, 'utf8') };
 }
 
+/**
+ * 子树里 `obj?.prop(...)` / `obj.prop(...)` 形态的调用点（按方法名收）。
+ *
+ * ⚠️ **两种都得认** —— `draftGuard?.restore()` 的 callee 是 `OptionalMemberExpression`、
+ * 调用节点是 `OptionalCallExpression`；只认 `MemberExpression` + `CallExpression`
+ * 会一个都收不到（**假绿**：断言写「应当有若干处」就会直接红，而写「必须是 0 处」会静默通过）。
+ */
+function optionalMemberCallsTo(node: t.Node, propName: string): t.Node[] {
+  const found: t.Node[] = [];
+  t.traverseFast(node, (child) => {
+    if (!t.isCallExpression(child) && !t.isOptionalCallExpression(child)) return;
+    const callee = (child as t.CallExpression).callee as t.Node;
+    const isMember = t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee);
+    if (!isMember) return;
+    const property = (callee as t.MemberExpression).property;
+    if (t.isIdentifier(property) && property.name === propName) found.push(child);
+  });
+  return found;
+}
+
 /** 子树里 `obj.prop(...)` 形态的调用点（按方法名收 —— callee 是成员表达式）。 */
 function memberCallsTo(node: t.Node, propName: string): t.CallExpression[] {
   const found: t.CallExpression[] = [];
@@ -474,5 +494,144 @@ describe('composer clear: 清空本身的写法', () => {
     // 拿它当「发送成功」的依据等于没有依据 —— 已经整体删除，别再写回来。
     // ⚠️ 判据取**调用点**而不是全文搜名字：注释里提到它（比如说明为什么删）是合法的。
     expect(callsTo(program, 'waitForComposerCleared')).toEqual([]);
+  });
+});
+
+/**
+ * **用户草稿的保护** —— 两个注入原语共用 `captureComposerDraft`。
+ *
+ * ## 它修的是什么
+ *
+ * 注入会无条件覆盖输入框（`setTextareaValue(textarea, '')` + 写 prompt），而
+ * **草稿的保存/恢复原先只在 `advanceContinuationLoop` 一条链上** ⇒ nudge 轮与
+ * 误用纠错轮**完全不保护草稿**，用户打了一半的内容直接没了、没有任何提示。
+ * 现在保存与恢复都收进两个注入原语，三条链一起覆盖。
+ *
+ * ## 判据为什么落在「位置」而不是「行为」
+ *
+ * 这两个函数在 `zai.content.ts` 里、不可 import（文件加载即执行 `defineContentScript`）。
+ * 所以只能问源码：**保存点必须在 `disabled = true` 之后**（那之前输入框是活的，
+ * 用户打的字会被紧接着的清空动作抹掉）；**`unsent` 出口必须调一次恢复**
+ * （那里清空过、又不提交，不还就等于丢）。
+ */
+describe('composer draft: 三条注入链共用的草稿保护', () => {
+  const DRAFT_FN = 'captureComposerDraft';
+  const RESTORE_PROP = 'restore';
+
+  for (const fn of [FORM_PATH_FN, DOM_PATH_FN]) {
+    it(`${fn} 的草稿保存点在 disabled = true 之后`, () => {
+      const { program } = context();
+      const body = findFunctionBody(program, fn);
+
+      const captures = callsTo(body, DRAFT_FN);
+      expect(captures, `${fn} 应当捕获一次草稿`).toHaveLength(1);
+      const capture = captures[0]!;
+
+      // 找 `textarea.disabled = true` 那个赋值。
+      let lockAt: number | null = null;
+      t.traverseFast(body, (node) => {
+        if (!t.isAssignmentExpression(node)) return;
+        const left = node.left;
+        if (!t.isMemberExpression(left)) return;
+        if (!t.isIdentifier(left.property, { name: 'disabled' })) return;
+        if (!t.isBooleanLiteral(node.right) || node.right.value !== true) return;
+        lockAt = node.start ?? null;
+      });
+      expect(lockAt, `${fn} 应当把输入框锁成 disabled`).not.toBeNull();
+      expect(
+        (capture.start ?? 0),
+        '草稿必须在「锁住输入框」之后才捕获 —— 再往前用户还在打字，捕获到的是半截',
+      ).toBeGreaterThan(lockAt!);
+    });
+
+    it(`${fn} 的每个 unsent 出口都还回草稿`, () => {
+      const { program } = context();
+      const body = findFunctionBody(program, fn);
+      const restores = optionalMemberCallsTo(body, RESTORE_PROP);
+      // 每个「清空过、又不提交」的出口各一次；正常路径那一份在 finally 里。
+      const unsentExits = ifStatements(body).filter(
+        (statement) => hasEarlyReturn(statement) && callsTo(statement.consequent, CLEAR_FN).length > 0,
+      );
+      expect(unsentExits.length, `${fn} 应当有若干个「清空过再退出」的出口`).toBeGreaterThan(0);
+      for (const exit of unsentExits) {
+        // ⚠️ **判「至少一次」而不是「恰好一次」** —— 外部评审 P1-2 指出的第二个洞：
+        // 要求恰好一次的话，把 `clear(); restore();` 抽成一个 `releaseComposer()` 助手
+        // （合理重构）就会假红，而那种重构一点问题都没有。
+        // 语义的守卫在 `tests/zai-composer-draft.test.ts`（真调三档当前值）——
+        // 本文件只负责「每个清空出口都接上了没」。
+        expect(
+          optionalMemberCallsTo(exit.consequent, RESTORE_PROP).length,
+          `${fn} 的某个提前退出分支清了输入框却没还草稿 —— 用户打的内容就没了`,
+        ).toBeGreaterThan(0);
+      }
+      // finally 里还要有一次兜底（幂等）。
+      const tries: t.TryStatement[] = [];
+      t.traverseFast(body, (node) => {
+        if (t.isTryStatement(node)) tries.push(node);
+      });
+      const guarded = tries.filter((node) => node.finalizer
+        && optionalMemberCallsTo(node.finalizer, RESTORE_PROP).length > 0);
+      expect(guarded.length, `${fn} 的 finally 必须兜一次草稿恢复`).toBeGreaterThan(0);
+      expect(restores.length, `${fn} 应当有草稿恢复的调用`).toBeGreaterThan(0);
+    });
+  }
+
+  it('判据本体已搬进 core/zai/composer-draft.ts，本文件不再按文本断言它', () => {
+    // ⚠️⚠️ **这条替换掉了原先两条「按源码文本找 `live.value !== ''`」的断言。**
+    // 那种断言问的是「源码里出现过这个字符串吗」，与「语义对不对」没有必然关系 ——
+    // 把两个条件调换顺序、或去掉其中一个，它照样绿。
+    // ⇒ 语义搬到 `tests/zai-composer-draft.test.ts`（真调三档当前值）。
+    // 这里只保留**接线**这一半：那两个原语确实调了本文件的薄封装。
+    const { program } = context();
+    const body = findFunctionBody(program, DRAFT_FN);
+    const text = context().source.slice(body.start ?? 0, body.end ?? 0);
+    expect(text, '薄封装必须把 `resolveInput` 与 `writeValue` 两个依赖注进去')
+      .toContain('resolveInput');
+    expect(text, '写值必须复用注入侧同一个原语').toContain('setTextareaValue');
+    expect(callsTo(body, 'captureComposerDraftWith').length, '应当转调共用实现').toBe(1);
+  });
+
+  it('「空值不算草稿」这条判据在共用实现里，不在薄封装里', () => {
+    // ⚠️ 判据本体搬进 `core/zai/composer-draft.ts` 之后，这条**不该**再在本文件里
+    // 按源码文本找 `textarea.value.trim()` —— 那是「去错文件找东西」，只会假红。
+    // 语义由 `tests/zai-composer-draft.test.ts` 的「空草稿 ⇒ 从头到尾 no-op」钉住
+    // （真喂 `''` 与 `'   '`，断言一次都没写回）。这里只核薄封装**没有**再长出一份自己的判据。
+    const { program, source } = context();
+    const body = findFunctionBody(program, DRAFT_FN);
+    const text = source.slice(body.start ?? 0, body.end ?? 0);
+    expect(text, '薄封装里不该再有一份保存判据 —— 两份必然分叉')
+      .not.toContain('textarea.value.trim()');
+  });
+});
+/**
+ * **「只查一次」不能靠「超时传 0」表达** —— 那个函数的骨架是「先算 deadline、再 while」，
+ * 传 0 时循环体一次都不进、恒返回 false。
+ *
+ * ⚠️ 这条钉的是一类**可达性**缺陷：`waitForDomTaskRecognized(taskId, 0)` 曾经被当成
+ * 「只查一次」，实测 2000 次全部返回 false ⇒ 那道「上一发已经归属就别再发」的短路判据
+ * 完全失效 ⇒ 归属慢的那一发会被重发（双会话 + 双计费）。
+ */
+describe('automation send: 「只查一次」有独立入口，不靠超时参数', () => {
+  it('sendPromptViaPage 用同步判据而不是 waitForDomTaskRecognized(…, 0)', () => {
+    const { program } = context();
+    const body = findFunctionBody(program, 'sendPromptViaPage');
+
+    // ⚠️ **判据走 AST，不走源码文本** —— 那段注释里也写着 `waitForDomTaskRecognized(taskId, 0)`
+    // （说明它为什么是缺陷），文本断言会被注释里的同名字样骗到（假红）。
+    const bad = callsTo(body, 'waitForDomTaskRecognized').filter((call) => {
+      const arg = call.arguments[1];
+      return arg !== undefined && t.isNumericLiteral(arg) && arg.value === 0;
+    });
+    expect(bad, '不该再用「传 0 超时」表达「只查一次」').toHaveLength(0);
+    expect(callsTo(body, 'isDomTaskRecognized').length, '应当用同步的 isDomTaskRecognized').toBeGreaterThan(0);
+  });
+
+  it('isDomTaskRecognized 是同步的、只读一次状态', () => {
+    const { program, source } = context();
+    const body = findFunctionBody(program, 'isDomTaskRecognized');
+    const text = source.slice(body.start ?? 0, body.end ?? 0);
+    expect(text, '不该有 await / 循环 / 定时器').not.toContain('await');
+    expect(text, '不该有 while 循环').not.toContain('while');
+    expect(text, '应当直接读 activeDomTasks 的状态').toContain('activeDomTasks.get(taskId)');
   });
 });
