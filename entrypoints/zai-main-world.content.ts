@@ -127,8 +127,8 @@ window.addEventListener('message', (event) => {
     return;
   }
   if (data.type === 'SYNC_HOOK_STATE') {
-    // ⚠️ **元素类型必须校验**：这些名字会被逐个喂给 `escapeRegExp`（`value.replace`），
-    // 非字符串会抛 TypeError → 走到 `controller.error` → **打断回给页面的响应流**。
+    // ⚠️ **元素类型必须校验**：这些名字会被逐个喂给工具标签扫描器，而非字符串在那里是
+    // **静默降级**（`Math.max` 遇 `123` 算成 `NaN` ⇒ 扣住长度恒 0 ⇒ 半截标签会直接放行）。
     // `new Set()` 不做类型收敛，别指望它兜。
     const state = decodeZaiSyncHookStateMessage(data);
     if (!state) return;

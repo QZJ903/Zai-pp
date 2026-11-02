@@ -69,6 +69,25 @@ describe('decodeZaiResponseCompleteMessage', () => {
     expect(decodeZaiResponseCompleteMessage({ ...legal, toolCalls: [] })).toEqual(legal);
   });
 
+  it('falls back to originalPrompt when agentTaskPrompt is absent', () => {
+    // ⚠️⚠️ **这条钉的是「字段可选」这个决策** —— 它与 `originalPrompt` 在本项目里恒等
+    // （`fetch-hook.ts` 的 `createRequestContext` 用同一个变量赋两处）。若有人把它从
+    // 生产者那边删掉、又把它当必需字段，**每一条** `RESPONSE_COMPLETE` 都会被丢弃 ⇒
+    // `respondedRequestIds` 不登记 ⇒ 4 秒后把自动化任务误报成「用户手动停止」。
+    // ⚠️ 「省略」与「给了个错值」必须分开：下面那条 `non-string agentTaskPrompt` 仍判否。
+    const withoutAgentTask = {
+      requestId: 'r-1',
+      originalPrompt: 'hi',
+      assistantText: 'done',
+    };
+    expect(decodeZaiResponseCompleteMessage(withoutAgentTask)).toEqual({
+      requestId: 'r-1',
+      originalPrompt: 'hi',
+      agentTaskPrompt: 'hi',
+      assistantText: 'done',
+    });
+  });
+
   it.each([
     ['null', null],
     ['array', []],
@@ -135,8 +154,8 @@ describe('decodeZaiSyncHookStateMessage', () => {
     ['nested array element', [['memory_save']]],
     ['mixed, one bad', ['memory_save', 123]],
   ])('rejects non-string element: %s', (_label, names) => {
-    // ⚠️⚠️ **这条是本组最要紧的** —— 元素会被逐个喂给 `escapeRegExp`（`value.replace`），
-    // 非字符串抛 TypeError → `controller.error` → **打断回给页面的响应流**。
+    // ⚠️⚠️ **这条是本组最要紧的** —— 元素会被逐个喂给工具标签扫描器，而那里对非字符串
+    // 是**静默降级**（`Math.max` 遇 `123` 算成 `NaN` ⇒ 扣住长度恒 0 ⇒ 半截标签直接放行）。
     // `new Set()` 不做类型收敛（`[...new Set(['a', 123])]` 仍是 `['a', 123]`），别指望它兜。
     expect(decodeZaiSyncHookStateMessage({ toolDescriptorNames: names })).toBeNull();
   });

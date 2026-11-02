@@ -43,6 +43,7 @@ import {
   encodeZaiStreamText,
 } from './stream-strip';
 import { matchCatalogToolName } from './tool-name-match';
+import { findZaiToolXmlBlocks } from './tool-xml';
 
 export interface ZaiHookState {
   toolDescriptorNames: ReadonlySet<string>;
@@ -156,6 +157,15 @@ function createEmptyHookState(): ZaiHookState {
   };
 }
 
+/**
+ * 局部更新 hook 状态。
+ *
+ * ⚠️⚠️ **必须浅合并，不能整体替换** —— 全仓两个调用点给的是**不同的子集**：
+ * `main()` 一次给全 8 个回调（`zai-main-world.content.ts`），而 `SYNC_HOOK_STATE`
+ * 分支只给 `toolDescriptorNames`。改成整体替换的话，那条同步消息会把**其余回调
+ * 全清成空函数**，而表现是静默的：工具识别还在（名字同步了），但执行通知、
+ * 用量快照、历史记录**全部停摆**。
+ */
 export function updateZaiHookState(partial: Partial<ZaiHookState>): void {
   hookState = { ...hookState, ...partial };
 }
@@ -305,9 +315,23 @@ export function readFeVersion(): string {
     /* ignore */
   }
   if (candidates.length > 0) {
-    return candidates.sort().reverse()[0];
+    // ⚠️ **不能 `sort()`** —— 那是字典序，`prod-fe-1.0.99` 会排在 `prod-fe-1.0.194` 后面
+    // 被当成「更新」。版本号必须按**数字段**比。
+    return candidates.reduce((best, next) => (compareFeVersions(next, best) > 0 ? next : best));
   }
   return '';
+}
+
+/** 按**数字段**比较两个 `prod-fe-x.y.z`（形态由 `ZAI_FE_VERSION_RE` 保证）。 */
+function compareFeVersions(a: string, b: string): number {
+  const left = a.replace(/^prod-fe-/, '').split('.').map((part) => Number(part) || 0);
+  const right = b.replace(/^prod-fe-/, '').split('.').map((part) => Number(part) || 0);
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (left[index] ?? 0) - (right[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }
 
 function createRequestContext(bodyStr: string): ZaiRequestContext {
@@ -334,7 +358,6 @@ function readRequestModelType(body: Record<string, unknown> | null): string | nu
 interface ZaiIntercepted {
   context: ZaiRequestContext;
   requestBody: string;
-  requestInit: RequestInit;
   /**
    * 本请求注入提示词的工具标签名。**`undefined` = 未增广**（增广失败 / 结果非法），
    * 与「增广成功但目录为空」（`[]`）是两回事 —— 后者必须按空目录处理、**不能回落全局快照**，
@@ -370,7 +393,6 @@ async function prepareRequest(
       modelType: readRequestModelType(parseZaiBody(requestBody)),
     },
     requestBody,
-    requestInit: ({} as RequestInit),
     toolNames,
   };
 }
@@ -408,6 +430,19 @@ function hookFetch(): () => void {
       ? matchZaiWebRoute({ url, method, baseUrl: readPageOrigin() })
       : null;
 
+    // ⚠️⚠️ **bypass 排在所有改写之前** —— 它的语义是「这条请求谁都别碰」。
+    // 排在历史分支之后的话，带 bypass 头的**历史请求仍会被清洗**（响应被重写）。
+    //
+    // ⚠️⚠️ **但它不能连「采集请求头」一起跳过** —— 那个回调是 token / user_id /
+    // fe 版本 / deviceId 的**唯一采集入口**（隔离世界据此写 `zaiCachedAuth` 桶，
+    // 后台的模型清单就靠它）。跳过它等于「页面上的任何脚本都能单方面关掉自己的
+    // 凭据采集」。所以这里**先采一次头再放行**。
+    // `hasBypassHeader` 为真 ⇒ `init.headers` 必然存在（它判的就是这个），不必再兜底。
+    if (hasBypassHeader(init?.headers)) {
+      hookState.onHeadersCaptured(captureClientHeaders(init!.headers, url));
+      return originalFetch.call(this, input, { ...init, headers: stripBypassHeader(init!.headers) });
+    }
+
     // ⚠️⚠️ **历史路由先于增广分支** —— 它们的响应体里有我们注入过的文本与工具 XML，
     // 要剥；而它们的**请求体里没有提示词**，绝不能进增广（见 `isZaiAugmentableRoute`）。
     // ⚠️ 这一判**不能写成 `route === 'chatDetail'`**：历史路由是**两条**，
@@ -423,9 +458,6 @@ function hookFetch(): () => void {
     // 走同一条原样转发。这是加历史路由之后**必须**分开的一件事。
     if (!isZaiAugmentableRoute(route) || typeof init?.body !== 'string') {
       return originalFetch.call(this, input, init);
-    }
-    if (hasBypassHeader(init.headers)) {
-      return originalFetch.call(this, input, { ...init, headers: stripBypassHeader(init.headers) });
     }
 
     hookState.onHeadersCaptured(captureClientHeaders(init.headers, url));
@@ -497,9 +529,14 @@ function hookXHR(): () => void {
   };
 
   Object.defineProperty(prototype, XHR_HOOK_MARKER, { value: true, configurable: true });
+  // ⚠️⚠️ **cleanup 要比「装完之后那一版」** —— 比 `origOpen` 会恒不等
+  // （装完之后 `prototype.open` 已经是上面那个 wrapper）⇒ 卸载永不生效、
+  // 反复安装会一层层叠上去。与 `hookFetch` 的 `hookedFetch` 同一口径。
+  const hookedOpen = prototype.open;
+  const hookedSend = prototype.send;
   return () => {
-    if (prototype.open === origOpen) prototype.open = origOpen as typeof XMLHttpRequest.prototype.open;
-    if (prototype.send === origSend) prototype.send = origSend;
+    if (prototype.open === hookedOpen) prototype.open = origOpen as typeof XMLHttpRequest.prototype.open;
+    if (prototype.send === hookedSend) prototype.send = origSend;
     // `defineProperty` 没有 `writable` ⇒ 该属性只读，只能 `delete`（`configurable: true`
     // 使 delete 合法），赋值在严格模式下会抛。
     delete prototype[XHR_HOOK_MARKER];
@@ -625,7 +662,12 @@ async function interceptCompletionResponse(
         notifyTerminal();
       }
     },
-    cancel() {
+    cancel(reason) {
+      // ⚠️ **页面放弃读取时必须把底层 reader 一起取消** —— 否则那条 HTTP 连接既不释放
+      // 也不消费，要等服务器自己发完（实测：底层流的 `cancel` 回调一次都不触发）。
+      // ⚠️ 与「`read()` 抛错时不能补 cancel」那一档不同：那里流已 errored、`cancel` 必 reject；
+      // 这里是**正常 cancel**，合法且有效。
+      void reader.cancel(reason).catch(() => undefined);
       notifyTerminal();
     },
   }, { highWaterMark: 0 });
@@ -667,8 +709,8 @@ async function interceptCompletionResponse(
  * Chrome 会截断或挂住响应。与 `interceptCompletionResponse` 同一处理。
  *
  * ⚠️ **不加字节上限** —— 这是页面**必需**的响应，读一半就废掉整个会话。
- * 实测量级：`messages/batch` 80 KB、`chats/{id}` 34 KB。与「六处刻意不加限」
- * 同一取舍（那些是 GitHub / chatNew 诊断这类非必需响应）。
+ * 实测量级：`messages/batch` 80 KB、`chats/{id}` 34 KB。与「五处刻意不加限」
+ * 同一取舍（那五处是 `core/skill/github-importer.ts` 的四处读响应 + 本文件这一处）。
  */
 /**
  * 从历史请求的 URL 里读出会话 id（`/api/v1/chats/<id>[/messages/batch]`）。
@@ -782,22 +824,19 @@ function extractAndNotifyToolCalls(
     : hookState.toolDescriptorNames;
   const text = accumulator.assistantText;
   if (!names || names.size === 0) return;
-  // 同一次扫描内按 `raw + requestId` 去重。工具名来自 descriptor 集合、各自独立匹配，
-  // 正常情况下不会命中；留着是防御 —— 名字互为前缀时（`shell` 与 `shell.exec`）正则可能重叠。
+  // 同一次扫描内按 `raw + requestId` 去重。扫描器按名字逐个匹配，而名字互为前缀时
+  // （`shell` 与 `shell_exec`）**同一个块可能被两个名字各认一次** ⇒ 这道去重仍然需要。
   const known = new Set<string>();
-  // 用简单正则找完整 `<tool>...</tool>` 块，避免半截标签误报。
-  for (const name of names) {
-    const re = new RegExp(`<${escapeRegExp(name)}\\b[^>]*>[\\s\\S]*?<\\/${escapeRegExp(name)}>`, 'g');
-    for (const match of text.matchAll(re)) {
-      const raw = match[0];
-      const key = raw + requestId;
-      if (known.has(key)) continue;
-      known.add(key);
-      registerToolCall({ name, raw, requestId });
-    }
+  // ⚠️⚠️ **必须与「解析」「剥离」用同一个扫描器** —— 曾经这里是手写的
+  // `<name\b[^>]*>[\s\S]*?</name>` 正则，与 `findZaiToolXmlBlocks` 口径不同：
+  // ① `<name id="1">` 只有正则认 ⇒ 会发一条 `TOOL_CALL`，下游解析不出、只留一行日志；
+  // ② `< name >` 只有扫描器认 ⇒ XML 被剥掉了、却**没有 `TOOL_CALL` 发出**，
+  //    同一轮若还有别的正常块，兜底解析也不会触发 ⇒ **静默不执行**。
+  // 「什么算一个工具块」只能有一份实现（`core/zai/tool-xml.ts`）。
+  for (const block of findZaiToolXmlBlocks(text, [...names])) {
+    const key = block.raw + requestId;
+    if (known.has(key)) continue;
+    known.add(key);
+    registerToolCall({ name: block.name, raw: block.raw, requestId });
   }
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

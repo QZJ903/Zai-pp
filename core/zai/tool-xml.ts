@@ -19,10 +19,24 @@ export interface ZaiToolXmlBlock {
  * 4,000 空白 6.5s / **8,000 空白 49s**。
  * ⚠️ **触发条件是「纯空白连续段」** —— 中间插一个非空白字符、或末尾补上闭合标签，
  * 都会立刻回到 0ms。所以这不是「长文本慢」，是 `\s*` 与 `[\s\S]*?\s*` 量词重叠回溯。
+ * ⚠️⚠️ **这组数据只对「带 `\s*` 的形态」成立，不能平移到别的正则上** ——
+ * 那条「通知侧」正则（`<name\b[^>]*>[\s\S]*?</name>`）**没有 `\s*`**，
+ * 实测「开标签 + 4,000 空白」**0.005 ms**（与上面 6.5 s 差六个数量级）。
+ * ⚠️ 它**已在本轮删除** —— 通知侧改走本模块的 `findZaiToolXmlBlocks`（见 U4-2），
+ * 现在全仓没有第二份「扫工具块」的正则。这组对照数据留在这里只说明一件事：
+ * 判某个正则会不会退化，**按字面形态单独跑**，别引用邻近的实测数字。
  * 上游同一处也是这么修的（`core/interceptor/tool-parser.ts` 的线性扫描器），
  * 回归用例见上游 `tool-parser-redos-regression`。
  *
  * ⚠️ **未闭合时要从开标签之后继续找，不能 `break`** —— 后面可能还有完整的块。
+ *
+ * ⚠️⚠️ **复杂度闸门与 `findZaiToolXmlStripRanges` 同款**：每个名字只允许「找不到闭标签」一次。
+ * 形态是模型在正文里反复**提及**标签（`关于 <shell_exec> 这个标签 …`），每个开标签都要再找
+ * 一次闭标签，而找不到时那次搜索会一路扫到文末 ⇒ O(k·n)。
+ * 实测 3,200 个提及 / 66 KB：**加闸门前 1,335 ms**、加闸门后与 `findZaiToolXmlStripRanges`
+ * 同级（~1 ms）。本函数被**通知侧**（`fetch-hook` 的 `extractAndNotifyToolCalls`）调用，
+ * 输入是无长度上限的 `assistantText` ⇒ 没有闸门时这条路径会被一次回复卡住 1.3 秒。
+ * 失败方向与那个函数一致：**少剥一次**（用户看得见 XML）优于「误删正文」。
  */
 export function findZaiToolXmlBlocks(
   text: string,
@@ -31,11 +45,13 @@ export function findZaiToolXmlBlocks(
   const blocks: ZaiToolXmlBlock[] = [];
   if (!text || names.length === 0) return blocks;
   const nameSet = new Set(names);
+  const missedClose = new Set<string>();
 
   let fromIndex = 0;
   while (fromIndex < text.length) {
     const open = findFirstXmlToolTag(text, nameSet, { closing: false, fromIndex });
     if (!open) break;
+    if (missedClose.has(open.name)) break;
     // 闭合标签只在**同名**里找（与正则的 `\1` 反向引用同义）。
     const close = findFirstXmlToolTag(
       text,
@@ -43,6 +59,7 @@ export function findZaiToolXmlBlocks(
       { closing: true, fromIndex: open.endIndex },
     );
     if (!close) {
+      missedClose.add(open.name);
       fromIndex = open.endIndex;
       continue;
     }
@@ -78,7 +95,8 @@ export function findZaiToolXmlBlocks(
  * 误删会让正文消失（也看得见）。选前者。
  *
  * ⚠️ 返回的区间**保证互不重叠且按位置递增**（`findFirstXmlToolTag` 每次都从上一个
- * 闭合标签之后继续扫）。
+ * 闭合标签之后继续扫；未闭合那条一旦命中就 `break` —— 它已经吃到文末，不可能再与
+ * 后面的区间重叠）。
  */
 export interface ZaiToolXmlRange {
   start: number;
@@ -93,10 +111,14 @@ export interface ZaiToolXmlRange {
  *
  * ⚠️ 只认 `{` / `[` / 空 —— **不认别的形态**：多认一种就多一分误删正文的风险，
  * 而工具载荷按提示词约定**必须是 JSON 对象**。
+ *
+ * ⚠️ **`stream-strip.ts` 直接 import 这一个** —— 它本来就要 import `tool/xml-tags`，
+ * 而本模块**只**依赖 `xml-tags`（`history-cleanup` 是反过来依赖本模块的）
+ * ⇒ 共用不新增任何依赖链，也就不需要再抄第二份。
  */
-function looksLikeTruncatedPayload(after: string): boolean {
-  const trimmed = after.trim();
-  return trimmed === '' || trimmed.startsWith('{') || trimmed.startsWith('[');
+export function looksLikeTruncatedPayload(text: string, fromIndex: number): boolean {
+  const head = text.slice(fromIndex).trimStart().charAt(0);
+  return head === '' || head === '{' || head === '[';
 }
 
 export function findZaiToolXmlStripRanges(
@@ -107,10 +129,20 @@ export function findZaiToolXmlStripRanges(
   if (!text || names.length === 0) return ranges;
   const nameSet = new Set(names);
 
+  // ⚠️⚠️ **每个名字只允许「找不到闭标签」一次** —— 这是本函数的复杂度闸门。
+  // 形态：模型在正文里反复**提及**标签（`关于 <shell_exec> 这个标签 …`），每个开标签
+  // 都要找一次闭标签，而找不到时那次搜索会一路扫到文末 ⇒ O(n²)。
+  // 实测 3,200 个提及 / 66 KB ⇒ **1.25 秒**（单看「扫开标签」只要 3.9 ms）。
+  // 真实数据里「同名开标签出现很多次、且都没有闭标签」不可能是载荷，所以每个名字
+  // **第二次**出现无闭合时直接结束扫描 —— 失败方向是「少剥一次」（用户看得见 XML），
+  // 与「误删正文」相比是安全的那一侧。
+  const missedClose = new Set<string>();
+
   let fromIndex = 0;
   while (fromIndex < text.length) {
     const open = findFirstXmlToolTag(text, nameSet, { closing: false, fromIndex });
     if (!open) break;
+    if (missedClose.has(open.name)) break;
     const close = findFirstXmlToolTag(
       text,
       new Set([open.name]),
@@ -121,9 +153,15 @@ export function findZaiToolXmlStripRanges(
       fromIndex = close.endIndex;
       continue;
     }
-    if (looksLikeTruncatedPayload(text.slice(open.endIndex))) {
+    if (looksLikeTruncatedPayload(text, open.endIndex)) {
       ranges.push({ start: open.index, end: text.length, name: open.name, unterminated: true });
+      // ⚠️⚠️ **命中就结束** —— 这一条已经吃到文末，后面不可能再有「能被正确切分」的块。
+      // 继续扫会让第二个未闭合开标签也产出一条 `[x, text.length]`，两条**互相嵌套**：
+      // 剥文本的结果碰巧还对，但 `strippedBlocks` 会多算、`calls` 会多报
+      // （history 侧把它渲染成两个工具，而实际只有一个半截标签）。
+      break;
     }
+    missedClose.add(open.name);
     fromIndex = open.endIndex;
   }
   return ranges;

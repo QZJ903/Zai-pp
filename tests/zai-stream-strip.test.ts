@@ -132,6 +132,95 @@ describe('zai tool XML text filter', () => {
   });
 });
 
+/**
+ * **「提及」不等于「调用」** —— 模型在正文里写 `<shell_exec>` 这个标签名时，
+ * 后面跟的是**散文**，不是 JSON 载荷。
+ *
+ * ⚠️⚠️ 不加这条守卫的后果（实测）：从那个开标签起到**流结束**的全部正文被当块删掉。
+ * 历史侧（`core/zai/tool-xml.ts` 的 `looksLikeTruncatedPayload`）早就有这条守卫，
+ * 流式侧漏了 ⇒ 用户看到「话说一半没了」，而且**没有任何报错**。
+ *
+ * ⚠️ 判据是「开标签之后第一个非空白字符 ∈ `{` / `[` / 空」——
+ * 与历史侧**逐字同口径**。改这里要同改 `core/zai/tool-xml.ts`。
+ */
+describe('zai tool XML filter: a mere mention is not a tool call', () => {
+  it('passes a mentioned tag through when prose follows it', () => {
+    const filter = createZaiToolXmlTextFilter(NAMES);
+    const text = '你可以写 <shell_exec> 来执行命令，注意转义。';
+    expect(filter.push(text) + filter.finish()).toBe(text);
+  });
+
+  it('passes a long mention through instead of eating the rest of the answer', () => {
+    const filter = createZaiToolXmlTextFilter(NAMES);
+    const text = '关于 <shell_exec> 这个标签，它用于执行命令，参数必须是 JSON 对象。以上是全部说明。';
+    expect(filter.push(text) + filter.finish()).toBe(text);
+  });
+
+  it('still drops a block that is genuinely truncated inside its payload', () => {
+    // 反面对照：开标签之后是 `{` ⇒ 那是被截断的载荷，仍要删（与历史侧同判）。
+    const filter = createZaiToolXmlTextFilter(NAMES);
+    expect(filter.push('开始执行<shell_exec>{"command":"ls -la"')).toBe('开始执行');
+    expect(filter.finish()).toBe('');
+  });
+
+  it('still drops an opening tag that is followed by nothing but whitespace', () => {
+    // 「开标签后什么都没有」在流里最可能就是载荷还没到 ⇒ 与历史侧同判（删）。
+    const filter = createZaiToolXmlTextFilter(NAMES);
+    expect(filter.push('开始<shell_exec>   ')).toBe('开始');
+    expect(filter.finish()).toBe('');
+  });
+
+  it('keeps a mention whose name differs from the block that follows it', () => {
+    // ⚠️ **必须用异名**：同名时「开标签→同名闭标签」的匹配会把提及与真块连成**一个块**
+    // （`<shell_exec>` 提及 + 后面的 `</shell_exec>` 被当成同一对的起止）——
+    // 那是「名字相同」这个前提的固有结果，**历史侧同样如此**（实测 `stripZaiToolCalls` 也删到 `用 完`）。
+    // 本条钉的是「流式侧不再把异名提及之后的正文整段吃掉，且不早退漏掉后面的真块」。
+    const filter = createZaiToolXmlTextFilter(NAMES);
+    const out = filter.push('用 <memory_save> 可以存记忆。<shell_exec>{"a":1}</shell_exec>好了。')
+      + filter.finish();
+    expect(out).toBe('用 <memory_save> 可以存记忆。好了。');
+  });
+});
+
+/**
+ * **跨相位**：`thinking` 帧里出现未闭合开标签时，不能让**下一相位**的正文被扣住。
+ *
+ * ⚠️⚠️ 实测过的形态：`thinking` 帧里写「我该用 `<shell_exec>` 这个标签」，
+ * 紧接着 `answer` 帧吐**整段最终答案** —— 未修时那整段答案被扣到流结束并删掉，
+ * 用户只看到思考里那半句。
+ *
+ * ⚠️ 对照用例（thinking 里没有标签）必须**同时**留着：它证明红的是「跨相位扣住」
+ * 而不是「answer 本来就不该出现」。
+ */
+describe('zai completion stream rewriter: mentions must not cross phases', () => {
+  it('lets the answer through when thinking merely mentions a tag', () => {
+    const rewriter = createZaiCompletionStreamRewriter(NAMES);
+    let out = rewriter.push(deltaFrame('我该用 <shell_exec> 这个标签', 'thinking')).text;
+    out += rewriter.push(deltaFrame('这是最终答案，很重要。')).text;
+    out += rewriter.push(deltaFrame('', 'done')).text;
+    out += rewriter.finish().text;
+    expect(visibleTextOf(out)).toBe('我该用 <shell_exec> 这个标签这是最终答案，很重要。');
+  });
+
+  it('lets the answer through when thinking has no tag at all (control)', () => {
+    const rewriter = createZaiCompletionStreamRewriter(NAMES);
+    let out = rewriter.push(deltaFrame('我想一想', 'thinking')).text;
+    out += rewriter.push(deltaFrame('这是最终答案，很重要。')).text;
+    out += rewriter.push(deltaFrame('', 'done')).text;
+    out += rewriter.finish().text;
+    expect(visibleTextOf(out)).toBe('我想一想这是最终答案，很重要。');
+  });
+
+  it('still strips a real block that spans the thinking/answer boundary', () => {
+    // 反面对照：真块跨相位时仍要剥 —— 守卫只放过「散文开头」的那一种。
+    const rewriter = createZaiCompletionStreamRewriter(NAMES);
+    let out = rewriter.push(deltaFrame('先看看<shell_exec>{"command":"ls"}', 'thinking')).text;
+    out += rewriter.push(deltaFrame('</shell_exec>看完了。')).text;
+    out += rewriter.finish().text;
+    expect(visibleTextOf(out)).toBe('先看看看完了。');
+  });
+});
+
 describe('zai completion stream rewriter', () => {
   it('rewrites a delta frame that contains a tool block', () => {
     const rewriter = createZaiCompletionStreamRewriter(NAMES);
@@ -364,5 +453,71 @@ describe('the real fetch hook strips tool XML from the page stream', () => {
     expect(ZAI_BUILTIN_HISTORY_TOOL_NAMES).toContain('shell_exec');
     const wire = deltaFrame('<shell_exec>{"command":"ls"}</shell_exec>');
     expect(await runThroughHook(wire)).not.toContain('shell_exec');
+  });
+});
+
+/**
+ * **终止帧（`done: true`）之前必须把扣住的正文放行。**
+ *
+ * ⚠️⚠️ 真机实测（N1，2026-11-02）：页面收到终止帧之后**不再处理任何后续帧** ——
+ * 探针插在流末尾时，连对照组的 `answer` 帧都不渲染。而 `finish()` 是在
+ * `pull(done)` 里调的 ⇒ 合成帧天然排在终止帧**之后** ⇒ 用户永远看不到它。
+ *
+ * ⇒ 判据两条：① 合成帧**排在终止帧之前**；② 它的 `phase` 不继承终止帧自己的 `done`
+ *   （真机同样验过：`done` 相位的 `delta_content` 不渲染）。
+ */
+describe('zai completion stream rewriter: flush before the terminal frame', () => {
+  const DONE_FRAME = 'data: {"type":"chat:completion","data":{"phase":"done","done":true}}\n\n';
+
+  const framesOf = (wire: string) => wire.split('\n')
+    .filter((line) => line.startsWith('data: '))
+    .map((line) => {
+      const data = (JSON.parse(line.slice(6)) as { data?: Record<string, unknown> }).data ?? {};
+      return {
+        phase: data.phase as string,
+        delta: (data.delta_content ?? '') as string,
+        terminal: data.done === true,
+      };
+    });
+
+  it('emits the held tail before the terminal frame', () => {
+    const rewriter = createZaiCompletionStreamRewriter(NAMES);
+    let out = rewriter.push(deltaFrame('结论，对比 <')).text;
+    out += rewriter.push(DONE_FRAME).text;
+    out += rewriter.finish().text;
+
+    const frames = framesOf(out);
+    const terminal = frames.findIndex((frame) => frame.terminal);
+    const synthetic = frames.findIndex((frame) => frame.delta === '<');
+    expect(synthetic, '扣住的 "<" 必须作为一帧出现').toBeGreaterThanOrEqual(0);
+    expect(synthetic, '它必须排在终止帧之前').toBeLessThan(terminal);
+    expect(frames[synthetic]!.phase, '不能继承终止帧的 done').toBe('answer');
+  });
+
+  it('does not add an extra frame when nothing was held', () => {
+    const rewriter = createZaiCompletionStreamRewriter(NAMES);
+    let out = rewriter.push(deltaFrame('正常回答。')).text;
+    out += rewriter.push(DONE_FRAME).text;
+    out += rewriter.finish().text;
+    expect(framesOf(out).map((frame) => frame.phase)).toEqual(['answer', 'done']);
+  });
+
+  it('keeps the held tail in a text-bearing phase', () => {
+    // `thinking` / `tool_response` 是真会带正文的相位（真机 626/626、5/5）⇒ 原样保留；
+    // `done` / `other` 不带（0/1、0/5）⇒ 回落 `answer`。
+    const cases: [string, string][] = [
+      ['thinking', 'thinking'],
+      ['tool_response', 'tool_response'],
+      ['done', 'answer'],
+      ['other', 'answer'],
+    ];
+    for (const [lastPhase, expected] of cases) {
+      const rewriter = createZaiCompletionStreamRewriter(NAMES);
+      let out = rewriter.push(deltaFrame('尾巴 <', lastPhase)).text;
+      out += rewriter.push(DONE_FRAME).text;
+      out += rewriter.finish().text;
+      const synthetic = framesOf(out).find((frame) => frame.delta === '<');
+      expect(synthetic?.phase, lastPhase).toBe(expected);
+    }
   });
 });

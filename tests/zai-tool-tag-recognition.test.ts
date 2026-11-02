@@ -225,3 +225,55 @@ describe('the main world forwards the augment result names into the hook state',
     expect(recognizedNames()).toEqual(['memory_save']);
   });
 });
+
+/**
+ * **「什么算一个工具块」只能有一份口径。**
+ *
+ * ⚠️⚠️ 通知侧曾经是一条手写正则 `<name\b[^>]*>[\s\S]*?</name>`，而**解析**与**剥离**
+ * 走的是 `core/zai/tool-xml.ts` 的线性扫描器。两者对边缘输入的判法不同：
+ *
+ * | 形态 | 手写正则 | 线性扫描器 |
+ * |---|---|---|
+ * | `<shell_exec id="1">{…}</shell_exec>` | 认 | **不认**（`>` 前只允许空白） |
+ * | `< shell_exec >{…}</ shell_exec>` | **不认** | 认 |
+ *
+ * 后果分别是：
+ * - 「正则认、扫描器不认」⇒ 发了一条 `TOOL_CALL`，下游解析不出来，**只在 console 留一行**；
+ * - 「扫描器认、正则不认」⇒ XML 被剥掉了、却**没有 `TOOL_CALL` 发出** ⇒ 静默不执行。
+ *
+ * ⇒ 本组钉的是「三处口径一致」，**不是**「让三处都去认」：
+ * 带属性那一档两边都该**不认**，带空白那一档两边都该**认**。
+ */
+describe('tool block recognition agrees with the parser and the stripper', () => {
+  it('does not recognize a tag with attributes, and leaves it visible', async () => {
+    // 扫描器（解析 / 剥离）不认 `id="1"` ⇒ 通知侧也不该认，且页面该看得见这段 XML。
+    const block = '<shell_exec id="1">{"command":"ls"}</shell_exec>';
+    const run = await runTurn([answerFrame(`前${block}后`), DONE_FRAME], {
+      hookSnapshot: ['shell_exec'],
+      perRequest: ['shell_exec'],
+    });
+    expect(run.toolCalls).toEqual([]);
+    expect(run.pageText).toContain('<shell_exec id="1">');
+  });
+
+  it('recognizes a whitespace-padded tag, and strips it from the page stream', async () => {
+    // 扫描器认 `< shell_exec >` ⇒ 通知侧也必须认，否则「剥了但不执行」。
+    const block = '< shell_exec >{"command":"ls"}</ shell_exec>';
+    const run = await runTurn([answerFrame(`前${block}后`), DONE_FRAME], {
+      hookSnapshot: ['shell_exec'],
+      perRequest: ['shell_exec'],
+    });
+    expect(run.toolCalls.map((call) => call.name)).toEqual(['shell_exec']);
+    expect(run.pageText).not.toContain('shell_exec');
+  });
+
+  it('recognizes a plain block and strips it (control)', async () => {
+    const block = '<shell_exec>{"command":"ls"}</shell_exec>';
+    const run = await runTurn([answerFrame(`前${block}后`), DONE_FRAME], {
+      hookSnapshot: ['shell_exec'],
+      perRequest: ['shell_exec'],
+    });
+    expect(run.toolCalls.map((call) => call.name)).toEqual(['shell_exec']);
+    expect(run.pageText).not.toContain('shell_exec');
+  });
+});

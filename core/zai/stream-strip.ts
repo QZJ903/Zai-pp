@@ -33,10 +33,19 @@
  */
 
 import { findFirstXmlToolTag, getPartialXmlToolTagTailLength } from '../tool/xml-tags';
+import { looksLikeTruncatedPayload as toolXmlLooksLikeTruncatedPayload } from './tool-xml';
 
 interface BlockRange {
   start: number;
   end: number;
+}
+
+interface ScanResult {
+  complete: BlockRange[];
+  /** 第一个未闭合开标签的起点（没有则 null）。 */
+  unterminatedStart: number | null;
+  /** 第一个未闭合开标签的**结束**位置（`>` 之后）—— 判「像不像载荷」从这里往后看。 */
+  unterminatedEnd: number;
 }
 
 /**
@@ -44,12 +53,16 @@ interface BlockRange {
  *
  * ⚠️ **未闭合的那一个要单独返回起点**（而不是像 `findZaiToolXmlStripRanges` 那样
  * 只判「一直空到文末」）—— 流式语义下「闭标签还没到」是常态，必须从开标签起扣住。
+ *
+ * ⚠️⚠️ **遇到未闭合的不能早退，要继续往后扫** —— 后面可能还有**完整**的块。
+ * 实测形态：`用 <memory_save> 可以存记忆。<shell_exec>{…}</shell_exec>好了。`
+ * 第一个开标签没有闭标签（它只是「提及」），后面那个是真块；早退会让那个真块
+ * **原样留在页面上**（XML 泄漏），而这是同一帧里就能看出来的。
  */
-function scanBlocks(
-  text: string,
-  nameSet: ReadonlySet<string>,
-): { complete: BlockRange[]; unterminatedStart: number | null } {
+function scanBlocks(text: string, nameSet: ReadonlySet<string>): ScanResult {
   const complete: BlockRange[] = [];
+  let unterminatedStart: number | null = null;
+  let unterminatedEnd = 0;
   let fromIndex = 0;
   while (fromIndex < text.length) {
     const open = findFirstXmlToolTag(text, nameSet, { closing: false, fromIndex });
@@ -60,12 +73,31 @@ function scanBlocks(
       new Set([open.name]),
       { closing: true, fromIndex: open.endIndex },
     );
-    if (!close) return { complete, unterminatedStart: open.index };
+    if (!close) {
+      // 只记第一个 —— 「扣到哪」由它决定；后面的未闭合块都落在同一段里。
+      if (unterminatedStart === null) {
+        unterminatedStart = open.index;
+        unterminatedEnd = open.endIndex;
+      }
+      fromIndex = open.endIndex;
+      continue;
+    }
     complete.push({ start: open.index, end: close.endIndex });
     fromIndex = close.endIndex;
   }
-  return { complete, unterminatedStart: null };
+  return { complete, unterminatedStart, unterminatedEnd };
 }
+
+/**
+ * 「开标签之后像不像**被截断的 JSON 载荷**」—— **直接复用** `core/zai/tool-xml.ts` 那一份。
+ *
+ * ⚠️⚠️ **为什么要复用而不是抄一份**：这份判据决定「流式侧删不删正文」，历史侧用的是同一条。
+ * 两处各写一遍时，改一边不改另一边**不会有任何报错** —— 而两侧口径分叉的表现是
+ * 「同一段回答，当场看得见 / 刷新后看不见」。
+ * ⚠️ **依赖是通的**：本模块本来就 import `../tool/xml-tags`，而 `tool-xml.ts` **只**依赖它
+ * （`history-cleanup` 是反过来依赖 `tool-xml` 的）⇒ 共用不新增任何依赖链。
+ */
+const looksLikeTruncatedPayload = toolXmlLooksLikeTruncatedPayload;
 
 function removeRanges(text: string, ranges: readonly BlockRange[], limit: number): string {
   if (ranges.length === 0) return text;
@@ -99,8 +131,14 @@ export interface ZaiToolXmlTextFilter {
  *
  * ⚠️ **扣住的判据有三条，缺一条就会漏**：
  * ① 尾部可能是**半个开标签**（`<shell_ex`）→ 用 `getPartialXmlToolTagTailLength`；
- * ② 尾部是**完整开标签但闭标签还没到**（`<shell_exec>` 后什么都没有）→ 从该开标签扣起；
+ * ② 尾部是**完整开标签但闭标签还没到**、**且开标签之后像 JSON 载荷**
+ *    （`<shell_exec>{"command":…` 或 `<shell_exec>` 后什么都没有）→ 从该开标签扣起；
  * ③ **跨越放行点的完整块** → 放行点必须退到该块起点（否则会删掉半个块）。
+ *
+ * ⚠️⚠️ **② 里那句「像 JSON 载荷」是承重的** —— 模型在正文里**提及**标签
+ * （`关于 <shell_exec> 这个标签…`）时不能扣，否则从该标签到流结束的**全部正文**
+ * 都会被当块删掉（历史侧早就有这条守卫，流式侧漏了）。判据见
+ * `looksLikeTruncatedPayload`。
  */
 export function createZaiToolXmlTextFilter(names: readonly string[]): ZaiToolXmlTextFilter {
   const nameSet = new Set(names);
@@ -110,9 +148,14 @@ export function createZaiToolXmlTextFilter(names: readonly string[]): ZaiToolXml
 
   const holdPoint = (text: string, final: boolean): number => {
     if (final) return text.length;
-    const { complete, unterminatedStart } = scanBlocks(text, nameSet);
+    const { complete, unterminatedStart, unterminatedEnd } = scanBlocks(text, nameSet);
     let holdFrom = text.length;
-    if (unterminatedStart !== null) holdFrom = Math.min(holdFrom, unterminatedStart);
+    // ⚠️ **只扣「像载荷」的那一种**。模型在正文里**提及**标签时，扣住会让后面
+    // 所有正文（含下一相位的整段答案）一直攒到流结束才放行 —— 那不只是延迟，
+    // 实测跨相位那一档会把 `answer` 的整段最终答案扣到最后。
+    if (unterminatedStart !== null && looksLikeTruncatedPayload(text, unterminatedEnd)) {
+      holdFrom = Math.min(holdFrom, unterminatedStart);
+    }
     const partial = getPartialXmlToolTagTailLength(text, nameSet, { closing: false });
     if (partial > 0) holdFrom = Math.min(holdFrom, text.length - partial);
     for (const range of complete) {
@@ -122,15 +165,24 @@ export function createZaiToolXmlTextFilter(names: readonly string[]): ZaiToolXml
   };
 
   const drain = (final: boolean): string => {
-    const { complete, unterminatedStart } = scanBlocks(held, nameSet);
+    const { complete, unterminatedStart, unterminatedEnd } = scanBlocks(held, nameSet);
     const limit = holdPoint(held, final);
     const prefix = held.slice(0, limit);
     held = held.slice(limit);
     // ⚠️ **流结束时那个未闭合的块要一起删掉** —— 它是「回答被截断在工具标签里」，
     // 那半截标签同样是内部协议、不该给用户看。`scanBlocks` 只返回**完整**块，
     // 所以这里要显式补上未闭合那一段（否则扣住的载荷会被原样吐给页面）。
-    const ranges = final && unterminatedStart !== null
-      ? [...complete, { start: unterminatedStart, end: prefix.length }]
+    //
+    // ⚠️⚠️ **但只在它「像被截断的载荷」时才删** —— 模型在正文里**提及**标签
+    // （`关于 <shell_exec> 这个标签…`）时，无条件删会把用户可见正文一起吞掉。
+    // 判据与历史侧同源（见 `looksLikeTruncatedPayload`）。
+    const dropUnterminated = final
+      && unterminatedStart !== null
+      && looksLikeTruncatedPayload(prefix, unterminatedEnd);
+    // ⚠️ **未闭合段吃到文末 ⇒ 只保留它**：它后面的「完整块」本就落在被删的区间里，
+    // 两份区间一起交给 `removeRanges` 会因**起点乱序**而切错（它会在越界那条上 break）。
+    const ranges = dropUnterminated
+      ? [{ start: unterminatedStart as number, end: prefix.length }]
       : complete;
     return removeRanges(prefix, ranges, limit);
   };
@@ -194,16 +246,30 @@ export function createZaiCompletionStreamRewriter(
   names: readonly string[],
 ): ZaiCompletionStreamRewriter {
   const filter = createZaiToolXmlTextFilter(names);
-  const encoder = new TextEncoder();
   let pending = '';
   let lastPhase = 'answer';
+
+  /**
+   * 合成帧用的 `phase`。
+   *
+   * ⚠️⚠️ **不能无脑继承 `lastPhase`** —— 真机实测（N1，2026-11-02）：
+   * `done` 相位的 `delta_content` **页面不渲染**（对照组 `answer` 渲染、实验组 `done` 不渲染）。
+   * 而流末尾几乎总是 `done` ⇒ 继承过去的话，扣住的**用户正文**（通常是末尾半截 `<`）
+   * 会落在一个页面不渲染的相位里。
+   * ⚠️ `answer` / `thinking` / `tool_response` 是真会带正文的相位（真机 757/757、626/626、5/5），
+   * 原样保留 —— 现有用例 `preserves the envelope type on synthetic frames` 钉的就是 `thinking`。
+   */
+  const syntheticPhase = (): string => {
+    const WITH_TEXT = new Set(['answer', 'thinking', 'tool_response']);
+    return WITH_TEXT.has(lastPhase) ? lastPhase : 'answer';
+  };
 
   /** 把扣住的正文包成一条合成的 delta 帧（关掉剥离 / 流结束时用）。 */
   const syntheticDeltaFrame = (text: string): string => (
     text
       ? `data: ${JSON.stringify({
         type: 'chat:completion',
-        data: { phase: lastPhase, delta_content: text },
+        data: { phase: syntheticPhase(), delta_content: text },
       })}\n\n`
       : ''
   );
@@ -233,6 +299,37 @@ export function createZaiCompletionStreamRewriter(
       ? (envelope.data as Record<string, unknown>)
       : envelope;
 
+    // ⚠️⚠️ **终止帧的正文也要过剥离器** —— 先把正文按常规语义处理完（拿到 `revised`），
+    // **再**判 `done`。顺序反了的话，终止帧自带的 `delta_content` / `content` 会被原样放行：
+    // 扣住的 `<shell_exec>{…` 在 `finish()` 里按「截断载荷」删掉了，终止帧的 `</shell_exec>`
+    // 却吐出去 ⇒ 页面上出现**孤立的闭标签**；若终止帧带完整工具块 ⇒ 整段 XML 泄漏。
+    // ⚠️ **但 `lastPhase` 的更新必须留在 `done` 判定之后** —— 终止帧自己的 phase 是 `done`，
+    // 先更新就把「扣住的尾巴属于哪个相位」冲掉了（`thinking` 的尾巴会被错标成 `answer`）。
+    const key = typeof inner.delta_content === 'string'
+      ? 'delta_content'
+      : (typeof inner.content === 'string' ? 'content' : null);
+
+    let revised = line;
+    let changed = false;
+    if (key) {
+      const original = inner[key] as string;
+      // `content` 是**整体替换**：先丢掉扣住的尾巴（它属于被替换掉的那一段）。
+      if (key === 'content') filter.discard();
+      const visible = filter.push(original);
+      if (visible !== original) {
+        inner[key] = visible;
+        const prefix = body.slice(0, body.length - payload.length);
+        revised = `${prefix}${JSON.stringify(envelope)}${eol}`;
+        changed = true;
+      }
+    }
+
+    if (inner.done === true) {
+      // 终止帧若**同时**带 `edit_content`（真机没见过，语义上仍要关掉剥离）。
+      const flushed = typeof inner.edit_content === 'string' ? filter.disable() : filter.finish();
+      return { text: syntheticDeltaFrame(flushed) + revised, changed: changed || flushed !== '' };
+    }
+
     if (typeof inner.phase === 'string') lastPhase = inner.phase;
 
     // ⚠️ 遇到 edit 立刻关掉剥离：偏移语义已经不可信，宁可露出 XML 也不要正文碎裂。
@@ -241,21 +338,7 @@ export function createZaiCompletionStreamRewriter(
       return { text: syntheticDeltaFrame(flushed) + line, changed: true };
     }
 
-    // 正文三语义里只有 delta（追加）与 content（整体替换）需要过剥。
-    const key = typeof inner.delta_content === 'string'
-      ? 'delta_content'
-      : (typeof inner.content === 'string' ? 'content' : null);
-    if (!key) return { text: line, changed: false };
-
-    const original = inner[key] as string;
-    // `content` 是**整体替换**：先丢掉扣住的尾巴（它属于被替换掉的那一段）。
-    if (key === 'content') filter.discard();
-    const visible = filter.push(original);
-    if (visible === original) return { text: line, changed: false };
-
-    inner[key] = visible;
-    const prefix = body.slice(0, body.length - payload.length);
-    return { text: `${prefix}${JSON.stringify(envelope)}${eol}`, changed: true };
+    return { text: revised, changed };
   };
 
   return {

@@ -119,6 +119,9 @@ export function decodeZaiToolCallMessage(
  * ⚠️ **`misusedNativeToolNames` 是可选字段** —— 缺省表示「这一轮没有用错通道」。
  * 形状不对时按**丢弃该字段**处理（不是丢弃整条消息）：漏掉它只是少一次纠错，
  * 而丢掉整条消息会让这一轮收尾链路断掉。
+ *
+ * ⚠️ **`agentTaskPrompt` 同样按可选处理**（缺省回落 `originalPrompt`）—— 它在本项目里
+ * 与 `originalPrompt` 恒等，把它当必需字段只会让「删掉它」变成一次**静默的整条丢弃**。
  */
 export function decodeZaiResponseCompleteMessage(
   value: unknown,
@@ -126,14 +129,21 @@ export function decodeZaiResponseCompleteMessage(
   if (!isPlainRecord(value)) return null;
   if (typeof value.requestId !== 'string' || !value.requestId) return null;
   if (typeof value.originalPrompt !== 'string') return null;
-  if (typeof value.agentTaskPrompt !== 'string') return null;
+  // ⚠️⚠️ **`agentTaskPrompt` 是可选的，缺省回落 `originalPrompt`** —— 主世界侧这两个字段
+  // 本来就**恒等**（`fetch-hook.ts` 的 `createRequestContext` 用同一个变量赋两处）。
+  // 把它当必需字段的代价是：哪天有人把它从生产者那边删掉（或忘了同步），**每一条**
+  // `RESPONSE_COMPLETE` 都会被这里判成非法 ⇒ `respondedRequestIds` 不登记 ⇒
+  // `armManualStopDetection` 4 秒后把自动化任务误报成「用户手动停止」并回收续跑循环。
+  // 而那个「四处都删了、偏偏留这句守卫」的组合，**`tsc` 是放行的**。
+  // ⚠️ 「省略」与「给了个错值」必须分开：显式给了非字符串仍判否。
+  if (value.agentTaskPrompt !== undefined && typeof value.agentTaskPrompt !== 'string') return null;
   if (typeof value.assistantText !== 'string') return null;
 
   const misused = readMisusedToolNames(value.misusedNativeToolNames);
   return {
     requestId: value.requestId,
     originalPrompt: value.originalPrompt,
-    agentTaskPrompt: value.agentTaskPrompt,
+    agentTaskPrompt: typeof value.agentTaskPrompt === 'string' ? value.agentTaskPrompt : value.originalPrompt,
     assistantText: value.assistantText,
     ...(misused ? { misusedNativeToolNames: misused } : {}),
   };
@@ -172,12 +182,14 @@ export function decodeZaiHtmlChallengeMessage(value: unknown): { requestId: stri
  * 隔离世界 → 主世界：工具标签名同步。
  *
  * ⚠️⚠️ **这条必须校验元素类型，不能只判 `Array.isArray`** ——
- * 主世界把名字收进 `Set` 后逐个数喂给 `escapeRegExp`（`core/zai/fetch-hook.ts`），
- * 而它是 `value.replace(...)`：**非字符串元素会直接抛 TypeError**。
- * 那个调用点在 `ReadableStream.pull` 的 try 里，抛错会走到 `controller.error(error)` ——
- * 而这个 stream **就是回给页面的那个 Response 的 body**，页面自己的 `reader.read()`
- * 会 reject，**用户正在看的这一轮回答被从中间掐断**；同一个 catch 里的
- * `notifyTerminal()` 还会让隔离世界给自动化任务回一条假的 `DOM_TASK_FAILED`。
+ * 主世界把名字收进 `Set` 后逐个数喂给 `core/tool/xml-tags.ts` 的扫描器，而那里
+ * 对**非字符串元素**是**静默降级**而不是抛错：`getPartialXmlToolTagTailLength` 里
+ * `Math.max(0, ...names.map((name) => name.length))` 遇到 `123` 会算出 `NaN` ⇒ `limit` 变 `NaN`
+ * ⇒ 循环一次都不进 ⇒ **返回 0**（实测：干净名单 9、混入 `123` 后 0）。
+ * 后果是「半个开标签跨帧」那一档**不再被扣住**，那半截会直接放行给页面 — 全程无报错。
+ * ⚠️ 历史注记：这里原先写的是「非字符串会抛 TypeError → `controller.error` → 打断响应流」，
+ * 那个形态来自已经删掉的 `escapeRegExp`（通知侧改走同一个扫描器之后不复存在）。
+ * 判据（必须校验元素类型）不变，**失效形态从「响亮地崩」变成了「安静地漏」**。
  * ⚠️ `new Set()` **不做任何类型收敛**（`[...new Set(['a', 123])]` 仍是 `['a', 123]`）。
  */
 export function decodeZaiSyncHookStateMessage(
