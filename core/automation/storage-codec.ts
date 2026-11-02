@@ -1,7 +1,4 @@
-import { SUPPORTED_LOCALES } from '../i18n/types';
-import { decodePersistedMemoryRecord } from '../memory/codec';
 import {
-  isToolDescriptorRecord,
   isToolExecutionRecord,
 } from '../messaging/tool-record-codec';
 import type {
@@ -9,7 +6,6 @@ import type {
   AutomationZaiSession,
   AutomationErrorState,
   AutomationFailurePhase,
-  AutomationPromptContext,
   AutomationPromptOptions,
   AutomationRun,
   AutomationRunnerFailure,
@@ -31,7 +27,6 @@ const AUTOMATION_RUN_STATUSES = new Set([
   'failed',
   'timeout',
   'cancelled',
-  'skipped',
 ]);
 const AUTOMATION_TRIGGERS = new Set(['manual', 'schedule', 'retry']);
 const AUTOMATION_SCHEDULE_KINDS = new Set(['manual', 'cron', 'rrule']);
@@ -49,7 +44,6 @@ const AUTOMATION_FAILURE_PHASES = new Set([
   'cancelled',
   'unknown',
 ]);
-const SUPPORTED_LOCALE_SET: ReadonlySet<string> = new Set(SUPPORTED_LOCALES);
 
 export type AutomationStorageState = {
   version: typeof AUTOMATION_STORAGE_VERSION;
@@ -269,8 +263,19 @@ function decodeRunnerRequest(
     ? requestedAt + LEGACY_AUTOMATION_RUN_TIMEOUT_MS
     : positiveNumber(value.deadlineAt, `${path}.deadlineAt`);
 
+  // 已删字段 `locale` / `promptContext`：**读侧宽容、写侧剥掉**。
+  // 旧记录里可能还带着它们（上游 HTTP 直连架构下由后台构造），本项目零消费者
+  // ⇒ 读到不报错、解出来丢掉。⚠️ **必须真的从落盘记录里去掉**，不能只「不读取」——
+  // `promptContext` 里可能塞过 toolDescriptors，白占存储；而且 `...value` 会把它们
+  // 原样带进新状态、写回去，等于永远跟着走。
+  const {
+    locale: _legacyLocale,
+    promptContext: _legacyPromptContext,
+    ...rest
+  } = value;
+
   return {
-    ...value,
+    ...rest,
     runId,
     automationId,
     deadlineAt,
@@ -280,40 +285,8 @@ function decodeRunnerRequest(
     // ⚠️ **兼容缺省**：站点是后加字段，旧 run 记录里没有 ⇒ null（不知道）。
     siteOrigin: defaultedNullableString(value.siteOrigin, `${path}.siteOrigin`),
     promptOptions: decodePromptOptions(value.promptOptions, `${path}.promptOptions`),
-    ...(value.locale === undefined
-      ? {}
-      : { locale: enumValue(value.locale, SUPPORTED_LOCALE_SET, `${path}.locale`) }),
-    ...(value.promptContext === undefined
-      ? {}
-      : { promptContext: decodePromptContext(value.promptContext, `${path}.promptContext`) }),
     requestedAt,
   } as AutomationRunnerRequest;
-}
-
-function decodePromptContext(raw: unknown, path: string): AutomationPromptContext {
-  const value = recordValue(raw, path);
-  const memories = value.memories === undefined
-    ? undefined
-    : arrayValue(value.memories, `${path}.memories`).map((memory, index) => (
-      decodePersistedMemoryRecord(memory, `${path}.memories[${index}]`)
-    ));
-  const toolDescriptors = value.toolDescriptors === undefined
-    ? undefined
-    : arrayValue(value.toolDescriptors, `${path}.toolDescriptors`).map((descriptor, index) => {
-      if (!isToolDescriptorRecord(descriptor)) {
-        corrupt(`${path}.toolDescriptors[${index}]`, 'Invalid persisted tool descriptor.');
-      }
-      return descriptor;
-    });
-
-  return {
-    ...value,
-    ...(memories === undefined ? {} : { memories }),
-    ...(value.presetContent === undefined
-      ? {}
-      : { presetContent: nullableString(value.presetContent, `${path}.presetContent`) }),
-    ...(toolDescriptors === undefined ? {} : { toolDescriptors }),
-  } as AutomationPromptContext;
 }
 
 function decodeRunnerResult(raw: unknown, path: string): AutomationRunnerResult {
@@ -339,7 +312,9 @@ function decodeRunnerSuccess(
   return {
     ...value,
     ok: true,
-    chatSessionId: stringValue(value.chatSessionId, `${path}.chatSessionId`),
+    // 成功结果的会话 id 可空（`null` = 本次没拿到）。**不接受缺字段** ——
+    // 这个字段从 v1 起就是必填，缺失只可能是真的数据损坏。
+    chatSessionId: nullableString(value.chatSessionId, `${path}.chatSessionId`),
     sessionUrl: nullableString(value.sessionUrl, `${path}.sessionUrl`),
     // ⚠️ **兼容缺省**（与 `AutomationZaiSession.siteOrigin` 同口径）：站点是后加字段，
     // 旧记录里没有 ⇒ null（不知道）。写成必填会让旧记录判 corrupt、整份存储打不开。

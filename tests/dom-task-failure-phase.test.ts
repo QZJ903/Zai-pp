@@ -104,3 +104,65 @@ describe('dom task failure phase', () => {
     expect(source).not.toContain("error: 'cancelled',");
   });
 });
+
+/**
+ * **同一个失败走两条通道（`RUN_DOM_TASK` 的响应与 `DOM_TASK_FAILED` 事件）时，
+ * 两条给出的结论必须一致。**
+ *
+ * 缘由：协调器的 `entry.settled` 只认**先到的那个**。原来响应那条恒给
+ * `composer_inject_failed` 且**不设 `retrySafe`**，而事件那条给真实 kind 并按白名单算
+ * `retrySafe` ⇒ **同一个故障「有时自动重跑、有时不重跑」**，`phase` 也在
+ * `bridge`（响应路径）与 `runner`（事件路径）之间摇摆。
+ *
+ * ⚠️ 已有那条「keeps every other failure code on the runner phase」只调 `onFailed`，
+ * **绕过了响应那条路** —— 所以它绿着也证明不了两条通道一致（实测确认过）。
+ */
+describe('the two failure channels agree', () => {
+  /** 只让 `RUN_DOM_TASK` 的响应报错；不投递任何事件。 */
+  async function settleViaResponse(error: string) {
+    const coordinator = createDomTaskCoordinator({
+      queryTabs: vi.fn(async () => [
+        { id: 7, url: 'https://chat.z.ai/', active: false, windowId: 1 } as chrome.tabs.Tab,
+      ]),
+      sendTabMessage: vi.fn(async () => ({ ok: false, error })),
+      updateTab: vi.fn(async (tabId) => ({ id: tabId } as chrome.tabs.Tab)),
+      createTab: vi.fn(async () => ({ id: 8 } as chrome.tabs.Tab)),
+      readActiveSiteOrigin: vi.fn(async () => 'https://chat.z.ai'),
+      reportError: vi.fn(),
+    });
+    return coordinator.startTask(
+      { taskId: 'task-1', kind: 'automation', prompt: 'run', chatSessionId: null },
+      { handshakeTimeoutMs: 1_000 },
+    );
+  }
+
+  const SEND_CHAIN_CODES = ['agent_not_idle', 'no_textarea', 'form_not_connected', 'composer_inject_failed'];
+
+  it.each(SEND_CHAIN_CODES)('gives %s the same phase and retrySafe on both channels', async (code) => {
+    const viaResponse = await settleViaResponse(code);
+    const viaEvent = await settleWithError(code);
+
+    if (viaResponse.ok || viaEvent.ok) throw new Error('expected both to fail');
+    expect(viaResponse.error, '错误码必须一致').toBe(viaEvent.error);
+    expect(viaResponse.phase, `${code} 的 phase 必须一致`).toBe(viaEvent.phase);
+    expect(viaResponse.retrySafe, `${code} 的 retrySafe 必须一致`).toBe(viaEvent.retrySafe);
+  });
+
+  it('keeps handshake failures on the bridge phase (they are not send-chain failures)', async () => {
+    // 反向守卫：别为了「两条通道一致」把真正的桥故障也说成 runner。
+    for (const code of ['dom_task_handshake_timeout', 'dom_task_content_script_missing']) {
+      const outcome = await settleViaResponse(code);
+      if (outcome.ok) throw new Error('expected failure');
+      expect(outcome.phase, `${code} 属于桥这一环`).toBe('bridge');
+      expect(outcome.retrySafe).toBe(false);
+    }
+  });
+
+  it('keeps the tab-phase rejections on tab', async () => {
+    for (const code of ['wrong_conversation', 'busy']) {
+      const outcome = await settleViaResponse(code);
+      if (outcome.ok) throw new Error('expected failure');
+      expect(outcome.phase, `${code} 属于「挑不到标签页」`).toBe('tab');
+    }
+  });
+});

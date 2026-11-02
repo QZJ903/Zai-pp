@@ -26,6 +26,8 @@ import AutomationPage from '../entrypoints/sidepanel/pages/AutomationPage';
 let container: HTMLDivElement;
 let root: Root | null;
 let automationResponse: unknown;
+/** `RUN_AUTOMATION_NOW` 的返回值；`undefined` 时给默认的 `{ ok: true }`。 */
+let runNowResponse: unknown;
 let messageListener: ((message: { type?: string; automations?: unknown }) => void) | null;
 
 beforeEach(() => {
@@ -34,12 +36,14 @@ beforeEach(() => {
   document.body.append(container);
   root = null;
   automationResponse = [automation];
+  runNowResponse = undefined;
   messageListener = null;
   vi.stubGlobal('chrome', {
     runtime: {
       sendMessage: vi.fn(async (message: { type?: string }) => {
         if (message.type === 'GET_AUTOMATIONS') return automationResponse;
         if (message.type === 'GET_AUTOMATION_RUNS') return [];
+        if (message.type === 'RUN_AUTOMATION_NOW') return runNowResponse ?? { ok: true };
         // 本项目页面挂载时另拉模型清单（后台带 5 分钟缓存）。给一份最小合法清单，
         // 免得它走 fallback 分支往页面上写一条提示、干扰下面的文案断言。
         if (message.type === 'GET_ZAI_MODELS') {
@@ -129,6 +133,53 @@ describe('Automation UI persistence errors', () => {
     expect(container.textContent).not.toContain('Stale automation');
   });
 });
+
+/**
+ * **后台的领域失败码不能直出到 banner 上。**
+ *
+ * `{ ok: false, error }` 里的 `error` 是蛇形标识符（`automation_already_running`、
+ * `automation_not_found`）。原来两处 `banner.show('error', xxx.error)` 直接把它摆出去，
+ * 而「已有在跑」是**常态**：每分钟扫描与手动点「运行」撞车就会撞上。
+ *
+ * 判据：渲染出来的文本里**没有那条蛇形码**，而是本地化文案。
+ */
+describe('Automation UI never renders a raw backend error code', () => {
+  it('renders localized copy instead of automation_already_running', async () => {
+    runNowResponse = { ok: false, error: 'automation_already_running' };
+    await renderAutomationPage();
+
+    await act(async () => {
+      await clickByText('立即运行');
+    });
+    await settle();
+
+    expect(container.textContent).not.toContain('automation_already_running');
+    // 文案本身要在（否则「不出现裸码」可以靠「什么都不显示」蒙过去）。
+    expect(container.textContent).toContain('该任务已在运行中');
+  });
+
+  it('renders a generic fallback for an unmapped backend code', async () => {
+    runNowResponse = { ok: false, error: 'some_unknown_domain_code' };
+    await renderAutomationPage();
+
+    await act(async () => {
+      await clickByText('立即运行');
+    });
+    await settle();
+
+    // 未映射的裸码也要被套进「运行失败（…）」那一层，而不是原样摆着。
+    expect(container.textContent).not.toBe('');
+    expect(container.textContent).toContain('运行失败');
+  });
+});
+
+/** 点一个按文本找的按钮（自动化卡片上的「运行」）。 */
+async function clickByText(text: string): Promise<void> {
+  const buttons = [...container.querySelectorAll('button')];
+  const target = buttons.find((button) => button.textContent?.trim() === text);
+  if (!target) throw new Error(`找不到按钮：${text}（现有：${buttons.map((b) => b.textContent?.trim()).join(' / ')}）`);
+  target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
 
 async function renderAutomationPage() {
   await act(async () => {

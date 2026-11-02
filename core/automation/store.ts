@@ -23,6 +23,26 @@ import { createSerialOperationQueue } from '../persistence/serial-operation-queu
 
 const DEFAULT_RUN_HISTORY_LIMIT = 100;
 
+/**
+ * 运行历史占 `chrome.storage.local` 配额的**比例上限**。
+ *
+ * ⚠️⚠️ **只按条数裁剪不构成上界** —— 单条 run 里带着 `toolExecutions`，写失败的
+ * 表现不是「少一条记录」，而是 `QUOTA_BYTES` 抛到扫描之外、**整轮扫描中断**。
+ * ⚠️ **这个比例是按「全局配额」留的余量，不是「本 key 独占配额」** ——
+ * `chrome.storage.local.QUOTA_BYTES` 是**整个扩展共用**的一份，而
+ * `core/tool/history.ts` 已在同一份配额上按 0.75 预算 ⇒ 两个 key 名义上可到 1.25×。
+ * 实际不构成风险（裁剪后 run 历史只有几 MB），但**下次调这个比例时别按「单 key」推**。
+ * ⚠️ 真正压体积的是 `trimRunnerResultForStorage`；预算这条是**第二道防线**。
+ * ⚠️ **预算只在 `claimAutomationRun` 那条路上执行**（`pruneRunHistory` 的唯一调用点）——
+ * `finalizeAutomationRun` / `updateAutomationRun` / `reconcileStaleRunsDetailed` 写盘时**不裁剪**，
+ * 靠「单条已被裁到 27 KB 量级 + 100 条上限」保证不越界。
+ */
+const RUN_HISTORY_BUDGET_RATIO = 0.5;
+
+/** 落库时给单个工具的 detail / 错误信息留多少字。 */
+const RUN_TOOL_DETAIL_CHARS = 500;
+const RUN_TOOL_ERROR_CHARS = 500;
+
 export type AutomationRunClaimResult =
   | { kind: 'claimed'; automation: Automation; run: AutomationRun }
   | { kind: 'automation_missing'; run: null }
@@ -110,6 +130,40 @@ export async function updateAutomationRuntime(
   patch: AutomationRuntimeUpdate,
 ): Promise<Automation | null> {
   return patchAutomation(id, patch);
+}
+
+/**
+ * 与 `updateAutomationRuntime` 同效，但 patch 由**写盘那一刻的自动化记录**求值。
+ *
+ * ⚠️⚠️ **需要看现有值才能决定写什么的场景必须用它** —— 拿外面读到的快照去算 patch、
+ * 再写进新状态，中间任何一次并发写都会被静默覆盖（整键读改写、后写赢）。
+ * 这与 `finalizeAutomationRun` 的 `runtimePatch` 是同一个形态。
+ *
+ * `createPatch` 返回 `null` 表示「不写」（例如自动化已经不在了）。
+ */
+export async function updateAutomationRuntimeWith(
+  id: AutomationId,
+  createPatch: (automation: Automation) => AutomationRuntimeUpdate | null,
+): Promise<Automation | null> {
+  return mutateState((state) => {
+    let updatedAutomation: Automation | null = null;
+    const automations = state.automations.map((automation) => {
+      if (automation.id !== id) return automation;
+      const patch = createPatch(automation);
+      if (!patch) return automation;
+      updatedAutomation = {
+        ...automation,
+        ...patch,
+        updatedAt: Date.now(),
+      };
+      return updatedAutomation;
+    });
+    return {
+      nextState: { ...state, automations },
+      result: updatedAutomation,
+      changed: updatedAutomation !== null,
+    };
+  });
 }
 
 export async function setAutomationStatus(
@@ -216,7 +270,7 @@ export async function finalizeAutomationRun(
     const updatedRun: AutomationRun = {
       ...runs[runIndex],
       status: input.status,
-      result: input.result,
+      result: trimRunnerResultForStorage(input.result),
       error: input.result.ok ? null : input.result.error,
       completedAt: input.result.completedAt,
       updatedAt: now,
@@ -251,6 +305,8 @@ export async function updateAutomationRun(
       updatedRun = {
         ...run,
         ...patch,
+        // 重试中途也会把 result 落库（`executeWithRetry`），同样要裁。
+        ...(patch.result === undefined ? {} : { result: trimRunnerResultForStorage(patch.result) }),
         updatedAt: Date.now(),
       };
       return updatedRun;
@@ -436,9 +492,107 @@ function pruneRunHistory(runs: AutomationRun[]): AutomationRun[] {
     grouped.set(run.automationId, group);
   }
 
-  return [...grouped.values()].flatMap((group) =>
+  const trimmed = [...grouped.values()].flatMap((group) =>
     group
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, DEFAULT_RUN_HISTORY_LIMIT),
   );
+  return trimRunsToFit(trimmed, getRunHistoryBudgetBytes());
+}
+
+/**
+ * 按序列化后的 **UTF-8 字节**丢最旧的 run，直到装得下。
+ *
+ * ⚠️ **判据是字节不是字符**（中文一字三字节，按 `string.length` 会低估三倍）。
+ * ⚠️ **至少保留一条** —— 全丢会让「刚刚跑完」那条也看不见，而用户点「运行」
+ * 之后最想看到的正是它。
+ * ⚠️ **每条只序列化一次** —— 单条可以有几百 KB，`while` 里反复 stringify
+ * 会把一次落库拖成几秒。
+ */
+function trimRunsToFit(runs: AutomationRun[], budgetBytes: number): AutomationRun[] {
+  if (runs.length <= 1) return runs;
+  const sorted = [...runs].sort((a, b) => b.createdAt - a.createdAt);
+  const sizes = sorted.map((run) => utf8Bytes(JSON.stringify(run)));
+  // 数组的序列化字节 = `[` + 各条之和 + 分隔逗号 + `]`
+  let total = 2 + sizes.reduce((sum, size) => sum + size, 0) + (sorted.length - 1);
+  let kept = sorted.length;
+  while (kept > 1 && total > budgetBytes) {
+    kept -= 1;
+    total -= sizes[kept] + 1;
+  }
+  // ⚠️ **没超预算就原样返回 `runs`，不要返回 `sorted`** —— 否则每次 claim 都会把
+  // 持久化的 `state.runs` 按 `createdAt` 重排一遍（原来是按 automation 分组拼接的顺序）。
+  // 当前无消费者依赖那个顺序（`getAutomationRuns` 自己排、reconcile/claim 都是
+  // `map`/`find`），但那是**隐性行为变更**，不该由「裁剪」顺手做掉。
+  return kept === sorted.length ? runs : sorted.slice(0, kept);
+}
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function getRunHistoryBudgetBytes(): number {
+  // 与工具历史同一口径：优先读运行时给的配额常量。
+  const quota = (chrome.storage.local.QUOTA_BYTES as number | undefined) ?? 10_485_760;
+  return Math.floor(quota * RUN_HISTORY_BUDGET_RATIO);
+}
+
+/**
+ * 落库前裁掉 `toolExecutions` 里**只有界面以外的用途**才会看的大字段。
+ *
+ * ⚠️⚠️ **运行历史里真正占地方的就是它**：`shell_exec` 单条输出上限 128 KB、
+ * MCP 默认 64 KB，一轮跑五个工具就是 640 KB，而自动化只占**一个 storage key**。
+ * 实测「5 个 shell 工具 + 8000 字回答」的一轮：不裁 1274 KB、裁完 27 KB。
+ * ⚠️ **`output` 整个丢掉是安全的** —— 全仓没有一处读 `run.result.toolExecutions`
+ * （页面只渲染 `status` / `attempt`；reconcile 只读 `ok` / 会话 / 站点 / 错误 / 时间）。
+ * 留下 `name` / `ok` / `summary` / `detail`（截断）/ `error` 已够回答「这轮调了什么、成没成」。
+ * 裁完的记录仍能通过 `isToolExecutionRecord` 的校验。
+ *
+ * ⚠️ 入参**允许 `null`** —— `AutomationRun.result` 本身就是可空的，`updateAutomationRun`
+ * 的 patch 也允许显式清空；那一档原样返回。
+ */
+function trimRunnerResultForStorage(
+  result: AutomationRunnerResult | null,
+): AutomationRunnerResult | null {
+  if (!result || !result.ok || !result.toolExecutions?.length) return result;
+  return {
+    ...result,
+    toolExecutions: result.toolExecutions.map((execution) => {
+      // ⚠️ **`truncated` 只在真的动过内容时置位** —— 它是 `ToolCardResult` 的既有语义
+      // （「给用户看的结果被截短了」），一律标 `true` 会让「detail 只有 20 字、也没有
+      // output」的记录也说自己被截断。当前 run 历史零读者，但那是**元数据失真**，
+      // 将来把 run 历史接到面板上就会显示成假截断。
+      // ⚠️ 丢 `output` 本身也算一次截断（那份数据确实没落库）。
+      const detailTruncated = typeof execution.result.detail === 'string'
+        && execution.result.detail.length > RUN_TOOL_DETAIL_CHARS;
+      const errorTruncated = (execution.result.error?.message.length ?? 0) > RUN_TOOL_ERROR_CHARS;
+      const truncated = execution.result.output !== undefined
+        || detailTruncated
+        || errorTruncated
+        || execution.result.truncated === true;
+      return {
+        ...execution,
+        result: {
+          ok: execution.result.ok,
+          summary: execution.result.summary,
+          ...(typeof execution.result.detail === 'string'
+            ? { detail: truncateChars(execution.result.detail, RUN_TOOL_DETAIL_CHARS) }
+            : {}),
+          ...(execution.result.error
+            ? {
+                error: {
+                  ...execution.result.error,
+                  message: truncateChars(execution.result.error.message, RUN_TOOL_ERROR_CHARS),
+                },
+              }
+            : {}),
+          truncated,
+        },
+      };
+    }),
+  };
+}
+
+function truncateChars(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n...[truncated]`;
 }

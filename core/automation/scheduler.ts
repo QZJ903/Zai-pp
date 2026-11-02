@@ -2,11 +2,11 @@ import {
   claimAutomationRun,
   finalizeAutomationRun,
   getAllAutomations,
-  getAutomationById,
   getAutomationRunById,
   reconcileStaleRunsDetailed,
   updateAutomationRun,
   updateAutomationRuntime,
+  updateAutomationRuntimeWith,
 } from './store';
 import { calculateNextRunAt } from './schedule';
 import { buildZaiChatSessionUrl } from '../zai/chat-session';
@@ -53,7 +53,9 @@ export function resolveAutomationReusableSessionId(
   automation: Pick<Automation, 'promptOptions' | 'zai'>,
 ): string | null {
   if (automation.promptOptions.fixedSession !== true) return null;
-  return automation.zai.chatSessionId;
+  // 空串不是会话 id。判 `!== null` 会把空串当成「有会话」，
+  // 于是新对话被送去记录里那一站。
+  return automation.zai.chatSessionId || null;
 }
 
 export interface AutomationRunnerRequestContext {
@@ -80,12 +82,21 @@ export function createAutomationRunnerRequest(
     deadlineAt: context.deadlineAt,
     prompt: automation.prompt,
     trigger: context.trigger,
-    chatSessionId: automation.zai.chatSessionId,
+    // ⚠️⚠️ **必须是 `reusableSessionId`，不能直接抄记录里的 `zai.chatSessionId`。**
+    // 两者在两个格子上分叉：**非固定会话**（本轮是新对话）与 **固定会话但记录里是空串**
+    // （没有可用会话）。抄原值会让这两格填进一个**不属于本轮**的会话 id，后果有两个：
+    // ① 与下面 `siteOrigin` 的判据矛盾（一个说「复用它」、一个说「跟当前标签页」）；
+    // ② **会写坏数据** —— 失败收尾时 `createAutomationRunnerFailure` 在没有
+    //    `sessionIdOverride` 时会回落这个值（见 `background.ts` 的 catch 分支），
+    //    而收尾再把 `result.chatSessionId ?? 记录` 写回去 ⇒ 运行期间
+    //    `persistAutomationSession` 刚写进去的新会话被上一轮的旧 id 顶掉。
+    chatSessionId: reusableSessionId,
     // 站点提示只在**复用已有会话**时成立：那条会话属于哪一站是确定的，会话 id
     // 在两站之间也不通用，所以必须去记录里那一站找它。
     // 其余情况（没开固定会话、或开了但还没建出会话）都是新对话、没有会话归属
     // ⇒ 站点交给协调器按「用户当前所在的标签页」判定（`resolveDomTab`），
     // 不能沿用记录里上一次跑过的站，否则任务会被上一次运行永久钉在那一站。
+    // ⚠️ 判据与 `chatSessionId` 那行**同源**（都走 `reusableSessionId`），别再各判一次。
     siteOrigin: reusableSessionId !== null ? automation.zai.siteOrigin : null,
     promptOptions: automation.promptOptions,
     requestedAt: context.requestedAt,
@@ -111,6 +122,13 @@ export interface ScanDueAutomationsResult {
   failed: number;
   /** 被 reconcile 判定为「中断」并改判终态的悬挂 run 数量（不含本次新起的 run）。 */
   reconciled: number;
+  /**
+   * 本轮**因为读写存储失败而被跳过**的任务数。
+   *
+   * ⚠️ 与 `failed` 分开：`failed` 是「真的跑了一次、结果是失败」，这一档连 run
+   * 都没建出来。混在一起会让界面在「什么都没跑」时也刷新运行记录。
+   */
+  errored: number;
 }
 
 interface ActiveAutomationLease {
@@ -129,11 +147,27 @@ export async function scanDueAutomations(
   // Recover any `running` rows orphaned by a service-worker termination before
   // scanning, so the in-memory lock (which is lost on restart) doesn't allow a
   // duplicate run and so the orphaned row is finalized.
-  const reconciled = await reconcileStaleRunsDetailed(AUTOMATION_RUN_TIMEOUT_MS, now, {
-    protectedRunIds: new Set([...activeRunLeases.values()].map((lease) => lease.runId)),
-    runtimePatch: (automation, run) => createInterruptedRuntimePatch(automation, run, now),
-  });
+  //
+  // ⚠️⚠️ **这一步也要兜错** —— 它在有悬挂 run 时**会写盘**（`mutateState` →
+  // `chrome.storage.local.set`），配额满 / 上下文失效时抛出来就**从第一行中断整轮**，
+  // 与下面 `for` 循环里那条是同一个失效形态。而且两条路径**正相关**：存储越满，
+  // 越可能先在这里炸。
+  // ⚠️ **失败不能早退** —— reconcile 只负责「顺手清理」，清不掉不代表没东西可扫。
+  // 早退会让所有本来到期的任务这一分钟一个都不跑，比不清理更糟。
+  let reconciled: Awaited<ReturnType<typeof reconcileStaleRunsDetailed>> = [];
+  let reconcileFailed = false;
+  try {
+    reconciled = await reconcileStaleRunsDetailed(AUTOMATION_RUN_TIMEOUT_MS, now, {
+      protectedRunIds: new Set([...activeRunLeases.values()].map((lease) => lease.runId)),
+      runtimePatch: (automation, run) => createInterruptedRuntimePatch(automation, run, now),
+    });
+  } catch (error) {
+    reconcileFailed = true;
+    console.error('[Zai++] stale run reconciliation before the scan failed', error);
+  }
 
+  // ⚠️ 这一行是**读**，配额不影响读 —— 它抛基本只意味着存储损坏 / 上下文失效，
+  // 那种情况下面一条任务也跑不动，让它照常抛出去（由调用方记 `automation_*_scan_failed`）。
   const automations = await getAllAutomations();
   const result: ScanDueAutomationsResult = {
     checkedAt: now,
@@ -144,36 +178,62 @@ export async function scanDueAutomations(
     locked: 0,
     failed: 0,
     reconciled: reconciled.length,
+    // reconcile 失败也算一次「本轮被跳过的事」，让调用方的广播判据照常成立。
+    errored: reconcileFailed ? 1 : 0,
   };
+
+  /** 本轮的逐条错误（整轮只在末尾汇总打一行）。 */
+  const scanErrors: Array<{ automationId: AutomationId; message: string }> = [];
 
   for (const automation of automations) {
     if (!isSchedulableAutomation(automation)) continue;
 
-    if (automation.nextRunAt == null) {
-      await refreshAutomationNextRunAt(automation.id, now);
-      result.initialized++;
-      continue;
+    // ⚠️⚠️ **每条任务各自兜错** —— 存储写失败（配额满 / 上下文失效）会从
+    // `refreshAutomationNextRunAt` / `runAutomation` 里抛出来。没有这一层的话
+    // 一次抛错就**中断整轮扫描**，而扫描每分钟一次、每次都在同一个任务上再撞
+    // ⇒ 排在其后的所有自动化**永久不再运行**。
+    try {
+      if (automation.nextRunAt == null) {
+        await refreshAutomationNextRunAt(automation.id, now);
+        result.initialized++;
+        continue;
+      }
+
+      if (automation.nextRunAt > now) continue;
+
+      result.due++;
+      const run = await runAutomation({
+        automationId: automation.id,
+        trigger: 'schedule',
+        scheduledFor: automation.nextRunAt,
+        now,
+        executor,
+      });
+
+      if (run == null) {
+        result.locked++;
+      } else if (run.status === 'failed' || run.status === 'timeout') {
+        result.started++;
+        result.failed++;
+      } else {
+        result.started++;
+      }
+    } catch (error) {
+      result.errored++;
+      scanErrors.push({
+        automationId: automation.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
+  }
 
-    if (automation.nextRunAt > now) continue;
-
-    result.due++;
-    const run = await runAutomation({
-      automationId: automation.id,
-      trigger: 'schedule',
-      scheduledFor: automation.nextRunAt,
-      now,
-      executor,
+  if (scanErrors.length > 0) {
+    // 整轮只打一行：这一档每分钟都会重来，逐条打会按任务数刷屏。
+    // 用 error 而不是静默 —— 成因（配额满 / 存储不可写）用户从界面上看不出来。
+    console.error('[Zai++] automation scan skipped some automations', {
+      count: scanErrors.length,
+      first: scanErrors[0],
     });
-
-    if (run == null) {
-      result.locked++;
-    } else if (run.status === 'failed' || run.status === 'timeout') {
-      result.started++;
-      result.failed++;
-    } else {
-      result.started++;
-    }
   }
 
   return result;
@@ -183,24 +243,37 @@ export async function refreshAutomationNextRunAt(
   automationId: AutomationId,
   now: number = Date.now(),
 ): Promise<Automation | null> {
-  const automation = await getAutomationById(automationId);
-  if (!automation) return null;
+  /**
+   * ⚠️⚠️ **patch 必须在写盘那一刻求值，不能拿外面读到的快照算** —— 这个函数要读
+   * 现有值才能决定写什么（排期是否还成立、要不要清 `lastError`），而两次队列操作
+   * 之间任何一次并发写（运行收尾 / 用户改配置）都会被旧快照的 patch 覆盖。
+   *
+   * 会丢的东西具体是：快照里是**排期错误**时 patch 非空（要清 `lastError`），
+   * 应用在**新**状态上 ⇒ 这中间刚落库的**运行期错误被清掉**。
+   *
+   * `lastError` 一个字段承载两种语义（排期校验 / 运行期），所以这里只清
+   * 「自己那一半」：读到的是排期错误才清，运行期错误一律不碰。
+   */
+  return updateAutomationRuntimeWith(automationId, (automation) => {
+    // ⚠️ 显式标类型，不用 `as const` —— 后者作用在**三元结果**上不合法（TS1355）。
+    const scheduleErrorPatch: AutomationRuntimeUpdate = automation.lastError?.phase === 'schedule'
+      ? { lastError: null }
+      : {};
 
-  if (!isSchedulableAutomation(automation)) {
-    return updateAutomationRuntime(automation.id, { nextRunAt: null });
-  }
+    if (!isSchedulableAutomation(automation)) {
+      // 不再排期 ⇒ 没有「排期错误」可报，但运行期错误要留着。
+      return { nextRunAt: null, ...scheduleErrorPatch };
+    }
 
-  const next = calculateNextRunAt(automation.schedule, now);
-  if (!next.ok) {
-    return updateAutomationRuntime(automation.id, {
-      nextRunAt: null,
-      lastError: toAutomationError(next.error.code, next.error.message, 'schedule', false, now),
-    });
-  }
+    const next = calculateNextRunAt(automation.schedule, now);
+    if (!next.ok) {
+      return {
+        nextRunAt: null,
+        lastError: toAutomationError(next.error.code, next.error.message, 'schedule', false, now),
+      };
+    }
 
-  return updateAutomationRuntime(automation.id, {
-    nextRunAt: next.value,
-    lastError: null,
+    return { nextRunAt: next.value, ...scheduleErrorPatch };
   });
 }
 
@@ -631,7 +704,14 @@ function createAutomationRuntimePatch(
   scheduledFor: number | null = null,
 ): AutomationRuntimeUpdate {
   const completedAt = result.completedAt;
-  const nextRunAt = trigger === 'schedule' || scheduledFor !== null
+  // ⚠️ **口径已定（N5）：重算的参照点是 `completedAt`，不是 `scheduledFor`。**
+  // 理由：`nextRunAfterCompletion` 守的语义就是「跑完之后隔多久再跑」，重试也是跑。
+  // 代价上界：重试最多把 `completedAt` 往后拖 `AUTOMATION_RETRY_DELAY_MS` +
+  // 剩余执行时间（两次尝试共享同一个 `deadlineAt`，故 ≤ `AUTOMATION_RUN_TIMEOUT_MS`）
+  // ≈ 3 分钟，而最小间隔是 15 分钟 ⇒ **不会连跑**。
+  // ⚠️ **别改成从 `scheduledFor` 算** —— 那会把「不连跑」这条不变式绑在
+  // 「最小间隔 > 最大重试时长」上，而那个间隔是可调的。
+  const nextRunAt = isScheduledOccurrence(trigger, scheduledFor)
     ? nextRunAfterCompletion(automation, completedAt)
     : automation.nextRunAt;
 
@@ -646,11 +726,18 @@ function createAutomationRuntimePatch(
   const nextSiteOrigin = siteOrigin ?? automation.zai.siteOrigin;
 
   if (result.ok) {
+    // `result.chatSessionId` 可空 —— `null` = 本次没拿到，**保留记录里已有的**
+    // （运行期间 `persistAutomationSession` 可能已经写进去了），与失败分支同口径。
+    // ⚠️ **末尾的 `|| null` 顺手把历史遗留的空串归一成 `null`** ——
+    // `resolveAutomationReusableSessionId` 那侧已确立「空串不是会话 id」，
+    // 而这里是**唯一一处仍会把 `''` 写回库**的路径；不归一的话那条脏值永远不会自愈。
+    const successSessionId = (result.chatSessionId ?? automation.zai.chatSessionId) || null;
     return {
       zai: {
         ...automation.zai,
-        chatSessionId: result.chatSessionId,
-        sessionUrl: result.sessionUrl,
+        chatSessionId: successSessionId,
+        // 有 id 时 result 的 url 才是权威的；没有就保留旧 url。
+        sessionUrl: result.chatSessionId !== null ? result.sessionUrl : automation.zai.sessionUrl,
         // 成功收尾时协调器一定给得出站点；万一没有，保留旧值，不拿 null 覆盖已知站点。
         siteOrigin: nextSiteOrigin,
       },
@@ -668,7 +755,8 @@ function createAutomationRuntimePatch(
   //   只判「url 缺不缺」会跳过修复，「打开会话」会一直跳到上一次的对话；
   // - **站点也要一起写**：即使这次没拿到会话 id，本次跑在哪个站仍是已知事实，
   //   下一次运行要靠它决定去哪一站。
-  const nextSessionId = result.chatSessionId ?? automation.zai.chatSessionId;
+  // ⚠️ **同上**：末尾 `|| null` 把历史遗留的空串归一（失败分支也写会话状态）。
+  const nextSessionId = (result.chatSessionId ?? automation.zai.chatSessionId) || null;
   // 拼 URL 的 base 只认证据（本次 / 记录站点 / 记录里那条 url 的 origin）。
   // ⚠️ **不再吃默认站**：那会造出一条「站点写着 null、url 却指向默认站」的记录，
   // 而下一次运行又会把那条 url 当成站点证据（第三级）⇒ 绕一圈仍然钉死在默认站。
@@ -704,8 +792,26 @@ function createAutomationRuntimePatch(
   };
 }
 
+/**
+ * **这条运行是不是「按排期来的」**（而不是用户手动点的）。
+ *
+ * ⚠️ **两个条件任一成立就算**：`trigger === 'schedule'` 或 `scheduledFor !== null`。
+ * 后者是必需的 —— `executeWithRetry` 在中途把 run 的 `trigger` 改写成 `'retry'`
+ * （那是**记录**上的语义，UI 靠它显示「重试」），而 `scheduledFor` 保留原值
+ * ⇒ 只看 `trigger` 会把重试误判成手动运行、**不再重算 `nextRunAt`**。
+ *
+ * ⚠️ **这是唯一判定入口** —— `createAutomationRuntimePatch`（收 `trigger` + `scheduledFor`）
+ * 与 `isScheduledRun`（收整条 run）都走它。两处各写一遍 `||` 的老形态改一处不报错。
+ */
+function isScheduledOccurrence(
+  trigger: AutomationTrigger,
+  scheduledFor: number | null,
+): boolean {
+  return trigger === 'schedule' || scheduledFor !== null;
+}
+
 function isScheduledRun(run: AutomationRun): boolean {
-  return run.trigger === 'schedule' || run.scheduledFor !== null;
+  return isScheduledOccurrence(run.trigger, run.scheduledFor);
 }
 
 /**

@@ -1,5 +1,4 @@
-import type { Memory, ToolDescriptor, ToolExecutionRecord } from '../types';
-import type { SupportedLocale } from '../i18n';
+import type { ToolExecutionRecord } from '../types';
 
 export type AutomationId = string;
 export type AutomationRunId = string;
@@ -12,8 +11,7 @@ export type AutomationRunStatus =
   | 'succeeded'
   | 'failed'
   | 'timeout'
-  | 'cancelled'
-  | 'skipped';
+  | 'cancelled';
 
 export type AutomationTrigger = 'manual' | 'schedule' | 'retry';
 
@@ -119,6 +117,18 @@ export interface AutomationRunnerRequest {
   deadlineAt: number;
   prompt: string;
   trigger: AutomationTrigger;
+  /**
+   * **本次运行要在哪条会话上跑**（不是「记录里碰巧留着什么」）。
+   *
+   * - **固定会话**（`promptOptions.fixedSession === true`）且记录里已有会话 id
+   *   ⇒ 就是它 —— 「让它在上一个会话继续跑」正是这个开关的语义；
+   * - 其余两档 ⇒ **`null`**：非固定会话（本轮是新对话），以及固定会话但记录里
+   *   还没有会话 / 是历史遗留的空串。
+   *
+   * ⚠️⚠️ **判据与下面 `siteOrigin` 同源**（都走 `resolveAutomationReusableSessionId`）。
+   * 抄记录原值会让这两档填进一个**不属于本轮**的 id，与 `siteOrigin` 矛盾，而且
+   * 失败收尾时会被回落进去 ⇒ 把运行期间刚写进去的新会话顶掉。
+   */
   chatSessionId: string | null;
   /**
    * **本次运行指定去哪个站**（origin）。`null` = 不指定，由协调器就地判定。
@@ -133,20 +143,19 @@ export interface AutomationRunnerRequest {
    */
   siteOrigin: string | null;
   promptOptions: AutomationPromptOptions;
-  locale?: SupportedLocale;
-  promptContext?: AutomationPromptContext;
   requestedAt: number;
-}
-
-export interface AutomationPromptContext {
-  memories?: Memory[];
-  presetContent?: string | null;
-  toolDescriptors?: ToolDescriptor[];
 }
 
 export interface AutomationRunnerSuccess {
   ok: true;
-  chatSessionId: string;
+  /**
+   * 本次运行落在哪条会话。**`null` = 这次没拿到会话 id**（新会话首轮、内容脚本
+   * 还没读到 `/c/<id>`），不是「空会话」。
+   *
+   * ⚠️ 写成 `string` 会逼调用方用 `''` 兜底，而空串在「有没有可复用的会话」这类
+   * 判据上算「有值」—— 表现是下一次运行被送到记录里那一站去开新对话。
+   */
+  chatSessionId: string | null;
   sessionUrl: string | null;
   /**
    * 本次运行落在哪个站（origin）。

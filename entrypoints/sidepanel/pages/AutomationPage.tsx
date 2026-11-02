@@ -220,7 +220,8 @@ export default function AutomationPage() {
         : await sidepanelRuntimeClient.request({ type: 'CREATE_AUTOMATION', payload });
 
       if ('ok' in response) {
-        banner.show('error', response.error);
+        // 后台回的是裸码，不能直出 —— 走与卡片红条同一层的三级回退。
+        banner.show('error', formatAutomationError({ code: response.error, message: response.error }, t));
         return;
       }
       // 只有**排期**错误才该挡住保存：那是 `refreshAutomationNextRunAt` 刚算出来的
@@ -252,7 +253,8 @@ export default function AutomationPage() {
         { acceptFailure: true },
       );
       if (run && 'error' in run && typeof run.error === 'string') {
-        banner.show('error', run.error);
+        // 同上：`automation_already_running` 是常态而非边缘情况。
+        banner.show('error', formatAutomationError({ code: run.error, message: run.error }, t));
       } else if (run && 'status' in run && (run.status === 'failed' || run.status === 'timeout')) {
         banner.show(
           'error',
@@ -275,10 +277,18 @@ export default function AutomationPage() {
 
   const toggleStatus = async (automation: Automation) => {
     try {
-      await sidepanelRuntimeClient.request({
+      // ⚠️ **`acceptFailure` 是必需的** —— 不加的话 `automation_not_found` /
+      // `invalid_automation_status` 会走 `runtime-client` 抛 `SidepanelRuntimeError`，
+      // 最后落到 `formatRuntimeError`（通用兜底），而它们在
+      // `automation-error-message.ts` 里有**可诊断的专门文案**。
+      const response = await sidepanelRuntimeClient.request({
         type: 'SET_AUTOMATION_STATUS',
         payload: { id: automation.id, status: automation.status === 'active' ? 'paused' : 'active' },
-      });
+      }, { acceptFailure: true });
+      if ('error' in response) {
+        banner.show('error', formatAutomationError({ code: response.error, message: response.error }, t));
+        return;
+      }
       await load();
     } catch (error) {
       banner.show('error', formatRuntimeError(error, t));
@@ -294,6 +304,9 @@ export default function AutomationPage() {
    */
   const dismissError = async (automation: Automation) => {
     try {
+      // ⚠️ **不加 `acceptFailure`** —— `CLEAR_AUTOMATION_ERROR` 是**幂等 ack**：
+      // 后台无论任务在不在都回 `{ ok: true }`（见那个 handler 的注释），
+      // 域失败这一档不存在，唯一的失败是传输层（`catch` 那条已覆盖）。
       await sidepanelRuntimeClient.request({
         type: 'CLEAR_AUTOMATION_ERROR',
         payload: { id: automation.id },
@@ -313,6 +326,8 @@ export default function AutomationPage() {
     });
     if (!ok) return;
     try {
+      // ⚠️ **不加 `acceptFailure`** —— `DELETE_AUTOMATION` 无论 id 在不在都回
+      // `{ ok: true }`（`deleteAutomation` 对不存在的 id 是 no-op），没有域失败档。
       await sidepanelRuntimeClient.request({
         type: 'DELETE_AUTOMATION',
         payload: { id: automation.id },
@@ -709,7 +724,6 @@ function formatRun(run: AutomationRun, t: ReturnType<typeof useI18n>['t']): stri
     failed: t('sidepanel.automationPage.status.failed'),
     timeout: t('sidepanel.automationPage.status.timeout'),
     cancelled: t('sidepanel.automationPage.status.cancelled'),
-    skipped: t('sidepanel.automationPage.status.skipped'),
   };
   return `${label[run.status]}${run.attempt > 1 ? ` · ${t('sidepanel.automationPage.attempt', { count: run.attempt })}` : ''}`;
 }

@@ -355,11 +355,11 @@ function settleToolTurn(requestId: string): void {
     // `handleResponseComplete`，而这里一旦抛出就会从 `mainWorldQueue.run` 的
     // promise 里漏出去（调用方是 `void`）⇒ **unhandled rejection 会进
     // `chrome://extensions` 的错误列表**，且比 `console.error` 更难压。
-    // 现在的实现里它不会抛（`closeToolAuthorizationGrant` 只 rethrow 非失效错误、
-    // `sendRuntimeMessage` 自己吞光），但 `toolPanel.finalizePending` / `sealTurn`
-    // 是同步 DOM 操作 —— 属于「将来加一条会抛的实现」那一类。
+    // ⚠️ **它是同步函数、没有 await 了**（关 grant 改成不等待，见那个函数的说明），
+    // 但这个 try 仍要留 —— `toolPanel.finalizePending` / `sealTurn` 是同步 DOM 操作，
+    // 属于「将来加一条会抛的实现」那一类。
     try {
-      await tryFinalizeRequest(requestId);
+      tryFinalizeRequest(requestId);
     } catch (error) {
       if (isExtensionInvalidatedError(error)) invalidateExtensionContext();
       else console.error('[Zai++] request finalize failed inside the tool-turn rendezvous', error);
@@ -379,15 +379,33 @@ function settleToolTurn(requestId: string): void {
  * `chatSessionIdByRequestId` 的最后一个读者都在 `handleResponseComplete` 里）。
  * ⚠️ **`finalizePending` 必须排在 `sealTurn` 之前** —— 前者可能重发一次带 `live: true`
  * 的记录把块画回展开，反过来收尾就被顶掉（与 `handleResponseComplete` 内部同一条理由）。
+ *
+ * ⚠️⚠️ **这个函数是同步的，签名就是承诺。**
+ *
+ * 它原先 `async`，中间夹着 `await closeToolAuthorization(requestId)` —— 那是一次
+ * **后台往返**（`chrome.runtime.sendMessage` → 后台的同步恢复闸门 → `chrome.storage.session`
+ * 的读写）。那条链上没有任何超时，一旦不回来，后面四步全都不执行：
+ * `armManualStopDetection` / 手动轮回收 / `finalizePending` / `releaseRequestState`。
+ * 而 `toolTurnStates` 条目**已经先删了** ⇒ 这个请求**再也不会有人来收尾**
+ * （下一句 `if (!state?.terminalSeen) return` 直接返回）。
+ *
+ * 真机撞见过一次：`toolTurnStates` 空、`activeToolAuthorizations` 里留着一条跨 400 秒
+ * 没消失的条目。根因没定（那条往返为什么挂住查不出来），但**不该由它来决定收尾做不做**。
+ *
+ * ⇒ 现在的形状是「**先同步把本地状态摘干净，再不等待地关后台那份 grant**」：
+ * 本地这几样立刻释放，grant 由后台的 30 分钟 TTL 兜底。代价是关失败时 grant 多留一会儿
+ * —— 但那**不是新增代价**（原实现里 `finally` 也是删了 Map 就不管后台了），
+ * 区别只是「慢」和「失败」不再阻塞收尾。
  */
-async function tryFinalizeRequest(requestId: string): Promise<void> {
+function tryFinalizeRequest(requestId: string): void {
   const state = toolTurnStates.get(requestId);
   if (!state?.terminalSeen) return;
   if (state.pendingExecutions > 0) return;
   if (state.response || state.settleScheduled) return;
   toolTurnStates.delete(requestId);
-  if (activeToolAuthorizations.has(requestId)) {
-    await closeToolAuthorization(requestId);
+  const authorizationId = detachToolAuthorization(requestId);
+  if (authorizationId) {
+    closeToolAuthorizationInBackground(authorizationId, 'closing the finalized tool authorization failed');
   }
   // 流终止但这一轮从未产出 RESPONSE_COMPLETE = 页面侧把读取流 abort 了
   // （用户点 Stop，或读取中途出错）。这比「等 Stop 按钮消失」更直接，
@@ -939,14 +957,39 @@ async function closeToolAuthorizationGrant(authorizationId: string): Promise<voi
   }
 }
 
-async function closeToolAuthorization(requestId: string): Promise<void> {
+/**
+ * **同步**摘掉某个请求的 grant 登记，返回它的授权 id（没有则 `null`）。
+ *
+ * ⚠️ **与「关后台那份 grant」是两件事，必须分开** —— 登记是本地 Map、摘掉是同步的；
+ * 关后台是一次往返、可能很慢甚至不回来。把它们捆在一起（原来是
+ * `closeToolAuthorization` 的 `try { await … } finally { delete }`）就让
+ * **慢的那一半决定了快的那一半什么时候生效**，而调用方（`tryFinalizeRequest`）
+ * 后面还有四步收尾等着。
+ */
+function detachToolAuthorization(requestId: string): string | null {
   const authorization = activeToolAuthorizations.get(requestId);
-  if (!authorization) return;
-  try {
-    await closeToolAuthorizationGrant(authorization.id);
-  } finally {
-    activeToolAuthorizations.delete(requestId);
-  }
+  if (!authorization) return null;
+  activeToolAuthorizations.delete(requestId);
+  return authorization.id;
+}
+
+/**
+ * **不等待**地关掉后台那份 grant。
+ *
+ * ⚠️ 关失败不会更糟：后台对 grant 有 `TOOL_AUTHORIZATION_TTL_MS`（30 分钟）的过期，
+ * `pruneState` 会在下一次建授权时顺手清掉。这条路径的唯一作用是把名额**提前**还回去。
+ *
+ * ⚠️ **必须自己接住 rejection** —— 调用方是同步的、跑在 `mainWorldQueue` 的任务里，
+ * 漏出去就是 unhandled rejection（会进 `chrome://extensions` 的错误列表）。
+ */
+function closeToolAuthorizationInBackground(authorizationId: string, failureMessage: string): void {
+  void closeToolAuthorizationGrant(authorizationId).catch((error: unknown) => {
+    if (isExtensionInvalidatedError(error)) {
+      invalidateExtensionContext();
+      return;
+    }
+    console.error(`[Zai++] ${failureMessage}`, error);
+  });
 }
 
 async function executeToolCall(
@@ -1711,7 +1754,7 @@ async function dispatchMainWorldMessageInner(
         // 会在第一行直接返回，收尾整块不执行（授权永不关、请求级状态永不释放）。
         // decoder 已保证 requestId 是非空字符串，下面的判定不必再判空。
         ensureToolTurnState(requestId).terminalSeen = true;
-        await tryFinalizeRequest(requestId);
+        tryFinalizeRequest(requestId);
         return;
       }
       case 'HTML_CHALLENGE': {
@@ -1722,6 +1765,43 @@ async function dispatchMainWorldMessageInner(
           return;
         }
         const requestId = challenge.requestId;
+        /**
+         * ⚠️⚠️ **挑战页这一轮永远不会有终态 ⇒ 它的 grant 必须在这里还回去。**
+         *
+         * `fetch-hook` 在 `text/html` 分支里只发 `onHtmlChallenge` 就 `return`，
+         * **不发 `RESPONSE_COMPLETE`、也不发 `REQUEST_TERMINAL`**（那条分支读完 headers
+         * 就返回，根本不读流）。而 `tryFinalizeRequest` 的第一句是
+         * `if (!state?.terminalSeen) return` ⇒ 这个 requestId **再也不会有人来收尾**。
+         *
+         * 后果不是内存，是**后台的 grant 名额**：`closeToolAuthorizationGrant` 没人调，
+         * 后台那份 grant 只能等 `TOOL_AUTHORIZATION_TTL_MS`（30 分钟）过期。
+         * `MAX_ACTIVE_GRANTS` 是 32，满了之后**之后所有轮次的建授权全部抛
+         * `tool_authorization_grant_limit`** —— 表现是工具静默全部不可用。
+         *
+         * ⚠️ **放在下面那条 `continuationLoop?.status === 'running' && …activeRequestId === requestId`
+         * 判据外面** —— 未认领的那一档（原生轮 / 循环已收）同样泄漏：那种请求不会
+         * 走 `advanceContinuationLoop`，grant 就一直留到 TTL。
+         *
+         * ⚠️ **这里只还 grant，不调 `releaseRequestState`。** 那五样在挑战页这条路上
+         * **全是 no-op**：两个大容器（`executedToolCallSignatures` / `executionsByRequest`）
+         * 需要 `TOOL_CALL` / `RESPONSE_COMPLETE` 才会被写，而这条路上一条都没有；
+         * 另外三个小条目也没有读者（读它们的三处全在 `handleResponseComplete` 或
+         * `executeDetected` 里，两者都需要上面那两个回调）。
+         * ⇒ 清它们没有收益，而「没有 `REQUEST_TERMINAL` 的路径留残余」本身是
+         * `releaseRequestState` 注释里写明的**有意接受**的取舍，不该在这里推翻。
+         *
+         * ⚠️ **与那条判据里的推进不冲突** —— `advanceContinuationLoop` 读的是
+         * `loop.localSkillDir` / `loop.toolExecutions` / `loopState.descriptors`，
+         * 不读 `activeToolAuthorizations`；而且这里摘的是**被撞的那一轮**的登记，
+         * 推进出去的是**新 requestId**，两者不是同一条。
+         */
+        const challengedAuthorizationId = detachToolAuthorization(requestId);
+        if (challengedAuthorizationId) {
+          closeToolAuthorizationInBackground(
+            challengedAuthorizationId,
+            'closing the challenge-page tool authorization failed',
+          );
+        }
         if (continuationLoop?.status === 'running' && continuationLoop.activeRequestId === requestId) {
           const expectedLoop = continuationLoop;
           setTimeout(() => {
@@ -2542,10 +2622,26 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
     const nativeTaskId = taskIdByRequestId.get(complete.requestId);
     if (nativeTaskId) {
       const task = activeDomTasks.get(nativeTaskId);
-      taskIdByRequestId.delete(complete.requestId);
+      /**
+       * ⚠️⚠️ **收尾必须走 `clearActiveDomTask`，不能裸 `activeDomTasks.delete`。**
+       *
+       * 那个函数清**三个**容器（`activeDomTasks` + `taskIdByPromptText` +
+       * `taskIdByRequestId`），裸删只清一个 ⇒ 少清 `taskIdByPromptText`。
+       * 正常路径看不出来（completion 路由命中时那一项已经删过了），但**只要那一轮
+       * 没命中 prompt 原文**（页面在 chatNew 之后改写了用户消息文本），残留就留到
+       * 别处的 `clearActiveDomTask` 兜底为止 —— 而这条路径自己不做。
+       *
+       * ⚠️ **顺序**：`status = 'done'` 要排在清理之前 —— 那个函数直接把条目删了，
+       * 之后 `task` 只剩本地引用，再写状态没有读者。
+       *
+       * ⚠️ **清理要放在 `if (task)` 外面**：`task` 为 `undefined` 时（条目已不在
+       * `activeDomTasks`，但 `taskIdByRequestId` 还指着它）原来两个容器都不清。
+       * 那种形态下没什么可回传，但**映射必须摘掉**，否则 `armManualStopDetection`
+       * 会拿一个已死的 taskId 去挂宽限窗口。
+       */
+      if (task) task.status = 'done';
+      clearActiveDomTask(nativeTaskId);
       if (task) {
-        task.status = 'done';
-        activeDomTasks.delete(nativeTaskId);
         // 固定会话：回传前 re-read 真实 /c/<id>（新建会话下 task.chatSessionId 可能还是 null）。
         const liveSessionId = getCurrentChatSessionId();
         void sendRuntimeMessage({
@@ -2952,8 +3048,15 @@ function hasActiveDomTaskRunning(): boolean {
  * 发送动作走「自动化发送链（sendPromptViaPage）」，命中后续跑/工具执行仍由
  * 核心续跑状态机自闭环（handleResponseComplete 里 continuationLoop 接手）。
  * 内部先同步一次运行时状态（记忆/技能/工具目录），再走自动化发送链。
+ *
+ * **返回 `null` = 注入已发出**；否则返回**本次发送的失败码**。
+ *
+ * ⚠️⚠️ **失败码必须由这里返回，不能让调用方自己去读 `lastAutomationSendErrorKind`** ——
+ * 同一个失败还会经 `DOM_TASK_FAILED` 回传一次，两条通道谁先到由协调器采信。
+ * 调用方自己再算一遍等于把归一规则写成两份，改一处另一处不报错，而后果是
+ * 「同一个故障有时自动重跑、有时不重跑」（`retrySafe` 由码决定）。
  */
-async function submitDomTaskPrompt(taskId: string, prompt: string): Promise<boolean> {
+async function submitDomTaskPrompt(taskId: string, prompt: string): Promise<string | null> {
   // ⚠️⚠️ **复位失败码，必须在任何 await 之前** —— 这个变量是「**本次**发送」的失败码来源，
   // 而发送链有三种失败出口**不写它**（`domSendInFlight` 早退 / 请求已发出但未归属 /
   // 一个请求都没发出）。不复位 ⇒ 那三种会读到**上一次任务**留下的 kind：
@@ -2963,18 +3066,20 @@ async function submitDomTaskPrompt(taskId: string, prompt: string): Promise<bool
   lastAutomationSendErrorKind = null;
   await loadAndSyncRuntimeState();
   const submitted = await sendPromptViaPage(taskId, prompt);
-  if (!submitted) {
-    const task = activeDomTasks.get(taskId);
-    if (task) {
-      clearActiveDomTask(taskId);
-      const lastError = lastAutomationSendErrorKind;
-      const code = lastError && RETRYABLE_PRE_SEND_ERRORS.has(lastError)
-        ? lastError
-        : 'composer_inject_failed';
-      void sendRuntimeMessage({ type: 'DOM_TASK_FAILED', taskId, error: code });
-    }
+  if (submitted) return null;
+
+  const lastError = lastAutomationSendErrorKind;
+  const code = lastError && RETRYABLE_PRE_SEND_ERRORS.has(lastError)
+    ? lastError
+    : 'composer_inject_failed';
+  const task = activeDomTasks.get(taskId);
+  if (task) {
+    clearActiveDomTask(taskId);
+    void sendRuntimeMessage({ type: 'DOM_TASK_FAILED', taskId, error: code });
   }
-  return submitted;
+  // ⚠️ **即使任务已经不在登记表里也要返回码** —— 调用方要靠它决定 `RUN_DOM_TASK`
+  // 的响应，而那条响应与 `DOM_TASK_FAILED` 必须给出同一个结论。
+  return code;
 }
 
 // ---------------------------------------------------------------------------
@@ -3398,8 +3503,12 @@ async function runDomTask(input: {
 
   // 返回 ok:true 只表示「注入已发出」；最终结果由进入续跑循环 / 单轮完成后的
   // DOM_TASK_COMPLETE 统一回传，任务不被当作「已完成」。
-  const submitted = await submitDomTaskPrompt(input.taskId, input.prompt);
-  if (!submitted) return { ok: false, error: 'composer_inject_failed' };
+  //
+  // ⚠️ **失败时带的是 `submitDomTaskPrompt` 归一后的真实码，不是恒定的
+  // `composer_inject_failed`** —— 同一个失败还会经 `DOM_TASK_FAILED` 回传一次，
+  // 两条通道给出的码与 `retrySafe` 必须一致，否则「有时自动重跑、有时不重跑」。
+  const failureCode = await submitDomTaskPrompt(input.taskId, input.prompt);
+  if (failureCode !== null) return { ok: false, error: failureCode };
   return { ok: true };
 }
 

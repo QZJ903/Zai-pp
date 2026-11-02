@@ -944,7 +944,11 @@ async function scanDueAutomationsFromWake() {
   const result = await scanDueAutomations(executeAutomationWithContext);
   // `reconciled` 是「被改判为中断的悬挂 run」数：它同样改变侧边栏要显示的状态，
   // 漏掉它会出现「DB 已是 failed、UI 仍显示运行中」直到用户切走再切回。
-  if (result.initialized > 0 || result.started > 0 || result.failed > 0 || result.reconciled > 0) {
+  // `errored` 只进「自动化列表」那一档 —— 它没有任何运行记录可刷（run 都没建出来）。
+  if (
+    result.initialized > 0 || result.started > 0 || result.failed > 0
+    || result.reconciled > 0 || result.errored > 0
+  ) {
     await broadcastAutomationUpdate();
   }
   if (result.started > 0 || result.failed > 0 || result.reconciled > 0) {
@@ -1056,7 +1060,9 @@ async function executeAutomationWithContext(
   const completedAt = Date.now();
   return {
     ok: true,
-    chatSessionId: finalChatSessionId ?? '',
+    // ⚠️ **不要 `?? ''`** —— 空串在「有没有可复用的会话」这类判据上算「有值」，
+    // 会把下一次新对话送到记录里那一站。拿不到就给 `null`。
+    chatSessionId: finalChatSessionId,
     sessionUrl: finalChatSessionId ? buildZaiSessionUrl(finalChatSessionId, outcome.siteOrigin) : null,
     siteOrigin: outcome.siteOrigin,
     assistantText: outcome.assistantText,

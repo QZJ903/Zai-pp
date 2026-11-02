@@ -622,6 +622,10 @@ export const sidepanel = {
       pageSessionMissing: '拿不到当前会话，请刷新 Zai 页面后重试',
       pageTaskParamsMissing: '任务参数不完整，请重新保存任务后再运行',
       pageTaskAlreadyRunning: '该任务已在运行中',
+      // ── 后台命令级（见 `automation-error-message.ts` 末尾那三条）──
+      automationNotFound: '找不到这条自动化，可能已被删除',
+      automationAlreadyRunning: '该任务已在运行中，请等它结束再试',
+      automationInvalidStatus: '状态值无效，请刷新页面后重试',
     },
     form: {
       name: '名称',
@@ -654,7 +658,6 @@ export const sidepanel = {
       failed: '失败',
       timeout: '超时',
       cancelled: '已取消',
-      skipped: '已跳过',
     },
     meta: {
       next: '下次',

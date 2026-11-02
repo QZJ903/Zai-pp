@@ -19,7 +19,7 @@ import { looksLikeErrorCode } from '../../core/messaging/error-code';
  * ⚠️ **为什么放在 UI 层而不是写入时翻译**：`lastError` 是**持久化**的。写入时翻译会把
  * 「当时那个 locale」刻进记录，用户后来切语言那条红条不会跟着变。UI 层映射每次渲染重算。
  * 而且写入点（`createAutomationRunnerFailure`）**拿不到 locale** ——
- * `AutomationRunnerRequest.locale` 声明了但从未赋值，scheduler 那条路也不经过它。
+ * 它走的是 scheduler 那条路，那条路上没有任何地方持有当前界面语言。
  *
  * ⚠️ **新增失败码时在这里补一条**；不补不会报错，只会回落成通用文案（见 `formatAutomationError`）。
  */
@@ -89,6 +89,15 @@ const AUTOMATION_ERROR_KEYS: Readonly<Record<string, LocaleMessageKey>> = Object
   // 不补也不会泄漏裸码（三级回退会套通用文案），补上是为了给出**可诊断**的那一句。
   dom_automation_dom_task_rejected: 'sidepanel.automationPage.error.pageFailed',
   dom_automation_dom_task_failed: 'sidepanel.automationPage.error.pageFailed',
+
+  // ── 后台命令级（`{ ok: false, error }` 的 `error`，不是 `lastError.code`）──
+  // ⚠️ 这三条**不带 `dom_automation_` 前缀**：它们是后台直接回的领域失败码，
+  // 走的是 banner 那条路，不是运行记录。不映射的后果是用户看到
+  // `automation_already_running` 这一行蛇形标识符 —— 而「已有在跑」是常态，
+  // 每分钟扫描与手动点击撞车就会撞上。
+  automation_not_found: 'sidepanel.automationPage.error.automationNotFound',
+  automation_already_running: 'sidepanel.automationPage.error.automationAlreadyRunning',
+  invalid_automation_status: 'sidepanel.automationPage.error.automationInvalidStatus',
 });
 
 /**

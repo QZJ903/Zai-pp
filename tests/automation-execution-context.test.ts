@@ -36,27 +36,6 @@ afterEach(() => {
 });
 
 describe('automation execution context', () => {
-  it('builds an idempotency key from the run id and a trimmed scope', () => {
-    const execution = createAutomationExecutionContext({
-      ...BASE_INPUT,
-      signal: new AbortController().signal,
-      isLeaseCurrent: () => true,
-    });
-    expect(execution.createIdempotencyKey('tool:1')).toBe('automation:run-1:tool:1');
-    expect(execution.createIdempotencyKey('  tool:2  ')).toBe('automation:run-1:tool:2');
-  });
-
-  it('rejects an empty idempotency scope instead of building a colliding key', () => {
-    const execution = createAutomationExecutionContext({
-      ...BASE_INPUT,
-      signal: new AbortController().signal,
-      isLeaseCurrent: () => true,
-    });
-    // ⚠️ 空白 scope 若不拦，会造出 `automation:run-1:` 这种**同一次运行内必然重复**的 key
-    // ⇒ 后续「按 key 去重」的地方会把两个不同的工具调用当成同一个。
-    expect(() => execution.createIdempotencyKey('   ')).toThrow('must not be empty');
-  });
-
   it('passes the identity fields through unchanged', () => {
     const controller = new AbortController();
     const execution = createAutomationExecutionContext({

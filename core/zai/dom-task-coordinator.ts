@@ -204,6 +204,19 @@ const RETRYABLE_PRE_SEND_ERRORS: ReadonlySet<string> = new Set([
   'agent_not_idle',
 ]);
 
+/**
+ * 这个失败码是不是**内容脚本发送链**报上来的（而不是握手 / 桥那一层）。
+ *
+ * ⚠️ 让响应与 `DOM_TASK_FAILED` 两条通道给出一致的 `phase`：发送链的失败归
+ * `'runner'`（与 `onFailed` 同口径），握手超时 / 接收端缺失保持 `'bridge'`。
+ * ⚠️ 判据是「白名单 ∪ 归一后的兜底码」—— 内容脚本把不在白名单里的发送失败
+ * 一律收敛成 `composer_inject_failed`。
+ */
+function isContentScriptSendFailure(error: string | undefined): boolean {
+  if (!error) return false;
+  return error === 'composer_inject_failed' || RETRYABLE_PRE_SEND_ERRORS.has(error);
+}
+
 interface PendingDomTask {
   taskId: string;
   kind: DomTaskKind;
@@ -335,10 +348,9 @@ export function createDomTaskCoordinator(
    * ⚠️ **顺序不可颠倒**：把 4 提到 1 前面会让固定会话任务跟着用户切站乱跑；
    * 把 3 提到 1 前面会让「记录说 A 站」被「B 站恰好开着个主页」顶掉。
    *
-   * 返回的 chatSessionId 与输入可能不同：续用会话时找不到精确 /c/<id> tab，
-   * 就降级为「新会话」语义（chatSessionId 置 null、走新对话的标签页解析），
-   * 而不是新开目标会话 tab 后又被 content 的 wrong_conversation 校验拒绝。
-   * content 收到 null 会跳过会话一致性校验（新会话本来就是 null）。
+   * 返回的 chatSessionId 只在**输入本来就是 null** 时为 null（新对话）。
+   * 续用会话时即使找不到精确 `/c/<id>` tab，也会**新开一条目标会话 tab**
+   * （见下面 `sessionId != null` 分支的说明），不降级成新会话。
    */
   async function resolveDomTab(
     chatSessionId: string | null,
@@ -469,7 +481,10 @@ export function createDomTaskCoordinator(
     tabId: number,
     input: DomTaskStartInput,
     options: DomTaskStartOptions,
-  ): Promise<{ ok: boolean; error?: string; phase?: 'tab' | 'bridge' }> {
+  ): Promise<
+    | { ok: true }
+    | { ok: false; error: string; phase: 'tab' | 'bridge' | 'runner' }
+  > {
     const deadline = Date.now() + (options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS);
     let attempt = 0;
     /**
@@ -508,7 +523,11 @@ export function createDomTaskCoordinator(
           return {
             ok: false,
             error,
-            phase: error === 'wrong_conversation' || error === 'busy' ? 'tab' : 'bridge',
+            // ⚠️ 内容脚本发送链报上来的码归 `'runner'`（与 `onFailed` 同口径），
+            // 只有「挑不到标签页」那两类归 `'tab'`，其余（握手/桥）归 `'bridge'`。
+            phase: error === 'wrong_conversation' || error === 'busy'
+              ? 'tab'
+              : (isContentScriptSendFailure(error) ? 'runner' : 'bridge'),
           };
         }
         // 无结构化响应：内容脚本在、但没给出形状合法的答复（例如入站来源闸门拒了）
@@ -730,8 +749,16 @@ export function createDomTaskCoordinator(
           settleEntry(entry, {
             ok: false,
             taskId,
-            error: result.error ?? 'dom_task_rejected',
-            phase: result.phase ?? 'bridge',
+            error: result.error,
+            // ⚠️⚠️ **`phase` 与 `retrySafe` 都要与 `onFailed` 同口径** —— 同一个失败
+            // 会经响应与 `DOM_TASK_FAILED` 两条通道回来，谁先到由 `entry.settled` 决定。
+            // 只在一处算，同一个故障就会「有时自动重跑、有时不重跑」，phase 也会在
+            // `bridge` 与 `runner` 之间摇摆。
+            // ⚠️ **这里不再有 `??` 兜底** —— `handshake` 的返回类型已把 `error` 与
+            // `phase` 收紧成「失败时必需」，三类出口（发送链 / 挑不到标签页 / 握手与桥）
+            // 各自定档。将来加出口若不设 phase，`tsc` 会直接报错。
+            phase: result.phase,
+            retrySafe: RETRYABLE_PRE_SEND_ERRORS.has(result.error),
             // 站点此时已经定下（标签页是 resolveDomTab 挑的），沿用它。
             siteOrigin,
           });

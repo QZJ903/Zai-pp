@@ -623,6 +623,9 @@ export const sidepanel = {
       pageSessionMissing: 'Could not resolve the current conversation — reload the Zai page and retry',
       pageTaskParamsMissing: 'Task parameters are incomplete — save the task again before running',
       pageTaskAlreadyRunning: 'This task is already running',
+      automationNotFound: 'This automation no longer exists — it may have been deleted',
+      automationAlreadyRunning: 'This task is already running — wait for it to finish',
+      automationInvalidStatus: 'Invalid status value — reload the page and retry',
     },
     form: {
       name: 'Name',
@@ -648,7 +651,6 @@ export const sidepanel = {
       failed: 'Failed',
       timeout: 'Timed out',
       cancelled: 'Cancelled',
-      skipped: 'Skipped',
     },
     meta: {
       next: 'Next',

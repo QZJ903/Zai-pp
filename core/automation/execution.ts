@@ -18,7 +18,6 @@ export interface AutomationExecutionContext {
   readonly deadlineAt: number;
   readonly attempt: number;
   readonly signal: AbortSignal;
-  createIdempotencyKey(scope: string): string;
   assertActive(): void;
 }
 
@@ -40,11 +39,6 @@ export function createAutomationExecutionContext(
     deadlineAt: input.deadlineAt,
     attempt: input.attempt,
     signal: input.signal,
-    createIdempotencyKey(scope) {
-      const normalizedScope = scope.trim();
-      if (!normalizedScope) throw new Error('Automation idempotency scope must not be empty.');
-      return `automation:${input.runId}:${normalizedScope}`;
-    },
     assertActive() {
       if (Date.now() >= input.deadlineAt) {
         throw new AutomationExecutionStoppedError(

@@ -485,18 +485,35 @@ describe('request-scoped state is released once per request', () => {
     // ⚠️ **关授权这个动作本身也要在** —— 少一条「必须先等」的判据是过度提前，
     // 整个动作消失则是grant 泄漏（后台 `MAX_ACTIVE_GRANTS = 32`，满了之后
     // **之后所有轮次**的建授权都会抛 `tool_authorization_grant_limit`）。
+    //
+    // ⚠️⚠️ **动作拆成了两半，两半都要在**（拆的理由见 `tryFinalizeRequest` 的注释：
+    // 关后台是一次**无超时的往返**，原来 `await` 它 ⇒ 它不回来收尾就不往下走，
+    // 而 `toolTurnStates` 已经先删了 ⇒ 这个请求再没人收尾）。
+    // 判据必须分开断 —— 只断 `closeToolAuthorizationInBackground` 会漏掉「本地登记没摘」
+    // 那一半（那是 `activeToolAuthorizations` 泄漏的形态）；
+    // 只断 `detachToolAuthorization` 会漏掉「后台那份 grant 没人关」那一半。
+    const finalizerSource = readFileSync(CONTENT_SOURCE, 'utf8').slice(body.start!, body.end!);
     expect(
-      /closeToolAuthorization\(/.test(readFileSync(CONTENT_SOURCE, 'utf8').slice(body.start!, body.end!)),
-      '收尾函数必须真的关掉授权',
+      /detachToolAuthorization\(/.test(finalizerSource),
+      '收尾函数必须同步摘掉本地 grant 登记',
     ).toBe(true);
+    expect(
+      /closeToolAuthorizationInBackground\(/.test(finalizerSource),
+      '收尾函数必须真的去关后台那份 grant',
+    ).toBe(true);
+    // ⚠️ **反向自检：不许再 await 关授权** —— 那正是这条用例守的那个缺陷形态。
+    expect(
+      /await\s+closeToolAuthorization(InBackground)?\(/.test(finalizerSource),
+      '收尾函数不得 await 关授权（那会让一次后台往返决定收尾做不做）',
+    ).toBe(false);
 
     // 且必须先于释放（用源码偏移判前后）。
-    const source = readFileSync(CONTENT_SOURCE, 'utf8').slice(body.start!, body.end!);
+    const source = finalizerSource;
     const firstGuard = Math.min(
       source.indexOf('state.pendingExecutions'),
       source.indexOf('state.response'),
     );
-    const actionOffsets = ['closeToolAuthorization(', 'releaseRequestState(']
+    const actionOffsets = ['detachToolAuthorization(', 'releaseRequestState(']
       .map((a) => source.indexOf(a))
       .filter((i) => i >= 0);
     expect(actionOffsets.length, '收尾函数里应当有关授权与释放两个动作').toBeGreaterThan(0);
@@ -1434,5 +1451,102 @@ describe('the chatNew grant is released on the error path too', () => {
       'chatNew 的增广段必须包在 try/finally 里，且 finally 里关掉 grant —— '
       + '否则增广抛错时 grant 没人还，占满 32 个名额后所有工具静默不可用',
     ).toBe(true);
+  });
+});
+
+/**
+ * **两条「没有终态事件」的路径也要把 grant 还回去。**
+ *
+ * ⚠️⚠️ 这一组守的是同一个后果，两个不同成因：
+ * ① `tryFinalizeRequest` 里那次后台往返可能**不回来**（真机撞见过：`toolTurnStates` 空、
+ *    `activeToolAuthorizations` 留着一条跨 400 秒没消失的条目）—— 修法是**不再 await 它**；
+ * ② 挑战页那一轮**永远不会有终态**（`fetch-hook` 在 `text/html` 分支读完 headers 就
+ *    `return`，不发 `RESPONSE_COMPLETE` / `REQUEST_TERMINAL`）⇒ `tryFinalizeRequest`
+ *    第一句就返回，这条请求再没人收尾。
+ *
+ * 两者都不清的话，后台那份 grant 只能等 30 分钟 TTL；`MAX_ACTIVE_GRANTS` 是 32，
+ * 满了之后**之后所有轮次的建授权全部抛 `tool_authorization_grant_limit`**，
+ * 表现是工具静默全部不可用。
+ *
+ * ⚠️ **为什么用源码断言**：这两处都是 `zai.content.ts` 里的模块私有函数，
+ * 没有测试入口；而判据是「结构上有没有这条清理」—— 属于接线，不是行为。
+ */
+describe('grant cleanup covers the two paths that never see a terminal event', () => {
+  it('does not await the background round-trip inside the finalizer', () => {
+    // ⚠️ 这条与上面 `waits for in-flight executions …` 里那条反向自检重复，
+    // 但**故意分开**：那条跟着「前置判据」一起验，这条单独钉「同步」这个性质，
+    // 改坏时失败信息能直接指出来是哪个性质丢了。
+    const body = findFunctionBody(readContentProgram(), 'tryFinalizeRequest');
+    expect(body, '应当有 tryFinalizeRequest').toBeDefined();
+
+    // 判据一：函数**不是 async**（签名就是承诺 —— 同步就写不出 await）。
+    let isAsync = false;
+    walkSourceAst(readContentProgram(), (node) => {
+      if (!t.isFunctionDeclaration(node)) return;
+      if (!t.isIdentifier(node.id, { name: 'tryFinalizeRequest' })) return;
+      isAsync = node.async === true;
+    });
+    expect(isAsync, '收尾函数必须是同步的 —— 一旦 async，就又能夹进无超时的后台往返').toBe(false);
+
+    // 判据二：函数体里没有 await。
+    let awaits = 0;
+    walkSourceAst(body!, (node) => {
+      if (t.isAwaitExpression(node)) awaits += 1;
+    });
+    expect(awaits, '收尾函数体里不得有 await').toBe(0);
+  });
+
+  it('releases the challenge-page grant outside the claimed branch', () => {
+    // ⚠️⚠️ **必须在 `if (claimed)` 外面** —— 实测 `claimed: false` 的挑战页请求
+    // 同样留了 grant（原生轮、或循环已收尾那一档）。只清认领那一档等于漏一半。
+    const caseBodies = collectMessageCaseBodies(readContentProgram());
+    const challenge = caseBodies.get('HTML_CHALLENGE');
+    expect(challenge, '应当有 HTML_CHALLENGE 分支').toBeDefined();
+
+    // ① 分支里必须有「摘本地登记 + 关后台」两个动作。
+    let detaches = 0;
+    let closes = 0;
+    for (const statement of challenge!) {
+      walkSourceAst(statement, (node) => {
+        if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+        if (node.callee.name === 'detachToolAuthorization') detaches += 1;
+        if (node.callee.name === 'closeToolAuthorizationInBackground') closes += 1;
+      });
+    }
+    expect(detaches, '挑战页分支必须摘掉本地 grant 登记').toBe(1);
+    expect(closes, '挑战页分支必须去关后台那份 grant').toBe(1);
+
+    // ② 两个动作都**不在**任何「认领判据」里面。
+    //    ⚠️ 判据收窄到「`test` 子树里出现 `continuationLoop`」—— 认领条件就是它。
+    //    ⚠️ **会匹配到两个**：外层那个 `if (continuationLoop?.status === 'running' && …)`
+    //    与 `setTimeout` 里那条延迟复检 `if (continuationLoop !== expectedLoop || …)`。
+    //    两个都算「认领判据」，两个里面都不许出现清理。
+    const claimedBranches: t.IfStatement[] = [];
+    for (const statement of challenge!) {
+      walkSourceAst(statement, (node) => {
+        if (!t.isIfStatement(node)) return;
+        let mentionsLoop = false;
+        walkSourceAst(node.test, (inner) => {
+          if (t.isIdentifier(inner, { name: 'continuationLoop' })) mentionsLoop = true;
+        });
+        if (mentionsLoop) claimedBranches.push(node);
+      });
+    }
+    // 反面自检：一个都找不到说明判据写错了（那时下面那条恒真）。
+    expect(claimedBranches.length, '应当找得到认领判据').toBeGreaterThan(0);
+    let insideClaimed = 0;
+    for (const branch of claimedBranches) {
+      walkSourceAst(branch, (node) => {
+        if (!t.isCallExpression(node) || !t.isIdentifier(node.callee)) return;
+        if (node.callee.name === 'detachToolAuthorization'
+          || node.callee.name === 'closeToolAuthorizationInBackground') {
+          insideClaimed += 1;
+        }
+      });
+    }
+    expect(
+      insideClaimed,
+      '清理必须在认领判据之外 —— 未认领的挑战页请求同样会留 grant',
+    ).toBe(0);
   });
 });
