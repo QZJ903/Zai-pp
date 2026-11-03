@@ -31,8 +31,18 @@
  * 也就是说：**这个开关控制的是行为，不是权限** —— 安装时那两条权限警告永远在。
  */
 
+import { createSerialOperationQueue } from '../persistence/serial-operation-queue';
+
 /** `chrome.storage.local` 的键。与 `zai_pp_browser_control_settings` 同一套命名。 */
 export const TAB_KEEPALIVE_STORAGE_KEY = 'zai_pp_tab_keepalive_settings';
+
+/**
+ * 这一个存储键的写入串行队列（与 `settings.ts` 同因、**各自一条**）。
+ *
+ * ⚠️ `saveTabKeepaliveSettings` 同样是「读 → 合并 → 写」：两个侧边栏同时拨开关时，
+ * 后写者会拿旧快照覆盖前者。与浏览器控制那个键共用一个队列没有意义 —— 两个键互不相干。
+ */
+const tabKeepaliveSettingsOperations = createSerialOperationQueue();
 
 export interface TabKeepaliveSettings {
   /** 允不允许挂 `chrome.debugger` 做保活。 */
@@ -66,8 +76,10 @@ export async function getTabKeepaliveSettings(): Promise<TabKeepaliveSettings> {
 export async function saveTabKeepaliveSettings(
   patch: Partial<TabKeepaliveSettings>,
 ): Promise<TabKeepaliveSettings> {
-  const current = await getTabKeepaliveSettings();
-  const next = normalizeTabKeepaliveSettings({ ...current, ...patch });
-  await chrome.storage.local.set({ [TAB_KEEPALIVE_STORAGE_KEY]: next });
-  return next;
+  return tabKeepaliveSettingsOperations.run(async () => {
+    const current = await getTabKeepaliveSettings();
+    const next = normalizeTabKeepaliveSettings({ ...current, ...patch });
+    await chrome.storage.local.set({ [TAB_KEEPALIVE_STORAGE_KEY]: next });
+    return next;
+  });
 }

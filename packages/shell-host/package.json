@@ -1,6 +1,6 @@
 {
   "name": "zai-pp-shell-host",
-  "version": "2.15.62",
+  "version": "2.15.63",
   "description": "Native Messaging Shell MCP host installer for Zai++",
   "type": "module",
   "private": true,

@@ -50,6 +50,23 @@ const ORIGINAL_TASK_MAX_CHARS = 8_000;
 const NUDGE_PREVIOUS_TEXT_MAX_CHARS = 4_000;
 const TOOL_DETAIL_MAX_CHARS = 4_000;
 const TOOL_OUTPUT_MAX_CHARS = 8_000;
+/**
+ * `browser_snapshot` 的 detail 上限（比默认宽 6 倍）。
+ *
+ * ⚠️⚠️ **只有这一个工具吃宽上限，不是所有快照** —— 动作后自动补的快照
+ * （`includeSnapshotAfterActions`，默认开）走的是普通 4_000。若把所有快照都放宽，
+ * 「点一下看一眼」的连续动作会让最近 4 条全变成 24_000 字符，prompt 直接涨到十万字符
+ * （实测：3 步全 browser 时 20_800 → 76 867 字符，+270%）。
+ *
+ * ⚠️ **它必须 ≤ `maxSnapshotTextBytes` 能产出的量** —— 那个预算的上界是 24_000 **字节**，
+ * 中文约 8_000 字符、英文约 24_000 字符 ⇒ 24_000 字符的上限刚好装得下，
+ * 不会出现「预算给了、这里又截一刀」的错配。
+ *
+ * ⚠️ **prompt 总长没有独立上界**（`buildZaiContinuationPrompt` 拼完之后到注入之间
+ * 没有任何长度检查）。这条宽上限是**唯一**约束 `browser_snapshot` 贡献量的地方，
+ * 别把它抬到 24_000 以上而不先给 prompt 加总上界。
+ */
+const BROWSER_SNAPSHOT_DETAIL_MAX_CHARS = 24_000;
 const COMPRESSED_SUMMARY_MAX_CHARS = 400;
 const TOOL_ERROR_MESSAGE_MAX_CHARS = 400;
 
@@ -208,17 +225,63 @@ function renderFailureRecovery(): string {
  *
  * ⚠️ **压缩条目带 `windowed: true`** —— 让模型知道「这条是被裁过的」，而不是
  * 以为工具本来就没返回细节。
+ *
+ * ## ⚠️⚠️ 快照只保最新一份的正文（与窗口无关的**第二条**压缩规则）
+ *
+ * `browser_snapshot` 与「动作后自动补的快照」里的 uid 是 `e{序号}` ——
+ * **只是「第 N 个节点」的编号，不是稳定 id**。而 `BrowserControlService` 的
+ * `uidToBackendNodeId` **每次拍新快照都会 `clear()`** ⇒ 只有**最新那一份**的 uid 能用。
+ *
+ * 旧快照留在 prompt 里的后果不是「浪费体积」，是**误导**：实测两份快照的 `e1`
+ * 分别指向「提交订单」与「下一步」，模型照旧快照的 `e1` 去点，会**静默点到另一个元素**。
+ *
+ * ⇒ 从最新往回数，**第一份**带快照的结果保完整正文，更早的快照一律压缩
+ * （`summary` + `windowed: true`，正文丢掉）。压掉的不是「可能有用的信息」，
+ * 是「已经失效、照着做会出错的旧坐标」。
+ *
+ * ⚠️ **这条规则与 `includeSnapshotAfterActions` 默认开启叠加后才有意义** ——
+ * 默认每一次点击都会补一份快照，所以「最近 4 条」里常常有 2–4 份互相冲突的 uid。
  */
 function renderWindowedToolResults(executions: readonly ToolExecutionRecord[]) {
-  if (executions.length <= ZAI_INLINE_AGENT_FULL_TOOL_RESULT_WINDOW) {
-    return executions.map(renderToolResult);
+  const windowStart = Math.max(0, executions.length - ZAI_INLINE_AGENT_FULL_TOOL_RESULT_WINDOW);
+  // ⚠️ **从最新往回找第一份带快照的** —— 只有它保正文，更早的压缩。
+  let newestSnapshotIndex = -1;
+  for (let index = executions.length - 1; index >= 0; index -= 1) {
+    if (carriesAccessibilitySnapshot(executions[index]!)) {
+      newestSnapshotIndex = index;
+      break;
+    }
   }
-  const older = executions.slice(0, -ZAI_INLINE_AGENT_FULL_TOOL_RESULT_WINDOW);
-  const recent = executions.slice(-ZAI_INLINE_AGENT_FULL_TOOL_RESULT_WINDOW);
-  return [
-    ...older.map(renderCompressedToolResult),
-    ...recent.map(renderToolResult),
-  ];
+
+  return executions.map((execution, index) => {
+    const insideWindow = index >= windowStart;
+    const staleSnapshot = carriesAccessibilitySnapshot(execution) && index !== newestSnapshotIndex;
+    return insideWindow && !staleSnapshot
+      ? renderToolResult(execution)
+      : renderCompressedToolResult(execution);
+  });
+}
+
+/**
+ * 这条结果里有没有一份**可寻址的页面快照**（即带 `e{序号}` uid 的那份正文）。
+ *
+ * 两种形态都要认：
+ * - `browser_snapshot`：正文在 `detail`，`output` 是顶层元数据（`url` / `nodeCount` / …）；
+ * - **动作后自动补的快照**（`withOptionalSnapshot`）：正文接在 `detail` 末尾，
+ *   `output.snapshot` 是同一份元数据。
+ *
+ * ⚠️ **判 `output` 的形状，不判工具名** —— 判名会漏掉「`browser_click` 也带快照」
+ * 这一整类（`includeSnapshotAfterActions` 默认就是开的）。
+ */
+function carriesAccessibilitySnapshot(execution: ToolExecutionRecord): boolean {
+  const output = execution.result.output;
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return false;
+  const record = output as Record<string, unknown>;
+  const snapshot = record.snapshot;
+  const candidate = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)
+    ? snapshot as Record<string, unknown>
+    : record;
+  return typeof candidate.nodeCount === 'number' && typeof candidate.truncated === 'boolean';
 }
 
 function renderToolResult(execution: ToolExecutionRecord) {
@@ -226,8 +289,19 @@ function renderToolResult(execution: ToolExecutionRecord) {
     tool: execution.name,
     provider: execution.provider?.displayName,
     ok: execution.result.ok,
-    summary: execution.result.summary,
-    detail: clamp(execution.result.detail, TOOL_DETAIL_MAX_CHARS),
+    // ⚠️ **`summary` 也要有上界** —— 本地工具的 summary 都是我们自己生成的固定串
+    //（`Captured N accessibility nodes` 之类），但 MCP 那条路径的 summary 来自服务端。
+    // 与压缩档同口径（400），否则「压缩了一条很长的 summary」这件事本身就不成立。
+    summary: clamp(execution.result.summary, COMPRESSED_SUMMARY_MAX_CHARS),
+    // ⚠️ **`browser_snapshot` 单独一档** —— 它是模型主动要的整页快照，4_000 字符只够
+    // 看一屏的十分之一；而动作后自动补的快照（默认开）仍走 4_000，否则连续点击会把
+    // 最近 4 条全撑成 24_000 字符。判据见 `BROWSER_SNAPSHOT_DETAIL_MAX_CHARS` 的说明。
+    detail: clamp(
+      execution.result.detail,
+      execution.name === 'browser_snapshot'
+        ? BROWSER_SNAPSHOT_DETAIL_MAX_CHARS
+        : TOOL_DETAIL_MAX_CHARS,
+    ),
     // ⚠️ **失败原因必须给全** —— 只给 `ok: false` 时模型看不到错误码与可重试性，
     // 只能瞎猜参数，往往直接放弃。`details` 刻意丢掉（可能很大，且不是判据）。
     error: boundToolError(execution.result.error),

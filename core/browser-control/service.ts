@@ -1,4 +1,8 @@
-import { getBrowserControlSettings, saveBrowserControlSettings } from './settings';
+import {
+  getBrowserControlSettings,
+  saveBrowserControlSettings,
+  updateBrowserControlSettingsWith,
+} from './settings';
 import { BrowserConnection, BrowserControlError } from './cdp';
 import { TabKeepAliveSession } from './tab-keepalive';
 import { formatAccessibilitySnapshot } from './snapshot';
@@ -44,22 +48,36 @@ export class BrowserControlService {
   private readonly connection: BrowserConnection | null;
   private readonly uidToBackendNodeId = new Map<string, number>();
   private lastError: string | null = null;
+  /*
+   * ⚠️⚠️ **取消信号是逐层传的参数，不是实例字段。**
+   *
+   * 曾经它是个 `activeSignal` 实例字段 —— 理由是「十几处 `sendCommand`，逐层加参数
+   * 要改二十几个私有方法签名」。那个理由省了改动，但**建在一个不成立的前提上**：
+   * 原注释说「本类不是并发安全的，因为工具执行串行在内容脚本的 `executionChain` 上」。
+   * 而 `executionChain` 是**每个内容脚本实例自己的**（`zai.content.ts` 里按 requestId
+   * 分桶的 `ToolTurnState.executionChain`），只管单页面内的串行；后台那条
+   * `EXECUTE_TOOL_CALL` 链上**没有任何串行队列**（`runtime-command-registry.ts` 的
+   * `dispatch` 直接 `await handler.handle(...)`）。
+   *
+   * ⇒ 两个 z.ai 标签、或「手动聊天 + 自动化」同时调 `browser_*` 时，后进的那个会覆盖
+   * 先进那个挂上的 signal：A 写 signalA → B 写 signalB（`previousSignal` = signalA）
+   * → A 的后续命令读到 **B** 的 signal。B 取消/超时后 A 的动作被误判
+   * `browser_control_aborted`；且 B 结束把字段还原成 signalA、A 结束再还原成更早的值，
+   * **链式污染**。
+   *
+   * ⚠️ **复现不是「一并发就中」** —— 要 A 那条链上有**第二个 `sendCommand`**、且 B 在
+   * 两步之间插入才踩得到（实测：单步的 A 读到的是自己的 signal）。真实动作基本都多步
+   * （`navigate` = `Page.navigate` → 等落点 → `createSnapshot`），所以这条不是理论风险。
+   *
+   * ⚠️ **为什么不改成外层加互斥**：那会让两个**独立标签**的 `browser_*` 动作真串行，
+   * 而它们本来可以并行（各自独立的 CDP 会话）—— 为一个单标签场景下不存在的并发问题
+   * 引入一个行为退步。显式传参没有任何锁、也没有行为变化。
+   */
 
   constructor(dependencies: BrowserControlDependencies = {}) {
     this.dependencies = dependencies;
     const chromeApi = this.getChromeApi();
     this.connection = chromeApi ? new BrowserConnection(chromeApi) : null;
-  }
-
-  /**
-   * 续跑保活会话（只读它「这条标签有没有被我保活着」）。
-   *
-   * ⚠️ **必须是 getter，不能在构造里取** —— 模块级单例 `tabKeepAliveSession` 声明在
-   * `browserControlService = new BrowserControlService()` **之后**，构造期读它会撞上
-   * const 的暂时性死区，整个模块加载即抛错。
-   */
-  private get keepAlive(): { isKeepingAlive(tabId: number): boolean } {
-    return this.dependencies.tabKeepAlive ?? tabKeepAliveSession;
   }
 
   isSupported(): boolean {
@@ -135,30 +153,47 @@ export class BrowserControlService {
     if (current.targetTabId !== tabId && this.connection?.attached) {
       await this.connection.detach();
     }
+    // ⚠️⚠️ **换目标必须清 uid 映射** —— `uidToBackendNodeId` 里的 uid 是**快照当时那条
+    // 标签**的 `backendNodeId`，换标签之后它们指向另一棵树上的节点。不清的话
+    // `browser_click { uid: 'e5' }` 不会重新拍快照（映射里还有 `e5`），
+    // 直接拿旧标签的 nodeId 去新标签上 `DOM.resolveNode`。
+    // ⚠️ 与 `createSnapshot` 里那次 `clear()` 不重复：那条只在「重新拍快照」时生效。
+    this.uidToBackendNodeId.clear();
     await saveBrowserControlSettings({ targetTabId: tabId });
     return target;
   }
 
   async detach(): Promise<void> {
     await this.connection?.detach();
+    // 会话没了 ⇒ 那份 uid → backendNodeId 映射也不再有任何意义。
+    this.uidToBackendNodeId.clear();
   }
 
   async execute(
     name: BrowserControlToolName,
     payload: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<BrowserActionResult> {
     const started = this.now();
     let outcome: BrowserActionResult;
     try {
       const settings = await getBrowserControlSettings();
-      if (!settings.enabled && name !== 'browser_list_tabs') {
+      // ⚠️ **没有 `browser_list_tabs` 豁免** —— 曾经写过
+      // `if (!settings.enabled && name !== 'browser_list_tabs')`，但那条豁免**走不到**：
+      // 工具能不能被调到，取决于它在不在目录里，而 `shouldExposeBrowserControlTools()`
+      // 在 `enabled === false` 时返回 `[]`（`tool.ts`）⇒ 模型根本没有这个名字可调。
+      // 唯一能命中的是「目录按开启态构建完、执行前用户关掉开关」那个竞态窗口。
+      // ⇒ 删掉，不留一条读者会以为「关闭时还能列标签」的死分支。
+      // 真要让它在关闭时可用，得先改目录门（单独给它一条「只要 tabs 可用就暴露」的
+      // 判据），那是另一件事、不是这里加个 `||`。
+      if (!settings.enabled) {
         throw new BrowserControlError(
           'browser_control_disabled',
           'Browser control is disabled. Enable it in the Zai++ side panel before using browser tools.',
         );
       }
 
-      const result = await this.executeEnabled(name, payload, settings);
+      const result = await this.executeEnabled(name, payload, settings, signal);
       this.lastError = null;
       outcome = {
         ...result,
@@ -237,48 +272,84 @@ export class BrowserControlService {
     }
   }
 
+  /**
+   * 这条标签上有没有正在跑的续跑循环。
+   *
+   * ⚠️ **只有页面知道答案** —— `continuationLoop` 活在内容脚本里，后台没有镜像。
+   * 所以要发一条消息问（`QUERY_CONTINUATION_STATE`，走 `chrome.tabs.sendMessage`）。
+   *
+   * ⚠️⚠️ **必须带超时，且失败一律按「没有」处理** —— `tabs.sendMessage` 在
+   * 「标签已关 / 内容脚本没注入 / 扩展刚重载」三种情况下都会抛
+   * `Receiving end does not exist`，而**永不回**那种（页面卡死）如果一直等，
+   * 会把 `browser_close_tab` 本身也拖住。这里给 1 秒的硬上界。
+   * ⚠️ **失败方向：少拦一次只是退回改造前的行为，多拦一次会让用户关不掉正常标签。**
+   */
+  private async isContinuationRunning(tabId: number): Promise<boolean> {
+    const chromeApi = this.getChromeApi();
+    if (!chromeApi?.tabs?.sendMessage) return false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const response = await Promise.race([
+        chromeApi.tabs.sendMessage(tabId, { type: 'QUERY_CONTINUATION_STATE' }),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), 1_000);
+        }),
+      ]);
+      return Boolean(
+        response
+        && typeof response === 'object'
+        && (response as { continuationRunning?: unknown }).continuationRunning === true,
+      );
+    } catch {
+      return false;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
   private async executeEnabled(
     name: BrowserControlToolName,
     payload: Record<string, unknown>,
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     switch (name) {
       case 'browser_navigate':
-        return this.navigate(payload, settings);
+        return this.navigate(payload, settings, signal);
       case 'browser_go_back':
-        return this.navigateHistory('back', settings);
+        return this.navigateHistory('back', settings, signal);
       case 'browser_go_forward':
-        return this.navigateHistory('forward', settings);
+        return this.navigateHistory('forward', settings, signal);
       case 'browser_refresh':
-        return this.refresh(settings);
+        return this.refresh(settings, signal);
       case 'browser_list_tabs':
-        return this.listTabs();
+        return this.listTabs(signal);
       case 'browser_select_tab':
-        return this.selectTab(payload);
+        return this.selectTab(payload, signal);
       case 'browser_close_tab':
-        return this.closeTab(payload);
+        return this.closeTab(payload, signal);
       case 'browser_snapshot':
-        return this.snapshotAction(settings);
+        return this.snapshotAction(settings, signal);
       case 'browser_click':
-        return this.pointAction('click', payload, settings);
+        return this.pointAction('click', payload, settings, signal);
       case 'browser_hover':
-        return this.pointAction('hover', payload, settings);
+        return this.pointAction('hover', payload, settings, signal);
       case 'browser_fill':
-        return this.fill(payload, settings);
+        return this.fill(payload, settings, signal);
       case 'browser_fill_form':
-        return this.fillForm(payload, settings);
+        return this.fillForm(payload, settings, signal);
       case 'browser_key':
-        return this.key(payload, settings);
+        return this.key(payload, settings, signal);
       case 'browser_type':
-        return this.typeText(payload, settings);
+        return this.typeText(payload, settings, signal);
       case 'browser_attach_file':
-        return this.attachFile(payload, settings);
+        return this.attachFile(payload, settings, signal);
       case 'browser_wait_for':
-        return this.waitFor(payload, settings);
+        return this.waitFor(payload, settings, signal);
       case 'browser_handle_dialog':
-        return this.handleDialog(payload);
+        return this.handleDialog(payload, signal);
       case 'browser_evaluate_script':
-        return this.evaluateScript(payload, settings);
+        return this.evaluateScript(payload, settings, signal);
       default:
         throw new BrowserControlError('browser_tool_unsupported', `Unsupported browser tool: ${name}`);
     }
@@ -287,6 +358,7 @@ export class BrowserControlService {
   private async navigate(
     payload: Record<string, unknown>,
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     const url = normalizeUrl(requireString(payload, 'url'));
     // ⚠️⚠️ **导航目的地是 z.ai 时直接拒绝，必须在 `Page.navigate` 之前** ——
@@ -314,7 +386,7 @@ export class BrowserControlService {
       await this.ensureAttached(tabId);
       const before = await this.requireChromeApi().tabs.get(tabId);
       previousUrl = before.url;
-      await this.connection!.sendCommand('Page.navigate', { url });
+      await this.connection!.sendCommand('Page.navigate', { url }, signal);
     }
 
     const settled = await this.waitForTabUrl(tabId, url, previousUrl, 3_000).catch(() => false);
@@ -334,19 +406,20 @@ export class BrowserControlService {
         ? `Opened new controlled tab ${tabId} at ${url}.`
         : `Navigated controlled tab ${tabId} to ${url}.`,
       output: { tabId, url, newTab },
-    }, settings, tabId);
+    }, settings, tabId, signal);
   }
 
   private async navigateHistory(
     direction: 'back' | 'forward',
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
     const history = await this.connection!.sendCommand<{
       currentIndex?: number;
       entries?: Array<{ id?: number; url?: string }>;
-    }>('Page.getNavigationHistory');
+    }>('Page.getNavigationHistory', undefined, signal);
     const currentIndex = history.currentIndex ?? 0;
     const nextIndex = direction === 'back' ? currentIndex - 1 : currentIndex + 1;
     const entry = history.entries?.[nextIndex];
@@ -360,28 +433,31 @@ export class BrowserControlService {
     // 记录就够了（用户先在该标签开过 z.ai，之后标签停在别的页）。落点与 `navigate` 相同：
     // debugger 留在 z.ai 上，而这一发是在 `ensureAttached` **之后**才被拒的，标签不会被导过去。
     if (entry.url) assertNavigableDestination(entry.url);
-    await this.connection!.sendCommand('Page.navigateToHistoryEntry', { entryId: entry.id });
+    await this.connection!.sendCommand('Page.navigateToHistoryEntry', { entryId: entry.id }, signal);
     return this.withOptionalSnapshot({
       ok: true,
       summary: direction === 'back' ? 'Went back' : 'Went forward',
       detail: `Navigated ${direction} to ${entry.url ?? '(unknown URL)'}.`,
       output: { tabId, direction, url: entry.url ?? '' },
-    }, settings, tabId);
+    }, settings, tabId, signal);
   }
 
-  private async refresh(settings: BrowserControlSettings): Promise<BrowserActionResult> {
+  private async refresh(
+    settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
+  ): Promise<BrowserActionResult> {
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
-    await this.connection!.sendCommand('Page.reload', { ignoreCache: false });
+    await this.connection!.sendCommand('Page.reload', { ignoreCache: false }, signal);
     return this.withOptionalSnapshot({
       ok: true,
       summary: 'Reloaded controlled tab',
       detail: `Reloaded tab ${tabId}.`,
       output: { tabId },
-    }, settings, tabId);
+    }, settings, tabId, signal);
   }
 
-  private async listTabs(): Promise<BrowserActionResult> {
+  private async listTabs(signal: AbortSignal | undefined): Promise<BrowserActionResult> {
     const targets = await this.listTargets();
     const lines = targets.map((target) => {
       const marker = target.currentWindow ? '*' : ' ';
@@ -396,7 +472,10 @@ export class BrowserControlService {
     };
   }
 
-  private async selectTab(payload: Record<string, unknown>): Promise<BrowserActionResult> {
+  private async selectTab(
+    payload: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ): Promise<BrowserActionResult> {
     const tabId = requireInteger(payload, 'tabId');
     const target = await this.setTarget(tabId);
     await this.requireChromeApi().tabs.update(tabId, { active: true }).catch(() => undefined);
@@ -408,38 +487,49 @@ export class BrowserControlService {
     };
   }
 
-  private async closeTab(payload: Record<string, unknown>): Promise<BrowserActionResult> {
+  private async closeTab(
+    payload: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ): Promise<BrowserActionResult> {
     const settings = await getBrowserControlSettings();
     const requestedTabId = typeof payload.tabId === 'number'
       ? requireInteger(payload, 'tabId')
       : settings.targetTabId;
-    // ⚠️⚠️ **正在被续跑保活挂着的标签不许关** —— 关掉等于当场掐断那一轮的续跑循环：
+    // ⚠️⚠️ **正在跑续跑循环的标签不许关** —— 关掉等于当场掐断那一轮续跑：
     // 内容脚本随标签一起消失，后台 DOM 任务收不到终态，只能等 `deadlineAt`（180 秒）到期。
-    // 判据与「z.ai 不可作为控制目标」同源（两者护的都是保活那条 CDP 会话），但**范围更窄**：
-    // 关一个 z.ai 标签本身是合法操作（`closeTab` 不碰 debugger，只是 `tabs.remove`），
-    // 拦住它的是「别把正在跑的续跑拆掉」，不是「z.ai 不能碰」。
+    //
+    // ⚠️⚠️ **判据是「这条标签上有没有正在跑的续跑循环」，不是「我有没有挂着 debugger」**。
+    // 原来判的是 `keepAlive.isKeepingAlive(tabId)`，而那个集合是
+    // `wanted ∩ 真在后台` ⇒ 开关关着（**默认值**）、或标签在前台时它恒为 `false`，
+    // 这两格恰恰是最常见的情况 ⇒ **默认配置下这条保护等于不存在**。
+    // 现在的判据由内容脚本直接回答（`QUERY_CONTINUATION_STATE`），它读的是页面里那份
+    // `continuationLoop?.status === 'running'` —— 这才是「关掉会不会掐断续跑」的真身。
     //
     // ⚠️ **必须在解析目标之前判**（`ensureTargetTabId` 会写 storage 并静默换目标）：
-    // 否则「存的 target 正是被保活那条、又没有别的可控标签」时会先抛
-    // `browser_target_missing`（还说 retryable），错误码与事实不符。
-    // ⚠️ **缺省目标时只判存着的那个**，不提前跑一遍「重新挑一个」：挑出来的目标不可能是
-    // 保活那条（z.ai 恒不可控），所以提前判不会漏。
-    if (requestedTabId !== null && this.keepAlive.isKeepingAlive(requestedTabId)) {
+    // 否则「存的 target 正是那条、又没有别的可控标签」时会先抛 `browser_target_missing`
+    // （还说 retryable），错误码与事实不符。
+    // ⚠️ **查不到就放行** —— 见 `isContinuationRunning` 的失败方向说明。
+    if (requestedTabId !== null && await this.isContinuationRunning(requestedTabId)) {
       throw new BrowserControlError(
         'browser_target_protected',
-        `Tab ${requestedTabId} is kept alive by an active continuation loop and cannot be closed.`,
+        `Tab ${requestedTabId} is running a continuation loop and cannot be closed.`,
       );
     }
     const tabId = requestedTabId ?? await this.ensureTargetTabId(settings);
-    // ⚠️ 覆盖不到的一格，是刻意的：自动化首条消息（chatNew）阶段还没建续跑循环、
-    // 保活没挂 ⇒ 那一刻关标签拦不住（要盖住得读协调器的私有 `busyTabs`，代价不成比例）。
     // ⚠️ 「保活 `detach()` 失败后 `tabId` 留在原地、那条标签一直受保护」这一格已在
     // `tab-keepalive.ts` 收口：两类「标签已经没了」的措辞都会清掉绑定。
     if (this.connection?.tabId === tabId) await this.connection.detach();
     await this.requireChromeApi().tabs.remove(tabId);
-    if (settings.targetTabId === tabId) {
-      await saveBrowserControlSettings({ targetTabId: null });
-    }
+    // ⚠️⚠️ **判断必须在写盘那一刻做，不能用开函数时读的 `settings`** ——
+    // 中间隔着 `await tabs.remove`，若这期间侧边栏把 target 改成了另一条标签，
+    // 拿旧快照判断就会把它的改动**覆盖成 null**（实测：target 12 → 关 12 期间改成 13
+    // → 结果被清成 null）。`updateBrowserControlSettingsWith` 的 patch 在队列内求值，
+    // 与 U2-4 的 `updateAutomationRuntimeWith` 同形。
+    // ⚠️ `settings` 本身仍要用 —— 它决定 `requestedTabId` 的默认值（「关当前目标」是
+    // 调用那一刻的意图，读旧值是对的），只是不再拿它做写决策。
+    await updateBrowserControlSettingsWith((current) => (
+      current.targetTabId === tabId ? { targetTabId: null } : null
+    ));
     return {
       ok: true,
       summary: `Closed tab ${tabId}`,
@@ -448,8 +538,11 @@ export class BrowserControlService {
     };
   }
 
-  private async snapshotAction(settings: BrowserControlSettings): Promise<BrowserActionResult> {
-    const snapshot = await this.createSnapshot(settings);
+  private async snapshotAction(
+    settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
+  ): Promise<BrowserActionResult> {
+    const snapshot = await this.createSnapshot(settings, signal);
     return {
       ok: true,
       summary: `Captured ${snapshot.nodes.length} accessibility nodes`,
@@ -463,11 +556,12 @@ export class BrowserControlService {
     action: 'click' | 'hover',
     payload: Record<string, unknown>,
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
-    const element = await this.resolveElement(payload);
-    const point = await this.getElementPoint(element.objectId);
+    const element = await this.resolveElement(payload, signal);
+    const point = await this.getElementPoint(element.objectId, signal);
     if (!point.visible) {
       throw new BrowserControlError('browser_element_not_visible', `${element.label} is not visible.`);
     }
@@ -477,7 +571,7 @@ export class BrowserControlService {
       x: point.x,
       y: point.y,
       button: 'none',
-    });
+    }, signal);
     if (action === 'click') {
       const button = readString(payload.button, 'left');
       const clickCount = clampInteger(payload.clickCount, 1, 1, 3);
@@ -487,14 +581,14 @@ export class BrowserControlService {
         y: point.y,
         button,
         clickCount,
-      });
+      }, signal);
       await this.connection!.sendCommand('Input.dispatchMouseEvent', {
         type: 'mouseReleased',
         x: point.x,
         y: point.y,
         button,
         clickCount,
-      });
+      }, signal);
     }
 
     return this.withOptionalSnapshot({
@@ -502,29 +596,31 @@ export class BrowserControlService {
       summary: action === 'click' ? `Clicked ${element.label}` : `Hovered ${element.label}`,
       detail: `${action === 'click' ? 'Clicked' : 'Hovered'} ${element.label} at (${Math.round(point.x)}, ${Math.round(point.y)}).`,
       output: { tabId, action, target: element.label, point },
-    }, settings, tabId);
+    }, settings, tabId, signal);
   }
 
   private async fill(
     payload: Record<string, unknown>,
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
     const value = requireString(payload, 'value');
-    const element = await this.resolveElement(payload);
-    await this.fillElement(element, value);
+    const element = await this.resolveElement(payload, signal);
+    await this.fillElement(element, value, signal);
     return this.withOptionalSnapshot({
       ok: true,
       summary: `Filled ${element.label}`,
       detail: `Filled ${element.label} using DOM value assignment and input/change events.`,
       output: { tabId, target: element.label, valueLength: value.length },
-    }, settings, tabId);
+    }, settings, tabId, signal);
   }
 
   private async fillForm(
     payload: Record<string, unknown>,
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
@@ -540,8 +636,8 @@ export class BrowserControlService {
       }
       const record = field as Record<string, unknown>;
       const value = requireString(record, 'value');
-      const element = await this.resolveElement(record);
-      await this.fillElement(element, value);
+      const element = await this.resolveElement(record, signal);
+      await this.fillElement(element, value, signal);
       filled.push({ target: element.label, valueLength: value.length });
     }
 
@@ -550,84 +646,102 @@ export class BrowserControlService {
       summary: `Filled ${filled.length} form fields`,
       detail: `Filled ${filled.length} fields using DOM value assignment and input/change events.`,
       output: { tabId, filled },
-    }, settings, tabId);
+    }, settings, tabId, signal);
   }
 
   private async key(
     payload: Record<string, unknown>,
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
     if (payload.uid || payload.selector) {
-      const element = await this.resolveElement(payload);
-      await this.focusElement(element);
+      const element = await this.resolveElement(payload, signal);
+      await this.focusElement(element, signal);
     }
     const key = requireString(payload, 'key');
-    const keyParams = keyEventParams(key);
+    const { params, text } = keyEventParams(key);
+    // ⚠️⚠️ **有 `text` 的键必须用 `keyDown`，不能用 `rawKeyDown`** —— CDP 规范明写
+    // `text` 参数「Not needed for `keyUp` and `rawKeyDown` events」，即 `rawKeyDown`
+    // **不产生字符输入**（它只是「按下了一个键」）。原来恒用 `rawKeyDown` ⇒
+    // `browser_key { key: 'a' }` 在页面上什么都不发生，而工具描述写的是
+    // 「... or a character」。Puppeteer 的写法同样是 `type: text ? 'keyDown' : 'rawKeyDown'`。
     await this.connection!.sendCommand('Input.dispatchKeyEvent', {
-      type: 'rawKeyDown',
-      ...keyParams,
-    });
+      type: text === undefined ? 'rawKeyDown' : 'keyDown',
+      ...params,
+      ...(text === undefined ? {} : { text, unmodifiedText: text }),
+    }, signal);
+    // `keyUp` 不带 `text`（规范：`text` 对 `keyUp` 无意义）。
     await this.connection!.sendCommand('Input.dispatchKeyEvent', {
       type: 'keyUp',
-      ...keyParams,
-    });
+      ...params,
+    }, signal);
 
     return this.withOptionalSnapshot({
       ok: true,
       summary: `Pressed ${key}`,
       detail: `Pressed key ${key}.`,
       output: { tabId, key },
-    }, settings, tabId);
+    }, settings, tabId, signal);
   }
 
   private async typeText(
     payload: Record<string, unknown>,
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
     if (payload.uid || payload.selector) {
-      const element = await this.resolveElement(payload);
-      await this.focusElement(element);
+      const element = await this.resolveElement(payload, signal);
+      await this.focusElement(element, signal);
     }
     const text = requireString(payload, 'text');
-    await this.connection!.sendCommand('Input.insertText', { text });
+    await this.connection!.sendCommand('Input.insertText', { text }, signal);
     return this.withOptionalSnapshot({
       ok: true,
       summary: `Typed ${text.length} characters`,
       detail: `Inserted ${text.length} characters into the focused element.`,
       output: { tabId, textLength: text.length },
-    }, settings, tabId);
+    }, settings, tabId, signal);
   }
 
   private async attachFile(
     payload: Record<string, unknown>,
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
     const files = payload.files;
-    if (!Array.isArray(files) || !files.every((item) => typeof item === 'string' && item.trim())) {
+    // ⚠️ **`length === 0` 必须单独判** —— `[].every(...)` 恒 `true`，只写 `every` 的话
+    // 空数组会通过这道「非空数组」校验，而 `DOM.setFileInputFiles` 收空数组是
+    // **清空**文件选择，不是报错。同文件的 `fillForm` 用的是 `length === 0`，两处对齐。
+    if (
+      !Array.isArray(files) ||
+      files.length === 0 ||
+      !files.every((item) => typeof item === 'string' && item.trim())
+    ) {
       throw new BrowserControlError('browser_invalid_files', 'files must be a non-empty string array of absolute file paths.');
     }
-    const element = await this.resolveElement(payload);
+    const element = await this.resolveElement(payload, signal);
     await this.connection!.sendCommand('DOM.setFileInputFiles', {
       objectId: element.objectId,
       files,
-    });
+    }, signal);
     return this.withOptionalSnapshot({
       ok: true,
       summary: `Attached ${files.length} file(s)`,
       detail: `Attached ${files.length} file(s) to ${element.label}.`,
       output: { tabId, target: element.label, fileCount: files.length },
-    }, settings, tabId);
+    }, settings, tabId, signal);
   }
 
   private async waitFor(
     payload: Record<string, unknown>,
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
@@ -636,14 +750,14 @@ export class BrowserControlService {
     const expression = waitExpression(payload);
 
     while (this.now() - started <= timeoutMs) {
-      const matched = await this.evaluateBoolean(expression);
+      const matched = await this.evaluateBoolean(expression, signal);
       if (matched) {
         return this.withOptionalSnapshot({
           ok: true,
           summary: 'Wait condition matched',
           detail: `Condition matched after ${this.now() - started}ms.`,
           output: { tabId, waitedMs: this.now() - started },
-        }, settings, tabId);
+        }, settings, tabId, signal);
       }
       await delay(250);
     }
@@ -653,7 +767,10 @@ export class BrowserControlService {
     });
   }
 
-  private async handleDialog(payload: Record<string, unknown>): Promise<BrowserActionResult> {
+  private async handleDialog(
+    payload: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ): Promise<BrowserActionResult> {
     const settings = await getBrowserControlSettings();
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
@@ -666,7 +783,7 @@ export class BrowserControlService {
     await this.connection!.sendCommand('Page.handleJavaScriptDialog', {
       accept,
       ...(promptText !== undefined ? { promptText } : {}),
-    });
+    }, signal);
     this.connection!.clearDialog(tabId);
     return {
       ok: true,
@@ -687,19 +804,20 @@ export class BrowserControlService {
   private async evaluateScript(
     payload: Record<string, unknown>,
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     const tabId = await this.ensureTargetTabId(settings);
     await this.ensureAttached(tabId);
     const expression = typeof payload.expression === 'string'
       ? payload.expression
       : requireString(payload, 'script');
-    const result = await this.evaluate(expression, { awaitPromise: payload.awaitPromise !== false });
+    const result = await this.evaluate(expression, { awaitPromise: payload.awaitPromise !== false }, signal);
     return this.withOptionalSnapshot({
       ok: true,
       summary: 'Evaluated script',
       detail: `Result: ${JSON.stringify(result).slice(0, 4_000)}`,
       output: { tabId, result: toJsonSafe(result) },
-    }, settings, tabId);
+    }, settings, tabId, signal);
   }
 
   private async ensureTargetTabId(
@@ -759,12 +877,13 @@ export class BrowserControlService {
    */
   private async createSnapshot(
     settings: BrowserControlSettings,
+    signal: AbortSignal | undefined,
     tabId?: number,
   ): Promise<BrowserSnapshotResult> {
     const resolvedTabId = tabId ?? await this.ensureTargetTabId(settings);
     await this.ensureAttached(resolvedTabId);
     const tab = await this.requireChromeApi().tabs.get(resolvedTabId);
-    const ax = await this.connection!.sendCommand<{ nodes?: unknown[] }>('Accessibility.getFullAXTree');
+    const ax = await this.connection!.sendCommand<{ nodes?: unknown[] }>('Accessibility.getFullAXTree', undefined, signal);
     const formatted = formatAccessibilitySnapshot({
       axNodes: Array.isArray(ax.nodes) ? ax.nodes as never[] : [],
       url: tab.url ?? '',
@@ -792,9 +911,10 @@ export class BrowserControlService {
     result: BrowserActionResult,
     settings: BrowserControlSettings,
     tabId: number,
+    signal: AbortSignal | undefined,
   ): Promise<BrowserActionResult> {
     if (!settings.includeSnapshotAfterActions) return result;
-    const snapshot = await this.createSnapshot(settings, tabId);
+    const snapshot = await this.createSnapshot(settings, signal, tabId);
     return {
       ...result,
       detail: `${result.detail ?? result.summary}\n\n${snapshot.text}`,
@@ -806,7 +926,10 @@ export class BrowserControlService {
     };
   }
 
-  private async resolveElement(payload: Record<string, unknown>): Promise<ElementHandle> {
+  private async resolveElement(
+    payload: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ): Promise<ElementHandle> {
     const uid = typeof payload.uid === 'string' ? payload.uid.trim() : '';
     const selector = typeof payload.selector === 'string' ? payload.selector.trim() : '';
     if (!uid && !selector) {
@@ -817,7 +940,7 @@ export class BrowserControlService {
       let backendNodeId = this.uidToBackendNodeId.get(uid);
       if (backendNodeId === undefined) {
         const settings = await getBrowserControlSettings();
-        await this.createSnapshot(settings);
+        await this.createSnapshot(settings, signal);
         backendNodeId = this.uidToBackendNodeId.get(uid);
       }
       if (backendNodeId === undefined) {
@@ -827,7 +950,7 @@ export class BrowserControlService {
       }
       const resolved = await this.connection!.sendCommand<{
         object?: RuntimeRemoteObject;
-      }>('DOM.resolveNode', { backendNodeId });
+      }>('DOM.resolveNode', { backendNodeId }, signal);
       if (!resolved.object?.objectId) {
         throw new BrowserControlError('browser_node_resolve_failed', `Could not resolve snapshot uid: ${uid}`);
       }
@@ -840,7 +963,7 @@ export class BrowserControlService {
     }>('Runtime.evaluate', {
       expression: `document.querySelector(${JSON.stringify(selector)})`,
       objectGroup: 'zai-pp-browser-control',
-    });
+    }, signal);
     if (result.exceptionDetails) {
       throw new BrowserControlError('browser_selector_failed', `Selector failed: ${selector}`);
     }
@@ -852,8 +975,16 @@ export class BrowserControlService {
     return { objectId: result.result.objectId, label: selector };
   }
 
-  private async getElementPoint(objectId: string): Promise<ElementPoint> {
-    const value = await this.callFunctionOn(objectId, String(getBrowserControlElementPoint));
+  private async getElementPoint(
+    objectId: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ElementPoint> {
+    const value = await this.callFunctionOn(
+      objectId,
+      String(getBrowserControlElementPoint),
+      [],
+      signal,
+    );
     if (!value || typeof value !== 'object') {
       throw new BrowserControlError('browser_element_point_failed', 'Could not compute the element point.');
     }
@@ -875,34 +1006,58 @@ export class BrowserControlService {
     };
   }
 
-  private async fillElement(element: ElementHandle, value: string): Promise<void> {
+  private async fillElement(
+    element: ElementHandle,
+    value: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
     await this.callFunctionOn(element.objectId, String(function fillElement(
       this: HTMLElement & { value?: string },
       nextValue: string,
     ) {
       this.focus();
       if ('value' in this) {
-        this.value = nextValue;
+        // ⚠️⚠️ **必须走原型上的原生 setter，不能直接 `this.value = x`** ——
+        // 直接赋值对 **React 受控组件无效**：React 在 `input` 事件里比对
+        // 「DOM 当前值 vs 它上一次写下去的那份」，直接赋值把它那份快照一起改了
+        // ⇒ 判定「没变化」⇒ 不更新 state。随后页面任何一次重渲染都会把 DOM 值
+        // **回写成 state 里那个旧值**（实测：填完显示 hello，点一下别处就变回空串）。
+        // 原生 setter 绕开这层记录，React 才能看到真实变化。
+        //
+        // ⚠️ **取 `Object.getPrototypeOf(this)` 而不是写死 `HTMLInputElement.prototype`** ——
+        // textarea / select 各有自己的 setter，拿 input 的 setter 去调它们会
+        // `Illegal invocation`。取自己的原型对三者都对。
+        // ⚠️ 这与内容脚本 `setTextareaValue` 是同一套写法（那里已在 z.ai 真机验证有效）。
+        const setter = Object.getOwnPropertyDescriptor(
+          Object.getPrototypeOf(this) as object,
+          'value',
+        )?.set;
+        if (setter) setter.call(this, nextValue);
+        else this.value = nextValue;
       } else {
         this.textContent = nextValue;
       }
       this.dispatchEvent(new InputEvent('input', { bubbles: true, data: nextValue }));
       this.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
-    }), [{ value }]);
+    }), [{ value }], signal);
   }
 
-  private async focusElement(element: ElementHandle): Promise<void> {
+  private async focusElement(
+    element: ElementHandle,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
     await this.callFunctionOn(element.objectId, String(function focusElement(this: HTMLElement) {
       this.focus();
       return document.activeElement === this;
-    }));
+    }), [], signal);
   }
 
   private async callFunctionOn(
     objectId: string,
     functionDeclaration: string,
     args: Array<{ value: unknown }> = [],
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const result = await this.connection!.sendCommand<{
       result?: RuntimeRemoteObject;
@@ -913,7 +1068,7 @@ export class BrowserControlService {
       arguments: args,
       returnByValue: true,
       awaitPromise: true,
-    });
+    }, signal);
     if (result.exceptionDetails) {
       throw new BrowserControlError(
         'browser_dom_call_failed',
@@ -923,7 +1078,11 @@ export class BrowserControlService {
     return remoteObjectValue(result.result);
   }
 
-  private async evaluate(expression: string, options: { awaitPromise: boolean }): Promise<unknown> {
+  private async evaluate(
+    expression: string,
+    options: { awaitPromise: boolean },
+    signal: AbortSignal | undefined,
+  ): Promise<unknown> {
     const result = await this.connection!.sendCommand<{
       result?: RuntimeRemoteObject;
       exceptionDetails?: { text?: string; exception?: { description?: string } };
@@ -931,7 +1090,7 @@ export class BrowserControlService {
       expression,
       returnByValue: true,
       awaitPromise: options.awaitPromise,
-    });
+    }, signal);
     if (result.exceptionDetails) {
       throw new BrowserControlError(
         'browser_script_failed',
@@ -941,8 +1100,11 @@ export class BrowserControlService {
     return remoteObjectValue(result.result);
   }
 
-  private async evaluateBoolean(expression: string): Promise<boolean> {
-    return await this.evaluate(expression, { awaitPromise: true }) === true;
+  private async evaluateBoolean(
+    expression: string,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> {
+    return await this.evaluate(expression, { awaitPromise: true }, signal) === true;
   }
 
   private async getTargetOrThrow(tabId: number): Promise<BrowserControlTarget> {
@@ -1042,15 +1204,24 @@ export async function getBrowserControlElementPoint(this: Element): Promise<Elem
     };
   }
 
-  let point = readPoint(this);
+  const point = readPoint(this);
   if (point.visible) return point;
 
-  this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' });
-  if (typeof requestAnimationFrame === 'function') {
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  }
-  point = readPoint(this);
-  return point;
+  // ⚠️⚠️ **滚动之后不能再等一帧** —— `requestAnimationFrame` 在**后台标签**上永远不会
+  // 被调用（Chrome 自 2011 年起就不给后台标签发 rAF，见 *Background tabs in Chrome 57*：
+  // "Chrome does not call requestAnimationFrame() when a page is in the background"）。
+  // 而浏览器控制的目标标签**常态就是在后台**（用户切回 z.ai 看输出、`newTab: false`
+  // 时不激活）⇒ 在这里 `await` 会让整个 `Runtime.callFunctionOn`（`awaitPromise: true`）
+  // 永不返回 ⇒ 整条 `EXECUTE_TOOL_CALL` 卡死 ⇒ 内容脚本 `pendingExecutions` 永不减
+  // ⇒ 会合点永不触发 ⇒ **续跑循环停在 running**。本该报的 `browser_element_not_visible`
+  // 变成静默永久挂住。
+  //
+  // ⚠️ **不等也读得到新位置**：`scrollIntoView({ behavior: 'instant' })` 是同步滚动，
+  // 紧随其后的 `getBoundingClientRect()` 会强制布局并拿到滚动后的值。
+  // ⚠️ **必须是 `'instant'` 不是 `'auto'`** —— `'auto'` 会尊重 CSS 的 `scroll-behavior`，
+  // 页面写了 `smooth` 时滚动是异步的，同步读到的仍是旧位置。
+  this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  return readPoint(this);
 }
 
 export function getControllableState(url: string): { controllable: boolean; reason?: string } {
@@ -1178,7 +1349,13 @@ function normalizeUrl(input: string): string {
   }
 }
 
-function keyEventParams(key: string): Record<string, unknown> {
+/**
+ * 把工具入参的 `key` 翻成 CDP 的派发参数。
+ *
+ * 返回的 `text` **有值就代表这个键会产生字符输入**（调用方据此选 `keyDown` 还是
+ * `rawKeyDown`）—— 这个区分不能省，见 `key()` 里的说明。
+ */
+function keyEventParams(key: string): { params: Record<string, unknown>; text?: string } {
   const special: Record<string, { code: string; windowsVirtualKeyCode: number }> = {
     Enter: { code: 'Enter', windowsVirtualKeyCode: 13 },
     Escape: { code: 'Escape', windowsVirtualKeyCode: 27 },
@@ -1191,16 +1368,22 @@ function keyEventParams(key: string): Record<string, unknown> {
     ArrowRight: { code: 'ArrowRight', windowsVirtualKeyCode: 39 },
   };
   const known = special[key];
-  if (known) return { key, ...known };
+  if (known) return { params: { key, ...known } };
   if (key.length === 1) {
+    // ⚠️ **非 ASCII 单字符不拼 `code` / `windowsVirtualKeyCode`** —— `Key中` 与
+    // 20013 都是编出来的假值，喂给 CDP 只会让页面的 KeyboardEvent 带一身错数据。
+    // 只给 `key` + `text`，字符照样能插进去。
+    if (key.charCodeAt(0) > 0x7f) return { params: { key }, text: key };
     return {
-      key,
+      params: {
+        key,
+        code: `Key${key.toUpperCase()}`,
+        windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0),
+      },
       text: key,
-      code: `Key${key.toUpperCase()}`,
-      windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0),
     };
   }
-  return { key };
+  return { params: { key } };
 }
 
 function waitExpression(payload: Record<string, unknown>): string {
@@ -1233,11 +1416,28 @@ function asObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/**
+ * 快照的**结构化元数据**（不含正文）。
+ *
+ * ⚠️⚠️ **`text` 刻意不在这里** —— 快照正文一律走 `detail`（`snapshotAction` 的
+ * `detail: snapshot.text`、`withOptionalSnapshot` 的 `` `${detail}\n\n${text}` ``）。
+ * 把它也塞进 `output` 的后果是**同一份文本在一条结果里出现两次**：
+ * 实测一份 400 节点的中文列表页，`detail` 一份 + `output.snapshot.text` 一份
+ * = 64,865 字节，去掉之后 31,865 字节 —— 载荷直接减半。
+ * 而两份在进模型时都会被各自裁掉（detail 4000 字符 / output 8000 字符），
+ * **裁下来的还都是同一份文本的开头**，并集只等于较长的那一份 ⇒ 第二次纯属浪费。
+ * 更糟的是 output 那份是 JSON 转义形态（换行占两字符、引号要转义），同样的可见字符
+ * 要多花约 7% 的长度，而且截断后是**不完整的 JSON 字符串**。
+ *
+ * ⚠️ **`output.snapshot` 在生产代码里零消费者**（`grep` 过：只有测试读顶层
+ * `result.snapshot`，没有任何地方读 `output.snapshot.text`）⇒ 去掉它没有现实代价。
+ * `truncated` 与 `nodeCount` 保留 —— 它们是「这份快照有没有被预算截断」的信号，
+ * 与 `ToolResult.truncated` 同源。
+ */
 function snapshotToJson(snapshot: BrowserSnapshotResult): Record<string, unknown> {
   return {
     url: snapshot.url,
     title: snapshot.title,
-    text: snapshot.text,
     nodeCount: snapshot.nodes.length,
     truncated: snapshot.truncated,
   };

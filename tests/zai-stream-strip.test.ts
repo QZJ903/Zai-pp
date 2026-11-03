@@ -5,6 +5,14 @@ import {
 } from '../core/zai/stream-strip';
 import { installZaiFetchHook, updateZaiHookState } from '../core/zai/fetch-hook';
 import { ZAI_BUILTIN_HISTORY_TOOL_NAMES } from '../core/zai/history-tool-names';
+// ⚠️ 正文推演抽到 `tests/helpers/sse-visible-text.ts` —— 与
+// `zai-tool-tag-recognition.test.ts` 共用同一份口径，别在这里再写一份。
+// 本地只保留 `payloadsOf`（它刻意**把解析失败的帧变成 `__parseError` 条目**，
+// 供「envelope 必须每行都能解析」那条用例断言，与 helper 的「跳过坏帧」语义不同）。
+import {
+  sseAccumulatedText as accumulate,
+  sseVisibleText as visibleTextOf,
+} from './helpers/sse-visible-text';
 
 /**
  * **流式工具 XML 剥离**（流式侧）。
@@ -37,22 +45,6 @@ function payloadsOf(wire: string): Record<string, unknown>[] {
     }
   }
   return out;
-}
-
-/** 拼出「页面最终看到的正文」= 各帧的 delta_content（追加）与 content（整体替换）按顺序推演。 */
-function visibleTextOf(wire: string): string {
-  let text = '';
-  for (const json of payloadsOf(wire)) {
-    const data = json.data as Record<string, unknown> | undefined;
-    if (typeof data?.delta_content === 'string') { text += data.delta_content; continue; }
-    if (typeof data?.content === 'string') { text = data.content; continue; }
-  }
-  return text;
-}
-
-/** 跨多次 push / finish 累积页面最终看到的正文（测试里逐块喂时用）。 */
-function accumulate(...wires: string[]): string {
-  return visibleTextOf(wires.join(''));
 }
 
 describe('zai tool XML text filter', () => {

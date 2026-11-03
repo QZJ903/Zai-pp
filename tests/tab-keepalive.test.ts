@@ -491,3 +491,81 @@ describe('tab keepalive session', () => {
     expect(session.attachedTabIds).toEqual([]);
   });
 });
+
+describe('browser control settings write serialization', () => {
+  it('does not lose a patch made while another patch is in flight', async () => {
+    // ⚠️⚠️ `saveBrowserControlSettings` 是「读 → 合并 → 写」。不串行的话，后写者会拿
+    // **自己的旧快照**覆盖前者 —— 真实场景：`browser_navigate { newTab:true }` 内部
+    // 写 `targetTabId`，同时侧边栏在调 `maxSnapshotNodes`，先落地的那次被整条覆盖。
+    // 判别点：两个**不同字段**的补丁，两次都必须留下。
+    const storage = new Map<string, unknown>();
+    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    vi.stubGlobal('chrome', {
+      storage: {
+        local: {
+          get: async (key: string) => {
+            const snapshot = { [key]: storage.get(key) };
+            await delay(5);
+            return snapshot;
+          },
+          set: async (value: Record<string, unknown>) => {
+            await delay(1);
+            for (const [key, storedValue] of Object.entries(value)) storage.set(key, storedValue);
+          },
+        },
+      },
+    });
+
+    const { saveBrowserControlSettings, getBrowserControlSettings } = await import(
+      '../core/browser-control/settings'
+    );
+
+    await Promise.all([
+      saveBrowserControlSettings({ targetTabId: 42 }),
+      saveBrowserControlSettings({ maxSnapshotNodes: 900 }),
+    ]);
+
+    const final = await getBrowserControlSettings();
+    expect(final.targetTabId, '导航写下的目标不能被侧边栏的保存覆盖掉').toBe(42);
+    expect(final.maxSnapshotNodes, '侧边栏的改动也不能被导航覆盖掉').toBe(900);
+  });
+});
+
+describe('tab keepalive settings write serialization', () => {
+  it('serializes two writers so neither reads a stale snapshot', async () => {
+    // ⚠️ 与上面那条同因：`saveTabKeepaliveSettings` 也是「读 → 合并 → 写」。
+    // ⚠️ `TabKeepaliveSettings` 目前只有一个字段，所以「值被覆盖」这件事看不出差别 ——
+    // 判别力放在**读的时刻**上：不串行时两个写会**同时**读到 `undefined`（两次读的
+    // 起始时间几乎相同），串行时第二次读必须发生在第一次 `set` **之后**。
+    const storage = new Map<string, unknown>();
+    const events: Array<'read' | 'write'> = [];
+    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    vi.stubGlobal('chrome', {
+      storage: {
+        local: {
+          get: async (key: string) => {
+            events.push('read');
+            const snapshot = { [key]: storage.get(key) };
+            await delay(5);
+            return snapshot;
+          },
+          set: async (value: Record<string, unknown>) => {
+            events.push('write');
+            await delay(1);
+            for (const [key, storedValue] of Object.entries(value)) storage.set(key, storedValue);
+          },
+        },
+      },
+    });
+
+    const { saveTabKeepaliveSettings } = await import('../core/browser-control/keepalive-settings');
+
+    await Promise.all([
+      saveTabKeepaliveSettings({ enabled: true }),
+      saveTabKeepaliveSettings({ enabled: false }),
+    ]);
+
+    // 串行 ⇒ read,write,read,write；不串行 ⇒ read,read,write,write。
+    expect(events).toEqual(['read', 'write', 'read', 'write']);
+  });
+});

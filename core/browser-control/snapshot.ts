@@ -3,6 +3,29 @@ import type {
   BrowserSnapshotResult,
 } from './types';
 
+/**
+ * 一个字符串的 **UTF-8 字节数**。
+ *
+ * ⚠️ **不能用 `value.length`** —— 那是 UTF-16 码元数：中文 1 字 = 1 码元但 **3 字节**，
+ * emoji 1 字 = **2 码元**但 4 字节。预算名叫 `maxTextBytes`、面板文案写「字节数」，
+ * 判据就必须是字节。
+ * ⚠️ **也不能在每个节点上 `new TextEncoder().encode(整段 text)`** —— 那是 O(n²)：
+ * 每次都要把已经拼好的全文再编码一遍。这里的用法是**只编码新增的那一行**，
+ * 然后累加（见 `textBytes`）。
+ */
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+/**
+ * 超预算时追加在 `text` 末尾的标记。
+ *
+ * ⚠️ **它自己的字节数也要算进预算** —— 见下面那段说明。单独提成常量是为了
+ * 「加标记」与「量标记」用的是同一个真源，别在两处各写一份字面量。
+ */
+const SNAPSHOT_TRUNCATION_MARKER = '\n...[snapshot truncated]';
+const SNAPSHOT_TRUNCATION_MARKER_BYTES = utf8Length(SNAPSHOT_TRUNCATION_MARKER);
+
 interface AxNode {
   nodeId?: string;
   ignored?: boolean;
@@ -49,6 +72,9 @@ export function formatAccessibilitySnapshot(input: SnapshotInput): FormattedSnap
   const nodes: BrowserSnapshotNode[] = [];
   const seen = new Set<string>();
   let text = `URL: ${input.url || '(unknown)'}\nTitle: ${input.title || '(untitled)'}\n`;
+  // ⚠️ **累计字节必须跟着 `text` 一起长** —— 逐行累加（每行只编码一次），
+  // 不在循环里重新编码全文。
+  let textBytes = utf8Length(text);
   let truncated = false;
 
   while (queue.length > 0) {
@@ -67,22 +93,42 @@ export function formatAccessibilitySnapshot(input: SnapshotInput): FormattedSnap
       break;
     }
 
+    // ⚠️⚠️ **文本预算必须判在 `nodes.push` 之前** —— 判在之后的话，撞线那个节点
+    // 已经进了 `nodes` 与 `uidToBackendNodeId`，但它的行没进 `text`：
+    // 模型按 `text` 看不见它，而 `browser_click { uid }` 照样能解析成功
+    // （`DOM.resolveNode` 认的是映射）⇒ **看不见却能点**，`nodeCount` 也比实际可见的多 1。
+    // 两个预算的截断点必须同源（`maxNodes` 那条本来就在 push 之前）。
+    const nextLine = formatSnapshotLine(normalizedNode);
+    const nextLineBytes = utf8Length(nextLine);
+    if (textBytes + nextLineBytes > input.maxTextBytes) {
+      truncated = true;
+      break;
+    }
     nodes.push(normalizedNode);
     if (normalizedNode.backendDOMNodeId !== undefined) {
       uidToBackendNodeId.set(normalizedNode.uid, normalizedNode.backendDOMNodeId);
     }
-
-    const nextLine = formatSnapshotLine(normalizedNode);
-    if (text.length + nextLine.length > input.maxTextBytes) {
-      truncated = true;
-      break;
-    }
     text += nextLine;
+    textBytes += nextLineBytes;
 
     enqueueChildren(queue, node, byId, level);
   }
 
-  if (truncated) text += '\n...[snapshot truncated]';
+  /**
+   * ⚠️⚠️ **截断标记本身也要算进预算** —— 判据在循环里用的是 `maxTextBytes`，
+   * 而标记是在判完之后追加的（`SNAPSHOT_TRUNCATION_MARKER` 是 25 字节）。
+   * 不扣它的话最终 `text` 会超出预算 25 字节。
+   *
+   * 后果不是功能错，是**两处截断信号叠加**：英文页 24_000 字节 ≈ 24_000 字符，
+   * 再进 `core/zai/continuation.ts` 的 `BROWSER_SNAPSHOT_DETAIL_MAX_CHARS`（同为 24_000
+   * **字符**）时会多出第二个 `...[truncated]` —— 读的人会以为被截了两轮。
+   *
+   * ⚠️ **放不下就干脆不加** —— 加一个把预算撑破的标记，比没有标记更糟：
+   * 下游按「没超预算」处理，而它其实超了。
+   */
+  if (truncated && textBytes + SNAPSHOT_TRUNCATION_MARKER_BYTES <= input.maxTextBytes) {
+    text += SNAPSHOT_TRUNCATION_MARKER;
+  }
 
   return {
     result: {

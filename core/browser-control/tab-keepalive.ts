@@ -171,7 +171,13 @@ export class TabKeepAliveSession {
     return [...this.attached];
   }
 
-  /** 这条标签是否正被保活。`closeTab` 的保护判据用它。 */
+  /**
+   * 这条标签是否正被保活（只读查询）。
+   *
+   * ⚠️ **`closeTab` 不再用它作保护判据** —— 那条判据改成了向内容脚本发
+   * `QUERY_CONTINUATION_STATE`（`service.ts` 的 `isContinuationRunning`），
+   * 因为「保活着」与「这一轮真的在跑」不是一回事。
+   */
   isKeepingAlive(tabId: number): boolean {
     return this.attached.has(tabId);
   }
@@ -199,7 +205,15 @@ export class TabKeepAliveSession {
     await this.detach(tabId);
   }
 
-  /** 丢掉全部意图并卸掉全部会话（页面卸载 / 扩展停用时用）。 */
+  /**
+   * 丢掉全部意图并卸掉全部会话。
+   *
+   * ⚠️ **当前没有调用方** —— 页面卸载时内容脚本发的是 `STOP_TAB_KEEPALIVE`
+   * （`releaseTabKeepAlive()`），走的是 `unwant(那一条)`，**不是这里**。
+   * 注释原来写「页面卸载 / 扩展停用时用」，那句话是错的：整站收摊的真实路径是
+   * 「每个标签各发一次 STOP」。这里留着是因为它与无参 `detach()` 是同一件事、
+   * 语义清楚，将来真要一个「一次清空」的入口不必重写。
+   */
   async clear(): Promise<void> {
     const all = [...this.attached];
     this.wanted.clear();

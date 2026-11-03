@@ -9,7 +9,7 @@ import type {
   ToolExecutionTrigger,
   ToolResult,
 } from './types';
-import type { ToolProviderRegistry } from './provider-registry';
+import type { ToolProviderExecutionContext, ToolProviderRegistry } from './provider-registry';
 import {
   isExternalizedToolPayload,
   parseExternalizedToolPayload,
@@ -26,6 +26,8 @@ import {
   ToolAuthorizationError,
 } from './authorization';
 import { enforceLocalSkillCwd } from './local-skill-cwd';
+import { createAbortScope } from '../network/abort';
+import { truncateUtf8ToByteLimit } from './result-bytes';
 
 export interface RuntimeToolCallOptions {
   timeoutMs?: number;
@@ -206,33 +208,25 @@ async function executeRuntimeToolCall(
       } else {
         resolvedCall = resolution.call;
         executionDescriptor = resolution.descriptor;
-        result = await providerRegistry.execute(
-          resolvedCall,
-          executionDescriptor,
-          {
-            locale,
-            signal: options.signal,
-            timeoutMs: options.timeoutMs,
-            maxResultBytes: options.maxResultBytes,
-            availableDescriptors: currentDescriptors,
-            capabilityScope: createRuntimeCapabilityScope(context, authorized.call),
-          },
-        );
-        providerCompleted = true;
-      }
-    } else {
-      result = await providerRegistry.execute(
-        resolvedCall,
-        executionDescriptor,
-        {
+        result = await runProvider(providerRegistry, resolvedCall, executionDescriptor, {
           locale,
           signal: options.signal,
           timeoutMs: options.timeoutMs,
           maxResultBytes: options.maxResultBytes,
           availableDescriptors: currentDescriptors,
           capabilityScope: createRuntimeCapabilityScope(context, authorized.call),
-        },
-      );
+        });
+        providerCompleted = true;
+      }
+    } else {
+      result = await runProvider(providerRegistry, resolvedCall, executionDescriptor, {
+        locale,
+        signal: options.signal,
+        timeoutMs: options.timeoutMs,
+        maxResultBytes: options.maxResultBytes,
+        availableDescriptors: currentDescriptors,
+        capabilityScope: createRuntimeCapabilityScope(context, authorized.call),
+      });
       providerCompleted = true;
     }
     assertRuntimeExecutionActive(options);
@@ -320,6 +314,162 @@ async function completeAuthorizationAfterProvider(
     // provider result and history instead of replacing it with a storage error.
     console.log('[Zai++] tool authorization completion persistence failed', error);
   }
+}
+
+/**
+ * 执行一次 provider 调用，**把描述符声明的两道上界都真的施加一遍**。
+ *
+ * 两件事分开算、顺序固定：
+ * 1. **时长**（`execution.timeoutMs`）—— 建 `AbortScope` + 与 provider 调用竞速；
+ * 2. **体积**（`execution.maxResultBytes`）—— 对结果本身裁 `detail` / `output`。
+ *
+ * ⚠️⚠️ **这两条在改造前都是空转的**：本地 provider 链上没有任何地方读这两个字段
+ * （`core/mcp/discovery.ts` 那条是 MCP 链自己的，管不到本地 provider），
+ * 而 `core/tool/authorization.ts:854-855` 还在校验它们的合法性 ——
+ * 那层校验让读者更确信它们生效。
+ * ⚠️ **顺序不能反**：先裁体积再判超时的话，超时那条错误结果本身也会被裁，
+ * 而它的 `details: { timeoutMs }` 是排障依据。
+ */
+async function runProvider(
+  providerRegistry: ToolProviderRegistry,
+  call: ToolCall,
+  descriptor: ToolDescriptor,
+  context: ToolProviderExecutionContext,
+): Promise<ToolResult> {
+  const result = await executeWithTimeout(providerRegistry, call, descriptor, context);
+  return applyResultByteBudget(result, descriptor, context);
+}
+
+/**
+ * 按 `execution.maxResultBytes` 裁结果。
+ *
+ * ⚠️⚠️ **这是 `maxResultBytes` 在本地 provider 链上唯一的消费点** —— 在此之前
+ * 那 18 个浏览器工具声明的 40 000 / 60 000、以及 `memory_*` / `skill_*` 的 4096
+ * **全部空转**（`core/mcp/discovery.ts` 那条是 MCP 链自己的，管不到本地 provider）。
+ *
+ * ⚠️⚠️ **只裁 `detail`，不裁 `output`** —— 这是 MCP 链的既有口径
+ * （`normalizeMcpToolResult` 裁 `detailSource`，`output` 原样结构化返回），local 链必须**跟它一致**，
+ * 否则同一个 `ToolResult` 在两个 provider 上形状不同：
+ * - `output` 是**结构化结果**，消费方按对象形状判（`skill_draft_create` 的「保存」按钮、
+ *   `memory_import_preview` 的「导入」按钮都靠它）—— 把它裁成字符串等于**让按钮消失**，
+ *   而且失败方向是静默的（渲染器按「形状不对」退回纯文本，不报错）。
+ * - `detail` 是**给人/模型看的文本**，本来就是要被裁的那一侧。
+ *
+ * ⚠️ **不要改成「裁整个 ToolResult 的 JSON」**：`name` / `provider` / `error.code`
+ * 是判据字段，被截断会让下游认不出这是什么工具、失败码是什么。
+ * ⚠️ **`summary` 不裁** —— 它是给面板与模型看的一行摘要，各工具自己控制在几十字内；
+ * 裁它只会让「工具名 + 失败原因」拼不成句。
+ * ⚠️ **超预算时置 `truncated: true`** —— 这是「结果被裁过」的唯一信号，
+ * 续跑模板会把它原样带给模型。
+ */
+function applyResultByteBudget(
+  result: ToolResult,
+  descriptor: ToolDescriptor,
+  context: ToolProviderExecutionContext,
+): ToolResult {
+  const limit = context.maxResultBytes ?? descriptor.execution.maxResultBytes;
+  if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) return result;
+
+  if (typeof result.detail !== 'string') return result;
+  const projection = truncateUtf8ToByteLimit(result.detail, limit);
+  if (!projection.truncated) return result;
+  return { ...result, detail: projection.value, truncated: true };
+}
+
+/**
+ * 时长那一半：建 `AbortScope` 并与 provider 调用竞速。
+ *
+ * ⚠️ **`context.timeoutMs`（调用方显式传的）优先于描述符** —— 后者是工具自己声明的
+ * 默认值，前者是这一次调用的意图。
+ * ⚠️ **当前没有生产调用方传 `context.timeoutMs`**（后台那条 `EXECUTE_TOOL_CALL` 入口
+ * 只传 `call` / `authorization` / `locale`；自动化走的是内容脚本的 DOM 任务，不经过这里）。
+ * 留这个优先关系是为了将来能按租约剩余时间收窄——**在此之前别把它当成已有来源**。
+ * ⚠️ **两者都没有时不建 scope** —— 不加超时是既有行为，不要在这里凭空造一个上限：
+ * `memory_*` / `skill_*` 那几个工具本来就不声明 `timeoutMs`。
+ */
+async function executeWithTimeout(
+  providerRegistry: ToolProviderRegistry,
+  call: ToolCall,
+  descriptor: ToolDescriptor,
+  context: ToolProviderExecutionContext,
+): Promise<ToolResult> {
+  const timeoutMs = context.timeoutMs ?? descriptor.execution.timeoutMs;
+  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return providerRegistry.execute(call, descriptor, context);
+  }
+  const startedAt = Date.now();
+  const scope = createAbortScope(context.signal, timeoutMs);
+  try {
+    // ⚠️⚠️ **光传 signal 不够，必须真的竞速** —— 各 provider 对 `signal` 的反应
+    // 是不统一的：browser 那条链会把它传到 `cdp.sendCommand`（那里会抛
+    // `browser_control_aborted`），而 MCP / memory / skill 那几条**根本不看它**，
+    // 拿着一个已 abort 的 signal 照样跑到底（实测：一个永不 settle 的 provider
+    // 在只传 signal 的情况下会一直挂到测试超时）。
+    // ⇒ 传 signal 是为了「能真取消的链真的取消」，竞速是为了「不能取消的链也按时返回」。
+    return await raceProviderExecution(
+      providerRegistry.execute(call, descriptor, { ...context, signal: scope.signal }),
+      scope.signal,
+    );
+  } catch (error) {
+    // ⚠️⚠️ **超时收敛成一条 ToolResult，不是往上抛** —— 抛出去会落到
+    // `createBackgroundErrorResponse`，那里把任何异常折成
+    // `{ code: 'background_tool_execution_failed', retryable: true }`，
+    // 「超时」这个信息当场丢掉，模型看到的是「工具坏了、可以重试」。
+    // 而各 provider 对 signal 的反应本来就不统一（browser 抛 `browser_control_aborted`、
+    // 别的可能抛 `DOMException`、也可能拿着已 abort 的 signal 跑完再正常返回）。
+    // ⚠️ **这一层只是兜底，不是 MCP 超时的唯一出口** —— MCP 那条链自己有传输层超时，
+    // 而且它比本层**早 500ms** 到期（见 `core/mcp/discovery.ts` 的
+    // `MCP_TRANSPORT_TIMEOUT_BUFFER_MS`）。正常情况下先到的是内层，模型拿到的是
+    // `mcp_transport_timeout` + `retryable: true`；只有 provider 链**根本不看 signal**
+    // 真挂住时，才会走到这里的 `tool_execution_timeout`。
+    if (!scope.timedOut()) throw error;
+    const completedAt = Date.now();
+    const message = `Tool ${descriptor.name} exceeded its ${timeoutMs} ms budget.`;
+    return {
+      ok: false,
+      name: descriptor.name,
+      provider: descriptor.provider,
+      descriptorId: descriptor.id,
+      summary: translate(context.locale, 'tool.runtime.timedOut'),
+      detail: message,
+      error: {
+        code: 'tool_execution_timeout',
+        message,
+        // ⚠️ **不可重试**：超时说明这个动作这一次已经跑满预算，自动重跑只会再等一遍
+        // 同样长的时间（`browser_wait_for` 那种「本来就要等」的场景尤其如此）。
+        retryable: false,
+        details: { timeoutMs, providerId: descriptor.provider.id },
+      },
+      startedAt,
+      completedAt,
+      durationMs: completedAt - startedAt,
+    };
+  } finally {
+    scope.cleanup();
+  }
+}
+
+/**
+ * 让 provider 调用与取消信号竞速。
+ *
+ * ⚠️ **取消之后底层那次调用仍在飞** —— 这是有意的取舍：留一个在飞的读操作无害
+ * （结果没人接），而「一直等」会让整条工具链卡死、续跑循环停在 `running`。
+ * ⚠️ **监听器必须摘** —— 每次工具调用都往同一个 signal 上挂 `abort` 而不摘，
+ * 长会话里会累积。
+ */
+function raceProviderExecution<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException('Tool execution aborted.', 'AbortError'));
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    pending.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      (error) => { signal.removeEventListener('abort', onAbort); reject(error); },
+    );
+  });
 }
 
 async function appendRuntimeToolHistory(

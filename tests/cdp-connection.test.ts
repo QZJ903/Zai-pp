@@ -60,6 +60,8 @@ function createChromeStub() {
     chromeApi: chromeApi as unknown as typeof chrome,
     attached,
     detached,
+    /** 浏览器侧实际发出的全部命令（按顺序）。 */
+    sent,
     /** 只留 attach 之后的那批 enable 命令，顺序也被钉住。 */
     enableCommands: () => sent.map((command) => command.method)
       .filter((method) => ENABLE_COMMANDS.includes(method)),
@@ -98,6 +100,59 @@ describe('browser connection attach lifecycle', () => {
     // 第二次直接 return —— 不重复 attach、也不重复发 enable 命令。
     expect(stub.attached).toEqual([7]);
     expect(stub.enableCommands()).toHaveLength(ENABLE_COMMANDS.length);
+  });
+
+  it('drops the binding when an enable command fails, so the next attach retries it', async () => {
+    // ⚠️⚠️ **这条守的是「假连接」** —— `attach` 先把 `attachedTabId` 置位、再发 5 条
+    // enable。初始化中途失败却不收回绑定时，下一次 `attach(同一标签)` 会在
+    // 「同一条就 return」处早退，**一条 enable 都不重发** ⇒ 那几个 CDP 域永远没启用
+    // （`Accessibility.getFullAXTree` 依赖 `Accessibility.enable`、
+    // `DOM.resolveNode` 依赖 `DOM.enable`），而 `attached` 报 `true`。
+    // 那个中间态没有任何出口：`attach` 早退、`onDetach` 不触发、`detach` 又要有人调。
+    const stub = createChromeStub();
+    const connection = new BrowserConnection(stub.chromeApi);
+
+    const realSendCommand = stub.chromeApi.debugger.sendCommand;
+    let failed = false;
+    stub.chromeApi.debugger.sendCommand = vi.fn(async (source, method, params) => {
+      if (!failed && method === 'DOM.enable') {
+        failed = true;
+        throw new Error("'DOM.enable' wasn't found");
+      }
+      return realSendCommand(source, method, params);
+    }) as unknown as typeof stub.chromeApi.debugger.sendCommand;
+
+    await expect(connection.attach(7)).rejects.toThrow("'DOM.enable' wasn't found");
+    expect(connection.tabId, '初始化失败不能留下绑定').toBeNull();
+    expect(connection.attached).toBe(false);
+    expect(stub.actuallyAttachedTabId, '浏览器侧也要真的卸掉').toBeNull();
+
+    // 第二次 attach 必须重新走一遍全部 enable —— 否则「域没启用」这件事永远补不回来。
+    // 第一次只发到 `DOM.enable` 就炸了（桩在 push 之前抛），所以这里看「第二批」是完整 5 条。
+    await connection.attach(7);
+    expect(connection.tabId).toBe(7);
+    expect(stub.enableCommands().slice(-ENABLE_COMMANDS.length)).toEqual([...ENABLE_COMMANDS]);
+    expect(stub.enableCommands().length).toBeGreaterThan(ENABLE_COMMANDS.length);
+  });
+
+  it('drops the binding even when the cleanup detach itself fails', async () => {
+    // ⚠️ 与 `detach()` 的「失败保留绑定」方向相反：这条路的意图是**丢弃**这条半成品
+    // 会话，所以 detach 也失败时仍要清掉本地绑定（否则下次 `attach` 会早退、永远不自愈）。
+    const stub = createChromeStub();
+    const connection = new BrowserConnection(stub.chromeApi);
+
+    const realSendCommand = stub.chromeApi.debugger.sendCommand;
+    stub.chromeApi.debugger.sendCommand = vi.fn(async (source, method, params) => {
+      if (method === 'Runtime.enable') throw new Error('Command failed');
+      return realSendCommand(source, method, params);
+    }) as unknown as typeof stub.chromeApi.debugger.sendCommand;
+    stub.chromeApi.debugger.detach = vi.fn(async () => {
+      throw new Error('Extension context invalidated.');
+    }) as unknown as typeof stub.chromeApi.debugger.detach;
+
+    await expect(connection.attach(7)).rejects.toThrow('Command failed');
+    expect(connection.tabId).toBeNull();
+    expect(connection.attached).toBe(false);
   });
 });
 
@@ -209,5 +264,47 @@ describe('browser connection detach lifecycle', () => {
 
     // F12 顶掉会话时 Chrome 会发 onDetach —— 那一路本来就该清。
     expect(connection.tabId).toBeNull();
+  });
+});
+/**
+ * **已经取消的 signal 不许再发出一条命令。**
+ *
+ * ⚠️⚠️ 这条守的是「先副作用、后判取消」——`sendCommand` 原来是
+ * 「先 `chrome.debugger.sendCommand(...)` 拿到 pending，再 `throwIfAborted(signal)`」。
+ * 对 `Page.navigate` / `Input.dispatchMouseEvent` / `DOM.setFileInputFiles` 这类
+ * **有副作用**的命令，signal 已经 abort 时命令**已经真的执行了**，而抛出来的文案
+ * 还写着 "cancelled before it started"（说的是假话）。`raceWithAbort` 只负责「不再等」，
+ * 收不回已经发出去的那一条。
+ */
+describe('cdp sendCommand respects an already-aborted signal', () => {
+  it('does not dispatch the command at all', async () => {
+    const stub = createChromeStub();
+    const connection = new BrowserConnection(stub.chromeApi);
+    await connection.attach(7);
+    const before = stub.sent.length;
+
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      connection.sendCommand('Page.navigate', { url: 'https://example.com/' }, controller.signal),
+    ).rejects.toThrow();
+
+    expect(
+      stub.sent.slice(before).map((item) => item.method),
+      '已经 abort 的 signal 不该发出任何命令',
+    ).not.toContain('Page.navigate');
+  });
+
+  it('still dispatches when the signal is live', async () => {
+    // 反向自检：上一条若写成「什么都不发」也能过 —— 这条证明正常路径没被误伤。
+    const stub = createChromeStub();
+    const connection = new BrowserConnection(stub.chromeApi);
+    await connection.attach(7);
+    const before = stub.sent.length;
+
+    await connection.sendCommand('Page.navigate', { url: 'https://example.com/' }, new AbortController().signal);
+
+    expect(stub.sent.slice(before).map((item) => item.method)).toContain('Page.navigate');
   });
 });

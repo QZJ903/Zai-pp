@@ -4843,6 +4843,19 @@ export default defineContentScript({
         })();
         return true;
       }
+      if (message.type === 'QUERY_CONTINUATION_STATE') {
+        // ⚠️⚠️ **后台唯一能问出「这条标签上有没有续跑在跑」的地方** ——
+        // `continuationLoop` 活在页面里，后台没有镜像。`browser_close_tab` 靠它决定
+        // 能不能关这条标签（关掉 = 当场掐断续跑，后台 DOM 任务收不到终态、
+        // 只能等 180 秒租约到期）。
+        // ⚠️ **只读，不动任何状态** —— 这条消息会在「模型要关标签」时到达，
+        // 不该有副作用。⚠️ **必须同步回**（`sendResponse` 之后 `return true`），
+        // 后台那边有 1 秒硬上界，等太久会被判成「没有续跑」。
+        sendResponse({
+          continuationRunning: continuationLoop?.status === 'running',
+        });
+        return true;
+      }
       if (message.type === 'CANCEL_DOM_TASK') {
         const taskId = typeof message.taskId === 'string' ? message.taskId : '';
         if (taskId) {

@@ -9,6 +9,7 @@ export const tool = {
     authorizationDisabledHint: '该工具当前已禁用：请在工具设置中启用后重试。',
     authorizationIdentityMissingHint: '缺少执行所需的身份信息：请重新发起该操作。',
     authorizationGenericHint: '如需继续执行，请重新发起该操作并完成授权确认。',
+    timedOut: '工具执行超时',
   },
   memory: {
     providerName: 'Zai++ Memory',

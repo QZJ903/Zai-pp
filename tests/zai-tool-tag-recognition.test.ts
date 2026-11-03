@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { installZaiFetchHook, updateZaiHookState } from '../core/zai/fetch-hook';
 import type { ZaiDetectedToolCall } from '../core/zai/fetch-hook';
 import { ZAI_CONTENT_TO_MAIN } from '../core/zai/messages';
+import { sseVisibleText } from './helpers/sse-visible-text';
 
 /**
  * 工具 XML 标签的识别名单 = **本请求注入提示词的那一份**（增广结果回传的
@@ -41,8 +42,17 @@ afterEach(() => {
 
 interface HookRun {
   toolCalls: ZaiDetectedToolCall[];
-  /** 页面实际读到的字节（拼成一串）。 */
+  /** 页面实际读到的字节（拼成一串，SSE wire 原文）。 */
   pageText: string;
+  /**
+   * **页面最终看到的助手正文** —— 按帧解 `delta_content` / `content` 之后拼出来的。
+   *
+   * ⚠️⚠️ **判「页面上看得见什么」必须用它，不能直接对 `pageText` 做字符串断言**：
+   * wire 里的正文是 JSON 字符串，页面上的 `<shell_exec id="1">` 在 wire 里是
+   * `<shell_exec id=\"1\">`（引号带反斜杠）⇒ 拿原串 `toContain` 必然失败，
+   * 而生产代码其实完全正确。口径见 `tests/helpers/sse-visible-text.ts` 的文件头。
+   */
+  visibleText: string;
 }
 
 /**
@@ -97,7 +107,7 @@ async function runTurn(
   } finally {
     uninstall();
   }
-  return { toolCalls, pageText };
+  return { toolCalls, pageText, visibleText: sseVisibleText(pageText) };
 }
 
 describe('tool tag recognition uses the per-request descriptor names', () => {
@@ -138,7 +148,7 @@ describe('tool tag recognition uses the per-request descriptor names', () => {
       perRequest: ['mcp__demo__echo'],
     });
     expect(run.toolCalls.map((call) => call.name)).toEqual(['mcp__demo__echo']);
-    expect(run.pageText).not.toContain('mcp__demo__echo');
+    expect(run.visibleText).not.toContain('mcp__demo__echo');
   });
 });
 
@@ -247,13 +257,16 @@ describe('the main world forwards the augment result names into the hook state',
 describe('tool block recognition agrees with the parser and the stripper', () => {
   it('does not recognize a tag with attributes, and leaves it visible', async () => {
     // 扫描器（解析 / 剥离）不认 `id="1"` ⇒ 通知侧也不该认，且页面该看得见这段 XML。
+    // ⚠️ 判的是 `visibleText`（解码后的正文），**不是 `pageText`** —— wire 里这段是
+    // `<shell_exec id=\"1\">`，拿原串判会假红（这条用例第一版就是这么错的）。
     const block = '<shell_exec id="1">{"command":"ls"}</shell_exec>';
     const run = await runTurn([answerFrame(`前${block}后`), DONE_FRAME], {
       hookSnapshot: ['shell_exec'],
       perRequest: ['shell_exec'],
     });
     expect(run.toolCalls).toEqual([]);
-    expect(run.pageText).toContain('<shell_exec id="1">');
+    // 整段原样留在正文里（前后文也在）—— 比 `toContain` 更严：漏掉半截也会红。
+    expect(run.visibleText).toBe(`前${block}后`);
   });
 
   it('recognizes a whitespace-padded tag, and strips it from the page stream', async () => {
@@ -264,7 +277,7 @@ describe('tool block recognition agrees with the parser and the stripper', () =>
       perRequest: ['shell_exec'],
     });
     expect(run.toolCalls.map((call) => call.name)).toEqual(['shell_exec']);
-    expect(run.pageText).not.toContain('shell_exec');
+    expect(run.visibleText).toBe('前后');
   });
 
   it('recognizes a plain block and strips it (control)', async () => {
@@ -274,6 +287,6 @@ describe('tool block recognition agrees with the parser and the stripper', () =>
       perRequest: ['shell_exec'],
     });
     expect(run.toolCalls.map((call) => call.name)).toEqual(['shell_exec']);
-    expect(run.pageText).not.toContain('shell_exec');
+    expect(run.visibleText).toBe('前后');
   });
 });

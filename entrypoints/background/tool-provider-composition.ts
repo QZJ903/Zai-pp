@@ -86,7 +86,9 @@ export function createProductionToolProviderRegistry(): ToolProviderRegistry {
         if (!await shouldExposeBrowserControlTools()) return [];
         return createBrowserControlToolDescriptors(locale);
       },
-      (call, _descriptor, { locale }) => executeBrowserControlToolCall(call, locale),
+      // ⚠️ **`signal` 必须往下传** —— 它是 `execution.timeoutMs` 唯一的落地路径
+      // （`executeRuntimeToolCall` 建 scope → provider context → 这里 → cdp.sendCommand）。
+      (call, _descriptor, { locale, signal }) => executeBrowserControlToolCall(call, locale, signal),
     ),
     createMcpCapabilityProvider(),
     createMcpProvider(),

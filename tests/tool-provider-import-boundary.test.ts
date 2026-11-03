@@ -37,12 +37,21 @@ describe('tool provider import boundary', () => {
       '../diagnostics/log-buffer',
       '../i18n/background',
       '../messaging/tool-record-codec',
+      // ⚠️ **`../network/abort` 是执行超时的落地依赖** —— `executeRuntimeToolCall` 按
+      // 描述符的 `execution.timeoutMs` 建 `createAbortScope`，把 signal 一路传到
+      // provider（浏览器控制那条最终落到 `cdp.sendCommand`）。
+      // ⚠️ 它是**纯工具模块**（只导出一个 `AbortScope` 工厂，不 import 任何 provider），
+      // 加进来不破坏这条用例守的东西：runtime 仍然不认识任何具体 provider。
+      '../network/abort',
       './authorization',
       './execution-error',
       './externalized-payload',
       './history',
       './local-skill-cwd',
       './provider-registry',
+      // ⚠️ **`./result-bytes` 是 `maxResultBytes` 的落地实现** —— 与 `../network/abort`
+      // 同一个来由（一个是时长上界、一个是体积上界）。它是纯工具模块，不 import 任何 provider。
+      './result-bytes',
       './types',
     ]);
   });

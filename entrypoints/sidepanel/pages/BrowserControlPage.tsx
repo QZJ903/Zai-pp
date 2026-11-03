@@ -250,9 +250,12 @@ export default function BrowserControlPage() {
         <Slider
           label={t('sidepanel.browserControlPage.maxBytes')}
           value={settings.maxSnapshotTextBytes}
+          // ⚠️ **上界必须 ≤ 消费端的上界** —— 续跑模板给 `browser_snapshot` 的
+          // detail 上限是 24000 字符、给动作后快照的是 4000。开到 80000 只是让
+          // 滑块后半段看起来有用（实测：预算 80000 时模型仍只看到 3970 字符）。
           min={4000}
-          max={80000}
-          step={4000}
+          max={24000}
+          step={2000}
           disabled={busy !== 'idle'}
           onChange={(value) => savePatch({ maxSnapshotTextBytes: value })}
         />

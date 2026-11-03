@@ -93,6 +93,22 @@ function sanitizeCall(call: ToolCall): ToolCall {
   };
 }
 
+/**
+ * 落库前裁一遍 `detail` / `output` / `error`。
+ *
+ * ⚠️⚠️ **这里的 4_000 是「工具面板刷新后回读」的预算，不是模型看到的那个上限。**
+ * 两个消费者服务的东西不同：
+ * - **续跑 prompt** 读的是内存里的 `executionsByRequest`，**没经过本函数**；
+ *   它对 `browser_snapshot` 的 detail 单列了 `BROWSER_SNAPSHOT_DETAIL_MAX_CHARS`
+ *   （24_000，见 `core/zai/continuation.ts`）—— 模型要看全快照才能点对元素。
+ * - **本函数**落的是 `zai_pp_tool_history`，给面板回读用。人看一屏够了，
+ *   而这块**受配额硬约束**：`MAX_HISTORY`（100 条）× 这份上限就是整键的体积，
+ *   而 `chrome.storage.local` 只有 10 MB、写超了是**之后每次写都失败**
+ *   （见文件头那段 200 → 100 的事故记录）。
+ *
+ * ⇒ **别看到 24_000 就回来把这里抬上去。** 真要抬得先算配额：
+ * 现在 `100 × (4_000 + 8_000)` 约 1.2 MB，抬到 24_000 就是 3.2 MB。
+ */
 function sanitizeResult(result: ToolResult): ToolResult {
   return {
     ...result,

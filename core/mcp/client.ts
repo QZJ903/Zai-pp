@@ -7,6 +7,7 @@ import type {
   ToolRiskLevel,
   ToolTransportKind,
 } from '../tool/types';
+import { truncateUtf8ToByteLimit } from '../tool/result-bytes';
 import type {
   McpCallToolOptions,
   McpCallToolResult,
@@ -573,23 +574,6 @@ function normalizeMcpToolResult(
       }
       : undefined,
   };
-}
-
-function truncateUtf8ToByteLimit(value: string, maxBytes: number): { value: string; truncated: boolean } {
-  const limit = Number.isFinite(maxBytes) ? Math.max(0, Math.floor(maxBytes)) : 0;
-  const bytes = new TextEncoder().encode(value);
-  if (bytes.byteLength <= limit) return { value, truncated: false };
-
-  let boundary = limit;
-  while (boundary > 0 && isUtf8ContinuationByte(bytes[boundary])) boundary -= 1;
-  return {
-    value: new TextDecoder().decode(bytes.subarray(0, boundary)),
-    truncated: true,
-  };
-}
-
-function isUtf8ContinuationByte(value: number | undefined): boolean {
-  return value !== undefined && (value & 0b1100_0000) === 0b1000_0000;
 }
 
 function extractMcpErrorMessage(result: McpCallToolResult, fallback: string): string {

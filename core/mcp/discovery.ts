@@ -17,6 +17,46 @@ import type {
 } from './types';
 
 const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
+
+/**
+ * 传输层超时相对外层运行时超时的**提前量**。
+ *
+ * ⚠️⚠️ **必须让内层先到期，否则 MCP 自己的错误码永远拿不到。**
+ *
+ * `core/tool/runtime.ts` 的 `executeWithTimeout` 在 `providerRegistry.execute(...)`
+ * **之前**就建了一个 `AbortScope`，时长取自描述符的 `execution.timeoutMs`；而 MCP 那条链
+ * 在 `transports/common.ts` 的 `fetchWithTimeout` 里**又建一个**，时长也是同一个值
+ * （描述符的 `execution.timeoutMs` 就是 `server.timeouts.requestMs`，见 `client.ts`）。
+ * 同值定时器先建者先到期 ⇒ 外层赢。
+ *
+ * 而 `common.ts` 的 catch **第一个分支就是** `if (callerSignal?.aborted) throwSignalReason(callerSignal)`
+ * ⇒ 外层先 abort 时，内层根本走不到 `mcp_transport_timeout` 那一支，
+ * `McpTransportError('mcp_transport_timeout')` 的 `retryable: true` 也一起丢掉
+ * （外层结果是 `tool_execution_timeout` + `retryable: false`）。
+ * 同一类「服务端超时」在直连链与工具链上给出不同错误码与重试建议。
+ *
+ * ⇒ 这里把传给传输层的时长减一档，让内层先到期、保住它自己的语义。
+ * 外层退回它本来的职责：兜住**根本不看 signal** 的 provider。
+ *
+ * 取 500ms：够盖住调度抖动，又短到不影响任何工具的实际可用时间。
+ * 下限 1000ms 是防止「描述符声明了很小的超时（< 1500ms）」时减成负数或贴地。
+ */
+const MCP_TRANSPORT_TIMEOUT_BUFFER_MS = 500;
+const MCP_TRANSPORT_TIMEOUT_FLOOR_MS = 1_000;
+
+/**
+ * 外层给了 `budgetMs` 之后，传输层该拿多少。
+ *
+ * ⚠️ **抽成具名函数是为了可测** —— 内联在 `executeMcpToolCall` 里的话，那条
+ * 「内层必须早于外层到期」的判据没有任何行为入口（真跑一遍就是几百毫秒的计时断言，
+ * 又慢又不稳）。这里能直接喂边界值。
+ */
+export function resolveMcpTransportTimeoutMs(budgetMs: number): number {
+  return Math.max(
+    MCP_TRANSPORT_TIMEOUT_FLOOR_MS,
+    budgetMs - MCP_TRANSPORT_TIMEOUT_BUFFER_MS,
+  );
+}
 const discoveryTails = new Map<McpServerId, Promise<void>>();
 
 export async function refreshMcpServerDiscovery(
@@ -198,6 +238,10 @@ export async function executeMcpToolCall(
     };
   }
   const startedAt = Date.now();
+  // ⚠️ **这个值原样提交给外层运行时，传输层拿到的是它减去缓冲后的那一档**
+  // （理由见 `MCP_TRANSPORT_TIMEOUT_BUFFER_MS` 的注释）。
+  const budgetMs = options.timeoutMs ?? descriptor?.execution.timeoutMs ?? server.timeouts.requestMs;
+  const transportTimeoutMs = resolveMcpTransportTimeoutMs(budgetMs);
   try {
     const transport = createMcpTransport(server);
     await initializeMcpServer(server, transport, { signal: options.signal });
@@ -208,7 +252,7 @@ export async function executeMcpToolCall(
         provider: descriptor?.provider ?? call.provider,
       },
       descriptor,
-      timeoutMs: options.timeoutMs ?? descriptor?.execution.timeoutMs ?? server.timeouts.requestMs,
+      timeoutMs: transportTimeoutMs,
       maxResultBytes: options.maxResultBytes ?? descriptor?.execution.maxResultBytes ?? server.limits.maxResultBytes,
       signal: options.signal,
     });

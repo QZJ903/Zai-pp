@@ -151,6 +151,14 @@ export async function getBrowserControlState(): Promise<BrowserControlState> {
 export async function executeBrowserControlToolCall(
   call: ToolCall,
   locale: SupportedLocale,
+  /**
+   * 运行时的取消信号（由 `executeRuntimeToolCall` 按 `descriptor.execution.timeoutMs`
+   * 建出来，见 `core/tool/runtime.ts`）。
+   *
+   * ⚠️ **必须一路传到 `cdp.sendCommand`** —— `chrome.debugger.sendCommand` 自己没有超时，
+   * 页面卡死时那个 Promise 可以永不 settle；不传的话声明里的 `timeoutMs` 只是个数字。
+   */
+  signal?: AbortSignal,
 ): Promise<ToolResult> {
   if (!isBrowserControlToolName(call.name)) {
     return {
@@ -167,7 +175,7 @@ export async function executeBrowserControlToolCall(
   }
 
   const startedAt = Date.now();
-  const result = await browserControlService.execute(call.name, call.payload);
+  const result = await browserControlService.execute(call.name, call.payload, signal);
   const completedAt = Date.now();
   return {
     ok: result.ok,

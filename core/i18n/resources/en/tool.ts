@@ -9,6 +9,7 @@ export const tool = {
     authorizationDisabledHint: 'This tool is currently disabled. Enable it in tool settings and retry.',
     authorizationIdentityMissingHint: 'Identity information required for execution is missing. Re-run the action.',
     authorizationGenericHint: 'To continue, re-run the action and complete the authorization confirmation.',
+    timedOut: 'Tool timed out',
   },
   memory: {
     providerName: 'Zai++ Memory',

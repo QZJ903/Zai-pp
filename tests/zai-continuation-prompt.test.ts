@@ -47,6 +47,49 @@ function readResults(prompt: string, tag: 'tool_results' | 'tool_results_so_far'
   return JSON.parse(prompt.slice(start + tag.length + 3, end)) as Record<string, unknown>[];
 }
 
+describe('browser snapshot detail budget', () => {
+  it('keeps browser_snapshot detail up to 24k while action snapshots stay at 4k', () => {
+    // ⚠️⚠️ **只有 `browser_snapshot` 吃宽上限** —— 它是模型主动要的整页快照。
+    // 动作后自动补的快照（`includeSnapshotAfterActions`，默认开）必须仍走 4_000：
+    // 否则连续点击会让最近 4 条全变成 24_000 字符，prompt 直接涨到十万字符
+    // （实测 3 步全 browser 时 20_800 → 76 867 字符，+270%）。
+    const body = 'B'.repeat(20_000);
+    const asSnapshot = buildZaiContinuationPrompt(
+      '任务',
+      [execution({ name: 'browser_snapshot', result: { ok: true, summary: 'Captured', detail: body } })],
+      ['browser_snapshot'],
+    );
+    const asAction = buildZaiContinuationPrompt(
+      '任务',
+      [execution({ name: 'browser_click', result: { ok: true, summary: 'Clicked', detail: body } })],
+      ['browser_click'],
+    );
+
+    const snapshotDetail = readResults(asSnapshot)[0]!.detail as string;
+    const actionDetail = readResults(asAction)[0]!.detail as string;
+
+    // 宽档：20_000 字符原样保留（没有 `...[truncated]`）。
+    expect(snapshotDetail).toBe(body);
+    // 窄档：裁到 4_000 并显式标注。
+    expect(actionDetail.length).toBeLessThan(4_100);
+    expect(actionDetail).toContain('...[truncated]');
+  });
+
+  it('still caps browser_snapshot at 24k when the snapshot is larger', () => {
+    // ⚠️ 宽档不是「无上限」—— 24_000 是唯一约束 `browser_snapshot` 贡献量的地方，
+    // 因为 `buildZaiContinuationPrompt` 拼完之后到注入之间**没有任何总长检查**。
+    const body = 'B'.repeat(30_000);
+    const prompt = buildZaiContinuationPrompt(
+      '任务',
+      [execution({ name: 'browser_snapshot', result: { ok: true, summary: 'Captured', detail: body } })],
+      ['browser_snapshot'],
+    );
+    const detail = readResults(prompt)[0]!.detail as string;
+    expect(detail.length).toBeLessThan(24_100);
+    expect(detail).toContain('...[truncated]');
+  });
+});
+
 describe('zai continuation prompt recognition', () => {
   it('recognizes the continuation template', () => {
     const prompt = buildZaiContinuationPrompt('do the thing', NO_EXECUTIONS, ['shell_exec']);
@@ -274,6 +317,102 @@ describe('zai continuation prompt tool results', () => {
  * 窗口化：续跑每轮把整个执行历史重发一遍，不加窗口时上下文随步数线性增长
  * （25 步上限下实测约 90KB）。窗口化后稳定在常数级。
  */
+describe('only the newest accessibility snapshot keeps its body', () => {
+  /** 造一条「带快照」的结果 —— 两种形态都要能被判出来。 */
+  const snapshotExecution = (
+    name: string,
+    body: string,
+    meta: { urls?: string } = {},
+  ): ToolExecutionRecord => ({
+    name,
+    provider: { kind: 'local', id: 'browser_control', displayName: 'Browser', transport: 'in_process' },
+    result: {
+      ok: true,
+      summary: `Captured in ${name}`,
+      detail: `action done\n\n${body}`,
+      output: name === 'browser_snapshot'
+        // 主动快照：元数据在顶层
+        ? { url: meta.urls ?? 'https://x', title: 't', nodeCount: 400, truncated: false }
+        // 动作后补拍：元数据在 output.snapshot
+        : { tabId: 12, action: 'click', snapshot: { url: meta.urls ?? 'https://x', title: 't', nodeCount: 400, truncated: false } },
+    },
+  });
+
+  it('compresses older snapshots so their stale uids cannot mislead the model', () => {
+    // ⚠️⚠️ **这不是体积问题，是正确性问题** —— 快照的 uid 是 `e{序号}`（第 N 个节点），
+    // 而 `uidToBackendNodeId` 每次拍新快照都会 clear ⇒ 只有最新那份的 uid 有效。
+    // 旧快照留在 prompt 里，模型照着它的 e1 去点会**静默点到另一个元素**。
+    const results = readResults(buildZaiContinuationPrompt('任务', [
+      snapshotExecution('browser_click', '<OLD> e1 = 提交订单'),
+      snapshotExecution('browser_click', '<OLD2> e1 = 取消订单'),
+      snapshotExecution('browser_snapshot', '<NEWEST> e1 = 下一步'),
+    ], ['browser_click', 'browser_snapshot']));
+
+    // 最新那份保正文
+    expect(results[2]!.detail).toContain('<NEWEST>');
+    expect(results[2]!.windowed).toBeUndefined();
+    // 更早的两份：正文丢掉、带 windowed 标记
+    expect(results[0]!.windowed).toBe(true);
+    expect(results[1]!.windowed).toBe(true);
+    expect(results[0]!.detail).toBeUndefined();
+    expect(results[1]!.detail).toBeUndefined();
+    expect(JSON.stringify(results.slice(0, 2))).not.toContain('<OLD');
+  });
+
+  it('recognizes an action snapshot too, not just browser_snapshot', () => {
+    // ⚠️ 判 `output` 的形状而不是工具名 —— `includeSnapshotAfterActions` 默认开着，
+    // 所以 `browser_click` 也会带快照。按工具名判会漏掉这一整类。
+    const results = readResults(buildZaiContinuationPrompt('任务', [
+      snapshotExecution('browser_click', '<STALE>'),
+      snapshotExecution('browser_click', '<FRESH>'),
+    ], ['browser_click']));
+
+    expect(results[0]!.windowed).toBe(true);
+    expect(results[1]!.detail).toContain('<FRESH>');
+  });
+
+  it('does not compress anything when results carry no snapshot', () => {
+    // 反向用例：shell_exec 那类结果里没有快照 ⇒ 窗口内全部保完整。
+    const results = readResults(buildZaiContinuationPrompt('任务', [
+      execution({ name: 'shell_exec', result: { ok: true, summary: 'a', detail: 'd1' } }),
+      execution({ name: 'shell_exec', result: { ok: true, summary: 'b', detail: 'd2' } }),
+    ], ['shell_exec']));
+
+    expect(results.every((entry) => entry.windowed === undefined)).toBe(true);
+    expect(results.every((entry) => entry.detail !== undefined)).toBe(true);
+  });
+
+  it('bounds the summary of a full-detail entry too', () => {
+    // ⚠️ **完整档的 summary 原来完全没有上界** —— 压缩档有 400 的 clamp，完整档没有。
+    // 本地工具的 summary 是我们自己生成的固定串，但 MCP 那条路径的来自服务端。
+    // 没有这条 clamp 时，「压缩摘要」这件事对完整档不成立（实测 2000 字原样进 prompt）。
+    const results = readResults(buildZaiContinuationPrompt('任务', [
+      execution({ name: 'shell_exec', result: { ok: true, summary: 'y'.repeat(2_000), detail: 'd' } }),
+    ], ['shell_exec']));
+
+    expect(results[0]!.windowed, '这条在窗口内、没有快照 ⇒ 走完整档').toBeUndefined();
+    expect((results[0]!.summary as string).length).toBeLessThan(600);
+  });
+
+  it('keeps an old snapshot compressed even when it falls inside the recency window', () => {
+    // ⚠️ **两条规则叠加**：窗口内（最近 4 条）但含旧快照 ⇒ 仍压缩。
+    const executions = [
+      snapshotExecution('browser_snapshot', '<FIRST>'),
+      execution({ name: 'shell_exec', result: { ok: true, summary: 's', detail: 'd' } }),
+      snapshotExecution('browser_snapshot', '<SECOND>'),
+      execution({ name: 'shell_exec', result: { ok: true, summary: 's2', detail: 'd2' } }),
+    ];
+    const results = readResults(buildZaiContinuationPrompt('任务', executions, ['browser_snapshot', 'shell_exec']));
+
+    expect(results).toHaveLength(4);
+    // 全部 4 条都在窗口内，但只有第二份快照（index 2）保正文。
+    expect(results[0]!.windowed).toBe(true);
+    expect(results[2]!.detail).toContain('<SECOND>');
+    expect(results[1]!.detail).toBe('d');
+    expect(results[3]!.detail).toBe('d2');
+  });
+});
+
 describe('zai continuation prompt windows long tool result lists', () => {
   const many = (count: number) => Array.from(
     { length: count },
