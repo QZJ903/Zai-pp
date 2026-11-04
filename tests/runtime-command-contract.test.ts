@@ -28,13 +28,29 @@ import {
 } from './fixtures/runtime-contract/runtime';
 import { findTypeAliasDeclaration, parseTypeScriptSource } from './helpers/typescript-source';
 
+/**
+ * 文档正文里用的是**英文数词**（`Sixty-three names are shared`）。
+ *
+ * ⚠️ 只收录 0–99 里会出现在这份文档中的那些；**超出表就查表失败**，不许静默通过
+ * —— 数词写错与计数写错一样会让文档自相矛盾。`shared` 现在是 62，`declaredOnly` 是 2。
+ */
+const ENGLISH_NUMBER_WORDS: Record<number, string> = {
+  0: 'Zero', 1: 'One', 2: 'Two', 3: 'Three', 4: 'Four', 5: 'Five',
+  6: 'Six', 7: 'Seven', 8: 'Eight', 9: 'Nine', 10: 'Ten',
+  11: 'Eleven', 12: 'Twelve', 13: 'Thirteen', 14: 'Fourteen', 15: 'Fifteen',
+  16: 'Sixteen', 17: 'Seventeen', 18: 'Eighteen', 19: 'Nineteen', 20: 'Twenty',
+  27: 'Twenty-seven', 30: 'Thirty', 56: 'Fifty-six', 59: 'Fifty-nine',
+  60: 'Sixty', 62: 'Sixty-two', 63: 'Sixty-three', 64: 'Sixty-four',
+  65: 'Sixty-five', 89: 'Eighty-nine', 91: 'Ninety-one',
+};
+
 const backgroundSource = readFileSync('entrypoints/background.ts', 'utf8');
 const typesSource = readFileSync('core/types.ts', 'utf8');
 const inventorySource = readFileSync('docs/compatibility/runtime-command-inventory.md', 'utf8');
 const COMMAND_GROUP_SECTIONS = [
   ['Group A — Typed seam bootstrap (2)', 2],
   ['Group B — Persistence, library, and local preferences (41)', 41],
-  ['Group C — MCP, tool, browser control, and sandbox (31)', 31],
+  ['Group C — MCP, tool, browser control, and sandbox (30)', 30],
   ['Group D — DOM task lifecycle (3)', 3],
   ['Group E — Automation, usage, models, and lifecycle closure (13)', 13],
 ] as const;
@@ -81,10 +97,10 @@ describe('runtime command compatibility contract', () => {
       expect(commands, heading).toHaveLength(count);
       return commands;
     });
-    expect(groupedLedger).toHaveLength(90);
+    expect(groupedLedger).toHaveLength(89);
     expect(new Set(groupedLedger).size).toBe(groupedLedger.length);
     expectSortedEqual(groupedLedger, live);
-    expect(registryEntries).toHaveLength(92);
+    expect(registryEntries).toHaveLength(91);
     for (const contract of liveContracts) {
       const registered = RUNTIME_COMMAND_CONTRACTS[contract.type as keyof typeof RUNTIME_COMMAND_CONTRACTS];
       expect(registered.owner).toBe(getRuntimeCommandOwner(contract.type));
@@ -114,6 +130,56 @@ describe('runtime command compatibility contract', () => {
     expect(new Set(live).size).toBe(live.length);
     expect(new Set(declared).size).toBe(declared.length);
     for (const type of live) expect(getRuntimeCommandOwner(type)).toBeDefined();
+  });
+
+  it('keeps the inventory prose counts in sync with the frozen topology', () => {
+    // ⚠️⚠️ **这条守的是「文档正文里的数字」** —— 前面几条只校验**列表块**里的命令名，
+    // 而正文散文里那些计数（`declares 65 unique` / `Sixty-three names are shared` /
+    // `60/30` / `57 decoded`）**没有任何东西在读**。
+    // 实测后果：删掉 `APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK` 之后，列表块全部同步了、
+    // 契约测试全绿，而正文里 65 / 63 / 60 / 57 四处仍是旧值 ⇒ 这份自称
+    // "name-level authority" 的文档**自相矛盾**，且不会让任何用例变红。
+    //
+    // 判据：正文里出现的每个计数都必须等于 fixture 里对应字段。
+    const numbers = (pattern: RegExp) => matches(inventorySource, pattern);
+    const [liveCommands, declaredActions, shared, liveOnly, declaredOnly] = [
+      RUNTIME_TOPOLOGY.liveCommands,
+      RUNTIME_TOPOLOGY.declaredActions,
+      RUNTIME_TOPOLOGY.shared,
+      RUNTIME_TOPOLOGY.liveOnly,
+      RUNTIME_TOPOLOGY.declaredOnly,
+    ];
+
+    // ⚠️ `matches()` 只返回第 1 个捕获组，多组的地方要自己取。
+    const groups = (pattern: RegExp): string[][] => [...inventorySource.matchAll(pattern)]
+      .map((match) => match.slice(1).map(String));
+
+    expect(numbers(/declares (\d+) unique command names/g).map(Number), 'MessageAction 声明数')
+      .toEqual([declaredActions]);
+    // ⚠️ 数词在句首大写、句中全小写（`Sixty-two … and two are declared-only`）⇒ 归一成小写再比。
+    expect(
+      groups(/([\w-]+) names are shared, (\d+) are live-router-only, and ([\w-]+) are declared-only/g)
+        .map((row) => row.map((cell) => cell.toLowerCase())),
+      '共享 / 仅活路由 / 仅声明 三个计数',
+    ).toEqual([[
+      ENGLISH_NUMBER_WORDS[shared].toLowerCase(),
+      String(liveOnly),
+      ENGLISH_NUMBER_WORDS[declaredOnly].toLowerCase(),
+    ]]);
+    // ⚠️ 数词在句首大写、句中全小写（`Sixty-two … and two are declared-only`）
+    // ⇒ 上面那条比较要归一成小写再比。
+
+    expect(groups(/It freezes `89\/(\d+)\/(\d+)\/(\d+)\/(\d+)`/g).map((row) => row.map(Number)),
+      '契约测试段：declared / shared / liveOnly / declaredOnly')
+      .toEqual([[declaredActions, shared, liveOnly, declaredOnly]]);
+    expect(groups(/current `(\d+)\/(\d+)` payload access/g).map((row) => row.map(Number)),
+      '契约测试段：readsPayload / ignoresPayload')
+      .toEqual([[RUNTIME_TOPOLOGY.readsPayload, RUNTIME_TOPOLOGY.ignoresPayload]]);
+    expect(numbers(/(\d+) decoded \/ 0 direct-cast/g).map(Number), '契约测试段：decoded 数')
+      .toEqual([RUNTIME_TOPOLOGY.decodedPayloads]);
+    expect(groups(/`(\d+) typed \/ 0 legacy \/ (\d+) client-only`/g).map((row) => row.map(Number)),
+      '所有者模型段：typed / client-only')
+      .toEqual([[liveCommands, declaredOnly]]);
   });
 
   it('freezes serializable request and response families without creating a second router', () => {

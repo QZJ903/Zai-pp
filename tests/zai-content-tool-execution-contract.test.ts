@@ -661,6 +661,41 @@ describe('every finished turn seals its tool block', () => {
     ).toBe(true);
   });
 
+    it('logs dropped tool history records at log level from the content script', () => {
+    // ⚠️⚠️ **丢弃信号必须打在内容脚本里，因为后台的 `console` 用户看不见**：
+    // `history.ts` 跑在 service worker，它的 log 只出现在 `chrome://extensions` 的
+    // SW 控制台；而**用户按 F12 看到的是页面控制台**。所以「丢了几条」这个数要从
+    // 后台带过边界、由 `loadToolHistory` 打出来。
+    //
+    // 判据两条，缺一不可：
+    // ① 那个函数体里有 `console.log`；
+    // ② **不能有 `console.error`** —— 丢弃坏记录是**自愈动作**（下次写入会清掉它们），
+    //    打成 error 会让扩展错误面板长期挂红。
+    //
+    // ⚠️ `loadToolHistory` 是**传给 `createToolPanelController` 的对象字面量属性**
+    // （不是模块顶层函数声明）⇒ 不能用 `findFunctionBody`，要按属性名找。
+    const program = readContentProgram();
+    let body: t.Node | undefined;
+    walkReachable(program as unknown as t.Node, (node) => {
+      if (!t.isObjectProperty(node) || !isNamedKey(node.key, 'loadToolHistory')) return;
+      const value = node.value;
+      if (t.isArrowFunctionExpression(value) && t.isBlockStatement(value.body)) body = value.body;
+      if (t.isFunctionExpression(value) && t.isBlockStatement(value.body)) body = value.body;
+    });
+    expect(body, '应当能按属性名找到 loadToolHistory 的函数体').toBeDefined();
+
+    const consoleMethods: string[] = [];
+    walkReachable(body!, (node) => {
+      if (!t.isMemberExpression(node)) return;
+      if (!t.isIdentifier(node.object, { name: 'console' })) return;
+      if (!t.isIdentifier(node.property)) return;
+      consoleMethods.push(node.property.name);
+    });
+
+    expect(consoleMethods, '必须有 console.log 打丢弃信号').toContain('log');
+    expect(consoleMethods, '丢弃是可自愈的降级，不许打成 error').not.toContain('error');
+  });
+
   it('writes the assistant message anchor into the tool call source', () => {
     // ⚠️⚠️ **存储腿自带锚点这条链路的唯一发送点，此前零覆盖**（实测：删掉那行展开，
     // 当时全量 1629 条用例 + `tsc` **全绿**）。它的字段是 `string | null` 的可选字段，

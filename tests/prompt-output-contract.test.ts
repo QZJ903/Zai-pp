@@ -8,13 +8,7 @@ import { buildPromptAugmentation } from '../core/prompt';
 import {
   createMemoryToolDescriptors,
   createToolInvocationCatalog,
-  getToolCloseTag,
-  getToolOpenTag,
 } from '../core/tool';
-import {
-  appendExternalizedToolPayloadChunk,
-  takeExternalizedToolPayloadText,
-} from '../core/tool/externalized-payload';
 import { findFirstXmlToolTag, getPartialXmlToolTagTailLength } from '../core/tool/xml-tags';
 import type { ToolDescriptor } from '../core/types';
 
@@ -54,7 +48,9 @@ describe('tool XML compatibility contract', () => {
 
     expectUtf8Golden('tools/catalog-and-tags.json', JSON.stringify({
       invocationNames: catalog.invocationNames,
-      tags: catalog.invocationNames.map((name) => [getToolOpenTag(name), getToolCloseTag(name)]),
+      // ⚠️ 直接拼标签：`getToolOpenTag` / `getToolCloseTag` 两个 helper 已删（零生产消费者），
+      // 而它们本身就只是 `` `<${name}>` `` 的一行包装 —— 冻结的是**产物**，不是那两个函数。
+      tags: catalog.invocationNames.map((name) => [`<${name}>`, `</${name}>`]),
       opening: findFirstXmlToolTag(text, names, { closing: false }),
       closing: findFirstXmlToolTag(text, names, { closing: true }),
       partialOpeningTail: getPartialXmlToolTagTailLength('prefix < mcp_shell_local_shell', names, { closing: false }),
@@ -63,17 +59,6 @@ describe('tool XML compatibility contract', () => {
       partialOpeningNineSpaces: getPartialXmlToolTagTailLength(`<${' '.repeat(9)}mcp_shell_local_shell`, names, { closing: false }),
       completeOpeningNineSpaces: findFirstXmlToolTag(`<${' '.repeat(9)}shell_exec>`, names, { closing: false }),
     }, null, 2));
-  });
-
-  it('freezes one-shot deletion after an externalized payload name mismatch', () => {
-    appendExternalizedToolPayloadChunk(
-      'contract-mismatched-take',
-      'capture_page',
-      '{"url":"https://example.test/contracts"}',
-    );
-
-    expect(takeExternalizedToolPayloadText('contract-mismatched-take', 'shell_exec')).toBeNull();
-    expect(takeExternalizedToolPayloadText('contract-mismatched-take', 'capture_page')).toBeNull();
   });
 });
 

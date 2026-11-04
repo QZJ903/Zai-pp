@@ -5,6 +5,8 @@ import {
   normalizeBackgroundConfig,
 } from '../../../core/background/config';
 import { decodeRuntimeConfigResponse } from '../../../core/messaging/bootstrap-client';
+import { MEMORY_RECORD_MISSING_CODE } from '../../../core/messaging/error-code';
+import { getRuntimeErrorMessage } from '../runtime-response';
 import type {
   BackgroundConfig,
   Memory,
@@ -319,7 +321,19 @@ export function useSettingsController() {
       if (typeof id !== 'number' || !Number.isSafeInteger(id)) {
         throw new Error('Memory id is missing.');
       }
-      await libraryController.deleteMemory(id);
+      try {
+        await libraryController.deleteMemory(id);
+      } catch (error) {
+        // ⚠️ **「这一条已经不在了」在这里算成功，不报错** —— 本函数的语义是
+        // 「让这些 id 都不存在」，已经不在了 ⇒ 目标已达成。
+        // ⚠️ **与记忆页单条删除的口径不同是有意的**：那里「不在了」是**意外**
+        // （用户以为删掉了、其实这条早被别处删了，界面要告诉他），而这里是**遍历清空**，
+        // 中间任何一条被别处删掉都属正常竞态；把它当失败会让整个「清空全部」中断在
+        // 半路，且报出一个用户无法理解的蛇形码。
+        // ⚠️ **其它错误照抛** —— 存储坏了、配额满了这些必须让用户看见。
+        if (getRuntimeErrorMessage(error) === MEMORY_RECORD_MISSING_CODE) continue;
+        throw error;
+      }
     }
     setMemoryCount(0);
   }, []);

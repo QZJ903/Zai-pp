@@ -13,6 +13,7 @@ import type {
   ToolResult,
 } from '../core/tool/types';
 import { TOOL_HISTORY_STORAGE_KEY } from '../core/tool/history';
+import { trustedContext } from './helpers/trusted-tool-context';
 
 describe('runtime tool history persistence', () => {
   beforeEach(() => {
@@ -36,7 +37,7 @@ describe('runtime tool history persistence', () => {
 
   it('returns the provider result when history exceeds storage quota', async () => {
     const { execute, runtime, call } = createProviderRuntime();
-    const result = await runtime.executeToolCall(call, 'test', 'en');
+    const result = await runtime.executeToolCall(call, trustedContext('test'), 'en');
 
     expect(result).toEqual({ ok: true, summary: 'provider completed' });
     expect(execute).toHaveBeenCalledTimes(1);
@@ -58,7 +59,7 @@ describe('runtime tool history persistence', () => {
       },
     });
 
-    await expect(executeRuntimeToolCall(unsupportedToolCall(), 'manual_chat', 'en'))
+    await expect(executeRuntimeToolCall(unsupportedToolCall(), trustedContext('manual_chat'), 'en'))
       .rejects.toThrow('storage schema mismatch');
   });
 
@@ -75,7 +76,7 @@ describe('runtime tool history persistence', () => {
     });
     const { execute, runtime, call } = createProviderRuntime();
 
-    const error = await runtime.executeToolCall(call, 'test', 'en').catch((failure) => failure);
+    const error = await runtime.executeToolCall(call, trustedContext('test'), 'en').catch((failure) => failure);
 
     expect(execute).toHaveBeenCalledTimes(1);
     expect(error).toMatchObject({
@@ -111,7 +112,7 @@ describe('runtime tool history persistence', () => {
     });
     const { execute, runtime, call } = createProviderRuntime();
 
-    await expect(runtime.executeToolCall(call, 'test', 'en')).rejects.toMatchObject({
+    await expect(runtime.executeToolCall(call, trustedContext('test'), 'en')).rejects.toMatchObject({
       code: 'tool_post_effect_persistence_failed',
       retryable: false,
       externalOutcome: 'ambiguous',

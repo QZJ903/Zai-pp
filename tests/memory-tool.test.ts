@@ -6,6 +6,7 @@ import {
   type MemoryToolRuntime,
 } from '../core/tool/memory';
 import type { ToolCall } from '../core/tool/types';
+import { MEMORY_RECORD_MISSING_CODE } from '../core/messaging/error-code';
 
 function memorySaveCall(payload: Record<string, unknown>): ToolCall {
   return {
@@ -386,5 +387,87 @@ describe('memory_update rejects blank fields instead of leaking a store error', 
 
     expect(result.ok).toBe(true);
     expect(written[0].name).toBe('  新标题  ');
+  });
+
+  it('turns a store-level "row is gone" into a user-facing not-found result', async () => {
+    // ⚠️ **存储层拒绝与工具层失败是两件事** —— `deleteMemory` 在事务内查不到那条就抛
+    // `memory_record_missing`，不接的话它会冒泡到后台通用 catch、被包成
+    // `background_tool_execution_failed` 连同英文 message 回给模型。
+    const runtime: MemoryToolRuntime = {
+      async saveMemory() { return { id: 1 }; },
+      async getMemoryById() { return null; },
+      async updateMemory() {},
+      async deleteMemory() { throw new Error(MEMORY_RECORD_MISSING_CODE); },
+    };
+    const result = await executeMemoryToolCall(runtime, {
+      name: 'memory_delete',
+      payload: { id: 4242 },
+      raw: '<memory_delete />',
+    }, 'en');
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('memory_not_found');
+    expect(result.error?.message).not.toContain('memory_record_missing');
+  });
+
+  it('still reports a successful delete when the store accepts it', async () => {
+    const deleted: number[] = [];
+    const runtime: MemoryToolRuntime = {
+      async saveMemory() { return { id: 1 }; },
+      async getMemoryById() { return null; },
+      async updateMemory() {},
+      async deleteMemory(id) { deleted.push(id); },
+    };
+    const result = await executeMemoryToolCall(runtime, {
+      name: 'memory_delete',
+      payload: { id: 7 },
+      raw: '<memory_delete />',
+    }, 'en');
+
+    expect(result.ok).toBe(true);
+    expect(deleted).toEqual([7]);
+  });
+
+  it.each([true, [7], 3.7, '0x10', {}, null])(
+    'rejects a non-integer memory_delete id (%s) instead of coercing it',
+    async (id) => {
+      // schema 声明的是 `integer`，而裸 `Number()` 会把 `true` 转成 1、`[7]` 转成 7、
+      // `3.7` 原样放行、`'0x10'` 转成 16 ⇒ 模型发个 `{"id": true}` 就会删掉第 1 条。
+      let called = 0;
+      const runtime: MemoryToolRuntime = {
+        async saveMemory() { return { id: 1 }; },
+        async getMemoryById() { return null; },
+        async updateMemory() {},
+        async deleteMemory() { called += 1; },
+      };
+      const result = await executeMemoryToolCall(runtime, {
+        name: 'memory_delete',
+        payload: { id },
+        raw: '<memory_delete />',
+      }, 'en');
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('memory_invalid_id');
+      expect(called).toBe(0);
+    },
+  );
+
+  it('still accepts a numeric string id, which is a legal integer spelling', async () => {
+    // XML 里取值常带引号（`{"id":"7"}`），那是合法写法，不该因为引号被拒。
+    const deleted: number[] = [];
+    const runtime: MemoryToolRuntime = {
+      async saveMemory() { return { id: 1 }; },
+      async getMemoryById() { return null; },
+      async updateMemory() {},
+      async deleteMemory(id) { deleted.push(id); },
+    };
+    const result = await executeMemoryToolCall(runtime, {
+      name: 'memory_delete',
+      payload: { id: '7' },
+      raw: '<memory_delete />',
+    }, 'en');
+
+    expect(result.ok).toBe(true);
+    expect(deleted).toEqual([7]);
   });
 });

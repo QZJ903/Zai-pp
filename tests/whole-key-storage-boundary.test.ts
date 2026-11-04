@@ -64,7 +64,7 @@ describe('whole-key persistence boundaries', () => {
 
     const mcpController = readFileSync('entrypoints/sidepanel/controllers/mcp-tools-controller.ts', 'utf8');
     expect(mcpController).toContain('sidepanelRuntimeClient');
-    expect(mcpController).toContain("decodeToolCallHistory(value, 'GET_TOOL_CALL_HISTORY response')");
+    expect(mcpController).toContain("decodeToolCallHistoryEnvelope(value, 'GET_TOOL_CALL_HISTORY response')");
   });
 
   it('keeps the sidepanel off the raw runtime channel entirely', () => {

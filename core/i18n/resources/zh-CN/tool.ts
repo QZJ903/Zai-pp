@@ -72,9 +72,11 @@ export const tool = {
     tagsDescription: 'Tags to add to imported memories',
     previewReady: '记忆导入预览已就绪（{count}）',
     previewDetail: '跳过 {duplicates} 条重复，拒绝 {rejected} 条',
+    previewOmitted: '另有 {omitted} 条超出单次预览上限，未列出（请分批导入）。',
     failed: '记忆导入失败',
     result: {
       metaSummary: '{count} 条记忆 · {duplicates} 条重复',
+      metaSummaryTruncated: '{count} 条记忆 · {duplicates} 条重复 · 另有 {omitted} 条未列出',
       importMemories: '导入记忆',
       importing: '导入中...',
       imported: '已导入 {count} 条',

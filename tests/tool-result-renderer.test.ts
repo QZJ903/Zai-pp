@@ -106,6 +106,31 @@ describe('tool result renderer registry', () => {
     expect(target.textContent).toContain('Import memories');
   });
 
+  it('surfaces how many drafts were dropped by the preview limit', () => {
+    // ⚠️ 卡片只列前 5 个名字，用户本来就看不出全貌 ⇒ 少掉的 100 条与「本来就只有
+    // 100 条」在旧表头下完全同形。`omitted` 是唯一的信号。
+    registerDefaultToolResultRenderers(createActions());
+    const target = document.createElement('div');
+    const result = memoryImportResult();
+    (result.output as Record<string, unknown>).omitted = 100;
+
+    expect(renderToolResultWithRegistry({ target, result, locale: 'en' })).toBe(true);
+    expect(target.textContent).toContain('100 more not listed');
+  });
+
+  it('treats a missing omitted count as zero for records stored before the field existed', () => {
+    // 老记录没有这个字段；判它必填会让那张卡片**整块退回纯文本**（按钮一起消失）。
+    registerDefaultToolResultRenderers(createActions());
+    const target = document.createElement('div');
+
+    expect(renderToolResultWithRegistry({
+      target,
+      result: memoryImportResult(),
+      locale: 'en',
+    })).toBe(true);
+    expect(target.textContent).not.toContain('not listed');
+  });
+
   it('saves the Skill through the injected action on a trusted click', async () => {
     const actions = createActions();
     registerDefaultToolResultRenderers(actions);

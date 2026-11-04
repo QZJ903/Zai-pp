@@ -40,14 +40,14 @@ import type { ToolCall, ToolDescriptor, ToolResult } from '../core/tool/types';
 import { createToolInvocationCatalog, createToolCallFromInvocation } from '../core/tool/invocation';
 import { authorizeToolExecution } from '../core/tool/authorization';
 import { createMcpInvocationName } from '../core/mcp/descriptor-identity';
-import {
-  appendExternalizedToolPayloadChunk,
-  createExternalizedToolPayload,
-} from '../core/tool/externalized-payload';
 
 // 真实形状：MCP 长 invocation name（由生产同一个函数派生，不手抄）。
 const SHELL_EXEC_INVOCATION_NAME = createMcpInvocationName(SHELL_SERVER_ID, 'shell_exec');
 
+/** 后台自己发起工具调用时用的身份对象（`executeToolCall` 的第二参只收这个形状）。 */
+function trustedContext(trigger: 'manual_chat' | 'agent_run' | 'automation' | 'test' | 'sidepanel_chat') {
+  return { kind: 'trusted' as const, trigger, requestId: 'test-request' };
+}
 /** 真实形状的 shell_exec descriptor：短 name + MCP 长 invocationName。 */
 const shellExecDescriptor: ToolDescriptor = {
   id: `mcp:${SHELL_SERVER_ID}:shell_exec`,
@@ -128,34 +128,6 @@ describe('resolveToolCallPayload cwd 归一化 — 普通（内联 XML）分支'
   });
 });
 
-describe('resolveToolCallPayload cwd 归一化 — 外部化载荷分支', () => {
-  // 外部化分支的 cwd 判据同样取 `call.name`：载荷自带的 `invocationName` 是标签原文
-  // （`createExternalizedToolPayload` 记的那个），拿它比白名单会重蹈同一个坑。
-  it('外部化 shell_exec 载荷 → cwd 仍被归一化（判据不取自载荷里的标签名）', async () => {
-    const callId = 'call-external-cwd';
-    // 分块条目按 `namespace\0ref` 存（namespace 就是 grant.id），与 runtime 的取法一致。
-    appendExternalizedToolPayloadChunk(
-      callId,
-      SHELL_EXEC_INVOCATION_NAME,
-      '{"command":"pwd","cwd":"C:\\\\"}',
-      'grant-1',
-    );
-    const call: ToolCall = {
-      id: callId,
-      descriptorId: shellExecDescriptor.id,
-      provider: shellExecDescriptor.provider,
-      name: shellExecDescriptor.name,
-      invocationName: shellExecDescriptor.invocationName,
-      payload: createExternalizedToolPayload(callId, SHELL_EXEC_INVOCATION_NAME),
-      raw: '<shell_exec>...[payload externalized]</shell_exec>',
-    };
-
-    const out = await resolveToolCallPayload(call, 'grant-1');
-    expect(out.parseError).toBeUndefined();
-    expect((out.payload as { cwd?: string }).cwd).toBe(TEST_SKILL_DIR);
-  });
-});
-
 describe('resolveToolCallPayload cwd 归一化 — 解析器→runtime 端到端', () => {
   // 用真实解析器产出 call（模型吐的是短标签 `<shell_exec>`，而 catalog 会把它
   // 归一到 descriptor 的权威 invocationName —— 这正是长名进入调用链的入口）。
@@ -168,7 +140,6 @@ describe('resolveToolCallPayload cwd 归一化 — 解析器→runtime 端到端
         (descriptors as readonly ToolDescriptor[]).find(
           (d) => d.id === (call as ToolCall).descriptorId,
         ) ?? shellExecDescriptor,
-      externalPayloadNamespace: 'grant-1',
       reservation: { grantId: 'grant-1', callId: (call as ToolCall).id ?? 'call-1' },
       trigger: 'manual_chat',
     }));
@@ -202,7 +173,7 @@ describe('resolveToolCallPayload cwd 归一化 — 解析器→runtime 端到端
     };
     const runtime = createRuntimeToolRuntime(new ToolProviderRegistry([provider]));
 
-    await runtime.executeToolCall(parsed, 'manual_chat');
+    await runtime.executeToolCall(parsed, trustedContext('manual_chat'));
 
     expect(providerCalls).toHaveLength(1);
     expect((providerCalls[0].payload as { cwd?: string }).cwd).toBe(TEST_SKILL_DIR);

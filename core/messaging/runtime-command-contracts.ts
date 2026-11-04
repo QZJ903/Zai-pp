@@ -118,10 +118,6 @@ export const RUNTIME_COMMAND_CONTRACTS = {
   REFRESH_TOOL_DESCRIPTORS: typedCommand('none', 'value'),
   CREATE_TOOL_AUTHORIZATION: typedCommand('payload-decoded', 'value-or-domain-error'),
   CLOSE_TOOL_AUTHORIZATION: typedCommand('payload-decoded', 'status-or-domain-error'),
-  APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK: typedCommand(
-    'payload-decoded',
-    'status-or-domain-error-or-tool-result',
-  ),
   EXECUTE_TOOL_CALL: typedCommand('payload-decoded', 'tool-result', 'tool-error'),
   GET_TOOL_CALL_HISTORY: typedCommand('payload-decoded', 'value', 'background-error', 'live-and-declared', 'optional'),
   CLEAR_TOOL_CALL_HISTORY: typedCommand('none', 'ack'),

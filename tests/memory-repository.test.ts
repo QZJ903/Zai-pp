@@ -176,6 +176,31 @@ describe('Memory repository transaction and codec boundaries', () => {
     await expect(memories.toArray()).resolves.toEqual([]);
   });
 
+  it('rejects a delete whose row no longer exists instead of reporting success', async () => {
+    const { db, deleteMemory } = await import('../core/memory/store');
+    const memories = db.table(MEMORY_TABLE_NAME);
+    // 与 update 那一半同口径：`table.delete()` 恒 resolve、不返回计数（底层
+    // `IDBObjectStore.delete()` 对不存在的键也不报错）⇒ 必须自己先在同一事务里查一次。
+    await expect(deleteMemory(4242)).rejects.toThrow(MEMORY_RECORD_MISSING_CODE);
+    await expect(memories.toArray()).resolves.toEqual([]);
+  });
+
+  it('deletes a row that exists and leaves the others untouched', async () => {
+    const { db, deleteMemory, importMemoriesAtomically } = await import('../core/memory/store');
+    const memories = db.table(MEMORY_TABLE_NAME);
+    await importMemoriesAtomically([
+      { type: 'user', name: 'keep', content: 'keep me', description: '', tags: [], pinned: false },
+      { type: 'user', name: 'drop', content: 'drop me', description: '', tags: [], pinned: false },
+    ]);
+    const before = await memories.toArray();
+    const target = before.find((row) => (row as { name?: string }).name === 'drop') as { id: number };
+
+    await expect(deleteMemory(target.id)).resolves.toBeUndefined();
+    const after = await memories.toArray();
+    expect(after).toHaveLength(1);
+    expect((after[0] as { name?: string }).name).toBe('keep');
+  });
+
   it('lets the raw recovery path restore opaque corrupt rows without codec downgrade', async () => {
     const {
       captureRawMemoryRecordsForSyncRecovery,

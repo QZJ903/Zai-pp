@@ -22,7 +22,7 @@ describe('sidepanel MCP and Tools controller', () => {
       if (request.type === 'GET_MCP_SERVERS') return [server];
       if (request.type === 'GET_PLATFORM_CAPABILITIES') return platform;
       if (request.type === 'GET_MCP_TOOL_CACHE') return null;
-      if (request.type === 'GET_TOOL_CALL_HISTORY') return [];
+      if (request.type === 'GET_TOOL_CALL_HISTORY') return { records: [], dropped: 0 };
       if (request.type === 'GET_MCP_CAPABILITY_SETTINGS') return capabilitySettings;
       throw new Error(`Unexpected command: ${request.type}`);
     }));

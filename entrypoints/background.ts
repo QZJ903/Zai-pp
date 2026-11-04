@@ -46,11 +46,7 @@ import {
   runLocalStateMutationWithRecovery,
 } from '../core/sync/local-apply-runtime';
 import { createSyncRecoveryBarrier } from '../core/sync/recovery-barrier';
-import { clearToolCallHistory, getToolCallHistory } from '../core/tool/history';
-import {
-  appendExternalizedToolPayloadChunk,
-  clearExternalizedToolPayloadNamespace,
-} from '../core/tool/externalized-payload';
+import { clearToolCallHistory, getToolCallHistoryReport } from '../core/tool/history';
 import {
   createInvalidToolCallResult,
   createRuntimeToolRuntime,
@@ -66,12 +62,9 @@ import {
 } from '../core/mcp/capability-settings';
 import { projectMcpCapabilityDescriptors } from '../core/mcp/capability-projection';
 import {
-  authorizeExternalToolPayloadChunk,
   closeToolAuthorization,
   createToolAuthorization,
-  createToolAuthorizationResult,
 } from '../core/tool/authorization';
-import { ExternalPayloadAuthorizationCache } from '../core/tool/external-payload-authorization-cache';
 import {
   browserControlService,
   getBrowserControlSettings,
@@ -227,7 +220,6 @@ const zaiModelCatalog = createZaiModelCatalog({
   resolveOrigin: () => readCurrentZaiSiteOrigin(CURRENT_SITE_READ_TIMEOUT_MS),
   fetchImpl: (input, init) => fetch(input, init),
 });
-const externalPayloadAuthorizationCache = new ExternalPayloadAuthorizationCache();
 const {
   executeToolCall: executeRuntimeToolCall,
   getAuthorizationDescriptors: getRuntimeAuthorizationDescriptors,
@@ -415,14 +407,9 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
           );
         },
         closeToolAuthorization,
-        authorizeExternalToolPayloadChunk,
-        createToolAuthorizationResult,
         createInvalidToolCallResult,
-        externalPayloadAuthorizationCache,
-        appendExternalizedToolPayloadChunk,
-        clearExternalizedToolPayloadNamespace,
         executeToolCall: executeRuntimeToolCall,
-        getToolCallHistory,
+        getToolCallHistory: getToolCallHistoryReport,
         clearToolCallHistory,
         getPlatformEnvironment: getCurrentPlatformEnvironment,
         createRequestId: () => crypto.randomUUID(),

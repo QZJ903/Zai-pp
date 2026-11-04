@@ -31,7 +31,8 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.append(container);
   root = null;
-  historyResponse = [toolHistoryRecord];
+  // ⚠️ 响应是 `{ records, dropped }` 而不是裸数组（dropped 给内容脚本打页面日志用）。
+  historyResponse = { records: [toolHistoryRecord], dropped: 0 };
 
   vi.stubGlobal('chrome', {
     runtime: {

@@ -1,7 +1,6 @@
 import { DEFAULT_LOCALE, type SupportedLocale } from '../i18n/background';
 import { createMemoryToolDescriptors } from './memory';
 import type { ToolCall, ToolDescriptor, ToolError, ToolPayload } from './types';
-import { findFirstXmlToolTag } from './xml-tags';
 
 export function createDefaultToolDescriptors(
   locale: SupportedLocale = DEFAULT_LOCALE,
@@ -85,7 +84,7 @@ export function createToolCallFromInvocation(
   payload: ToolPayload,
   raw: string,
   catalog: ToolInvocationCatalog,
-  options?: { parseError?: ToolError; id?: string; localSkillDir?: string },
+  options?: { parseError?: ToolError; id?: string },
 ): ToolCall {
   const descriptor =
     catalog.descriptorByInvocationName.get(invocationName) ||
@@ -101,12 +100,6 @@ export function createToolCallFromInvocation(
     parseError: options?.parseError,
   };
   if (options?.id) call.id = options.id;
-  // localSkillDir is only a trusted internal injection point for the "request-
-  // level cwd hint": its source is the parser's activeLocalSkillDir (upstream
-  // requestContext.activeLocalSkillDir, injected by content.ts's augment result
-  // via fetch-hook, NOT the page/model message body). The untrusted page field
-  // is stripped at runtime.ts:resolveToolCallPayload.
-  if (options?.localSkillDir) call.localSkillDir = options.localSkillDir;
   return call;
 }
 
@@ -127,32 +120,6 @@ export function getPreferredToolInvocationName(
   const directName = descriptor.name.trim();
   if (directName && names.includes(directName)) return directName;
   return names[0] ?? descriptor.invocationName;
-}
-
-export function getToolInvocationLabel(
-  name: string,
-  catalog: ToolInvocationCatalog = createToolInvocationCatalog(),
-): string {
-  const descriptor =
-    catalog.descriptorByInvocationName.get(name) ||
-    catalog.descriptorByName.get(name);
-  return descriptor?.title || name;
-}
-
-export function getToolOpenTag(invocationName: string): string {
-  return `<${invocationName}>`;
-}
-
-export function getToolCloseTag(invocationName: string): string {
-  return `</${invocationName}>`;
-}
-
-export function hasXmlToolMarker(text: string, catalog: ToolInvocationCatalog): boolean {
-  const names = new Set(catalog.invocationNames);
-  return Boolean(
-    findFirstXmlToolTag(text, names, { closing: false }) ||
-    findFirstXmlToolTag(text, names, { closing: true }),
-  );
 }
 
 function addInvocationName(

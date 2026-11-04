@@ -1,6 +1,7 @@
 import type { Memory, MemoryType, NewMemory } from '../types';
 import { MEMORY_CONTENT_MAX_CHARS } from '../constants';
 import { DEFAULT_LOCALE, translate, type SupportedLocale } from '../i18n/background';
+import { MEMORY_RECORD_MISSING_CODE } from '../messaging/error-code';
 import type {
   JsonValue,
   ToolCall,
@@ -138,8 +139,6 @@ export function createMemoryToolDescriptors(
   },
   ];
 }
-
-export const MEMORY_TOOL_DESCRIPTORS: ToolDescriptor[] = createMemoryToolDescriptors(DEFAULT_LOCALE);
 
 export function isMemoryToolName(name: string): name is MemoryToolName {
   return (MEMORY_TOOL_NAMES as readonly string[]).includes(name);
@@ -417,8 +416,27 @@ async function deleteExistingMemory(
   const id = numberValue(call.payload.id);
   if (!id) return failure(call, 'memory_invalid_id', translate(locale, 'tool.memory.invalidId'), undefined, false);
 
-  await runtime.deleteMemory(id);
+  // ⚠️ **存储层拒绝「行不存在」时必须折成工具层的失败** —— `deleteMemory` 在事务内
+  // 查不到那条就抛 `memory_record_missing`，不接的话它会一路冒泡到后台的通用 catch，
+  // 被包成 `background_tool_execution_failed` 连同英文 message 回给模型。
+  // 这里改成与 `memory_update` 同一个 `memory_not_found` 码，两条删除路径口径一致。
+  try {
+    await runtime.deleteMemory(id);
+  } catch (error) {
+    if (!isMissingRecordError(error)) throw error;
+    return failure(
+      call,
+      'memory_not_found',
+      translate(locale, 'tool.memory.notFound'),
+      translate(locale, 'tool.memory.notFoundDetail', { id }),
+      false,
+    );
+  }
   return success(call, locale, translate(locale, 'tool.memory.deleted'), `#${id}`);
+}
+
+function isMissingRecordError(error: unknown): boolean {
+  return error instanceof Error && error.message === MEMORY_RECORD_MISSING_CODE;
 }
 
 function success(
@@ -471,9 +489,24 @@ function requiredStringValue(value: unknown): string {
   return typeof value === 'string' && value.trim().length > 0 ? value : '';
 }
 
+/**
+ * `memory_update` / `memory_delete` 的 `id` 解析。
+ *
+ * ⚠️⚠️ **判据必须是「先看类型、再看是不是整数」，光加 `Number.isInteger` 不够** ——
+ * 两份 schema 都把 `id` 声明成 `{ type: 'integer' }`，而裸 `Number()` 会做隐式转换：
+ * `Number(true) === 1`（**是整数**！）、`Number([9]) === 9`、`Number('0x10') === 16`。
+ * ⇒ 只加 `Number.isInteger` 的话 `{"id": true}` 照样删掉 #1。
+ * 所以先挡掉布尔 / 数组 / 对象这些**根本不是数字**的输入，再判整数。
+ * ⚠️ **数字字符串仍然接受** —— 模型从 XML 里取值时常带引号（`{"id":"7"}`），
+ * 那是一个合法的整数写法，不该因为引号被拒。
+ */
 function numberValue(value: unknown): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && /^\s*\d+\s*$/.test(value)
+      ? Number(value)
+      : Number.NaN;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
 }
 
 function memoryTypeValue(value: unknown): MemoryType | null {

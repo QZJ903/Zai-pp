@@ -78,6 +78,31 @@ export interface ToolHistoryRecordLike {
   createdAt: number;
 }
 
+/**
+ * `GET_TOOL_CALL_HISTORY` 的响应形状 —— **一个窄化视图，不是第二份权威**。
+ *
+ * ⚠️ **权威是 `ToolCallHistoryReadResult`**（`core/tool/history.ts`，已从 `core/tool`
+ * 的 barrel 导出）。这里只声明面板**真正会读**的那几样：面板只取 `record.call.name` /
+ * `raw` / `source.*` / `result` / `createdAt`，不需要 `ToolCall` 的 `payload` 等字段。
+ *
+ * ⚠️⚠️ **下面的编译期断言守的就是「两边不许漂移」** —— 权威形状一旦改了这里接不住的字段，
+ * `tsc` 立刻报错，而不是等运行时面板静默少读一个字段。
+ * ⚠️ **不是裸数组** —— `dropped` 要带到**内容脚本**才有人看得到：后台的 `console`
+ * 只出现在 `chrome://extensions` 的 service worker 控制台，而用户按 F12 看的是页面控制台。
+ */
+export interface ToolCallHistoryReadResultLike {
+  records: ToolHistoryRecordLike[];
+  dropped: number;
+}
+
+type AuthorityAssignableToPanelView =
+  import('../tool/history').ToolCallHistoryReadResult extends ToolCallHistoryReadResultLike
+    ? true
+    : never;
+/** 恒 `true`；写成值是为了让 `tsc` 真的实例化那个条件类型（纯类型别名不赋值不会报错）。 */
+const PANEL_VIEW_MATCHES_AUTHORITY: AuthorityAssignableToPanelView = true;
+void PANEL_VIEW_MATCHES_AUTHORITY;
+
 /** 一条历史腿记录（过桥之后的形状）。 */
 export interface HistoryToolRecordLike {
   messageId: string;
@@ -124,10 +149,13 @@ export interface ToolPanelController {
    * 而请求中断时就无从「把那一行收成失败」。
    * ⚠️ **`raw` 要传**（调用点手里有 `detected.raw`）—— 它是合流签名的一半，
    * 不传的话实时腿与历史腿永远配不上（见 `LiveSession.rawByCallId`）。
+   * ⚠️⚠️ **`chatSessionId` 必须由调用方给可信值**（见 `LiveSession.chatSessionId`）——
+   * 面板**不自己取「此刻」的地址栏**，那正是切会话期间错挂记录的根因。
    */
   beginToolCall: (
     requestId: string,
     call: { callId: string; name: string; raw?: string },
+    chatSessionId: string | null,
   ) => void;
   /**
    * **只登记 `raw`、不画行** —— 给「兜底执行路径」用。
@@ -139,10 +167,20 @@ export interface ToolPanelController {
    * ⇒ 那条路上实时腿的签名恒为「工具名 + 空串」，**与历史腿永远配不上**
    * ⇒ **同一轮画两块面板**（一块有结果、一块没有）。
    * ⇒ 把「画不画 pending 行」与「登记不登记 raw」**解耦**。
+   *
+   * ⚠️ **`chatSessionId` 同 `beginToolCall`**：这一轮第一次投递时就把会话冻住。
    */
-  noteToolCallRaw: (requestId: string, call: { callId: string; raw: string }) => void;
+  noteToolCallRaw: (
+    requestId: string,
+    call: { callId: string; raw: string },
+    chatSessionId: string | null,
+  ) => void;
   /** 某个工具执行完了 —— 把「执行中」那行换成真实结果。 */
-  completeToolCall: (requestId: string, execution: ToolExecutionRecord) => void;
+  completeToolCall: (
+    requestId: string,
+    execution: ToolExecutionRecord,
+    chatSessionId: string | null,
+  ) => void;
   /**
    * 一轮的最终结果批量落地（`RESPONSE_COMPLETE` 时调）。
    *
@@ -154,6 +192,7 @@ export interface ToolPanelController {
     requestId: string,
     executions: readonly ToolExecutionRecord[],
     fullText: string,
+    chatSessionId: string | null,
   ) => void;
   /**
    * 64：把该请求下所有「执行中」的行收成失败（请求终态时调）。
@@ -188,6 +227,19 @@ interface LiveSession {
   executions: ToolExecutionRecord[];
   content: string;
   createdAt: number;
+  /**
+   * 这一轮属于哪个会话 —— **创建时冻结，此后不随地址栏变化**。
+   *
+   * ⚠️⚠️ **它必须由调用方显式传入，不能在这里取「此刻」的地址栏**。
+   * 真机撞到过：切走之后工具才跑完，`publishLiveSession` 取到的是**新会话**的 id
+   * ⇒ 那一轮的记录被盖上错误的会话戳、挂到新会话的消息上（面板画在别的对话里），
+   * 而存储腿盖的是 grant 绑定的**正确**会话 ⇒ 刷新后被 `isRecordOnCurrentSession`
+   * 过滤掉、面板消失。两条腿口径不一致是那次缺陷的根因。
+   *
+   * ⚠️ `null` = 「不知道」（首条消息时地址栏还没切到 `/c/<id>`）——
+   * 与历史腿同口径：不知道就放行，不拒。
+   */
+  chatSessionId: string | null;
   /** 「执行中」的行：callId → 该行在 `executions` 里的位置（按 key 定位，不存索引）。 */
   pendingCallIds: Set<string>;
   /**
@@ -284,13 +336,21 @@ export function createToolPanelController(
   /** 重试前的等待 —— 与编排层的重试间隔同值（生产 250ms，测试注入 1ms）。 */
   const DEFAULT_STORAGE_LEG_RETRY_MS = 250;
 
-  function getOrCreateSession(requestId: string): LiveSession {
+  /**
+   * 取（或建）这一轮的容器。
+   *
+   * ⚠️⚠️ **建的时候就把会话冻结进去** —— 见 `LiveSession.chatSessionId`。
+   * 已有条目**不覆盖**会话：第一条投递盖章之后就不再变，否则一轮跑到一半切会话，
+   * 后面的投递会把戳改掉、同一条记录前后归属不同。
+   */
+  function getOrCreateSession(requestId: string, chatSessionId: string | null): LiveSession {
     const existing = liveSessions.get(requestId);
     if (existing) return existing;
     const session: LiveSession = {
       executions: [],
       content: '',
       createdAt: Date.now(),
+      chatSessionId,
       pendingCallIds: new Set(),
       recordIds: new Set(),
       rawByCallId: new Map(),
@@ -303,7 +363,17 @@ export function createToolPanelController(
   function publishLiveSession(requestId: string): void {
     const session = liveSessions.get(requestId);
     if (!session || session.executions.length === 0) return;
-    const messages = listZaiAssistantMessages(dependencies.document ?? document);
+    // ⚠️⚠️ **只有这一轮确实属于当前会话时，才去读「最后一条助手消息」当锚点** ——
+    // 切走之后 DOM 里最后那条是**新会话**的消息，拿它的 uuid 当锚点等于把这一轮的
+    // 结果挂到别的对话上。归属不一致时置 null ⇒ 退化成 `live:<requestId>`，
+    // 而会话戳也对不上 ⇒ 编排层的 `isRecordOnCurrentSession` 会把它拒掉（不渲染）。
+    // 失败方向是「切走期间跑完的工具不显示」，刷新后由存储腿补上。
+    const belongsToCurrent = session.chatSessionId === null
+      || dependencies.getChatSessionId() === null
+      || session.chatSessionId === dependencies.getChatSessionId();
+    const messages = belongsToCurrent
+      ? listZaiAssistantMessages(dependencies.document ?? document)
+      : [];
     const lastMessage = messages[messages.length - 1];
     const messageId = lastMessage ? readZaiMessageId(lastMessage) : null;
     // ⚠️ **id 用 messageId 优先**（与历史腿同 id ⇒ 天然合流、幂等）；
@@ -328,9 +398,9 @@ export function createToolPanelController(
       // ⚠️⚠️ **这一轮此刻还在飞** ⇒ 块展开（用户当场要看见在跑什么）。
       // 收尾时由 `sealTurn` 清掉，块随之收起 —— 上游同口径。
       live: true,
-      // ⚠️ 会话归属取「此刻」的地址栏。首条消息时可能还是 null（地址栏还没切到
-      // `/c/<id>`），那时按「不知道」放行；后续同一轮的投递会补上。
-      chatSessionId: dependencies.getChatSessionId(),
+      // ⚠️ **会话归属用这一轮冻结的值**，不是「此刻」的地址栏 —— 见
+      // `LiveSession.chatSessionId`。`null` = 不知道（首条消息时），按放行处理。
+      chatSessionId: session.chatSessionId,
       createdAt: session.createdAt,
     }]);
   }
@@ -349,8 +419,9 @@ export function createToolPanelController(
   function beginToolCall(
     requestId: string,
     call: { callId: string; name: string; raw?: string },
+    chatSessionId: string | null,
   ): void {
-    const session = getOrCreateSession(requestId);
+    const session = getOrCreateSession(requestId, chatSessionId);
     if (call.raw) session.rawByCallId.set(call.callId, call.raw);
     if (session.pendingCallIds.has(call.callId)) return;
     if (session.executions.some((execution) => execution.callId === call.callId)) return;
@@ -375,9 +446,13 @@ export function createToolPanelController(
    * ⚠️ **不调 `publishLiveSession`** —— 那条路的语义是「这一轮快结束了，别给用户
    * 塞一个稍纵即逝的状态」；登记 raw 只影响**未来**的合流签名，不影响此刻的渲染。
    */
-  function noteToolCallRaw(requestId: string, call: { callId: string; raw: string }): void {
+  function noteToolCallRaw(
+    requestId: string,
+    call: { callId: string; raw: string },
+    chatSessionId: string | null,
+  ): void {
     if (!call.callId || !call.raw) return;
-    getOrCreateSession(requestId).rawByCallId.set(call.callId, call.raw);
+    getOrCreateSession(requestId, chatSessionId).rawByCallId.set(call.callId, call.raw);
   }
 
   /**
@@ -392,9 +467,15 @@ export function createToolPanelController(
    * **只按 callId 匹配的失效方向是「多出一行重复的」**（pending 那行没人替换），
    * 而用户看到的会是「同一个工具显示两遍、一条永远转圈」。
    */
-  function completeToolCall(requestId: string, execution: ToolExecutionRecord): void {
-    const session = liveSessions.get(requestId);
-    if (!session) return;
+  function completeToolCall(
+    requestId: string,
+    execution: ToolExecutionRecord,
+    chatSessionId: string | null,
+  ): void {
+    // ⚠️ **`getOrCreateSession` 而不是 `liveSessions.get`** —— 切会话时 `liveSessions`
+    // 被清空，而工具可能还在飞；跑完那一下必须能把结果落到一个**带着正确会话戳**的
+    // 容器里（否则这一轮的结果彻底丢失）。用 get 的话这里直接早退、连会话都无从判断。
+    const session = getOrCreateSession(requestId, chatSessionId);
     const callId = execution.callId ?? '';
 
     let index = callId
@@ -641,9 +722,10 @@ export function createToolPanelController(
     requestId: string,
     executions: readonly ToolExecutionRecord[],
     fullText: string,
+    chatSessionId: string | null,
   ): void {
     if (executions.length === 0) return;
-    const session = getOrCreateSession(requestId);
+    const session = getOrCreateSession(requestId, chatSessionId);
     session.content = fullText || session.content;
     // 保留仍是 pending 的行（它们代表着「开始了但这一轮没结果」），
     // 其余用新结果覆盖。

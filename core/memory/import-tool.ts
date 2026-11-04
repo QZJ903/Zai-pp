@@ -61,6 +61,11 @@ export async function executeMemoryImportToolCall(
     const payload = normalizeMemoryImportPayload(call.payload);
     const existingMemories = await getAllMemories();
     const output = previewMemoryImport({ ...payload, existingMemories });
+    // ⚠️ **超上限的那部分必须说出来** —— 否则模型看到「预览 100 条 / 重复 0 / 拒绝 0」
+    // 会以为已经拿到全部，不会建议分批导入。`omitted` 只在真的截断时出现。
+    const omittedHint = output.omitted > 0
+      ? ` ${translate(locale, 'tool.memoryImport.previewOmitted', { omitted: output.omitted })}`
+      : '';
     return {
       ok: true,
       name: call.name,
@@ -69,7 +74,7 @@ export async function executeMemoryImportToolCall(
       detail: translate(locale, 'tool.memoryImport.previewDetail', {
         duplicates: output.duplicates,
         rejected: output.rejected,
-      }),
+      }) + omittedHint,
       output: output as unknown as JsonValue,
     };
   } catch (error) {

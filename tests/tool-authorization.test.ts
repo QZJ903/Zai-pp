@@ -142,7 +142,7 @@ describe('tool authorization context', () => {
     callOverflow.calls = Object.fromEntries(
       Array.from({ length: 129 }, (_, index) => [
         `call-${index}`,
-        { descriptorId: makeDescriptor().id, state: 'collecting', retryUsed: false },
+        { descriptorId: makeDescriptor().id, state: 'executing', fingerprint: 'a'.repeat(64) },
       ]),
     );
     sessionStorage.zai_pp_tool_authorizations = {
@@ -166,19 +166,19 @@ describe('tool authorization context', () => {
     const corruptions: Array<(state: StoredAuthorizationTestState) => void> = [
       (state) => {
         const call = state.grants[grant.id].calls['call-1'];
-        call.state = 'retryable';
+        call.state = 'executing';
         call.fingerprint = undefined;
-        call.retryUsed = false;
       },
       (state) => {
+        const call = state.grants[grant.id].calls['call-1'];
+        call.state = 'consumed';
+        call.fingerprint = undefined;
+      },
+      (state) => {
+        // 已删除的两档（`collecting` / `retryable`）现在一律判非法 ——
+        // 它们对应的生产者随功能删除，留着会让状态机多两个不可达取值。
         const call = state.grants[grant.id].calls['call-1'];
         call.state = 'retryable';
-        call.retryUsed = true;
-      },
-      (state) => {
-        const call = state.grants[grant.id].calls['call-1'];
-        call.state = 'collecting';
-        call.retryUsed = false;
       },
       (state) => {
         state.grants[grant.id].calls['call-1'].descriptorId = 'local:test:unknown';
@@ -581,7 +581,7 @@ describe('tool authorization context', () => {
     const grant = await createGrant([descriptor]);
     const context = { kind: 'grant' as const, grantId: grant.id, subject: SUBJECT };
     const first = await authorizeToolExecution(makeCall(), context, [descriptor]);
-    await completeToolExecutionAuthorization(first.reservation, { ok: true, summary: 'done' });
+    await completeToolExecutionAuthorization(first.reservation);
 
     await expect(authorizeToolExecution(makeCall(), context, [descriptor]))
       .rejects.toMatchObject({ code: 'tool_call_replayed' });
@@ -662,9 +662,8 @@ interface StoredAuthorizationTestState {
     descriptors: Array<{ id: string }>;
     calls: Record<string, {
       descriptorId: string;
-      state: 'collecting' | 'executing' | 'consumed' | 'retryable';
+      state: string;
       fingerprint?: string;
-      retryUsed: boolean;
     }>;
   }>;
 }

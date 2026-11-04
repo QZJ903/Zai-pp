@@ -7,7 +7,24 @@ export interface MemoryImportPreview {
   memories: NewMemory[];
   duplicates: number;
   rejected: number;
+  /**
+   * 因为单次预览上限而被丢掉的条数。
+   *
+   * ⚠️⚠️ **这一档必须显式带出来，否则「少了 100 条」和「本来就只有 100 条」同形** ——
+   * 预览列表是 `slice(0, MEMORY_IMPORT_PREVIEW_LIMIT)` 截的，而 `duplicates` /
+   * `rejected` 都只统计被跳过的，不统计被砍掉的 ⇒ 三个数字看起来自洽，
+   * 用户和模型都不知道还有下文。
+   */
+  omitted: number;
 }
+
+/**
+ * 单次预览最多列出多少条候选记忆。
+ *
+ * ⚠️ 超出部分**丢弃但计数**（见 `omitted`）—— 静默丢是旧行为，
+ * 现在的判据是「截断必须有信号」，与 `ToolResult.truncated` 同族。
+ */
+const MEMORY_IMPORT_PREVIEW_LIMIT = 100;
 
 const MEMORY_TYPES: readonly MemoryType[] = ['user', 'feedback', 'topic', 'reference'];
 
@@ -45,9 +62,10 @@ export function previewMemoryImport(input: {
 
   return {
     kind: 'memory_import_preview',
-    memories: memories.slice(0, 100),
+    memories: memories.slice(0, MEMORY_IMPORT_PREVIEW_LIMIT),
     duplicates,
     rejected,
+    omitted: Math.max(0, memories.length - MEMORY_IMPORT_PREVIEW_LIMIT),
   };
 }
 

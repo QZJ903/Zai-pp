@@ -101,7 +101,14 @@ export function useMemoryPageController(t: Translator, confirm: Confirm, feedbac
       }
       await load();
     } catch (error) {
-      showOperationError(error);
+      // ⚠️ **单条删除的「不在了」与上面 `save` 同一口味** —— 与「清空全部」相反，
+      // 这里漏删是**意外**（用户以为删掉了），要给他一句人话而不是裸码。
+      // ⚠️ 删失败时**不要**关表单、不要重载列表：让用户看见那条还在。
+      if (getRuntimeErrorMessage(error) === MEMORY_RECORD_MISSING_CODE) {
+        feedbackRef.current.error(translatorRef.current('sidepanel.memoryPage.recordMissing'));
+      } else {
+        showOperationError(error);
+      }
     }
   }, [confirm, editingMemory?.id, feedback, load, showOperationError, t]);
 

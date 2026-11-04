@@ -68,9 +68,11 @@ export const tool = {
     tagsDescription: 'Tags to add to imported memories',
     previewReady: 'Memory import preview ready ({count})',
     previewDetail: '{duplicates} duplicates skipped, {rejected} rejected',
+    previewOmitted: '{omitted} more exceeded the single-preview limit and were not listed (import in batches).',
     failed: 'Memory import failed',
     result: {
       metaSummary: '{count} memories · {duplicates} duplicates',
+      metaSummaryTruncated: '{count} memories · {duplicates} duplicates · {omitted} more not listed',
       importMemories: 'Import memories',
       importing: 'Importing...',
       imported: 'Imported {count}',

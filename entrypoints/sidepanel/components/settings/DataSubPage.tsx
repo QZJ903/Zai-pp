@@ -18,7 +18,12 @@ export default function DataSubPage({ state }: { state: SettingsState }) {
       cancelLabel: t('common.cancel'),
     });
     if (!ok) return;
-    await state.handleClearAllMemories();
+    // ⚠️ **必须 catch** —— 不加的话 `handleClearAllMemories` 抛出的错误会变成
+    // 未处理的 promise rejection：用户看到的是「点了按钮、什么都没发生」，
+    // 而真实原因（存储坏了 / 配额满了）只在 DevTools 里。
+    // ⚠️ 与旁边「导出日志」那条同一形态（`void ... .catch(() => banner.show(...))`）。
+    await state.handleClearAllMemories()
+      .catch(() => banner.show('error', t('sidepanel.settings.operationFailed')));
   };
 
   return (

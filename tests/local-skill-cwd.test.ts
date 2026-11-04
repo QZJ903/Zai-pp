@@ -1,8 +1,7 @@
 // 本地 Skill cwd「初始 cwd 提示」单测：
 //   1) enforceLocalSkillCwd 纯函数：仅对 shell_exec / shell_session_begin 在「初始 cwd」层面归一化 cwd=skillDir。
-//   2) parseExternalizedToolPayload 落点：当传入 skillDir 时，命令型工具的「初始 cwd」被归一化。
-//   3) 声明自洽：本层仅设定初始 cwd，不持久绑定会话（持久会话 cwd 复用由 shell 会话注册表既有语义负责）。
-//   4) shell_session_exec 不在归一化集合（其 cwd 由会话注册表保持，contracts.ts:80-84），不注入 cwd。
+//   2) 声明自洽：本层仅设定初始 cwd，不持久绑定会话（持久会话 cwd 复用由 shell 会话注册表既有语义负责）。
+//   3) shell_session_exec 不在归一化集合（其 cwd 由会话注册表保持，contracts.ts:80-84），不注入 cwd。
 //
 // ⚠️ 判据是**工具名**（`call.name` / `descriptor.name`），不是 invocation name ——
 // 后者对 Shell Local 的每个工具都是 `mcp_<server uuid>_<tool>`。真实形状下的端到端守卫
@@ -10,7 +9,6 @@
 
 import { describe, expect, it } from 'vitest';
 import { enforceLocalSkillCwd, isCwdEnforcedTool } from '../core/tool/local-skill-cwd';
-import { parseExternalizedToolPayload } from '../core/tool/externalized-payload';
 import { createMcpInvocationName } from '../core/mcp/descriptor-identity';
 
 // 真实 Shell Local 工具的 invocation name 由生产同一个函数派生（不手抄）。
@@ -66,56 +64,6 @@ describe('enforceLocalSkillCwd', () => {
     // 它**不在**集合里。这正是「判据必须取工具名」的原因（见文件头与
     // runtime-cwd-hydration.test.ts 的真实形状端到端用例）。
     expect(isCwdEnforcedTool(SHELL_EXEC_INVOCATION_NAME)).toBe(false);
-  });
-});
-
-describe('parseExternalizedToolPayload cwd 强制落点', () => {
-  it('shell_exec 解析时携带 skillDir → cwd 被强制', () => {
-    const { payload, parseError } = parseExternalizedToolPayload(
-      '{"command":"ls"}',
-      'shell_exec',
-      'shell_exec',
-      '/skills/demo',
-    );
-    expect(parseError).toBeUndefined();
-    expect(payload?.cwd).toBe('/skills/demo');
-  });
-
-  it('不传 skillDir → cwd 不被强制（保持 Agent 原意或缺失）', () => {
-    const { payload } = parseExternalizedToolPayload('{"command":"ls"}', 'shell_exec', 'shell_exec');
-    expect(payload?.cwd).toBeUndefined();
-  });
-
-  it('local_file_read 不强制 cwd', () => {
-    const { payload } = parseExternalizedToolPayload(
-      '{"rootPath":"/skills/demo"}',
-      'local_file_read',
-      'local_file_read',
-      '/skills/demo',
-    );
-    expect(payload?.cwd).toBeUndefined();
-  });
-
-  it('shell_exec 解析时携带错误 cwd（≠ skillDir）→ 被覆盖为 skillDir（parser→runtime 路径）', () => {
-    const { payload, parseError } = parseExternalizedToolPayload(
-      '{"command":"ls","cwd":"/somewhere/else"}',
-      'shell_exec',
-      'shell_exec',
-      '/skills/demo',
-    );
-    expect(parseError).toBeUndefined();
-    expect(payload?.cwd).toBe('/skills/demo');
-  });
-
-  it('MCP 长 invocation name + 短工具名 → 仍按工具名强制 cwd', () => {
-    const { payload, parseError } = parseExternalizedToolPayload(
-      '{"command":"pwd","cwd":"/somewhere/else"}',
-      SHELL_EXEC_INVOCATION_NAME,
-      'shell_exec',
-      '/skills/demo',
-    );
-    expect(parseError).toBeUndefined();
-    expect(payload?.cwd).toBe('/skills/demo');
   });
 });
 

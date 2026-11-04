@@ -1,20 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RuntimeMessageContext } from '../core/messaging/runtime-boundary';
 import {
-  authorizeExternalToolPayloadChunk,
   closeToolAuthorization,
   createToolAuthorization,
-  createToolAuthorizationResult,
   TOOL_AUTHORIZATION_STORAGE_KEY,
 } from '../core/tool/authorization';
-import { ExternalPayloadAuthorizationCache } from '../core/tool/external-payload-authorization-cache';
-import {
-  appendExternalizedToolPayloadChunk,
-  clearExternalizedToolPayloadNamespace,
-  createExternalizedToolPayload,
-  takeExternalizedToolPayloadText,
-} from '../core/tool/externalized-payload';
-import { clearToolCallHistory, getToolCallHistory } from '../core/tool/history';
+import { clearToolCallHistory, getToolCallHistoryReport } from '../core/tool/history';
 import {
   ToolProviderRegistry,
   type RuntimeToolProvider,
@@ -79,7 +70,7 @@ beforeEach(() => {
 });
 
 describe('real tool authorization handler composition', () => {
-  it('runs CREATE → APPEND → EXECUTE → replay rejection → CLOSE without bypassing state', async () => {
+  it('runs CREATE → EXECUTE → replay rejection → CLOSE without bypassing state', async () => {
     let activeGrantId = '';
     const providerCalls: ToolCall[] = [];
     const provider: RuntimeToolProvider = {
@@ -97,7 +88,6 @@ describe('real tool authorization handler composition', () => {
       }),
     };
     const runtime = createRuntimeToolRuntime(new ToolProviderRegistry([provider]));
-    const cache = new ExternalPayloadAuthorizationCache();
     const dependencies: ToolExecutionRuntimeHandlerDependencies = {
       getLocale: () => 'en',
       getToolDescriptors: runtime.getToolDescriptors,
@@ -106,16 +96,11 @@ describe('real tool authorization handler composition', () => {
       refreshToolDescriptors: runtime.refreshToolDescriptors,
       createToolAuthorization,
       closeToolAuthorization,
-      authorizeExternalToolPayloadChunk,
-      createToolAuthorizationResult,
-      createInvalidToolCallResult,
-      externalPayloadAuthorizationCache: cache,
-      appendExternalizedToolPayloadChunk,
-      clearExternalizedToolPayloadNamespace,
+          createInvalidToolCallResult,
       executeToolCall: runtime.executeToolCall,
       // mock 的本地目录校验默认信任（本用例不针对该校验逻辑）。
       validateLocalSkillDirectory: vi.fn(async () => true),
-      getToolCallHistory,
+      getToolCallHistory: getToolCallHistoryReport,
       clearToolCallHistory,
       getPlatformEnvironment: () => ({
         kind: 'browser_extension',
@@ -157,9 +142,7 @@ describe('real tool authorization handler composition', () => {
     activeGrantId = grant.id;
     expect(grant.id).toBeTruthy();
 
-    await expect(dispatch(handlers, appendMessage(grant.id, 'call-1')))
-      .resolves.toEqual({ ok: true });
-    const executionCall = createExternalizedCall('call-1');
+    const executionCall = createCall('call-1');
     await expect(dispatch(handlers, {
       type: 'EXECUTE_TOOL_CALL',
       payload: { ...executionCall, authorizationId: grant.id },
@@ -177,84 +160,47 @@ describe('real tool authorization handler composition', () => {
     });
     expect(readStoredCallState(grant.id, 'call-1')).toBe('consumed');
 
-    await expect(dispatch(handlers, appendMessage(grant.id, 'call-1')))
-      .resolves.toMatchObject({
-        ok: false,
-        error: { code: 'tool_call_replayed', retryable: false },
-      });
-    expect(provider.execute).toHaveBeenCalledTimes(1);
-
+    // ⚠️ **同一 callId 再授权一律判重放** —— 状态表只剩 `executing` / `consumed`
+    // 两档，两者都意味着「这次调用已经拿到过许可」。
     await expect(dispatch(handlers, {
       type: 'EXECUTE_TOOL_CALL',
-      payload: { ...executionCall, authorizationId: grant.id },
+      payload: { ...createCall('call-1'), authorizationId: grant.id },
     })).resolves.toMatchObject({
       ok: false,
       error: { code: 'tool_call_replayed', retryable: false },
     });
     expect(provider.execute).toHaveBeenCalledTimes(1);
 
-    await expect(dispatch(handlers, appendMessage(grant.id, 'call-2')))
-      .resolves.toEqual({ ok: true });
-    expect(takeExternalizedToolPayloadText(
-      'call-2',
-      descriptor.invocationName,
-      grant.id,
-    )).toBe('{"value":"approved"}');
-    appendExternalizedToolPayloadChunk(
-      'call-2',
-      descriptor.invocationName,
-      '{"value":"approved"}',
-      grant.id,
-    );
-
     await expect(dispatch(handlers, {
       type: 'CLOSE_TOOL_AUTHORIZATION',
       payload: { authorizationId: grant.id },
     })).resolves.toEqual({ ok: true });
     expect(readStoredGrant(grant.id)).toBeUndefined();
-    expect(takeExternalizedToolPayloadText(
-      'call-2',
-      descriptor.invocationName,
-      grant.id,
-    )).toBeNull();
 
-    await expect(dispatch(handlers, appendMessage(grant.id, 'call-2')))
-      .resolves.toMatchObject({
-        ok: false,
-        error: { code: 'tool_authorization_missing', retryable: false },
-      });
+    await expect(dispatch(handlers, {
+      type: 'EXECUTE_TOOL_CALL',
+      payload: { ...createCall('call-2'), authorizationId: grant.id },
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'tool_authorization_missing', retryable: false },
+    });
     expect(provider.execute).toHaveBeenCalledTimes(1);
   });
 });
 
-function createExternalizedCall(callId: string): ToolCall {
+function createCall(callId: string): ToolCall {
   return {
     id: callId,
     descriptorId: descriptor.id,
     provider: descriptor.provider,
     name: descriptor.name,
     invocationName: descriptor.invocationName,
-    payload: createExternalizedToolPayload(callId, descriptor.invocationName),
+    payload: { value: 'approved' },
     raw: '<sample_tool>{"value":"approved"}</sample_tool>',
     source: {
       trigger: 'manual_chat',
       requestId: 'request-1',
       chatSessionId: 'chat-1',
-    },
-  };
-}
-
-function appendMessage(authorizationId: string, callId: string): {
-  type: string;
-  payload: Record<string, unknown>;
-} {
-  return {
-    type: 'APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK',
-    payload: {
-      authorizationId,
-      callId,
-      invocationName: descriptor.invocationName,
-      chunk: '{"value":"approved"}',
     },
   };
 }

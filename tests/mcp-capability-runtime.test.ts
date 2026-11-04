@@ -12,6 +12,7 @@ import {
 } from '../core/tool/provider-registry';
 import { createRuntimeToolRuntime } from '../core/tool/runtime';
 import type { ToolCall, ToolDescriptor, ToolResult } from '../core/types';
+import { trustedContext } from './helpers/trusted-tool-context';
 
 let localStorage: Record<string, unknown>;
 let sessionStorage: Record<string, unknown>;
@@ -67,7 +68,7 @@ describe('MCP capability invoke runtime', () => {
 
     const tooLongDiscover = await runtime.executeToolCall(
       createCall(discover, { query: 'x'.repeat(2_001) }, 'call-discover-too-long'),
-      'sidepanel_chat',
+      trustedContext('sidepanel_chat'),
       'en',
       { trustedCapabilityScopeId: 'chat-turn-1' },
     );
@@ -78,7 +79,7 @@ describe('MCP capability invoke runtime', () => {
 
     const rejected = await runtime.executeToolCall(
       createCall(invoke, { name: target.name, args: { path: '/unsafe' } }, 'call-raw-name'),
-      'sidepanel_chat',
+      trustedContext('sidepanel_chat'),
       'en',
       { trustedCapabilityScopeId: 'chat-turn-1' },
     );
@@ -90,7 +91,7 @@ describe('MCP capability invoke runtime', () => {
 
     const discovered = await runtime.executeToolCall(
       createCall(discover, { query: 'write a document' }, 'call-discover'),
-      'sidepanel_chat',
+      trustedContext('sidepanel_chat'),
       'en',
       { trustedCapabilityScopeId: 'chat-turn-1' },
     );
@@ -113,7 +114,7 @@ describe('MCP capability invoke runtime', () => {
         capability: output.candidates[0]!.capability,
         arguments: { path: '/workspace/plan.md' },
       }, 'call-invoke'),
-      'sidepanel_chat',
+      trustedContext('sidepanel_chat'),
       'en',
       { trustedCapabilityScopeId: 'chat-turn-1' },
     );
@@ -151,7 +152,7 @@ describe('MCP capability invoke runtime', () => {
         capability: output.candidates[0]!.capability,
         arguments: { path: '/workspace/replay.md' },
       }, 'call-replay'),
-      'sidepanel_chat',
+      trustedContext('sidepanel_chat'),
       'en',
       { trustedCapabilityScopeId: 'chat-turn-1' },
     );

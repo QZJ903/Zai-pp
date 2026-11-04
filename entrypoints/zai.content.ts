@@ -145,7 +145,7 @@ import {
 } from '../core/zai/tool-block-adapter';
 import {
   createToolPanelController,
-  type ToolHistoryRecordLike,
+  type ToolCallHistoryReadResultLike,
 } from '../core/zai/tool-panel';
 import {
   mergeZaiAuthFromCapture,
@@ -1121,9 +1121,8 @@ function isContinuableExecution(execution: ToolExecutionRecord): boolean {
 /**
  * 简单字符串哈希（djb2），用于给同一条消息里多个同类型工具生成稳定且唯一的 callId。
  *
- * ⚠️ 名字带算法：`core/tool/restore-block.ts` 另有一个同用途但**算法不同**的哈希
- * （`hash * 31`）。两者都只在本文件内使用、输出不落库，因此不需要统一 ——
- * 但名字必须能区分，否则读代码的人会以为改一处等于改另一处。
+ * ⚠️ **名字必须带算法** —— 别改成 `hashString` 之类的中性名，否则将来有人以为
+ * 它和别处的哈希可以互换。它只在本文件内使用、输出不落库。
  */
 function djb2Hash(value: string): string {
   let hash = 5381;
@@ -1837,6 +1836,23 @@ async function dispatchMainWorldMessageInner(
 // ---------------------------------------------------------------------------
 
 /**
+ * 某个 requestId 属于哪个会话 —— **给工具面板盖章用**。
+ *
+ * ⚠️⚠️ **面板不许自己取「此刻」的地址栏**（见 `LiveSession.chatSessionId`）。
+ * 真机撞到过：切走之后工具才跑完，面板取到的是**新会话**的 id ⇒ 那一轮记录被挂到
+ * 别的对话上；而存储腿盖的是 grant 绑定的**正确**值 ⇒ 刷新后被会话判据过滤掉、面板消失。
+ *
+ * 取值顺序与 `executeDetected` 补全 `source.chatSessionId` 时**同一口径**
+ * （`chatSessionIdByRequestId` 优先、其次此刻地址栏）—— 两条腿必须同源，否则会再分叉。
+ *
+ * ⚠️ **chatNew 路由不写那个 Map**（收不到 `REQUEST_TERMINAL`，写进去是永不释放的孤儿）
+ * ⇒ 那一档退回地址栏，与改造前行为一致。
+ */
+function resolveRequestChatSessionId(requestId: string): string | null {
+  return chatSessionIdByRequestId.get(requestId) ?? getCurrentChatSessionId();
+}
+
+/**
  * 登记一条工具调用，并**在串行队列之外**执行它。
  *
  * ⚠️⚠️ **`pendingExecutions += 1` 必须是同步的、且在启动执行之前** ——
@@ -1869,7 +1885,7 @@ function startDetectedToolCall(detected: ZaiDetectedToolCall): void {
     // 恒为「工具名 + 空串」，与历史腿的「工具名 + XML 原文」永远配不上
     // ⇒ 一旦消息 uuid 读不到（id 退化成 `live:<requestId>`），同一轮会画两块面板。
     raw: detected.raw,
-  });
+  }, resolveRequestChatSessionId(detected.requestId));
   const state = ensureToolTurnState(detected.requestId);
   state.pendingExecutions += 1;
   state.executionChain = state.executionChain
@@ -2091,11 +2107,12 @@ async function executeDetected(call: ToolCall, requestId: string): Promise<ToolE
   // 面板：**只登记 raw**（不画「执行中」行）—— 覆盖「兜底执行路径没调过 `beginToolCall`」
   // 那一格（见 `ToolPanelController.noteToolCallRaw` 的说明）。
   // ⚠️ **幂等**：正常路径上 `beginToolCall` 已经登记过同一条 raw，重复写没有副作用。
-  toolPanel.noteToolCallRaw(requestId, { callId: stableCallId, raw: call.raw ?? '' });
+  toolPanel.noteToolCallRaw(requestId, { callId: stableCallId, raw: call.raw ?? '' }, chatSessionId);
   // 面板：把「执行中」那行换成真实结果。
   // ⚠️ **必须在 `executionsByRequest` 落账之后** —— 面板读的是同一份结果，
   // 顺序反了会让「面板显示成功、续跑判定看到空」这种分叉出现。
-  toolPanel.completeToolCall(requestId, execution);
+  // ⚠️ **会话用上面算好的那份**（grant 绑定优先）—— 与存储腿同一口径。
+  toolPanel.completeToolCall(requestId, execution, chatSessionId);
   return execution;
 }
 
@@ -2470,7 +2487,12 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
 
     // 工具调用面板（本节所有执行过的工具收成一块）。**尽力而为** ——
     // 找不到锚点就不挂，不影响执行链与续跑判定。
-    toolPanel.rememberExecutions(complete.requestId, executedThisTurn, complete.assistantText);
+    toolPanel.rememberExecutions(
+      complete.requestId,
+      executedThisTurn,
+      complete.assistantText,
+      resolveRequestChatSessionId(complete.requestId),
+    );
     // 64：这一轮到此为止，仍标着「执行中」的行收成失败（正常收尾时通常一条都没有）。
     toolPanel.finalizePending(
       complete.requestId,
@@ -2594,7 +2616,12 @@ async function handleResponseComplete(complete: ZaiResponseCompletePayload): Pro
   }
 
   // 工具调用面板（与续跑轮同一入口）。
-  toolPanel.rememberExecutions(complete.requestId, executions, complete.assistantText);
+  toolPanel.rememberExecutions(
+    complete.requestId,
+    executions,
+    complete.assistantText,
+    resolveRequestChatSessionId(complete.requestId),
+  );
   toolPanel.finalizePending(
     complete.requestId,
     translate(currentContentLocale, 'content.toolBlock.summaries.failed'),
@@ -3819,7 +3846,11 @@ const toolPanel = createToolPanelController({
   // ⚠️ **命令字面量必须留在本文件**（`tests/runtime-boundary.test.ts` 用 AST 从内容脚本
   // 抓「实际发出的命令」做双向比对）；所以这里只做一层转发，不把命令写进 `core/`。
   loadToolHistory: async () => {
-    const history = await sendRuntimeMessage<ToolHistoryRecordLike[]>({
+    // ⚠️ **返回的不是裸数组** —— 后台把「被丢掉的坏记录条数」一起带过来，
+    // 由**这个文件**打一行 log。背景的 `console` 只出现在 `chrome://extensions`
+    // 的 service worker 控制台，用户按 F12 看的是**页面控制台**，两者不是一个地方
+    // ⇒ 丢弃信号必须在内容脚本里打才能被看见。
+    const report = await sendRuntimeMessage<ToolCallHistoryReadResultLike>({
       type: 'GET_TOOL_CALL_HISTORY',
       payload: { limit: TOOL_PANEL_HISTORY_LIMIT },
     });
@@ -3828,8 +3859,16 @@ const toolPanel = createToolPanelController({
     // 而 `[]` 与「读到了但一条记录都没有」在下游**无法区分**：面板会静默退化成
     // 「工具名 + 已执行」（没有详情、没有保存按钮），且没有任何重试。
     // 抛出去之后 `loadStorageLeg` 会重试一次（见那边的说明）。
-    if (!Array.isArray(history)) throw new Error('tool_history_read_failed');
-    return history;
+    if (!Array.isArray(report?.records)) throw new Error('tool_history_read_failed');
+    // ⚠️ **`log` 级、不是 `error`** —— 丢弃坏记录是**自愈动作**（下次写入会把它们清掉），
+    // 不是故障；打成 error 会让扩展错误面板长期挂红。用户按 F12 能在页面控制台看到这一行。
+    if (report.dropped > 0) {
+      console.log('[Zai++] dropped malformed tool history records', {
+        dropped: report.dropped,
+        kept: report.records.length,
+      });
+    }
+    return report.records;
   },
   observeRoot: () => document.getElementById('app') ?? document.body,
 });

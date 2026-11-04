@@ -1,10 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  normalizeRestoredToolCardResult,
-  normalizeRestoredToolExecution,
-  sanitizeToolExecutionForRestoreStorage,
-} from '../core/tool/execution-restore';
 import { executeRuntimeToolCall } from './helpers/production-tool-runtime';
+import { trustedContext } from './helpers/trusted-tool-context';
 import {
   isToolCallHistoryRecord,
   isToolCallRecord,
@@ -16,9 +12,7 @@ import {
   isToolRegistrySnapshotRecord,
   isToolResultRecord,
 } from '../core/messaging/tool-record-codec';
-import type { ToolCardResult, ToolExecutionRecord } from '../core/types';
 import {
-  CONTRACT_EXECUTION_RECORD,
   CONTRACT_TOOL_CALL,
   MALFORMED_TOOL_RECORDS,
   LEGAL_TOOL_RECORDS,
@@ -89,27 +83,12 @@ describe('tool record compatibility contract', () => {
     expect(isToolCallRecord({ ...CONTRACT_TOOL_CALL, source: sourceWithoutAnchor })).toBe(true);
   });
 
-  it('preserves released restore normalization and storage sanitization fields', () => {
-    expect(normalizeRestoredToolExecution(CONTRACT_EXECUTION_RECORD)).toEqual({
-      name: CONTRACT_EXECUTION_RECORD.name,
-      provider: CONTRACT_EXECUTION_RECORD.provider,
-      descriptorId: CONTRACT_EXECUTION_RECORD.descriptorId,
-      result: CONTRACT_EXECUTION_RECORD.result,
-    });
-    expect(sanitizeToolExecutionForRestoreStorage(CONTRACT_EXECUTION_RECORD)).toEqual({
-      name: CONTRACT_EXECUTION_RECORD.name,
-      provider: CONTRACT_EXECUTION_RECORD.provider,
-      descriptorId: CONTRACT_EXECUTION_RECORD.descriptorId,
-      result: CONTRACT_EXECUTION_RECORD.result,
-    });
-  });
-
   it('freezes visible runtime tool errors', async () => {
     const unsupported = await executeRuntimeToolCall({
       name: 'unsupported_contract_tool',
       payload: {},
       raw: '<unsupported_contract_tool>{}</unsupported_contract_tool>',
-    }, 'test', 'en');
+    }, trustedContext('test'), 'en');
     const parseFailure = await executeRuntimeToolCall({
       name: 'capture_page',
       payload: {},
@@ -119,7 +98,7 @@ describe('tool record compatibility contract', () => {
         message: 'Tool payload is not valid JSON.',
         retryable: false,
       },
-    }, 'test', 'en');
+    }, trustedContext('test'), 'en');
 
     expect(unsupported).toMatchObject({
       ok: false,
@@ -134,7 +113,7 @@ describe('tool record compatibility contract', () => {
   });
 
   it('rejects a malformed runtime call before history or provider I/O', async () => {
-    const result = await executeRuntimeToolCall({ payload: {} } as unknown as Parameters<typeof executeRuntimeToolCall>[0], 'test', 'en');
+    const result = await executeRuntimeToolCall({ payload: {} } as unknown as Parameters<typeof executeRuntimeToolCall>[0], trustedContext('test'), 'en');
 
     expect(result).toMatchObject({
       ok: false,
@@ -156,25 +135,6 @@ describe('tool record compatibility contract', () => {
       expect(JSON.parse(JSON.stringify(fixture.record))).toEqual(fixture.record);
       expect(validators[fixture.family](fixture.record)).toBe(false);
     }
-    expect(MALFORMED_TOOL_RECORDS.map((fixture) => fixture.currentBehavior)).toEqual([
-      'no-authoritative-codec',
-      'accepted-by-restore-normalizer',
-      'accepted-by-restore-normalizer',
-      'consumer-dependent-failure',
-    ]);
-
-    const missingSummary = MALFORMED_TOOL_RECORDS[1].record as unknown as ToolCardResult;
-    expect(normalizeRestoredToolCardResult(missingSummary)).toEqual(missingSummary);
-    const unsupportedProviderExecution = {
-      name: 'capture_page',
-      provider: MALFORMED_TOOL_RECORDS[2].record,
-      result: CONTRACT_EXECUTION_RECORD.result,
-    } as unknown as ToolExecutionRecord;
-    expect(normalizeRestoredToolExecution(unsupportedProviderExecution).provider)
-      .toEqual(MALFORMED_TOOL_RECORDS[2].record);
-    const malformedExecution = MALFORMED_TOOL_RECORDS[3].record.executions[0] as ToolExecutionRecord;
-    expect(() => normalizeRestoredToolExecution(malformedExecution)).toThrow();
-
     const payloadWithFunction = { callback: () => 'not serializable', stable: 42 };
     expect(JSON.parse(JSON.stringify(payloadWithFunction))).toEqual({ stable: 42 });
     expect(isToolCallRecord({ ...LEGAL_TOOL_RECORDS.call, payload: payloadWithFunction })).toBe(false);

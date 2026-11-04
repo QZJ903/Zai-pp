@@ -13,6 +13,7 @@ import {
 } from '../core/zai/tool-block-adapter';
 import type { ToolCardResult, ToolExecutionRecord } from '../core/types';
 
+const CHAT_SESSION = 'chat-1';
 const UUID_A = '11111111-1111-1111-1111-111111111111';
 const UUID_B = '22222222-2222-2222-2222-222222222222';
 
@@ -330,7 +331,7 @@ describe('tool panel: live leg (L1)', () => {
     const bubble = buildRealisticMessage(UUID_A);
     const panel = makePanel();
 
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
     expect(panel.snapshot().livePending).toBe(1);
 
     // 渲染要等编排层跑一轮（它有自己的调度）。
@@ -344,8 +345,8 @@ describe('tool panel: live leg (L1)', () => {
     const panel = makePanel();
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
-    panel.completeToolCall('req-1', execution());
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    panel.completeToolCall('req-1', execution(), CHAT_SESSION);
     await settle();
     expect(panel.snapshot().livePending).toBe(0);
 
@@ -362,8 +363,8 @@ describe('tool panel: live leg (L1)', () => {
 
     // ⚠️ 两侧的 callId 计算口径不同（一个是 TOOL_CALL 的原始 XML、一个是解析后的
     // 单块哈希）⇒ 必须能退回按名字匹配，否则「同一个工具显示两遍、一条永远转圈」。
-    panel.beginToolCall('req-1', { callId: 'xml:from-tool-call', name: 'shell_exec' });
-    panel.completeToolCall('req-1', execution({ callId: 'xml:from-parser' }));
+    panel.beginToolCall('req-1', { callId: 'xml:from-tool-call', name: 'shell_exec' }, CHAT_SESSION);
+    panel.completeToolCall('req-1', execution({ callId: 'xml:from-parser' }), CHAT_SESSION);
     await settle();
 
     expect(document.querySelectorAll('.zpp-tool-block-item')).toHaveLength(1);
@@ -375,9 +376,9 @@ describe('tool panel: live leg (L1)', () => {
     const panel = makePanel();
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
-    panel.completeToolCall('req-1', execution());
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    panel.completeToolCall('req-1', execution(), CHAT_SESSION);
     await settle();
     expect(document.querySelectorAll('.zpp-tool-block-item')).toHaveLength(1);
   });
@@ -387,10 +388,10 @@ describe('tool panel: live leg (L1)', () => {
     const panel = makePanel();
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
-    panel.beginToolCall('req-1', { callId: 'xml:bbb', name: 'web_search' });
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    panel.beginToolCall('req-1', { callId: 'xml:bbb', name: 'web_search' }, CHAT_SESSION);
     // 只有 shell_exec 有结果 ⇒ web_search 那行仍应是「执行中」。
-    panel.rememberExecutions('req-1', [execution()], '正文');
+    panel.rememberExecutions('req-1', [execution()], '正文', CHAT_SESSION);
     await settle();
 
     expect(panel.snapshot().livePending).toBe(1);
@@ -406,7 +407,7 @@ describe('tool panel: pending finalize (todo 64)', () => {
     const panel = makePanel();
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
     panel.finalizePending('req-1', 'FAILED', '未完成（回答被中断）');
     await settle();
 
@@ -438,8 +439,8 @@ describe('tool panel: pending finalize (todo 64)', () => {
     const panel = makePanel();
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
-    panel.beginToolCall('req-2', { callId: 'xml:bbb', name: 'web_search' });
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    panel.beginToolCall('req-2', { callId: 'xml:bbb', name: 'web_search' }, CHAT_SESSION);
     panel.finalizeAllPending('FAILED', 'interrupted');
     await settle();
 
@@ -457,8 +458,8 @@ describe('tool panel: block collapse state', () => {
     const panel = makePanel();
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
-    panel.completeToolCall('req-1', execution());
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    panel.completeToolCall('req-1', execution(), CHAT_SESSION);
     await settle();
 
     // ⚠️ 在飞 ⇒ 展开（用户当场要看见在跑什么）—— 上游 `.dpp-tool-block`
@@ -471,8 +472,8 @@ describe('tool panel: block collapse state', () => {
     const panel = makePanel();
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
-    panel.completeToolCall('req-1', execution());
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    panel.completeToolCall('req-1', execution(), CHAT_SESSION);
     await settle();
     expect(blockOf()?.getAttribute('data-collapsed')).toBe('false');
 
@@ -557,6 +558,49 @@ describe('tool panel: block collapse state', () => {
 
     expect(panel.snapshot().records, '会话没变 ⇒ 记录必须留着').toBe(1);
     expect(document.querySelectorAll('.zpp-tool-block-item-name')).toHaveLength(1);
+  });
+
+  it('does not render a tool that finishes after the user switched conversation', async () => {
+    // ⚠️⚠️ **真机缺陷的回归守卫** —— 切走之后工具才跑完：
+    // ① 面板不许把这一轮的记录盖上「新会话」的戳（会话由调用方给，不是此刻地址栏）；
+    // ② 也不许拿新会话最后一条助手消息的 uuid 当锚点。
+    // 判据是「这一轮冻结的会话 ≠ 当前会话 ⇒ 编排层的 `isRecordOnCurrentSession` 拒掉、
+    // 什么都不画」。失败方向是「切走期间跑完的工具不显示」，刷新后由存储腿补上。
+    buildRealisticMessage(UUID_A, '旧会话的助手正文内容足够长');
+    buildRealisticMessage(UUID_B, '新会话的助手正文内容足够长');
+    let sessionId = 'chat-1';
+    const panel = makePanel({ getChatSessionId: () => sessionId });
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, 'chat-1');
+    await settle();
+
+    // 用户在工具跑完之前切到 chat-2。
+    sessionId = 'chat-2';
+    panel.handleSessionChange();
+    await settle();
+
+    // 工具这才跑完 —— 结果仍然属于 chat-1。
+    panel.completeToolCall('req-1', execution(), 'chat-1');
+    await settle();
+
+    expect(document.querySelectorAll('.zpp-tool-block-item-name'), '切走期间跑完的工具不许画到当前会话上')
+      .toHaveLength(0);
+    expect(panel.snapshot().livePending).toBe(0);
+  });
+
+  it('renders the same tool normally when the conversation did not change', async () => {
+    // 对照：不切会话时同一套调用必须照常渲染（防止上一条靠「永远不画」通过）。
+    buildRealisticMessage(UUID_A, '助手正文内容足够长用于锚定');
+    const panel = makePanel({ getChatSessionId: () => 'chat-1' });
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, 'chat-1');
+    panel.completeToolCall('req-1', execution(), 'chat-1');
+    await settle();
+
+    const names = [...document.querySelectorAll('.zpp-tool-block-item-name')].map((el) => el.textContent);
+    expect(names).toEqual(['shell_exec']);
   });
 
   it('drops records from another conversation but keeps the current one', async () => {
@@ -807,7 +851,7 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     const panel = makePanel();
     await panel.install();
 
-    panel.noteToolCallRaw('req-1', { callId: 'xml:aaa', raw });
+    panel.noteToolCallRaw('req-1', { callId: 'xml:aaa', raw }, CHAT_SESSION);
     await settle();
 
     // ⚠️ **不画行**（这是那条路径的语义）——连块都不该出现。
@@ -815,7 +859,7 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     expect(panel.snapshot().livePending).toBe(0);
 
     // 但它登记到了会话里：随后 `completeToolCall` 投出去的记录**带 raw**。
-    panel.completeToolCall('req-1', execution());
+    panel.completeToolCall('req-1', execution(), CHAT_SESSION);
     await settle();
     expect(document.querySelectorAll('.zpp-tool-block-item')).toHaveLength(1);
 
@@ -846,8 +890,8 @@ describe('tool panel: history leg (L3) and storage leg (L2)', () => {
     await panel.install();
 
     const raw = '<shell_exec>{"command":"ls"}</shell_exec>';
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec', raw });
-    panel.completeToolCall('req-1', execution());
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec', raw }, CHAT_SESSION);
+    panel.completeToolCall('req-1', execution(), CHAT_SESSION);
     await settle();
 
     // 历史腿随后到达（有锚点、无结果、**同一条 raw**）。
@@ -898,8 +942,8 @@ describe('tool panel: block-level default state', () => {
     const panel = makePanel({ renderDetail: cardRenderer() });
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' });
-    panel.completeToolCall('req-1', cardExecution());
+    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' }, CHAT_SESSION);
+    panel.completeToolCall('req-1', cardExecution(), CHAT_SESSION);
     await settle();
     // 在飞时展开 —— 这一条不变。
     expect(blockOf()?.getAttribute('data-collapsed')).toBe('false');
@@ -958,10 +1002,10 @@ describe('tool panel: block-level default state', () => {
     const panel = makePanel({ renderDetail: cardRenderer() });
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' });
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
     panel.completeToolCall('req-1', execution({
       result: { ok: true, summary: 'EXECUTED', detail: 'ls 的输出' } as ToolCardResult,
-    }));
+    }), CHAT_SESSION);
     await settle();
     panel.sealTurn('req-1');
     await settle();
@@ -975,15 +1019,15 @@ describe('tool panel: block-level default state', () => {
     const panel = makePanel({ renderDetail: cardRenderer() });
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' });
-    panel.completeToolCall('req-1', cardExecution());
+    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' }, CHAT_SESSION);
+    panel.completeToolCall('req-1', cardExecution(), CHAT_SESSION);
     await settle();
     const header = blockOf()?.querySelector<HTMLElement>('.zpp-tool-block-header');
     header?.click();
     expect(blockOf()?.getAttribute('data-collapsed')).toBe('true');
 
     // ⚠️ 再投递一次同一条记录（实时链路每执行一步都会重画一次）。
-    panel.rememberExecutions('req-1', [cardExecution()], '');
+    panel.rememberExecutions('req-1', [cardExecution()], '', CHAT_SESSION);
     await settle();
     expect(blockOf()?.getAttribute('data-collapsed')).toBe('true');
   });
@@ -1021,7 +1065,7 @@ describe('tool panel: one block per message when the legs fail to merge', () => 
       callId: 'xml:ls',
       name: 'shell_exec',
       result: { ok: true, summary: '真实结果', detail: 'ls 的真实输出' } as ToolCardResult,
-    }], '');
+    }], '', CHAT_SESSION);
     await settle();
 
     // 仍然只有一块，且真结果落进去了。
@@ -1052,12 +1096,12 @@ describe('tool panel: live leg and history leg collide on one message', () => {
       callId: 'xml:aaa',
       name: 'shell_exec',
       raw: '<shell_exec>{"command":"ls"}</shell_exec>',
-    });
+    }, CHAT_SESSION);
     // ⚠️ 实时腿的结果**带 detail** —— 那是「真结果」的唯一标志（历史腿合成的行没有它）。
     // 后面用它验「历史腿接管时不许把真结果冲掉」。
     panel.completeToolCall('req-1', execution({
       result: { ok: true, summary: '真实结果', detail: 'ls 的真实输出' } as ToolCardResult,
-    }));
+    }), CHAT_SESSION);
     await settle();
     // 实时腿画的块：键是 `live:req-1`，有真结果。
     expect(document.querySelectorAll('.zpp-tool-block')).toHaveLength(1);
@@ -1131,8 +1175,8 @@ describe('tool panel: block stays expanded only while an unsaved action is visib
     const panel = makePanel({ renderDetail: actionableCardRenderer() });
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' });
-    panel.completeToolCall('req-1', cardExecution());
+    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' }, CHAT_SESSION);
+    panel.completeToolCall('req-1', cardExecution(), CHAT_SESSION);
     await settle();
     panel.sealTurn('req-1');
     await settle();
@@ -1156,8 +1200,8 @@ describe('tool panel: block stays expanded only while an unsaved action is visib
     const panel = makePanel({ renderDetail: statusOnlyRenderer });
     await panel.install();
 
-    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' });
-    panel.completeToolCall('req-1', cardExecution());
+    panel.beginToolCall('req-1', { callId: 'xml:card', name: 'skill_draft_create' }, CHAT_SESSION);
+    panel.completeToolCall('req-1', cardExecution(), CHAT_SESSION);
     await settle();
     panel.sealTurn('req-1');
     await settle();

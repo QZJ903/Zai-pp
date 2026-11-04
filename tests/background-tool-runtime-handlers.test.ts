@@ -91,7 +91,7 @@ const call: ToolCall = {
 };
 
 describe('tool runtime handler ownership', () => {
-  it('creates exactly the 31 inventory-assigned handlers without duplicate ownership', () => {
+  it('creates exactly the 30 inventory-assigned handlers without duplicate ownership', () => {
     const handlers = createToolRuntimeHandlers({
       mcp: createMcpDependencies(),
       browser: createBrowserDependencies(),
@@ -99,11 +99,11 @@ describe('tool runtime handler ownership', () => {
     });
     const types = handlers.map((handler) => handler.type);
     const expected = readInventoryCommands(
-      'Group C — MCP, tool, browser control, and sandbox (31)',
+      'Group C — MCP, tool, browser control, and sandbox (30)',
     );
 
-    expect(types).toHaveLength(31);
-    expect(new Set(types).size).toBe(31);
+    expect(types).toHaveLength(30);
+    expect(new Set(types).size).toBe(30);
     expect([...types].sort()).toEqual([...expected].sort());
     for (const type of types) expect(getRuntimeCommandOwner(type)).toBe('typed-handler');
 
@@ -113,7 +113,7 @@ describe('tool runtime handler ownership', () => {
       .filter((type) => expected.includes(type))
       .sort();
     expect(Object.keys(TOOL_RUNTIME_PAYLOAD_DECODERS).sort()).toEqual(decodedTypes);
-    expect(decodedTypes).toHaveLength(19);
+    expect(decodedTypes).toHaveLength(18);
   });
 
   it('rejects malformed nested MCP input before persistence or external I/O', async () => {
@@ -486,67 +486,9 @@ describe('tool execution runtime handlers', () => {
     });
   });
 
-  it('authorizes an external payload before caching and appending its first chunk', async () => {
-    const events: string[] = [];
-    const dependencies = createExecutionDependencies();
-    vi.mocked(dependencies.externalPayloadAuthorizationCache.has).mockImplementation(() => {
-      events.push('cache:has');
-      return false;
-    });
-    vi.mocked(dependencies.getAuthorizationDescriptors).mockImplementation(async () => {
-      events.push('descriptors');
-      return [descriptor];
-    });
-    vi.mocked(dependencies.authorizeExternalToolPayloadChunk).mockImplementation(async () => {
-      events.push('authorize');
-      return { namespace: 'grant-1', expiresAt: 2_000 };
-    });
-    vi.mocked(dependencies.externalPayloadAuthorizationCache.remember).mockImplementation(() => {
-      events.push('cache:remember');
-    });
-    vi.mocked(dependencies.appendExternalizedToolPayloadChunk).mockImplementation(() => {
-      events.push('append');
-    });
-    const handlers = createToolExecutionRuntimeHandlers(dependencies);
-
-    await expect(dispatch(handlers, createAppendMessage(), zaiContext))
-      .resolves.toEqual({ ok: true });
-    expect(events).toEqual([
-      'cache:has',
-      'descriptors',
-      'authorize',
-      'cache:remember',
-      'append',
-    ]);
-  });
-
-  it('projects authorization failures without appending and reuses a valid hot-path proof', async () => {
-    const dependencies = createExecutionDependencies();
-    vi.mocked(dependencies.authorizeExternalToolPayloadChunk).mockRejectedValueOnce(
-      new ToolAuthorizationError('tool_authorization_missing', 'Grant not found.'),
-    );
-    const handlers = createToolExecutionRuntimeHandlers(dependencies);
-
-    await expect(dispatch(handlers, createAppendMessage(), zaiContext)).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'tool_authorization_missing' },
-    });
-    expect(dependencies.appendExternalizedToolPayloadChunk).not.toHaveBeenCalled();
-
-    vi.mocked(dependencies.externalPayloadAuthorizationCache.has).mockReturnValueOnce(true);
-    await expect(dispatch(handlers, createAppendMessage(), zaiContext))
-      .resolves.toEqual({ ok: true });
-    expect(dependencies.getAuthorizationDescriptors).toHaveBeenCalledTimes(1);
-    expect(dependencies.authorizeExternalToolPayloadChunk).toHaveBeenCalledTimes(1);
-    expect(dependencies.appendExternalizedToolPayloadChunk).toHaveBeenCalledTimes(1);
-  });
-
   it('uses content grants, fails closed without an id, and keeps extension calls trusted', async () => {
     const events: string[] = [];
     const dependencies = createExecutionDependencies();
-    vi.mocked(dependencies.externalPayloadAuthorizationCache.deleteCall).mockImplementation(() => {
-      events.push('cache:delete-call');
-    });
     vi.mocked(dependencies.executeToolCall).mockImplementation(async (_call, authorization) => {
       events.push(`execute:${authorization.kind}`);
       return { ok: true, summary: 'done' };
@@ -560,7 +502,7 @@ describe('tool execution runtime handlers', () => {
       type: 'EXECUTE_TOOL_CALL',
       payload: { ...call, authorizationId: 'grant-1' },
     }, zaiContext);
-    expect(events).toEqual(['cache:delete-call', 'execute:grant', 'history:broadcast']);
+    expect(events).toEqual(['execute:grant', 'history:broadcast']);
     expect(dependencies.executeToolCall).toHaveBeenNthCalledWith(
       1,
       call,
@@ -624,49 +566,40 @@ describe('tool execution runtime handlers', () => {
       type: 'EXECUTE_TOOL_CALL',
       payload,
     }, zaiContext)).resolves.toBe(invalidResult);
-    expect(dependencies.externalPayloadAuthorizationCache.deleteCall).not.toHaveBeenCalled();
     expect(dependencies.executeToolCall).not.toHaveBeenCalled();
     expect(dependencies.broadcastToolCallHistoryUpdate).not.toHaveBeenCalled();
   });
 
-  it('closes persisted authorization before clearing hot and external payload state', async () => {
-    const events: string[] = [];
+  it('closes the persisted authorization without touching anything else', async () => {
+    const close = vi.fn(async () => undefined);
     const dependencies = createExecutionDependencies();
-    vi.mocked(dependencies.closeToolAuthorization).mockImplementation(async () => {
-      events.push('close');
-    });
-    vi.mocked(dependencies.externalPayloadAuthorizationCache.deleteGrant).mockImplementation(() => {
-      events.push('cache:delete-grant');
-    });
-    vi.mocked(dependencies.clearExternalizedToolPayloadNamespace).mockImplementation(() => {
-      events.push('payload:clear');
-    });
+    vi.mocked(dependencies.closeToolAuthorization).mockImplementation(close);
     const handlers = createToolExecutionRuntimeHandlers(dependencies);
 
     await expect(dispatch(handlers, {
       type: 'CLOSE_TOOL_AUTHORIZATION',
       payload: { authorizationId: 'grant-1' },
     }, zaiContext)).resolves.toEqual({ ok: true });
-    expect(events).toEqual(['close', 'cache:delete-grant', 'payload:clear']);
+    expect(close).toHaveBeenCalledWith('grant-1', expect.anything());
   });
 
   it('preserves history limits, notification order, and platform capabilities', async () => {
     const dependencies = createExecutionDependencies();
     const history = createHistoryRecord();
     const platform = createPlatformEnvironment();
-    vi.mocked(dependencies.getToolCallHistory).mockResolvedValue([history]);
+    vi.mocked(dependencies.getToolCallHistory).mockResolvedValue({ records: [history], dropped: 0 });
     vi.mocked(dependencies.getPlatformEnvironment).mockReturnValue(platform);
     const handlers = createToolExecutionRuntimeHandlers(dependencies);
 
     await expect(dispatch(handlers, {
       type: 'GET_TOOL_CALL_HISTORY',
       payload: { limit: 5 },
-    })).resolves.toEqual([history]);
+    })).resolves.toEqual({ records: [history], dropped: 0 });
     expect(dependencies.getToolCallHistory).toHaveBeenCalledWith(5);
 
     vi.mocked(dependencies.getToolCallHistory).mockClear();
     await expect(dispatch(handlers, { type: 'GET_TOOL_CALL_HISTORY' }))
-      .resolves.toEqual([history]);
+      .resolves.toEqual({ records: [history], dropped: 0 });
     expect(dependencies.getToolCallHistory).toHaveBeenCalledWith(undefined);
 
     await expect(dispatch(handlers, { type: 'CLEAR_TOOL_CALL_HISTORY' }))
@@ -753,16 +686,6 @@ function createExecutionDependencies(): ToolExecutionRuntimeHandlerDependencies 
     refreshToolDescriptors: vi.fn(async () => [descriptor]),
     createToolAuthorization: vi.fn(async () => grant),
     closeToolAuthorization: vi.fn(async () => undefined),
-    authorizeExternalToolPayloadChunk: vi.fn(async () => ({
-      namespace: 'grant-1',
-      expiresAt: 2_000,
-    })),
-    createToolAuthorizationResult: vi.fn((error) => ({
-      ok: false,
-      summary: 'Tool authorization rejected',
-      detail: error.message,
-      error: { code: error.code, message: error.message, retryable: false },
-    })),
     createInvalidToolCallResult: vi.fn(() => ({
       ok: false,
       summary: 'Invalid tool call',
@@ -773,19 +696,11 @@ function createExecutionDependencies(): ToolExecutionRuntimeHandlerDependencies 
         retryable: false,
       },
     })),
-    externalPayloadAuthorizationCache: {
-      has: vi.fn(() => false),
-      remember: vi.fn(() => undefined),
-      deleteGrant: vi.fn(() => undefined),
-      deleteCall: vi.fn(() => undefined),
-    },
-    appendExternalizedToolPayloadChunk: vi.fn(() => undefined),
-    clearExternalizedToolPayloadNamespace: vi.fn(() => undefined),
     executeToolCall: vi.fn(async (_call, _authorization: RuntimeToolAuthorizationContext) => ({
       ok: true,
       summary: 'done',
     })),
-    getToolCallHistory: vi.fn(async () => []),
+    getToolCallHistory: vi.fn(async () => ({ records: [], dropped: 0 })),
     clearToolCallHistory: vi.fn(async () => undefined),
     getPlatformEnvironment: vi.fn(() => createPlatformEnvironment()),
     createRequestId: vi.fn(() => 'generated-request-id'),
@@ -911,17 +826,6 @@ function createHistoryRecord(): ToolCallHistoryRecord {
   };
 }
 
-function createAppendMessage(): { type: string; payload: Record<string, unknown> } {
-  return {
-    type: 'APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK',
-    payload: {
-      authorizationId: 'grant-1',
-      callId: 'call-1',
-      invocationName: descriptor.invocationName,
-      chunk: '{"value":"approved"}',
-    },
-  };
-}
 
 function dispatch(
   handlers: readonly RuntimeCommandHandler[],

@@ -13,28 +13,14 @@ import type {
   ToolAuthorizationGrantSummary,
   ToolAuthorizationSubject,
   ToolCall,
-  ToolCallHistoryRecord,
   ToolDescriptor,
   ToolExecutionTrigger,
   ToolResult,
   TrustedToolExecutionContext,
 } from '../../core/tool/types';
+import type { ToolCallHistoryReadResult } from '../../core/tool/history';
 import type { RuntimeMessageContext } from '../../core/messaging/runtime-boundary';
 import { defineToolPayloadRuntimeCommandHandler } from './runtime-handler';
-
-export interface ExternalPayloadAuthorizationBinding {
-  grantId: string;
-  subject: ToolAuthorizationSubject;
-  callId: string;
-  invocationName: string;
-}
-
-export interface ExternalPayloadAuthorizationCachePort {
-  has(binding: ExternalPayloadAuthorizationBinding): boolean;
-  remember(binding: ExternalPayloadAuthorizationBinding, expiresAt: number): void;
-  deleteGrant(grantId: string): void;
-  deleteCall(grantId: string, callId: string): void;
-}
 
 export interface ToolExecutionRuntimeHandlerDependencies {
   getLocale(): SupportedLocale;
@@ -49,25 +35,13 @@ export interface ToolExecutionRuntimeHandlerDependencies {
     authorizationId: string,
     subject: ToolAuthorizationSubject,
   ): Promise<void>;
-  authorizeExternalToolPayloadChunk(input: ExternalPayloadAuthorizationBinding & {
-    currentDescriptors: readonly ToolDescriptor[];
-  }): Promise<{ namespace: string; expiresAt: number }>;
-  createToolAuthorizationResult(error: ToolAuthorizationError): ToolResult;
   createInvalidToolCallResult(value: unknown, locale: SupportedLocale): ToolResult;
-  externalPayloadAuthorizationCache: ExternalPayloadAuthorizationCachePort;
-  appendExternalizedToolPayloadChunk(
-    callId: string,
-    invocationName: string,
-    chunk: string,
-    namespace: string,
-  ): void;
-  clearExternalizedToolPayloadNamespace(namespace: string): void;
   executeToolCall(
     call: ToolCall,
     authorization: RuntimeToolAuthorizationContext,
     locale: SupportedLocale,
   ): Promise<ToolResult>;
-  getToolCallHistory(limit?: number): Promise<ToolCallHistoryRecord[]>;
+  getToolCallHistory(limit?: number): Promise<ToolCallHistoryReadResult>;
   clearToolCallHistory(): Promise<void>;
   getPlatformEnvironment(): PlatformEnvironment;
   createRequestId(): string;
@@ -142,58 +116,14 @@ export function createToolExecutionRuntimeHandlers(
         authorizationId,
         createToolAuthorizationSubject(context),
       );
-      dependencies.externalPayloadAuthorizationCache.deleteGrant(authorizationId);
-      dependencies.clearExternalizedToolPayloadNamespace(authorizationId);
       return { ok: true as const };
     }),
-    defineToolPayloadRuntimeCommandHandler(
-      'APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK',
-      async (decoded, context) => {
-        if (decoded.ok === false) {
-          return { ok: false as const, error: decoded.error };
-        }
-        const payload = decoded.payload;
-        try {
-          const binding: ExternalPayloadAuthorizationBinding = {
-            grantId: payload.authorizationId,
-            subject: createToolAuthorizationSubject(context),
-            callId: payload.callId,
-            invocationName: payload.invocationName,
-          };
-          if (!dependencies.externalPayloadAuthorizationCache.has(binding)) {
-            const authorization = await dependencies.authorizeExternalToolPayloadChunk({
-              ...binding,
-              currentDescriptors: await dependencies.getAuthorizationDescriptors(
-                dependencies.getLocale(),
-              ),
-            });
-            dependencies.externalPayloadAuthorizationCache.remember(
-              binding,
-              authorization.expiresAt,
-            );
-          }
-          dependencies.appendExternalizedToolPayloadChunk(
-            payload.callId,
-            payload.invocationName,
-            payload.chunk,
-            payload.authorizationId,
-          );
-        } catch (error) {
-          if (!(error instanceof ToolAuthorizationError)) throw error;
-          return dependencies.createToolAuthorizationResult(error);
-        }
-        return { ok: true as const };
-      },
-    ),
     defineToolPayloadRuntimeCommandHandler('EXECUTE_TOOL_CALL', async (decoded, context) => {
       const locale = dependencies.getLocale();
       if (decoded.ok === false) {
         return dependencies.createInvalidToolCallResult(decoded.call, locale);
       }
       const { authorizationId, call } = decoded;
-      if (authorizationId && call.id) {
-        dependencies.externalPayloadAuthorizationCache.deleteCall(authorizationId, call.id);
-      }
       const authorization: RuntimeToolAuthorizationContext = context.surface === 'zai_content'
         ? {
           kind: 'grant',
@@ -250,6 +180,22 @@ export function createToolAuthorizationSubject(
   };
 }
 
+/**
+ * 后台自己发起的工具调用的身份对象。
+ *
+ * ⚠️⚠️ **`requestId` 只认 `call.source.requestId`，没有别的回落。**
+ * 原先还有 `automationRunId` → `runId` 两档，那是上游给「自动化直连工具」那条路
+ * 准备的；本项目自动化最终也是页面里的模型吐 XML、走 grant 档授权，
+ * 那两档**在生产里一次都不会命中**（`ToolCall.source` 的构造点全仓只有两处：
+ * 内容脚本的 `executeDetected` 带 `requestId`、授权层的 `canonicalizeCall` 从 grant 抄，
+ * 而 `automationRunId` / `runId` / `taskId` 没有任何写入点）。
+ * 留着它们会让「这条 id 到底从哪来」有两个看起来都可能成立的答案。
+ *
+ * ⚠️ **拿不到就现生成一个** —— 本地技能导入那条 trusted 调用就没有 `source.requestId`
+ * （它的 source 只有 `{ trigger }`），而这个 id 唯一的用途是给 tool capability scope
+ * 当 `scopeId`（`createRuntimeCapabilityScope` 的 `capabilityScopeId ?? requestId`），
+ * 每次调用一个新 id 正是想要的语义。
+ */
 export function createTrustedToolExecutionContext(
   call: ToolCall,
   trigger: ToolExecutionTrigger,
@@ -259,10 +205,7 @@ export function createTrustedToolExecutionContext(
   return {
     kind: 'trusted',
     trigger,
-    requestId: call.source?.requestId
-      ?? call.source?.automationRunId
-      ?? call.source?.runId
-      ?? createRequestId(),
+    requestId: call.source?.requestId ?? createRequestId(),
     capabilityScopeId,
     chatSessionId: call.source?.chatSessionId ?? null,
     taskId: call.source?.taskId,

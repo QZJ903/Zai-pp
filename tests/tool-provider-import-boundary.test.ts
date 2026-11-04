@@ -45,7 +45,6 @@ describe('tool provider import boundary', () => {
       '../network/abort',
       './authorization',
       './execution-error',
-      './externalized-payload',
       './history',
       './local-skill-cwd',
       './provider-registry',

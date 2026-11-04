@@ -239,10 +239,18 @@ function renderMemoryImportPreviewResult(input: ToolResultRendererInput): boolea
   const wrapper = createResultPanel('zpp-memory-import-result');
   const meta = document.createElement('div');
   meta.className = 'zpp-result-meta';
-  meta.textContent = translate(locale, 'tool.memoryImport.result.metaSummary', {
-    count: preview.memories.length,
-    duplicates: preview.duplicates,
-  });
+  // ⚠️ **截断过就把「另有 N 条」写进表头** —— 只列前 5 个名字，用户本来就看不出全貌，
+  // 而少掉的 100 条与「本来就只有 100 条」在旧表头下完全同形。
+  meta.textContent = preview.omitted > 0
+    ? translate(locale, 'tool.memoryImport.result.metaSummaryTruncated', {
+      count: preview.memories.length,
+      duplicates: preview.duplicates,
+      omitted: preview.omitted,
+    })
+    : translate(locale, 'tool.memoryImport.result.metaSummary', {
+      count: preview.memories.length,
+      duplicates: preview.duplicates,
+    });
   const list = document.createElement('div');
   list.className = 'zpp-result-text';
   // 只列有名字的条目 —— 结果对象是外部输入，元素缺 `name` 时直接拼会渲染出 `- undefined`。
@@ -369,6 +377,7 @@ function getMemoryImportPreviewOutput(value: unknown): {
   memories: Array<{ name: string }>;
   duplicates: number;
   rejected: number;
+  omitted: number;
 } | null {
   if (!value || typeof value !== 'object') return null;
   const output = value as {
@@ -376,14 +385,20 @@ function getMemoryImportPreviewOutput(value: unknown): {
     memories?: unknown;
     duplicates?: unknown;
     rejected?: unknown;
+    omitted?: unknown;
   };
   if (output.kind !== 'memory_import_preview' || !Array.isArray(output.memories)) return null;
   if (typeof output.duplicates !== 'number' || typeof output.rejected !== 'number') return null;
-  return value as {
-    kind: 'memory_import_preview';
-    memories: Array<{ name: string }>;
-    duplicates: number;
-    rejected: number;
+  return {
+    kind: 'memory_import_preview',
+    memories: output.memories as Array<{ name: string }>,
+    duplicates: output.duplicates,
+    rejected: output.rejected,
+    // ⚠️ **缺失按 0 处理** —— 本字段是后加的，历史里落库的老记录没有它；
+    // 判它必填会让那些卡片**整块退回纯文本**（连带「导入」按钮消失）。
+    omitted: typeof output.omitted === 'number' && Number.isFinite(output.omitted)
+      ? output.omitted
+      : 0,
   };
 }
 function createResultPanel(className: string): HTMLDivElement {

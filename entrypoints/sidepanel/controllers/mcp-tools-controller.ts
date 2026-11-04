@@ -12,7 +12,7 @@ import {
   type ShellToolName,
 } from '../../../core/shell';
 import { isExtensionInternalTool } from '../../../core/mcp/internal-tools';
-import { decodeToolCallHistory } from '../../../core/tool/history-codec';
+import { decodeToolCallHistoryEnvelope } from '../../../core/tool/history-codec';
 import type { LocaleMessageKey, MessageParams } from '../../../core/i18n';
 import type {
   McpCapabilityExposureMode,
@@ -286,8 +286,10 @@ export function createMcpToolsController(
         ))),
         runtimeClient.request(
           { type: 'GET_TOOL_CALL_HISTORY', payload: { limit: 12 } },
-          { decode: (value) => decodeToolCallHistory(value, 'GET_TOOL_CALL_HISTORY response') },
-        ),
+          // ⚠️ 响应是 `{ records, dropped }` 而不是裸数组 —— `dropped` 是给内容脚本
+          // 打页面控制台日志用的，侧边栏只关心 `records`。
+          { decode: (value) => decodeToolCallHistoryEnvelope(value, 'GET_TOOL_CALL_HISTORY response') },
+        ).then((report) => report.records),
         runtimeClient.request(
           { type: 'GET_MCP_CAPABILITY_SETTINGS' },
           { decode: decodeMcpCapabilitySettings },

@@ -23,7 +23,6 @@ describe('background runtime message context refresh', () => {
     expect([
       'CREATE_TOOL_AUTHORIZATION',
       'CLOSE_TOOL_AUTHORIZATION',
-      'APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK',
       'EXECUTE_TOOL_CALL',
     ].every(requiresCurrentToolAuthorizationSubject)).toBe(true);
     expect(requiresCurrentToolAuthorizationSubject('GET_TOOL_DESCRIPTORS')).toBe(false);

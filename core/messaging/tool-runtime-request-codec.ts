@@ -59,12 +59,6 @@ const MAX_TOOL_INTENT_CHARS = 16_000;
 interface SpecialDecodedPayloads {
   CREATE_TOOL_AUTHORIZATION: DecodedDomainPayload<DecodedCreateToolAuthorizationPayload>;
   CLOSE_TOOL_AUTHORIZATION: DecodedDomainPayload<{ authorizationId: string }>;
-  APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK: DecodedDomainPayload<{
-    authorizationId: string;
-    callId: string;
-    invocationName: string;
-    chunk: string;
-  }>;
   EXECUTE_TOOL_CALL: DecodedToolCallPayload;
 }
 
@@ -210,25 +204,6 @@ export const TOOL_RUNTIME_PAYLOAD_DECODERS: ToolRuntimePayloadDecoderMap = {
     return typeof authorizationId === 'string'
       ? validDecodedPayload({ authorizationId })
       : invalidDecodedPayload('invalid_tool_authorization_id');
-  },
-  APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK(value) {
-    if (!isPlainRuntimeRecord(value)) {
-      return invalidDecodedPayload('invalid_external_payload_chunk');
-    }
-    if (
-      typeof value.authorizationId !== 'string'
-      || typeof value.callId !== 'string'
-      || typeof value.invocationName !== 'string'
-      || typeof value.chunk !== 'string'
-    ) {
-      return invalidDecodedPayload('invalid_external_payload_chunk');
-    }
-    return validDecodedPayload({
-      authorizationId: value.authorizationId,
-      callId: value.callId,
-      invocationName: value.invocationName,
-      chunk: value.chunk,
-    });
   },
   EXECUTE_TOOL_CALL(value) {
     if (value === null || typeof value !== 'object') return { ok: false, call: value };

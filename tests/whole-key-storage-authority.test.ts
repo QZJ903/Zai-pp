@@ -179,21 +179,54 @@ describe('Tool History whole-key mutation authority', () => {
     expect(stored.map((record) => record.id)).not.toContain('legacy-0');
   });
 
-  it.each([
-    ['future envelope', { version: 2, records: [] }],
-    ['corrupt row', [{ id: 'broken' }]],
-    ['duplicate ids', [makeToolHistoryRecord('duplicate', 1), makeToolHistoryRecord('duplicate', 2)]],
-  ])('rejects %s on read, append, and clear without replacing it', async (_label, original) => {
+  it('fails closed when the whole key is not a tool history array', async () => {
+    // ⚠️ **整份形状错仍然抛** —— 那一档说明这个键被别的东西占了，
+    // 把它当历史用只会写出更乱的数据。宽容只针对「单条不合法」。
+    const original = { version: 2, records: [] };
     const { storage, chromeStub } = createChromeStub({ [TOOL_HISTORY_STORAGE_KEY]: original });
     vi.stubGlobal('chrome', chromeStub);
 
     await expect(getToolCallHistory()).rejects.toBeInstanceOf(ToolHistoryStorageContractError);
     await expect(appendToolCallHistory(makeToolCall(1), makeToolResult(1), 'manual_chat'))
       .rejects.toBeInstanceOf(ToolHistoryStorageContractError);
-    await expect(clearToolCallHistory()).rejects.toBeInstanceOf(ToolHistoryStorageContractError);
     expect(chromeStub.storage.local.set).not.toHaveBeenCalled();
-    expect(chromeStub.storage.local.remove).not.toHaveBeenCalled();
     expect(storage.get(TOOL_HISTORY_STORAGE_KEY)).toBe(original);
+
+    // 清空**不再先读** ⇒ 这一档也能自救（旧版这里必抛，坏数据连自杀都做不到）。
+    await expect(clearToolCallHistory()).resolves.toBeUndefined();
+    expect(storage.has(TOOL_HISTORY_STORAGE_KEY)).toBe(false);
+  });
+
+  it.each([
+    ['corrupt row', [{ id: 'broken' }], ['good']],
+    ['duplicate ids', [makeToolHistoryRecord('duplicate', 1), makeToolHistoryRecord('duplicate', 2)], ['good', 'duplicate']],
+  ])('skips %s on read and heals on the next append instead of bricking the store', async (_label, bad, expectedIds) => {
+    // ⚠️⚠️ **读宽容、写严格** —— 旧版让一条坏记录把三条路一起锁死：
+    // 读不出（面板退化成摘要）、写不出（每次工具失败并被标成 post-effect ambiguous）、
+    // 清不掉（clear 自己也要先读）。
+    const good = makeToolHistoryRecord('good', 5);
+    const original = [good, ...bad] as unknown[];
+    const { storage, chromeStub } = createChromeStub({ [TOOL_HISTORY_STORAGE_KEY]: original });
+    vi.stubGlobal('chrome', chromeStub);
+
+    // 读：能解的那条照常返回；**重复 id 保留第一条**（数组按时间倒序，丢后来那条不影响展示）。
+    const read = await getToolCallHistory();
+    expect(read.map((record) => record.id)).toEqual(expectedIds);
+
+    // 写：成功，并把坏记录**顺手清掉**（回写的是宽容读出来的那份）。
+    const appended = await appendToolCallHistory(makeToolCall(1), makeToolResult(1), 'manual_chat');
+    expect(appended.id).toBeTruthy();
+    const stored = storage.get(TOOL_HISTORY_STORAGE_KEY) as Array<{ id: string }>;
+    expect(stored.map((record) => record.id)).toContain(appended.id);
+    expect(stored.map((record) => record.id)).toContain('good');
+    expect(stored.map((record) => record.id)).not.toContain('broken');
+    expect(stored.map((record) => record.id).filter((id) => id === 'duplicate')).toHaveLength(
+      expectedIds.filter((id) => id === 'duplicate').length,
+    );
+
+    // 清：仍然可用。
+    await expect(clearToolCallHistory()).resolves.toBeUndefined();
+    expect(storage.has(TOOL_HISTORY_STORAGE_KEY)).toBe(false);
   });
 
   it('orders clear with appends and continues after a failed operation', async () => {

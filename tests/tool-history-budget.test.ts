@@ -113,7 +113,9 @@ describe('tool history output round-trip', () => {
     await appendToolCallHistory(sampleCall(0), {
       ok: true,
       summary: 'huge',
-      output: { kind: 'skill_draft', blob: 'x'.repeat(20_000) },
+      // ⚠️ 用**非结构化**载荷：`skill_draft` / `memory_import_preview` 走更宽的
+      // `STRUCTURED_OUTPUT_LIMITS`（64 KB / 32 KB），这个体积不再触发截断。
+      output: { blob: 'x'.repeat(20_000) },
     }, 'manual_chat');
 
     const [record] = await getToolCallHistory();
@@ -132,5 +134,72 @@ describe('tool history output round-trip', () => {
 
     const persisted = storage['zai_pp_tool_history'] as Array<{ result: { output: unknown } }>;
     expect(typeof persisted[0].result.output).toBe('string');
+  });
+});
+
+describe('structured output budgets', () => {
+  // ⚠️⚠️ **这两类结果不是「偶尔超」，是「写长就必超」** —— 而超了不是少看一点，
+  // 是卡片整个退化成纯文本、「保存 / 导入」按钮静默消失。
+  // 实测：16 000 字符指令的草稿 JSON 16 755（全角）~ 64 755（全反斜杠）字符，
+  // 5 条满长记忆的预览 JSON 10 328 字符，都超过通用的 8 000。
+  it('keeps a long skill draft intact instead of degrading the save button', async () => {
+    const draft = {
+      kind: 'skill_draft',
+      draft: {
+        name: 'x'.repeat(64),
+        description: 'y'.repeat(500),
+        instructions: '中'.repeat(16_000),
+        source: 'custom',
+        memoryEnabled: true,
+        enabled: true,
+        metadata: { createdBy: 'skill_draft_create' },
+      },
+      warnings: [],
+    };
+    await appendToolCallHistory(sampleCall(0), {
+      ok: true,
+      summary: 'Skill draft ready',
+      output: draft,
+    }, 'manual_chat');
+
+    const [record] = await getToolCallHistory();
+    expect(record.result.output).toEqual(draft);
+  });
+
+  it('keeps a long memory import preview intact instead of degrading the import button', async () => {
+    const preview = {
+      kind: 'memory_import_preview',
+      duplicates: 0,
+      rejected: 0,
+      omitted: 0,
+      memories: Array.from({ length: 5 }, (_, index) => ({
+        type: 'user',
+        name: `m${index}`,
+        content: '中'.repeat(2_000),
+        tags: [],
+      })),
+    };
+    await appendToolCallHistory(sampleCall(0), {
+      ok: true,
+      summary: 'Memory import preview ready',
+      output: preview,
+    }, 'manual_chat');
+
+    const [record] = await getToolCallHistory();
+    expect(record.result.output).toEqual(preview);
+  });
+
+  it('still clamps a structured payload that exceeds its own wider budget', async () => {
+    // ⚠️ **上限仍有，只是更宽** —— 不设上限的版本会让单条预览到 816 KB、
+    // 100 条 230 MB（预算只有 7.5 MB），`trimToFit` 会把别的工具记录一起挤掉。
+    await appendToolCallHistory(sampleCall(0), {
+      ok: true,
+      summary: 'huge preview',
+      output: { kind: 'memory_import_preview', blob: 'x'.repeat(40_000) },
+    }, 'manual_chat');
+
+    const [record] = await getToolCallHistory();
+    expect(typeof record.result.output).toBe('string');
+    expect(String(record.result.output)).toContain('...[truncated]');
   });
 });

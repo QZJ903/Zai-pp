@@ -5,7 +5,7 @@ import type {
   ToolExecutionTrigger,
   ToolResult,
 } from './types';
-import { decodeToolCallHistory, encodeToolCallHistory } from './history-codec';
+import { decodeToolCallHistoryTolerant, encodeToolCallHistory } from './history-codec';
 import { createCoalescingMutationQueue } from '../persistence/coalescing-mutation-queue';
 import { TOOL_OUTPUT_MAX_CHARS } from './result-bytes';
 
@@ -61,23 +61,63 @@ async function persistToolHistoryBurst(
   return results;
 }
 
-export async function getToolCallHistory(limit: number = MAX_HISTORY): Promise<ToolCallHistoryRecord[]> {
+/**
+ * 一次读的结果 + **被丢掉的条数**。
+ *
+ * ⚠️⚠️ **`dropped` 必须能跨进程带出去** —— 只在本模块 `console.log` 的话，它只出现在
+ * `chrome://extensions` 的 service worker 控制台，而**用户按 F12 看的是页面控制台**，
+ * 两者不是一个地方。内容脚本拿到这个数后再打一行 log，才是「用户能看见」的那条。
+ */
+export interface ToolCallHistoryReadResult {
+  records: ToolCallHistoryRecord[];
+  dropped: number;
+}
+
+export async function getToolCallHistoryReport(
+  limit: number = MAX_HISTORY,
+): Promise<ToolCallHistoryReadResult> {
   return toolHistoryOperations.barrier(async () => {
-    const history = orderToolCallHistory(await readToolCallHistoryAlreadyOwned());
-    return history.slice(0, limit).map(restoreOutputSnapshot);
+    const { records, dropped } = await readToolHistoryBare();
+    const history = orderToolCallHistory(records);
+    return { records: history.slice(0, limit).map(restoreOutputSnapshot), dropped };
   });
+}
+
+export async function getToolCallHistory(limit: number = MAX_HISTORY): Promise<ToolCallHistoryRecord[]> {
+  return (await getToolCallHistoryReport(limit)).records;
 }
 
 export async function clearToolCallHistory(): Promise<void> {
   await toolHistoryOperations.barrier(async () => {
-    await readToolCallHistoryAlreadyOwned();
     await chrome.storage.local.remove(TOOL_HISTORY_STORAGE_KEY);
   });
 }
 
-async function readToolCallHistoryAlreadyOwned(): Promise<ToolCallHistoryRecord[]> {
+/**
+ * 读回本模块拥有的整键历史，**连同被丢掉的条数一起返回**。
+ *
+ * ⚠️⚠️ **读宽容、写严格，两者不对称是有意的**：
+ * - **写**（`encodeToolCallHistory`）仍然严格 —— 保证落库的每一条都合法；
+ * - **读**必须宽容 —— 否则一条坏记录会让**整份历史**读不出来，连带三条路一起死：
+ *   ① `getToolCallHistory` 读不出（面板退回只有摘要）；
+ *   ② `persistToolHistoryBurst` 读不出 ⇒ 此后**每次工具执行**都失败，
+ *      并被包成 `tool_post_effect_persistence_failed`（「可能已执行、别重试」）；
+ *   ③ `clearToolCallHistory` 旧版也要先读 ⇒ **连清空这个自救动作都做不到**。
+ *
+ * ⚠️ **整份形状错（不是数组）仍然抛** —— 那一档说明这个键被别的东西占了，
+ * 把它当历史用只会写出更乱的数据。
+ *
+ * ⚠️ **本函数不打日志** —— 丢弃信号要由**能看到用户的地方**打（内容脚本的页面控制台）。
+ * 这一层只负责把数带出去，理由见 `ToolCallHistoryReadResult`。
+ */
+async function readToolHistoryBare(): Promise<ToolCallHistoryReadResult> {
   const data = await chrome.storage.local.get(TOOL_HISTORY_STORAGE_KEY) as Record<string, unknown>;
-  return decodeToolCallHistory(data[TOOL_HISTORY_STORAGE_KEY]);
+  return decodeToolCallHistoryTolerant(data[TOOL_HISTORY_STORAGE_KEY]);
+}
+
+/** 写侧与 `persistToolHistoryBurst` 用的薄封装：只要记录、丢弃数由调用方决定怎么报。 */
+async function readToolCallHistoryAlreadyOwned(): Promise<ToolCallHistoryRecord[]> {
+  return (await readToolHistoryBare()).records;
 }
 
 function orderToolCallHistory(
@@ -109,14 +149,35 @@ function sanitizeCall(call: ToolCall): ToolCall {
  *
  * ⇒ **别看到 24_000 就回来把这里抬上去。** 真要抬得先算配额：
  * 现在 `100 × (4_000 + 8_000)` 约 1.2 MB，抬到 24_000 就是 3.2 MB。
+ *
+ * ## 两类结构化结果单列更宽的上限（`STRUCTURED_OUTPUT_LIMITS`）
+ *
+ * ⚠️⚠️ **这两个工具不是「偶尔超」，是「写长就必超」** —— 而超了不是少看一点，
+ * 是**卡片整个退化成纯文本、按钮静默消失**（`restoreOutputSnapshot` 解析不回来）。
+ * 实测（`JSON.stringify` 后的字符数）：
+ * - `skill_draft_create` 允许 16_000 字符指令 ⇒ 产出 JSON **16 755**（全角）
+ *   ~ **64 755**（指令里全是反斜杠时的最坏转义）字符；
+ * - `memory_import_preview` 单条记忆上限 8_000 字 ⇒ 5 条就 **10 328** 字符。
+ *
+ * 所以按 `kind` 给两档更宽的上限，**但仍然截断** —— 不截的版本实测会让
+ * `memory_import_preview` 单条到 816 KB、100 条 230 MB（预算只有 7.5 MB），
+ * `trimToFit` 会砍到只剩个位数，把别的工具的记录一起挤掉。
+ * ⇒ 这里的判据是「够画卡片，超了照旧降级」，不是「越大越好」。
  */
+const STRUCTURED_OUTPUT_LIMITS: ReadonlyMap<string, number> = new Map([
+  // 16_000 字符指令 + 名称/描述/警告的最坏转义 ≈ 64 KB，刚好装下。
+  ['skill_draft', 64_000],
+  // 32 KB 能装下约 15 条满长记忆；再多就说明用户该分批导入了。
+  ['memory_import_preview', 32_000],
+]);
+
 function sanitizeResult(result: ToolResult): ToolResult {
   return {
     ...result,
     detail: truncateString(result.detail, 4_000),
     output: result.output === undefined
       ? undefined
-      : truncateString(JSON.stringify(result.output), TOOL_OUTPUT_MAX_CHARS),
+      : truncateString(JSON.stringify(result.output), outputLimitFor(result.output)),
     error: result.error
       ? {
         ...result.error,
@@ -125,6 +186,15 @@ function sanitizeResult(result: ToolResult): ToolResult {
       }
       : undefined,
   };
+}
+
+function outputLimitFor(output: JsonValue): number {
+  const kind = output && typeof output === 'object' && !Array.isArray(output)
+    ? (output as Record<string, unknown>).kind
+    : undefined;
+  return typeof kind === 'string'
+    ? STRUCTURED_OUTPUT_LIMITS.get(kind) ?? TOOL_OUTPUT_MAX_CHARS
+    : TOOL_OUTPUT_MAX_CHARS;
 }
 
 function truncateRecord(value: Record<string, unknown>, maxLength: number): Record<string, unknown> {

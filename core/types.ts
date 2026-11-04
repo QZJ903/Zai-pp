@@ -456,7 +456,6 @@ export type MessageAction =
     };
   }
   | { type: 'CLOSE_TOOL_AUTHORIZATION'; payload: { authorizationId: string } }
-  | { type: 'APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK'; payload: { authorizationId: string; callId: string; invocationName: string; chunk: string } }
   | { type: 'EXECUTE_TOOL_CALL'; payload: ToolCall & { authorizationId?: string } }
   | { type: 'GET_TOOL_CALL_HISTORY'; payload?: { limit?: number } }
   | { type: 'CLEAR_TOOL_CALL_HISTORY' }

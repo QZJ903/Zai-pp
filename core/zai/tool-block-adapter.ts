@@ -233,7 +233,6 @@ const OUTPUT_MAX_CHARS = 4_000;
  * 超限即截断并**显式标注**（上游 `clampDisplayText`）。
  *
  * ⚠️ **标记不能省** —— 不标的话读的人会以为「这就是全部」。
- * 与 `core/tool/execution-restore.ts` 的 `clampText` 同形（同一套 `...[truncated]` 约定）。
  */
 function clampDetailText(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength)}\n...[truncated]` : value;

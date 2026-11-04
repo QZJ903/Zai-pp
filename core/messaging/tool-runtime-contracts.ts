@@ -37,7 +37,6 @@ type DomainFailure = { ok: false; error: string };
 export const TOOL_AUTHORIZATION_SUBJECT_RUNTIME_COMMANDS: ReadonlySet<string> = new Set([
   'CREATE_TOOL_AUTHORIZATION',
   'CLOSE_TOOL_AUTHORIZATION',
-  'APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK',
   'EXECUTE_TOOL_CALL',
 ]);
 
@@ -170,17 +169,16 @@ export interface ToolRuntimeCommandContracts {
     request: DeclaredRuntimeRequest<'CLOSE_TOOL_AUTHORIZATION'>;
     response: Ack | DomainFailure;
   };
-  APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK: {
-    request: DeclaredRuntimeRequest<'APPEND_EXTERNAL_TOOL_PAYLOAD_CHUNK'>;
-    response: Ack | DomainFailure | ToolResult;
-  };
   EXECUTE_TOOL_CALL: {
     request: DeclaredRuntimeRequest<'EXECUTE_TOOL_CALL'>;
     response: ToolResult;
   };
   GET_TOOL_CALL_HISTORY: {
     request: DeclaredRuntimeRequest<'GET_TOOL_CALL_HISTORY'>;
-    response: ToolCallHistoryRecord[];
+    // ⚠️ **不是裸数组**：`dropped` 要跨进程带给内容脚本，由它打一行页面控制台可见的 log
+    // （背景的 console 只出现在 `chrome://extensions` 的 SW 控制台，用户按 F12 看不到）。
+    // 见 `ToolCallHistoryReadResult` 的说明。
+    response: { records: ToolCallHistoryRecord[]; dropped: number };
   };
   CLEAR_TOOL_CALL_HISTORY: {
     request: DeclaredRuntimeRequest<'CLEAR_TOOL_CALL_HISTORY'>;

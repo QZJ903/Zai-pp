@@ -10,11 +10,6 @@ import type {
   ToolResult,
 } from './types';
 import type { ToolProviderExecutionContext, ToolProviderRegistry } from './provider-registry';
-import {
-  isExternalizedToolPayload,
-  parseExternalizedToolPayload,
-  takeExternalizedToolPayloadText,
-} from './externalized-payload';
 import { isToolCallRecord } from '../messaging/tool-record-codec';
 import { diagnosticLogBuffer } from '../diagnostics/log-buffer';
 import {
@@ -33,7 +28,6 @@ export interface RuntimeToolCallOptions {
   timeoutMs?: number;
   maxResultBytes?: number;
   signal?: AbortSignal;
-  idempotencyKey?: string;
   assertActive?: () => void;
   /** Stable, background-owned scope for a multi-step trusted run. */
   trustedCapabilityScopeId?: string;
@@ -72,7 +66,7 @@ export interface RuntimeToolRuntime {
   refreshToolDescriptors(locale?: SupportedLocale): Promise<ToolDescriptor[]>;
   executeToolCall(
     call: ToolCall,
-    authorization: RuntimeToolAuthorizationContext | ToolExecutionTrigger,
+    authorization: RuntimeToolAuthorizationContext,
     locale?: SupportedLocale,
     options?: RuntimeToolCallOptions,
   ): Promise<ToolResult>;
@@ -123,35 +117,29 @@ async function getRuntimeDescriptors(
 async function executeRuntimeToolCall(
   providerRegistry: ToolProviderRegistry,
   call: ToolCall,
-  authorization: RuntimeToolAuthorizationContext | ToolExecutionTrigger,
+  context: RuntimeToolAuthorizationContext,
   locale: SupportedLocale = DEFAULT_LOCALE,
   options: RuntimeToolCallOptions = {},
   capabilityInvocationResolver?: RuntimeCapabilityInvocationResolver,
 ): Promise<ToolResult> {
   assertRuntimeExecutionActive(options);
-  const identifiedCall = !call.id && options.idempotencyKey
-    ? { ...call, id: options.idempotencyKey }
-    : call;
-  if (!isToolCallRecord(identifiedCall)) {
+  if (!isToolCallRecord(call)) {
     diagnosticLogBuffer.record({
       level: 'warn',
       source: 'tool-runtime',
       message: 'tool call payload rejected',
-      details: String(identifiedCall?.name ?? 'unknown'),
+      details: String(call?.name ?? 'unknown'),
     });
-    return createInvalidToolCallResult(identifiedCall, locale);
+    return createInvalidToolCallResult(call, locale);
   }
-  const context = typeof authorization === 'string'
-    ? createTrustedExecutionContext(identifiedCall, authorization, options.trustedCapabilityScopeId)
-    : authorization;
   diagnosticLogBuffer.record({
     level: 'info',
     source: 'tool-runtime',
-    message: `tool start: ${identifiedCall.name}`,
+    message: `tool start: ${call.name}`,
   });
-  if (identifiedCall.parseError) {
-    const result = createParseErrorToolResult(identifiedCall, locale);
-    await appendAuthorizedFailureHistory(identifiedCall, result, context);
+  if (call.parseError) {
+    const result = createParseErrorToolResult(call, locale);
+    await appendAuthorizedFailureHistory(call, result, context);
     return result;
   }
   let authorized: Awaited<ReturnType<typeof authorizeToolExecution>>;
@@ -159,7 +147,7 @@ async function executeRuntimeToolCall(
   try {
     currentDescriptors = await getRuntimeDescriptors(providerRegistry, locale, true);
     authorized = await authorizeToolExecution(
-      identifiedCall,
+      call,
       context,
       currentDescriptors,
     );
@@ -167,20 +155,20 @@ async function executeRuntimeToolCall(
   } catch (error) {
     if (!(error instanceof ToolAuthorizationError)) throw error;
     const result = error.code === 'tool_unsupported'
-      ? createUnsupportedToolResult(identifiedCall, locale)
+      ? createUnsupportedToolResult(call, locale)
       : createToolAuthorizationResult(
         error,
-        identifiedCall,
+        call,
         translate(locale, 'tool.runtime.authorizationRejected'),
         buildAuthorizationRejectionHint(locale, error),
       );
     diagnosticLogBuffer.record({
       level: 'warn',
       source: 'tool-runtime',
-      message: `tool authorization denied: ${identifiedCall.name}`,
+      message: `tool authorization denied: ${call.name}`,
       details: `${error.code}: ${error.message}`,
     });
-    await appendAuthorizedFailureHistory(identifiedCall, result, context);
+    await appendAuthorizedFailureHistory(call, result, context);
     return result;
   }
 
@@ -191,7 +179,7 @@ async function executeRuntimeToolCall(
   try {
     resolvedCall = await resolveToolCallPayload(
       authorized.call,
-      authorized.externalPayloadNamespace,
+      authorized.reservation?.grantId,
     );
     assertRuntimeExecutionActive(options);
     if (resolvedCall.parseError) {
@@ -240,7 +228,7 @@ async function executeRuntimeToolCall(
     await completeAuthorizationAfterProvider(authorized.reservation);
     throw error;
   }
-  await completeAuthorizationAfterProvider(authorized.reservation, result);
+  await completeAuthorizationAfterProvider(authorized.reservation);
   try {
     await appendRuntimeToolHistory(resolvedCall, result, authorized.trigger);
   } catch (error) {
@@ -304,10 +292,9 @@ async function appendAuthorizedFailureHistory(
 
 async function completeAuthorizationAfterProvider(
   reservation: Awaited<ReturnType<typeof authorizeToolExecution>>['reservation'],
-  result?: ToolResult,
 ): Promise<void> {
   try {
-    await completeToolExecutionAuthorization(reservation, result);
+    await completeToolExecutionAuthorization(reservation);
   } catch (error) {
     // The executing reservation was persisted before provider I/O, so a failed
     // completion write remains fail-closed for replay. Preserve the real
@@ -487,67 +474,27 @@ async function appendRuntimeToolHistory(
   }
 }
 
+/**
+ * 把调用准备成「可执行」形态：只做一件事 —— 按后台 grant 归一 `cwd`。
+ *
+ * ⚠️⚠️ **`cwd` 的唯一可信来源是后台 grant**（`getGrantLocalSkillDir(grantId)`）。
+ * **`ToolCall` 上不再有任何本地目录提示字段**（原先的 `localSkillDir` 已删 —— 它唯一的
+ * 赋值点是上游那个未移植的流式解析器，本项目从来没有生产者）⇒ 这一层**没有需要拦的输入面**，
+ * 只是把 grant 上那份目录填进 payload。
+ * ⚠️ **闸门键是 `call.name`（稳定工具身份），不是 `call.invocationName`** ——
+ * 后者对每个 Shell Local 工具都是 `mcp_<server uuid>_<tool>`，拿它比白名单恒不命中，
+ * 而失败方向是静默的（cwd 退回 `homedir()`）。详见 `local-skill-cwd.ts`。
+ */
 export async function resolveToolCallPayload(
   call: ToolCall,
-  externalPayloadNamespace?: string,
+  grantId?: string,
 ): Promise<ToolCall> {
-  // cwd is derived solely from the grant owned by background,
-  // ignoring any page/model-supplied call.localSkillDir (untrusted).
-  // externalPayloadNamespace is the grant.id, emitted uniformly by the
-  // authorization layer (authorization.ts:227); both the normal branch and the
-  // externalized branch share the same derived directory.
-  const grantLocalSkillDir = externalPayloadNamespace
-    ? await getGrantLocalSkillDir(externalPayloadNamespace)
+  const grantLocalSkillDir = grantId
+    ? await getGrantLocalSkillDir(grantId)
     : undefined;
-
-  if (!isExternalizedToolPayload(call.payload)) {
-    // Normal XML / legacy DSML path (the most common execution route): inject
-    // the initial cwd hint. Do not re-trust any call-supplied field.
-    // ⚠️ The cwd gate keys on `call.name` (the stable tool identity), NOT on
-    // `call.invocationName` — the latter is `mcp_<server uuid>_<tool>` for every
-    // Shell Local tool, so gating on it never fired (see local-skill-cwd.ts).
-    return {
-      ...call,
-      payload: enforceLocalSkillCwd(call.payload, call.name, grantLocalSkillDir),
-    };
-  }
-
-  const body = takeExternalizedToolPayloadText(
-    call.payload.ref,
-    call.payload.invocationName,
-    externalPayloadNamespace,
-  );
-  if (body === null) {
-    return {
-      ...call,
-      payload: {},
-      parseError: {
-        code: 'tool_call_external_payload_missing',
-        message: 'Tool call payload expired before execution completed. Retry the request.',
-        retryable: true,
-        details: { invocationName: call.payload.invocationName },
-      },
-    };
-  }
-
-  const resolved = parseExternalizedToolPayload(
-    body,
-    call.payload.invocationName,
-    call.name,
-    grantLocalSkillDir,
-  );
-  if (resolved.parseError) {
-    return {
-      ...call,
-      payload: {},
-      parseError: resolved.parseError,
-    };
-  }
-
   return {
     ...call,
-    payload: resolved.payload ?? {},
-    parseError: undefined,
+    payload: enforceLocalSkillCwd(call.payload, call.name, grantLocalSkillDir),
   };
 }
 
@@ -585,24 +532,6 @@ function createUnsupportedToolResult(call: ToolCall, locale: SupportedLocale): T
       message: `Unsupported tool: ${call.name}`,
       retryable: false,
     },
-  };
-}
-
-function createTrustedExecutionContext(
-  call: ToolCall,
-  trigger: ToolExecutionTrigger,
-  capabilityScopeId?: string,
-): RuntimeToolAuthorizationContext {
-  return {
-    kind: 'trusted',
-    trigger,
-    requestId: call.source?.requestId ?? crypto.randomUUID(),
-    capabilityScopeId,
-    chatSessionId: call.source?.chatSessionId ?? null,
-    taskId: call.source?.taskId,
-    runId: call.source?.runId,
-    automationId: call.source?.automationId,
-    automationRunId: call.source?.automationRunId,
   };
 }
 

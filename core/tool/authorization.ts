@@ -23,13 +23,12 @@ const MAX_ACTIVE_GRANTS = 32;
 const MAX_CALLS_PER_GRANT = 128;
 const MAX_AUTHORIZATION_STATE_BYTES = 4 * 1024 * 1024;
 
-type StoredCallState = 'collecting' | 'executing' | 'consumed' | 'retryable';
+type StoredCallState = 'executing' | 'consumed';
 
 interface StoredCallAuthorization {
   descriptorId: string;
   state: StoredCallState;
-  fingerprint?: string;
-  retryUsed: boolean;
+  fingerprint: string;
 }
 
 interface StoredToolAuthorizationGrant {
@@ -88,7 +87,6 @@ export interface AuthorizedToolExecution {
     grantId: string;
     callId: string;
   } | null;
-  externalPayloadNamespace?: string;
 }
 
 export class ToolAuthorizationError extends Error {
@@ -188,25 +186,19 @@ export async function authorizeToolExecution(
     const callId = requireIdentity(call.id, 'call.id');
     const fingerprint = await createToolCallFingerprint(call, snapshot.id);
     const existing = grant.calls[callId];
-    if (existing && existing.state !== 'retryable' && existing.state !== 'collecting') {
+    // ⚠️ **任何已存在的 callId 一律判重放** —— 这个状态表只剩 `executing` / `consumed`
+    // 两档，而两者都意味着「这次调用已经拿到过许可」。
+    // 原先这里还放行过 `collecting`（外部化载荷分块上传的中间态）与 `retryable`
+    // （联网工具的权限前置失败可重试），那两个生产者都已随功能删除，两个放行口
+    // 都成了不可达分支 —— 留着会让「没写过 fingerprint 的 collecting 档」变成
+    // 一个绕过去重检查的后门。
+    if (existing) {
       throw new ToolAuthorizationError(
         'tool_call_replayed',
         `Tool call ${callId} has already been reserved or consumed.`,
       );
     }
-    if (existing && existing.descriptorId !== snapshot.id) {
-      throw new ToolAuthorizationError(
-        'tool_call_identity_mismatch',
-        `Tool call ${callId} is already bound to another descriptor.`,
-      );
-    }
-    if (existing?.fingerprint && existing.fingerprint !== fingerprint) {
-      throw new ToolAuthorizationError(
-        'tool_call_identity_mismatch',
-        `Tool call ${callId} retry payload does not match its original authorization.`,
-      );
-    }
-    if (!existing && Object.keys(grant.calls).length >= MAX_CALLS_PER_GRANT) {
+    if (Object.keys(grant.calls).length >= MAX_CALLS_PER_GRANT) {
       throw new ToolAuthorizationError(
         'tool_authorization_call_limit',
         'Tool authorization call limit exceeded.',
@@ -217,7 +209,6 @@ export async function authorizeToolExecution(
       descriptorId: snapshot.id,
       state: 'executing',
       fingerprint,
-      retryUsed: existing?.state === 'retryable' ? true : existing?.retryUsed ?? false,
     };
     return {
       result: {
@@ -225,76 +216,23 @@ export async function authorizeToolExecution(
         descriptor,
         trigger: grant.trigger,
         reservation: { grantId: grant.id, callId },
-        externalPayloadNamespace: grant.id,
       },
       changed: true,
     };
   });
 }
 
-export async function authorizeExternalToolPayloadChunk(input: {
-  grantId: string;
-  subject: ToolAuthorizationSubject;
-  callId: string;
-  invocationName: string;
-  currentDescriptors: readonly ToolDescriptor[];
-  now?: number;
-}): Promise<{ namespace: string; expiresAt: number }> {
-  const callId = requireIdentity(input.callId, 'callId');
-  const invocationName = requireIdentity(input.invocationName, 'invocationName');
-  const now = input.now ?? Date.now();
-
-  return mutateState(async (state) => {
-    const grant = requireGrant(state, input.grantId, now);
-    const pruned = pruneState(state, now);
-    const subjectChanged = assertSubjectMatches(grant, input.subject);
-    const snapshots = grant.descriptors.filter((item) => item.invocationName === invocationName);
-    if (snapshots.length !== 1) {
-      throw new ToolAuthorizationError(
-        'tool_not_authorized',
-        `Tool invocation ${invocationName} is not authorized by this request.`,
-      );
-    }
-    const snapshot = snapshots[0];
-    await requireCurrentDescriptor(snapshot, input.currentDescriptors);
-
-    const existing = grant.calls[callId];
-    if (existing && existing.state !== 'collecting') {
-      throw new ToolAuthorizationError(
-        'tool_call_replayed',
-        `Tool call ${callId} is no longer accepting payload chunks.`,
-      );
-    }
-    if (existing && existing.descriptorId !== snapshot.id) {
-      throw new ToolAuthorizationError(
-        'tool_call_identity_mismatch',
-        `Tool call ${callId} is already bound to another descriptor.`,
-      );
-    }
-    if (!existing && Object.keys(grant.calls).length >= MAX_CALLS_PER_GRANT) {
-      throw new ToolAuthorizationError(
-        'tool_authorization_call_limit',
-        'Tool authorization call limit exceeded.',
-      );
-    }
-
-    if (!existing) {
-      grant.calls[callId] = {
-        descriptorId: snapshot.id,
-        state: 'collecting',
-        retryUsed: false,
-      };
-    }
-    return {
-      result: { namespace: grant.id, expiresAt: grant.expiresAt },
-      changed: pruned || subjectChanged || !existing,
-    };
-  });
-}
-
+/**
+ * 把一次调用标记成「已消费」，此后同一 `callId` 再授权一律判重放。
+ *
+ * ⚠️ **`result` 形参已删** —— 上游用它判「这次失败是否可重试」，可重试则写
+ * `state: 'retryable'` 让同一 `callId` 能被重新授权。那个判据只服务联网搜索的
+ * 权限前置（`isRetryableWebFetchPermissionPrecondition`），该工具已整体删除
+ * ⇒ 生产者不存在、状态不可达。本项目自用、无老用户，直接删掉这一档，
+ * 不留一个「为将来保留」的空壳状态（那会让去重检查多一个绕行口）。
+ */
 export async function completeToolExecutionAuthorization(
   reservation: AuthorizedToolExecution['reservation'],
-  _result?: ToolResult,
 ): Promise<void> {
   if (!reservation) return;
   await mutateState((state) => {
@@ -864,22 +802,13 @@ function isStoredCall(
 ): value is StoredCallAuthorization {
   if (!isPlainRecord(value)) return false;
   const call = value as Partial<StoredCallAuthorization>;
-  if (
-    !hasOnlyKeys(value, ['descriptorId', 'state', 'fingerprint', 'retryUsed']) ||
-    !isIdentity(id) ||
-    !isIdentity(call.descriptorId) ||
-    !descriptorIds.has(call.descriptorId) ||
-    typeof call.retryUsed !== 'boolean'
-  ) return false;
-
-  const hasFingerprint = typeof call.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(call.fingerprint);
-  return (
-    call.state === 'collecting' && call.fingerprint === undefined && !call.retryUsed
-  ) || (
-    (call.state === 'executing' || call.state === 'consumed') && hasFingerprint
-  ) || (
-    call.state === 'retryable' && hasFingerprint && !call.retryUsed
-  );
+  return hasOnlyKeys(value, ['descriptorId', 'state', 'fingerprint']) &&
+    isIdentity(id) &&
+    isIdentity(call.descriptorId) &&
+    descriptorIds.has(call.descriptorId) &&
+    (call.state === 'executing' || call.state === 'consumed') &&
+    typeof call.fingerprint === 'string' &&
+    /^[a-f0-9]{64}$/.test(call.fingerprint);
 }
 
 async function createToolCallFingerprint(

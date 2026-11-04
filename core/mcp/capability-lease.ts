@@ -4,6 +4,7 @@ import {
   toolDescriptorMatchesAuthorizationSnapshot,
 } from '../tool/authorization';
 import { createSerialOperationQueue } from '../persistence/serial-operation-queue';
+import { TOOL_EXECUTION_TRIGGERS } from '../tool/types';
 import type {
   ToolAuthorizationDescriptorSnapshot,
   ToolCapabilityScope,
@@ -215,7 +216,7 @@ function normalizeCapabilityScope(value: ToolCapabilityScope): ToolCapabilitySco
   const scopeId = requireIdentity(value.scopeId, 'Capability scope id');
   const chatSessionId = normalizeNullableIdentity(value.chatSessionId, 'Capability chat session id');
   const trigger = value.trigger;
-  if (!['manual_chat', 'agent_run', 'automation', 'test', 'sidepanel_chat'].includes(trigger)) {
+  if (!(TOOL_EXECUTION_TRIGGERS as readonly string[]).includes(trigger)) {
     throw new McpCapabilityLeaseError('mcp_capability_scope_invalid', 'Capability trigger is invalid.');
   }
   if (value.kind === 'grant') {
@@ -410,7 +411,7 @@ function isStoredCapabilityScope(value: unknown): value is ToolCapabilityScope {
   const common = hasOnlyKeys(value, ['kind', 'scopeId', 'trigger', 'chatSessionId', 'subject']) &&
     (scope.kind === 'grant' || scope.kind === 'trusted') &&
     typeof scope.scopeId === 'string' && scope.scopeId.trim().length > 0 &&
-    ['manual_chat', 'agent_run', 'automation', 'test', 'sidepanel_chat'].includes(String(scope.trigger)) &&
+    (TOOL_EXECUTION_TRIGGERS as readonly string[]).includes(String(scope.trigger)) &&
     (scope.chatSessionId === null || (typeof scope.chatSessionId === 'string' && scope.chatSessionId.trim().length > 0));
   if (!common) return false;
   return scope.kind === 'grant'

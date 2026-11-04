@@ -177,7 +177,18 @@ export async function deleteMemory(id: number): Promise<void> {
   await assertCurrentMemoryDatabaseVersion();
   await withSyncLocalStateLock(() => db.transaction('rw', memories, async (tx) => {
     await readValidatedMemoryRecords(tx);
-    await tx.table(MEMORY_TABLE_NAME).delete(id);
+    const table = tx.table(MEMORY_TABLE_NAME);
+    // ⚠️ **「行不在了」必须报出来，不能当成功** —— 与 `updateMemory` 同口径。
+    //
+    // `table.delete()` 恒 resolve、不返回计数（底层 `IDBObjectStore.delete()`
+    // 对不存在的键本身也不报错）⇒ 只能先在同一事务里读一次。
+    // 不判的后果是 `memory_delete {"id": 9999}` 回「已删除 #9999」，
+    // 而「删掉了」与「本来就没有」在回执上完全同形。
+    //
+    // ⚠️ **必须在事务内查** —— 在事务外先 `getMemoryById` 再进来删，
+    // 中间那一瞬仍可能被另一条路径删掉，等于把静默窗口从 100% 缩到很小而已。
+    if (await table.get(id) === undefined) throw new Error(MEMORY_RECORD_MISSING_CODE);
+    await table.delete(id);
   }));
 }
 

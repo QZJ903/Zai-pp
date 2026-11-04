@@ -36,11 +36,17 @@ export function looksLikeErrorCode(value: string): boolean {
 export const PAGE_CONTENT_SCRIPT_MISSING_CODE = 'page_content_script_missing';
 
 /**
- * 「要更新的那条记忆已经不在了」—— 记忆写入口在 `update()` 返回 0 时抛它。
+ * 「要改 / 要删的那条记忆已经不在了」。
  *
  * ⚠️⚠️ **生产端与判定端必须同源**：生产端在 `core/memory/store.ts` 的
- * `updateMemory`，判定端在侧边栏 `useMemoryPageController` 的保存失败分支
- * （拿它换一条可读文案）。两边各写一遍字面量就是「生产端与判定端各写一遍」
+ * `updateMemory`（`update()` 返回 0）与 `deleteMemory`（事务内 `get` 查不到），
+ * 判定端在侧边栏两条链路 —— `useMemoryPageController` 的保存与**单条删除**失败分支
+ * （都拿它换可读文案）。两边各写一遍字面量就是「生产端与判定端各写一遍」
  * 的老形态 —— 改一处另一处不报错，只会让那条文案静默退回英文技术串。
+ *
+ * ⚠️⚠️ **同一条码在「清空全部」里有相反的处置，那是有意的**：
+ * `useSettingsController.handleClearAllMemories` 遇到它**跳过继续**
+ * （遍历清空的目标就是「让这些 id 都不存在」，已经不在了 ⇒ 目标已达成；
+ * 当失败会让整个清空中断在半路）。
  */
 export const MEMORY_RECORD_MISSING_CODE = 'memory_record_missing';

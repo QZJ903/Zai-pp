@@ -33,7 +33,6 @@ export type {
 } from './types';
 
 export {
-  MEMORY_TOOL_DESCRIPTORS,
   MEMORY_TOOL_NAMES,
   MEMORY_TOOL_PROVIDER,
   createMemoryToolDescriptors,
@@ -94,12 +93,8 @@ export {
   createDefaultToolDescriptors,
   createToolCallFromInvocation,
   createToolInvocationCatalog,
-  getToolCloseTag,
-  getToolInvocationLabel,
   getPreferredToolInvocationName,
   getToolInvocationNames,
-  getToolOpenTag,
-  hasXmlToolMarker,
 } from './invocation';
 
 export type {
@@ -107,6 +102,19 @@ export type {
   MemoryToolRuntime,
   MemoryToolSaveConfirmation,
 } from './memory';
+
+/**
+ * `GET_TOOL_CALL_HISTORY` 的**权威响应形状**。
+ *
+ * ⚠️⚠️ **它必须从这里出去** —— 内容脚本拿到的响应就是它，而别的消费者（侧边栏）走的是
+ * `decodeToolCallHistoryEnvelope`。两边各自手写一份「记录 + 丢弃数」的形状，就是
+ * 「同一事实几份实现」的老形态：改一处另一处不报错，只会让某一侧静默按错形状读。
+ * ⚠️ 内容脚本用 `import type` 引它 —— 类型导入编译后被擦除，**不会把 `history.ts`
+ * 的运行时依赖（合并队列、配额预算）拖进内容脚本的 bundle**。
+ */
+export {
+  type ToolCallHistoryReadResult,
+} from './history';
 
 export type {
   ToolInvocationCatalog,
