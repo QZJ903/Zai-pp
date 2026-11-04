@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  MAX_DISCOVERY_PAGES,
+  MAX_DISCOVERY_RESPONSE_BYTES,
   MCP_NATIVE_ENVELOPE_PROTOCOL,
   MCP_NATIVE_ENVELOPE_VERSION,
   MCP_PROTOCOL_VERSION,
   MCP_SUPPORTED_PROTOCOL_VERSIONS,
+  McpTransportError,
+  buildMcpRequestHeaders,
   callMcpTool,
   createMcpNativeMessagingTransport,
   createMcpRequest,
@@ -409,6 +413,190 @@ describe('MCP and Native external contract', () => {
     expect(requestedCursors).toEqual([undefined, 'page-2']);
     expect(MCP_CURRENT_GAPS).toEqual([]);
   });
+
+  it('stops paginating when the server repeats the same cursor', async () => {
+    // ⚠️⚠️ 守的是一个真缺陷：循环条件只有「cursor 非空」+「工具数没到上限」，
+    // 服务端若每页都回同一个 cursor 且工具数永远到不了上限，请求就**永不停止**，
+    // 而 `refreshMcpServerDiscovery` 的 tail 也就永不完成 —— 该服务之后所有发现都排队。
+    let requests = 0;
+    const transport: McpProtocolTransport = {
+      async request(request) {
+        requests += 1;
+        return {
+          jsonrpc: '2.0',
+          id: request.id,
+          result: { tools: [{ name: `tool_${requests}`, inputSchema: { type: 'object' } }], nextCursor: 'stuck' },
+        } as McpJsonRpcResponse<any>;
+      },
+    };
+
+    await expect(listMcpTools(mcpServer(), transport)).rejects.toMatchObject({
+      code: 'mcp_pagination_stalled',
+    });
+    // 第一页 cursor 为空、返回 'stuck'；第二页带着 'stuck' 再拿回 'stuck' ⇒ 立刻停。
+    expect(requests).toBe(2);
+  });
+
+  /**
+   * **「达到工具数上限」与「cursor 不前进」是两件事 —— 前者是正常结束。**
+   *
+   * 两条闸门在循环里的顺序是：
+   * ```ts
+   * if (!cursor || tools.length >= maxToolCount) break;   // ← 先
+   * if (cursor === previousCursor) throw stalled;          // ← 后
+   * ```
+   * 所以「服务端第 N 页回了**同一个** cursor，但这一页恰好把工具数推过上限」走的是
+   * 正常 `break`，**不报 `mcp_pagination_stalled`**。
+   *
+   * ⚠️ **这是刻意的**：用户要的是「最多 N 个工具」，已经拿够了就没什么可报的；
+   * 报一条停滞错误反而会让这次成功的发现变成一个错误状态。
+   * ⚠️ **两条闸门顺序反过来就会误报** —— 那时「拿够了」也会被当成「服务端卡住」。
+   * 这条用例把顺序钉住：把两句对调，它就变红。
+   */
+  it('ends normally, not as stalled, when the last page repeats a cursor but fills the cap', async () => {
+    const server = mcpServer();
+    server.limits.maxToolCount = 2;
+    let requests = 0;
+    const transport: McpProtocolTransport = {
+      async request(request) {
+        requests += 1;
+        return {
+          jsonrpc: '2.0',
+          id: request.id,
+          result: {
+            // 每页一个工具、永远回同一个 cursor —— 单看 cursor 就是「卡住」，
+            // 但第二页拿满 2 个之后本该正常结束。
+            tools: [{ name: `tool_${requests}`, inputSchema: { type: 'object' } }],
+            nextCursor: 'stuck',
+          },
+        } as McpJsonRpcResponse<any>;
+      },
+    };
+
+    await expect(listMcpTools(server, transport)).resolves.toHaveLength(2);
+    // 第一页 cursor 空 → 不判停滞；第二页拿满上限 → break，走不到那条 throw。
+    expect(requests).toBe(2);
+  });
+
+  it('bounds discovery when the server keeps inventing fresh cursors', async () => {    // ⚠️ 服务端自己也在 `MAX_DISCOVERY_PAGES + 8` 之后抛错 —— 否则「页数上界被删掉」
+    // 这个变异会让测试**挂死**而不是变红（挂死的测试不算红）。
+    let requests = 0;
+    const transport: McpProtocolTransport = {
+      async request(request) {
+        requests += 1;
+        if (requests > MAX_DISCOVERY_PAGES + 8) throw new Error('runaway pagination');
+        return {
+          jsonrpc: '2.0',
+          id: request.id,
+          result: { tools: [], nextCursor: `cursor-${requests}` },
+        } as McpJsonRpcResponse<any>;
+      },
+    };
+
+    await expect(listMcpTools(mcpServer(), transport)).rejects.toMatchObject({
+      code: 'mcp_pagination_incomplete',
+    });
+    expect(requests).toBe(MAX_DISCOVERY_PAGES);
+  });
+
+  it('gives tools/list the discovery ceiling rather than the per-call result limit', async () => {
+    // ⚠️⚠️ 守的是「`limits.maxResultBytes` 被当成发现上限」这个缺陷。它约束的是
+    // 「一次工具调用的结果多大」，而 `tools/list` 的响应体随**工具数量**增长 ——
+    // 实测 100 工具 ≈ 90 KB、128 工具 ≈ 155 KB，而默认 64 000 会让这两档整个发现失败。
+    const seen: Array<number | undefined> = [];
+    const transport: McpProtocolTransport = {
+      async request(_request, options) {
+        seen.push(options?.maxResponseBytes);
+        return {
+          jsonrpc: '2.0',
+          id: 1,
+          result: { tools: [{ name: 'only_tool', inputSchema: { type: 'object' } }] },
+        } as McpJsonRpcResponse<any>;
+      },
+    };
+
+    await listMcpTools(mcpServer(), transport);
+    expect(seen).toEqual([Math.max(64_000, MAX_DISCOVERY_RESPONSE_BYTES)]);
+  });
+
+  it('never narrows discovery below a user-raised result limit', async () => {
+    // 用户把「结果字节」调到比发现上界还大时，发现不该被这里收紧。
+    const raised = mcpServer();
+    raised.limits.maxResultBytes = MAX_DISCOVERY_RESPONSE_BYTES * 2;
+    let seen: number | undefined;
+    const transport: McpProtocolTransport = {
+      async request(_request, options) {
+        seen = options?.maxResponseBytes;
+        return {
+          jsonrpc: '2.0',
+          id: 1,
+          result: { tools: [{ name: 'only_tool', inputSchema: { type: 'object' } }] },
+        } as McpJsonRpcResponse<any>;
+      },
+    };
+
+    await listMcpTools(raised, transport);
+    expect(seen).toBe(MAX_DISCOVERY_RESPONSE_BYTES * 2);
+  });
+
+  it('keeps the transport error code and retryable flag on a failed tool call', async () => {
+    // ⚠️⚠️ 守的是一个真缺陷：catch 只认 `McpProtocolError`，其余一律报成
+    // `mcp_tool_call_failed` + `retryable: true` ⇒ transport 层那五类显式声明
+    // `retryable: false` 的错误（响应过大 / 响应非法 / 端点非法 / 缺宿主权限 / SSE 源不符）
+    // 全被翻转成「可以重试」，而 `McpTransportError.retryable` 生产零读取。
+    const nonRetryable = [
+      ['mcp_response_too_large', 'MCP response exceeded 64000 bytes.'],
+      ['mcp_response_invalid', 'MCP response id did not match the active request.'],
+      ['mcp_endpoint_invalid', 'Invalid MCP server URL: not-a-url'],
+      ['mcp_origin_permission_denied', 'Host permission was not granted.'],
+      ['mcp_sse_endpoint_origin_mismatch', 'MCP SSE endpoint origin mismatch.'],
+    ] as const;
+
+    for (const [code, message] of nonRetryable) {
+      const transport: McpProtocolTransport = {
+        async request() {
+          throw new McpTransportError(code, message, { retryable: false });
+        },
+      };
+      const result = await callMcpTool(mcpServer(), transport, { call: toolCall() });
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe(code);
+      expect(result.error?.retryable).toBe(false);
+    }
+  });
+
+  it('still reports an unknown failure as a retryable tool-call failure', async () => {
+    const transport: McpProtocolTransport = {
+      async request() {
+        throw new Error('socket closed');
+      },
+    };
+    const result = await callMcpTool(mcpServer(), transport, { call: toolCall() });
+    expect(result.error).toMatchObject({ code: 'mcp_tool_call_failed', retryable: true });
+  });
+
+  it('names both versions when the server advertises an unsupported protocol version', async () => {
+    // ⚠️ discovery 的失败路径只把 `error.message` 存进 `health.error`，而那是 MCP 页
+    // 错误条**原样显示**的那一行 —— 版本号只放 `details` 的话，界面只剩
+    // 「Unsupported MCP protocol version.」，用户不知道是版本问题、也不知道该升谁。
+    vi.stubGlobal('chrome', {
+      runtime: { getManifest: () => ({ version: '1.11.9' }) },
+    });
+    const transport: McpProtocolTransport = {
+      async request(request) {
+        return {
+          jsonrpc: '2.0',
+          id: request.id,
+          result: { protocolVersion: '1999-01-01', capabilities: {} },
+        } as McpJsonRpcResponse<any>;
+      },
+    };
+
+    await expect(initializeMcpServer(mcpServer(), transport)).rejects.toMatchObject({
+      code: 'mcp_protocol_version_unsupported',
+      message: expect.stringMatching(/1999-01-01[\s\S]*2025-06-18/),
+    });
+  });
 });
 
 function resultTransport(result: unknown): McpProtocolTransport {
@@ -461,3 +649,82 @@ function mcpServer(
     updatedAt: 1,
   };
 }
+
+describe('MCP request headers', () => {
+  /**
+   * ⚠️⚠️ 守的是一个真缺陷：`buildMcpRequestHeaders` 返回普通对象，而 HTTP 头名是
+   * **大小写不敏感**、对象键不是。用户自定义 `authorization` 头 + bearer secret 会留下
+   * **两个键**，`Headers` 构造函数再把它们用 `", "` 拼起来 ⇒ 服务端收到
+   * `"Bearer xxx, custom"`，那不是合法的 `Authorization` 值。
+   */
+  it('lets a secret replace a custom header instead of joining it', () => {
+    const server = mcpServer();
+    server.headers = [{ name: 'authorization', value: 'custom' }];
+    server.secrets = [{ kind: 'bearer', value: 'token-1' }];
+
+    const headers = buildMcpRequestHeaders(server);
+    const authorizationKeys = Object.keys(headers).filter((name) => name.toLowerCase() === 'authorization');
+    expect(authorizationKeys, '只能有一个 Authorization 键').toHaveLength(1);
+    expect(headers[authorizationKeys[0]!]).toBe('Bearer token-1');
+  });
+
+  it('keeps unrelated custom headers while applying bearer auth', () => {
+    const server = mcpServer();
+    server.headers = [{ name: 'X-Tenant', value: 'acme' }];
+    server.secrets = [{ kind: 'bearer', value: 'token-1' }];
+
+    expect(buildMcpRequestHeaders(server)).toEqual({
+      'X-Tenant': 'acme',
+      Authorization: 'Bearer token-1',
+    });
+  });
+
+  it('applies a header secret case-insensitively over a custom header', () => {
+    const server = mcpServer();
+    server.headers = [{ name: 'X-Api-Key', value: 'from-header' }];
+    server.secrets = [{ kind: 'header', headerName: 'x-api-key', value: 'from-secret' }];
+
+    const headers = buildMcpRequestHeaders(server);
+    const keys = Object.keys(headers).filter((name) => name.toLowerCase() === 'x-api-key');
+    expect(keys).toHaveLength(1);
+    expect(headers[keys[0]!]).toBe('from-secret');
+  });
+});
+
+describe('MCP tool result summary', () => {
+  /**
+   * ⚠️⚠️ 守的是一个跨层耦合缺陷：`getMcpToolResultSummary` 曾经**只按工具名**判
+   * `python_exec`，而那个名字是 **Shell Local 的**（`core/shell/contracts.ts` 的
+   * `SHELL_TOOL_NAMES`），本函数却在**通用 MCP 客户端**里。任何第三方服务只要也发布一个
+   * 叫 `python_exec` 的工具，就会拿到 Shell 专用的「工具已执行」措辞。
+   *
+   * 判据与 `callMcpTool` 的续读分流同源（`isShellMcpServer`）—— 两处不许各判一套。
+   */
+  it('uses the generic wording for a non-Shell server that ships python_exec', async () => {
+    const thirdParty = mcpServer({
+      kind: 'streamable_http',
+      url: 'https://third-party.test/mcp',
+      // 名字叫 Shell Local 也不算 —— 身份只认 nativeHost（Q1）。
+    }, 'third-party');
+    thirdParty.displayName = 'Shell Local';
+
+    const result = await callMcpTool(
+      thirdParty,
+      resultTransport({ content: [{ type: 'text', text: 'ok' }] }),
+      { call: { ...toolCall(), name: 'python_exec', invocationName: 'python_exec' } },
+    );
+    expect(result.summary, '第三方同名工具不该拿 Shell 专用措辞').toBe('MCP 工具已执行');
+  });
+
+  it('keeps the Shell wording for the built-in host', async () => {
+    const shell = mcpServer({ kind: 'native_messaging', nativeHost: 'com.zai_pp.shell' }, 'shell');
+    shell.displayName = 'Shell Local';
+
+    const result = await callMcpTool(
+      shell,
+      resultTransport({ content: [{ type: 'text', text: 'ok' }] }),
+      { call: { ...toolCall(), name: 'python_exec', invocationName: 'python_exec' } },
+    );
+    expect(result.summary).toBe('工具已执行');
+  });
+});

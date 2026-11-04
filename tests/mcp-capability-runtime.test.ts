@@ -157,7 +157,9 @@ describe('MCP capability invoke runtime', () => {
     );
     expect(replay).toMatchObject({
       ok: false,
-      error: { code: 'mcp_capability_handle_replayed' },
+      // consume 现在把 lease 从池子里删掉，重放看到的是「句柄不存在」。
+      // ⚠️ **要守的是「第二次没打到 provider」**，不是那个码 —— 下一行才是判据。
+      error: { code: 'mcp_capability_handle_invalid' },
     });
     expect(targetExecute).toHaveBeenCalledTimes(1);
   });

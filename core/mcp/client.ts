@@ -25,6 +25,8 @@ import type {
 import { getExtensionVersion } from '../version';
 import { isExtensionInternalTool } from './internal-tools';
 import {
+  MAX_DISCOVERY_PAGES,
+  MAX_DISCOVERY_RESPONSE_BYTES,
   MCP_PROTOCOL_VERSION,
   MCP_SUPPORTED_PROTOCOL_VERSIONS,
 } from './constants';
@@ -104,9 +106,16 @@ export async function initializeMcpServer(
       protocolVersion as typeof MCP_SUPPORTED_PROTOCOL_VERSIONS[number],
     )
   ) {
+    // ⚠️ **版本号必须进 message，不能只放 `details`** —— discovery 的失败路径
+    // （`persistMcpDiscoveryFailure`）只把 `error.message` 存进 `health.error`，
+    // 而 `health.error` 是 MCP 页错误条**原样显示**的那一行。只写
+    // `Unsupported MCP protocol version.` 的话，用户看到「连不上」却不知道
+    // 是版本问题、更不知道该升谁 —— `details` 在那一层就丢了。
     throw new McpProtocolError(
       'mcp_protocol_version_unsupported',
-      'Unsupported MCP protocol version.',
+      `MCP protocol version mismatch: the server advertises ${describeProtocolVersion(advertisedProtocolVersion)}, `
+        + `but this extension requested ${MCP_PROTOCOL_VERSION} and supports `
+        + `${MCP_SUPPORTED_PROTOCOL_VERSIONS.join(', ')}.`,
       {
         details: {
           requestedProtocolVersion: MCP_PROTOCOL_VERSION,
@@ -141,14 +150,33 @@ export async function listMcpTools(
   const tools: ToolDescriptor[] = [];
   const maxToolCount = Math.max(0, Math.floor(server.limits.maxToolCount));
   if (maxToolCount === 0) return tools;
+  // ⚠️⚠️ **发现用的是自己的响应上界，不是 `limits.maxResultBytes`。**
+  // 后者约束的是「一次工具调用的结果多大」，而 `tools/list` 的响应体随**工具数量**
+  // 线性增长：两者没有关系。实测 100 工具 × 5 参数 ≈ 90 KB、128 工具 × 6 参数 ≈ 155 KB，
+  // 而默认 64 000 会让这两档服务端**整个发现失败**（界面只显示「连接失败」）。
+  // `Math.max` 那半边是承重的 —— 用户把「结果字节」调到比发现上界还大时不该被这里收紧。
+  const discoveryMaxBytes = Math.max(
+    server.limits.maxResultBytes,
+    MAX_DISCOVERY_RESPONSE_BYTES,
+  );
   let cursor: string | undefined;
+  let previousCursor: string | undefined;
 
-  do {
+  for (let page = 0; ; page += 1) {
+    if (page >= MAX_DISCOVERY_PAGES) {
+      // A server can also stall without repeating a cursor (a fresh opaque string every
+      // page, no tools). Bound the page count so discovery always terminates.
+      throw new McpProtocolError(
+        'mcp_pagination_incomplete',
+        `MCP tool discovery did not finish within ${MAX_DISCOVERY_PAGES} pages.`,
+        { details: { pages: MAX_DISCOVERY_PAGES, discoveredTools: tools.length } },
+      );
+    }
     const response = await transport.request<Record<string, unknown>, McpListToolsResult>(
       createMcpRequest('tools/list', cursor ? { cursor } : undefined),
       {
         timeoutMs: server.timeouts.discoveryMs,
-        maxResponseBytes: server.limits.maxResultBytes,
+        maxResponseBytes: discoveryMaxBytes,
         signal: options?.signal,
       },
     );
@@ -158,8 +186,21 @@ export async function listMcpTools(
     tools.push(...nextTools
       .slice(0, remaining)
       .map((tool) => normalizeMcpToolDescriptor(server, tool)));
+    previousCursor = cursor;
     cursor = typeof result.nextCursor === 'string' && result.nextCursor ? result.nextCursor : undefined;
-  } while (cursor && tools.length < maxToolCount);
+    if (!cursor || tools.length >= maxToolCount) break;
+    // A repeated cursor makes the loop spin forever: the same page comes back, the tool
+    // count never reaches the cap, and the discovery tail never settles — every later
+    // discovery for this server queues behind it. Fail loudly instead of returning a
+    // silently truncated tool list.
+    if (cursor === previousCursor) {
+      throw new McpProtocolError(
+        'mcp_pagination_stalled',
+        'MCP tool discovery received the same cursor twice.',
+        { details: { cursor, discoveredTools: tools.length } },
+      );
+    }
+  }
 
   return applyMcpToolPolicy(tools, server);
 }
@@ -195,6 +236,15 @@ export async function callMcpTool(
     const normalized = normalizeMcpToolResult(server, options.call, result, startedAt, options.maxResultBytes);
     return normalized;
   } catch (err) {
+    // Transport failures carry their own `code` and `retryable`; only protocol errors
+    // used to be read here, so every transport-level rejection was reported as a
+    // retryable `mcp_tool_call_failed` — including the ones that are explicitly
+    // non-retryable (response too large, invalid response, bad endpoint, missing host
+    // permission, SSE origin mismatch). Read both fields structurally so any error
+    // type that declares them is preserved.
+    const failure = err && typeof err === 'object'
+      ? err as { code?: unknown; retryable?: unknown }
+      : {};
     return {
       ok: false,
       summary: 'MCP 工具调用失败',
@@ -206,9 +256,9 @@ export async function callMcpTool(
       completedAt: Date.now(),
       durationMs: Date.now() - startedAt,
       error: {
-        code: err instanceof McpProtocolError ? err.code : 'mcp_tool_call_failed',
+        code: typeof failure.code === 'string' ? failure.code : 'mcp_tool_call_failed',
         message: err instanceof Error ? err.message : String(err),
-        retryable: err instanceof McpProtocolError ? err.retryable : true,
+        retryable: typeof failure.retryable === 'boolean' ? failure.retryable : true,
         details: err instanceof McpProtocolError && err.details?.externalOutcome === 'confirmed'
           ? err.details
           : {
@@ -226,9 +276,15 @@ export async function callMcpTool(
 // 聚合结果最终仍交回 normalizeMcpToolResult，与通用 MCP 路径共用同一套字节上限、
 // 计时与 output 归一化逻辑，不另起第二条返回路径。
 //
-// 单窗传输切片上限（12000 字符 × 4 字节 ≈ 48KB < 64KB 响应体上限）。这是传输层实现细节，
-// 不改变调用方看到的 max_chars 语义。
-const AUTO_READ_WINDOW_CHARS = 12000;
+// 单窗传输切片上限。这是传输层实现细节，不改变调用方看到的 max_chars 语义。
+//
+// ⚠️ **这个数要按 JSON 转义后的最坏情况算，不能只按 UTF-8 算**：一个控制字符
+// （`\u0000`–`\u001F`）进 JSON 要写成 6 字节的 `\u00XX`，UTF-8 只有 1 字节。
+// 12 000 × 6 = 72 000，超过默认的 64 000 响应体上限 ⇒ 那一窗被 `assertWithinByteLimit`
+// 拒掉 ⇒ 整条续读报「第 N 窗调用失败」。8 000 × 6 = 48 000，留出信封与转义余量。
+// ⚠️ 触发面是**把二进制文件当文本读**（大量 NUL）；普通源码 / 中文 / 日志 / ANSI 彩色输出
+// 实测都在 2–4 万字节，用不满这个上限。
+const AUTO_READ_WINDOW_CHARS = 8000;
 // 与宿主 contracts.mjs 已发布契约保持一致：max_chars 为「本次最多返回字符数」总量语义，
 // 缺省 16000，硬上限 MAX_LOCAL_FILE_READ_CHARS（100_000）。
 const AUTO_READ_DEFAULT_TOTAL_CHARS = 16000;
@@ -530,8 +586,28 @@ export function unwrapMcpResponse<TResult>(
   return response.result as TResult;
 }
 
-function getMcpToolResultSummary(call: ToolCall, result: McpCallToolResult): string {
-  if (call.name === 'python_exec') return result.isError ? '工具返回错误' : '工具已执行';
+/**
+ * One-line summary shown in the tool block and to the model.
+ *
+ * ⚠️ **`python_exec` 那一支要按服务身份判，不能按工具名判。** 这个名字是 **Shell
+ * Local 的**（`core/shell/contracts.ts` 的 `SHELL_TOOL_NAMES`），而本函数在通用 MCP
+ * 客户端里 —— 只按名字判的话，任何第三方服务发布一个同名的 `python_exec` 也会拿到
+ * 「工具已执行」这种 Shell 专用措辞。判据与 `callMcpTool` 的分流同源（`isShellMcpServer`），
+ * 不另写一份。
+ *
+ * ⚠️ **名字这一半判的是 `call.name`，而 `callMcpTool` 的分流判的是 `getMcpToolName(...)`**
+ * —— 后者会优先取描述符上的 `annotations.mcpToolName`。正常路径两者相等（Shell 工具不走别名），
+ * 但第三方服务若在 annotations 里塞 `mcpToolName: 'python_exec'` 而它自己的 `name` 不叫这个，
+ * 这里就会少一句特化文案。**失败方向无害**（不会错报），所以刻意不改成同一来源。
+ */
+function getMcpToolResultSummary(
+  server: McpServerConfig,
+  call: ToolCall,
+  result: McpCallToolResult,
+): string {
+  if (call.name === 'python_exec' && isShellMcpServer(server)) {
+    return result.isError ? '工具返回错误' : '工具已执行';
+  }
   return result.isError ? 'MCP 工具返回错误' : 'MCP 工具已执行';
 }
 
@@ -552,7 +628,7 @@ function normalizeMcpToolResult(
 
   return {
     ok: result.isError !== true,
-    summary: getMcpToolResultSummary(call, result),
+    summary: getMcpToolResultSummary(server, call, result),
     detail,
     name: call.name,
     provider: call.provider,
@@ -620,17 +696,42 @@ function getMcpToolName(call: ToolCall, descriptor?: ToolDescriptor): string {
   return call.invocationName || call.name;
 }
 
+/**
+ * Normalizes a server-supplied JSON Schema into the shape the persisted descriptor
+ * contract accepts.
+ *
+ * ⚠️⚠️ **This is the write side of a round trip the decoder validates strictly.**
+ * A server is free to publish `properties: []`, `required: [1, 2]`,
+ * `additionalProperties: []` or `description: 42`. Spreading those through stores a
+ * cache record that `isToolDescriptorRecord` rejects on the next read, and a rejected
+ * cache record fails the **whole** MCP storage state — every server becomes unreadable,
+ * including the built-in Shell host. Normalize the four validated fields here so
+ * `decode(normalize(x))` cannot throw.
+ */
 function normalizeToolSchema(value: unknown): ToolDescriptorSchema {
   const schema = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, JsonValue>
     : {};
-  return {
-    ...schema,
+  const { properties, required, additionalProperties, description, ...rest } = schema;
+  const normalized: ToolDescriptorSchema = {
+    ...rest,
     type: 'object',
-    properties: schema.properties && typeof schema.properties === 'object'
-      ? schema.properties as Record<string, JsonValue>
-      : {},
+    properties: isJsonRecord(properties) ? properties : {},
   };
+  if (Array.isArray(required) && required.every((name) => typeof name === 'string')) {
+    normalized.required = required as string[];
+  }
+  if (typeof additionalProperties === 'boolean') {
+    normalized.additionalProperties = additionalProperties;
+  } else if (isJsonRecord(additionalProperties)) {
+    normalized.additionalProperties = additionalProperties;
+  }
+  if (typeof description === 'string') normalized.description = description;
+  return normalized;
+}
+
+function isJsonRecord(value: unknown): value is Record<string, JsonValue> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function toolRiskValue(value: unknown): ToolRiskLevel {
@@ -681,4 +782,13 @@ function stringifyOutput(value: JsonValue): string {
 
 function stringValue(value: unknown): string {
   return typeof value === 'string' ? value : '';
+}
+
+/** Renders whatever the server advertised for `protocolVersion` into a readable token. */
+function describeProtocolVersion(value: unknown): string {
+  if (typeof value === 'string') return value ? `"${value}"` : '(empty string)';
+  if (value === undefined) return '(missing)';
+  if (value === null) return 'null';
+  if (typeof value === 'object') return `(a ${Array.isArray(value) ? 'array' : 'non-string value'})`;
+  return `(a ${typeof value})`;
 }

@@ -20,6 +20,7 @@ import {
   resolveMcpCapabilityLease,
 } from './capability-lease';
 import { isExecutableMcpDescriptor, rankMcpCapabilityDescriptors } from './capability-projection';
+import { TOOL_OUTPUT_MAX_CHARS } from '../tool/result-bytes';
 
 export {
   MCP_CAPABILITY_OPERATIONS,
@@ -47,6 +48,8 @@ const DISCOVER_LIMIT_DEFAULT = 8;
 const DISCOVER_LIMIT_MAX = 20;
 const DISCOVER_QUERY_MAX_CHARS = 2_000;
 const DISCOVER_CARD_TEXT_MAX_CHARS = 480;
+/** 毫秒时间戳恒 13 位 —— 预算试算用它占位，见 `discoverOutputChars`。 */
+const PLACEHOLDER_EXPIRES_AT = 1_700_000_000_000;
 
 export function createMcpCapabilityToolDescriptors(
   locale: SupportedLocale = DEFAULT_LOCALE,
@@ -245,23 +248,82 @@ async function discoverMcpCapabilities(
     query,
   );
   const selected = targets.slice(0, limit);
+  // ⚠️⚠️ **先按预算决定发几张，再签发租约。**
+  // `output` 会被 `JSON.stringify` 后进续跑模板，而那里对它的上界是
+  // `TOOL_OUTPUT_MAX_CHARS`（`core/tool/result-bytes.ts`）。超了不是「少几张卡」——
+  // 是整段 JSON 被从中间切断、拼上 `...[truncated]`，模型拿到的**根本解析不了**。
+  // 实测：20 张卡在描述被截到 480 字符时约 14 000 字符、三个字段都超长时 34 000 字符。
+  //
+  // ⚠️ **必须在签发之前裁**：`issueMcpCapabilityLeases` 每张都占一个池子名额
+  // （池子 256），发出去又不返回的 handle 就是纯泄漏。
+  //
+  // ⚠️ **handle 用等长占位符试算**（`mcp_cap_` + 36 字符 uuid = 44），否则真实 uuid
+  // 会让实际长度比试算多，又超出去。
+  const placeholderHandle = `mcp_cap_${'0'.repeat(36)}`;
+  const accepted: Array<{ descriptor: ToolDescriptor; card: Record<string, unknown> }> = [];
+  for (const descriptor of selected) {
+    const card = buildCatalogCard(placeholderHandle, descriptor);
+    if (accepted.length > 0 && discoverOutputChars(query, targets.length, [...accepted, { descriptor, card }]) > TOOL_OUTPUT_MAX_CHARS) {
+      break;
+    }
+    accepted.push({ descriptor, card });
+  }
+  // 兜底：一张都装不下时至少给第一张 —— 否则模型拿不到任何 handle，且没有任何报错。
+  if (accepted.length === 0 && selected.length > 0) {
+    accepted.push({ descriptor: selected[0]!, card: buildCatalogCard(placeholderHandle, selected[0]!) });
+  }
   const issued = await issueMcpCapabilityLeases({
     owner: context.capabilityScope!,
-    descriptors: selected,
+    descriptors: accepted.map((entry) => entry.descriptor),
   });
+  const truncated = accepted.length < selected.length;
   return capabilitySuccess(call, {
     query,
     totalCandidates: targets.length,
+    returned: accepted.length,
+    ...(truncated ? { truncated: true } : {}),
     candidates: issued.map(({ handle, descriptor, expiresAt }) => ({
-      capability: handle,
-      ...compactCatalogCardText('name', descriptor.name),
-      ...compactCatalogCardText('title', descriptor.title),
-      ...compactCatalogCardText('description', descriptor.description),
-      ...compactCatalogCardText('provider', descriptor.provider.displayName),
-      risk: descriptor.execution.risk,
+      ...buildCatalogCard(handle, descriptor),
       expiresAt,
     })),
   });
+}
+
+/** One catalog card — the shape the model reads, minus the lease handle. */
+function buildCatalogCard(handle: string, descriptor: ToolDescriptor): Record<string, unknown> {
+  return {
+    capability: handle,
+    ...compactCatalogCardText('name', descriptor.name),
+    ...compactCatalogCardText('title', descriptor.title),
+    ...compactCatalogCardText('description', descriptor.description),
+    ...compactCatalogCardText('provider', descriptor.provider.displayName),
+    risk: descriptor.execution.risk,
+  };
+}
+
+/**
+ * Serialized length of the whole `mcp_discover` output, measured **exactly** the way the
+ * consumer measures it (`JSON.stringify(...).length`).
+ *
+ * ⚠️ 20 cards is the hard ceiling (`DISCOVER_LIMIT_MAX`), so serializing the whole envelope
+ * per candidate is at most 20 passes — not worth an incremental estimator that would then
+ * disagree with the real thing at the boundary.
+ */
+function discoverOutputChars(
+  query: string,
+  totalCandidates: number,
+  accepted: ReadonlyArray<{ descriptor: ToolDescriptor; card: Record<string, unknown> }>,
+): number {
+  const truncated = accepted.length < Math.min(totalCandidates, DISCOVER_LIMIT_MAX);
+  return JSON.stringify({
+    query,
+    totalCandidates,
+    returned: accepted.length,
+    ...(truncated ? { truncated: true } : {}),
+    // ⚠️ **`expiresAt` 要按真实位数占位**（毫秒时间戳恒 13 位）—— 用 `0` 试算会每张少算
+    // 12 个字符，20 张就是 240 字符的偏差，正好在边界上让输出超出上限。
+    candidates: accepted.map((entry) => ({ ...entry.card, expiresAt: PLACEHOLDER_EXPIRES_AT })),
+  }).length;
 }
 
 async function describeMcpCapability(

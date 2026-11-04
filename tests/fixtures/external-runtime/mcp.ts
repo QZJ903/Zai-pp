@@ -1,6 +1,6 @@
 export const MCP_PROTOCOL_CONTRACT = {
   requestVersion: '2025-06-18',
-  supportedVersions: ['2024-11-05', '2025-03-26', '2025-06-18'],
+  supportedVersions: ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'],
   clientCapabilities: {},
   nativeEnvelopeProtocol: 'zai-pp-mcp-native',
   nativeEnvelopeVersion: 1,
@@ -19,6 +19,12 @@ export const MCP_PROTOCOL_NEGOTIATION_FIXTURES = [
     name: 'supported 2025-03-26 protocol version',
     serverVersion: '2025-03-26',
     currentOutput: '2025-03-26',
+    classification: 'legal',
+  },
+  {
+    name: 'supported 2025-11-25 protocol version (newer than the requested one)',
+    serverVersion: '2025-11-25',
+    currentOutput: '2025-11-25',
     classification: 'legal',
   },
   {

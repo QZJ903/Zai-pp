@@ -22,6 +22,23 @@ export interface ByteTruncation {
 }
 
 /**
+ * Character budget for one tool result's `output` payload.
+ *
+ * ⚠️⚠️ **The producer and the consumers must share this number, not each carry a copy.**
+ * Three places clamp the same value and they have to agree:
+ * ① the continuation template (`core/zai/continuation.ts`) — what the model actually sees;
+ * ② the persisted history (`core/tool/history.ts`) — what the panel restores after a reload;
+ * ③ producers that build the payload (`mcp_discover`) — which must **shape** their output to
+ *    fit, because a payload that only gets clamped later is a **half-truncated JSON string**
+ *    the model cannot parse, not a shorter list it can still use.
+ *
+ * ⚠️ The unit is **characters of `JSON.stringify(output)`**, not bytes — every consumer
+ * above slices the serialized string with `.length`. Measuring bytes here and slicing
+ * characters there would make the two disagree by 3–4× on CJK text.
+ */
+export const TOOL_OUTPUT_MAX_CHARS = 8_000;
+
+/**
  * 把 `value` 截到 **UTF-8 `maxBytes` 字节以内**，边界回退到完整字符。
  *
  * ⚠️ **不加 `...[truncated]` 标记** —— 这一层只回答「值超没超」，标记由各自的

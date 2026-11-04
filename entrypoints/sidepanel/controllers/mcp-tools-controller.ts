@@ -6,10 +6,9 @@ import {
   isShellNativeHostSupported,
 } from '../../../core/platform';
 import {
-  SHELL_MCP_NATIVE_HOST,
-  SHELL_MCP_SERVER_NAME,
   SHELL_TOOL_NAMES,
   createShellMcpPresetInput,
+  isShellMcpServer,
   type ShellToolName,
 } from '../../../core/shell';
 import { isExtensionInternalTool } from '../../../core/mcp/internal-tools';
@@ -391,11 +390,6 @@ export function findMcpPreset(
   kind: McpPresetKind,
 ): McpServerConfig | null {
   return servers.find((server) => isShellMcpServer(server)) ?? null;
-}
-
-export function isShellMcpServer(server: McpServerConfig): boolean {
-  return server.displayName === SHELL_MCP_SERVER_NAME
-    || server.transport.nativeHost === SHELL_MCP_NATIVE_HOST;
 }
 
 export function isMcpNativeMessagingSupported(

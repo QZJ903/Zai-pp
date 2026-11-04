@@ -64,11 +64,25 @@ export function createShellMcpPresetInput(
   };
 }
 
+/**
+ * Whether this server record is the built-in Shell Local host.
+ *
+ * ⚠️⚠️ **Identity is `nativeHost`, never `displayName`.** The display name is a
+ * user-editable field on the MCP page (no reserved-name check), and this predicate
+ * decides which transport path a tool call takes, which server the local-Skill importer
+ * talks to, and which record the startup preset maintenance touches. Answering `true`
+ * for a third-party server that merely *named* itself `Shell Local` would route its
+ * `local_file_read` through the Shell window-continuation path — the shape does not
+ * match, so every call fails closed with "could not parse the window content" and the
+ * user has no way to tell why.
+ *
+ * `nativeHost` is written into the host manifest at install time and cannot be typed
+ * into a form, so it is the only field that actually identifies the host.
+ */
 export function isShellMcpServer(
-  server: Pick<McpServerConfig, 'displayName' | 'transport'>,
+  server: Pick<McpServerConfig, 'transport'>,
 ): boolean {
-  return server.displayName === SHELL_MCP_SERVER_NAME ||
-    server.transport.nativeHost === SHELL_MCP_NATIVE_HOST;
+  return server.transport.nativeHost === SHELL_MCP_NATIVE_HOST;
 }
 
 /**

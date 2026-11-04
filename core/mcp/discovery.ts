@@ -329,6 +329,19 @@ async function persistMcpDiscoveryFailure(
 ): Promise<McpToolCacheEntry> {
   const completedAt = Date.now();
   const message = providerError instanceof Error ? providerError.message : String(providerError);
+  /**
+   * ⚠️⚠️ **只存 `message`、不存 `code` —— 这是错误条唯一的输入，别改成只存 code。**
+   *
+   * `health.error` 会被两处消费：
+   * ① `saveMcpDiscoveryResult` 把它抄进 `server.lastError`；
+   * ② 侧边栏的 `describeMcpFailure` / `shellSetupMessage` 拿它翻人话。
+   *
+   * 而那两处**只能按 message 的措辞判** —— `McpTransportError` / `McpProtocolError` 都是
+   * `super(message)`，构造时的 code **不在 message 里**。所以「按 `mcp_xxx` 码匹配」
+   * 在消费侧永远落空（曾经真的这么写过，`permissionDenied` 那一档整条落到 fallback 显示英文）。
+   *
+   * ⇒ **想结构化报错，得把 code 也带上**（改类型 + 两个消费者），不能单方面把这里改成只存 code。
+   */
   const previousCache = await getMcpToolCache(server.id);
   throwIfMcpExecutionAborted(options?.signal);
   const descriptors = previousCache?.descriptors ?? [];

@@ -24,6 +24,11 @@ import type {
   ToolError,
   ToolExecutionRecord,
 } from '../types';
+// ⚠️ **与产出侧共用同一个常量** —— `mcp_discover` 会按它自己裁好候选列表再返回，
+// 而这里是对已经成形的载荷兜最后一道。两处各写一份时，产出侧按 8 000 裁到 11 张卡、
+// 这里再截一刀，模型拿到的就是半截 JSON。
+import { TOOL_OUTPUT_MAX_CHARS } from '../tool/result-bytes';
+export { TOOL_OUTPUT_MAX_CHARS };
 // 续跑轮识别与占位符在**零依赖**的 `continuation-marker.ts` 里 —— 页面主世界
 // （历史清洗 + 气泡隐藏）也要用同一份判据，而本文件带着一条约 1.5 KB 的待办话术
 // 大正则，不该被拖进主世界。这里原样转出，**既有 import 路径全部不变**。
@@ -49,7 +54,6 @@ export const ZAI_INLINE_AGENT_FULL_TOOL_RESULT_WINDOW = 4;
 const ORIGINAL_TASK_MAX_CHARS = 8_000;
 const NUDGE_PREVIOUS_TEXT_MAX_CHARS = 4_000;
 const TOOL_DETAIL_MAX_CHARS = 4_000;
-const TOOL_OUTPUT_MAX_CHARS = 8_000;
 /**
  * `browser_snapshot` 的 detail 上限（比默认宽 6 倍）。
  *

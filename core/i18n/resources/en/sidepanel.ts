@@ -495,6 +495,17 @@ export const sidepanel = {
       noTools: 'No tools discovered yet. Use "Refresh tools" to discover them.',
       recentCalls: 'Recent calls',
       noHistory: 'No call history',
+      failure: {
+        forbidden: 'The server rejected this request (HTTP 401/403). Check the secret or custom headers.',
+        hostNotFound: 'Native host not found — run the install command first, and make sure Node.js/npm is installed.',
+        cannotConnect: 'Cannot reach this server — check the URL, the port, and whether it is running.',
+        timeout: 'The server did not respond in time — check that it is running, or raise "Request ms".',
+        responseTooLarge: 'The response exceeds the "Result bytes" limit. Raise it in Advanced, or have the server return less.',
+        responseInvalid: 'The server did not return a valid MCP response — the URL may point at a plain HTTP API, or the transport is unsupported.',
+        versionMismatch: 'Protocol version mismatch — the version the server advertises is not in this extension\'s supported list.',
+        permissionDenied: 'The browser has not granted access to this server origin — re-grant it in the step above.',
+        fallback: 'Connection failed: {detail}',
+      },
       hintExpand: 'Show install guide',
       toolInfo: {
         riskRead: 'Read',

@@ -134,6 +134,29 @@ export async function setMcpCapabilityServerExposure(input: {
   });
 }
 
+/**
+ * Drops one server's exposure entry when that server is deleted.
+ *
+ * ⚠️ **成对动作的另一半** —— `DELETE_MCP_SERVER` 此前只清 `servers` 与 `toolCaches`，
+ * 这一格（`zai_pp_mcp_capability_settings.servers[serverId]`）会一直留着：格数随删除次数
+ * 单调增长，而 `decodeMcpCapabilitySettings` 的 `assertOnlyKeys` 只管形状不管数量，
+ * 所以它永远不报错、也永远不会被读到 —— 属于「删了不清理」。
+ *
+ * ⚠️ **删不存在的键是幂等的**（返回原状态，不写盘），所以调用方不必先查。
+ */
+export async function deleteMcpCapabilityServerSettings(serverId: string): Promise<McpCapabilitySettings> {
+  return capabilitySettingsOperations.run(async () => {
+    const id = requireIdentity(serverId, 'serverId');
+    const current = await readSettings();
+    if (!Object.hasOwn(current.servers, id)) return current;
+    const servers = { ...current.servers };
+    delete servers[id];
+    const next = { ...current, servers };
+    await writeSettings(next);
+    return next;
+  });
+}
+
 export function getMcpCapabilityServerSettings(
   settings: McpCapabilitySettings,
   serverId: string,

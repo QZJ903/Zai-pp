@@ -7,6 +7,7 @@ import type {
 } from './types';
 import { decodeToolCallHistory, encodeToolCallHistory } from './history-codec';
 import { createCoalescingMutationQueue } from '../persistence/coalescing-mutation-queue';
+import { TOOL_OUTPUT_MAX_CHARS } from './result-bytes';
 
 export const TOOL_HISTORY_STORAGE_KEY = 'zai_pp_tool_history';
 // Lowered from 200 → 100. Each record carries detail/output snapshots, and each
@@ -113,7 +114,9 @@ function sanitizeResult(result: ToolResult): ToolResult {
   return {
     ...result,
     detail: truncateString(result.detail, 4_000),
-    output: result.output === undefined ? undefined : truncateString(JSON.stringify(result.output), 8_000),
+    output: result.output === undefined
+      ? undefined
+      : truncateString(JSON.stringify(result.output), TOOL_OUTPUT_MAX_CHARS),
     error: result.error
       ? {
         ...result.error,

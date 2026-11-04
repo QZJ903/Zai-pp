@@ -33,6 +33,14 @@ export class McpDiscoveryConfigChangedError extends Error {
   }
 }
 
+/**
+ * All server records, newest **configuration change** first.
+ *
+ * ⚠️ Sorted by `updatedAt`, which is written only by `createMcpServer` / `updateMcpServer`
+ * — i.e. by the user. Discovery and health checks deliberately leave it alone (see
+ * `applyMcpServerHealthPatch`), so a tool refresh never reshuffles the MCP page's list,
+ * and a *failed* connection cannot push a broken server to the top.
+ */
 export async function getAllMcpServers(options?: { includeSecrets?: boolean }): Promise<McpServerConfig[]> {
   return mcpStorageOperations.run(async () => {
     const state = await readStateAlreadyOwned();
@@ -247,20 +255,39 @@ export function sanitizeMcpServerConfig(server: McpServerConfig): McpServerConfi
   };
 }
 
+/**
+ * Request headers for one server: user-configured `headers` first, `secrets` on top.
+ *
+ * ⚠️⚠️ **Overriding is case-insensitive, and a secret REPLACES a same-named custom
+ * header — it does not coexist with it.** HTTP header names are case-insensitive, but a
+ * plain object is not: writing `headers.Authorization` while `headers.authorization`
+ * already exists leaves **two keys**, and the `Headers` constructor joins them with
+ * `", "` ⇒ the server receives `"Bearer <token>, <user value>"`, which is not a valid
+ * `Authorization` value. Whichever side the user configured, exactly one wins, and the
+ * secret is the more specific intent.
+ */
 export function buildMcpRequestHeaders(server: McpServerConfig): Record<string, string> {
-  const headers: Record<string, string> = {};
+  const headers = new Map<string, { name: string; value: string }>();
+  const put = (name: string, value: string): void => {
+    // Key by lower-case, keep the first spelling of the name for the wire.
+    const key = name.toLowerCase();
+    headers.set(key, { name: headers.get(key)?.name ?? name, value });
+  };
+
   for (const header of server.headers) {
-    if (header.name.trim()) headers[header.name.trim()] = header.value;
+    const name = header.name.trim();
+    if (name) put(name, header.value);
   }
   for (const secret of server.secrets) {
     if (!secret.value) continue;
-    if (secret.kind === 'bearer') headers.Authorization = `Bearer ${secret.value}`;
-    if (secret.kind === 'basic') headers.Authorization = `Basic ${secret.value}`;
+    if (secret.kind === 'bearer') put('Authorization', `Bearer ${secret.value}`);
+    if (secret.kind === 'basic') put('Authorization', `Basic ${secret.value}`);
     if (secret.kind === 'header' && secret.headerName?.trim()) {
-      headers[secret.headerName.trim()] = secret.value;
+      put(secret.headerName.trim(), secret.value);
     }
   }
-  return headers;
+
+  return Object.fromEntries([...headers.values()].map((entry) => [entry.name, entry.value]));
 }
 
 async function readStateAlreadyOwned(): Promise<McpServerStorageState> {
@@ -341,6 +368,20 @@ function resolveMcpServerHealthStatus(
   return patch.status ?? server.status;
 }
 
+/**
+ * Applies a connection-health patch **without touching `updatedAt`**.
+ *
+ * ⚠️⚠️ **`updatedAt` means "the user last changed this configuration", and it is the
+ * only sort key of the MCP page's server list** (`getAllMcpServers` sorts by it
+ * descending). Writing it here made every discovery/health check look like a config
+ * edit: the refreshed server jumped to the top of the list — and because a *failed*
+ * discovery writes the same patch, a server that had just failed to connect also jumped
+ * to the top. The function's own contract says it records health "without treating it as
+ * a configuration mutation"; this is that contract expressed in code.
+ *
+ * Health has its own field: `lastConnectedAt` (only written when the check actually
+ * succeeded) plus `status` / `lastError`.
+ */
 function applyMcpServerHealthPatch(
   server: McpServerConfig,
   patch: Partial<Pick<McpServerConfig, 'status' | 'lastConnectedAt' | 'lastError'>>,
@@ -352,7 +393,6 @@ function applyMcpServerHealthPatch(
       ? server.lastConnectedAt
       : patch.lastConnectedAt,
     lastError: patch.lastError === undefined ? server.lastError : patch.lastError,
-    updatedAt: Date.now(),
   };
 }
 

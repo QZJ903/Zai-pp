@@ -185,6 +185,20 @@ describe('MCP runtime handlers', () => {
     })).resolves.toBeNull();
   });
 
+  it('drops the server exposure entry when a server is deleted', async () => {
+    // ⚠️ **成对动作的另一半** —— 服务的暴露设置（`mode` / `pinnedDescriptorIds`）
+    // 存在 `zai_pp_mcp_capability_settings` 里，是一个**独立的键**。只删 `servers`
+    // 与 `toolCaches` 会让那一格随删除次数单调增长：读不到、也不报错，永远发现不了。
+    const dependencies = createMcpDependencies();
+    const handlers = createMcpRuntimeHandlers(dependencies);
+
+    await dispatch(handlers, { type: 'DELETE_MCP_SERVER', payload: { id: 'doomed' } });
+
+    expect(dependencies.deleteMcpServer).toHaveBeenCalledWith('doomed');
+    expect(dependencies.deleteMcpCapabilityServerSettings, '删除服务必须同时清掉它的暴露设置')
+      .toHaveBeenCalledWith('doomed');
+  });
+
   it('notifies MCP consumers before descriptor consumers after mutations and discovery', async () => {
     const events: string[] = [];
     const dependencies = createMcpDependencies();
@@ -695,6 +709,7 @@ function createMcpDependencies(): McpRuntimeHandlerDependencies {
     createMcpServer: vi.fn(async () => createMcpServer()),
     updateMcpServer: vi.fn(async () => createMcpServer()),
     deleteMcpServer: vi.fn(async () => undefined),
+    deleteMcpCapabilityServerSettings: vi.fn(async () => createMcpCapabilitySettings()),
     getMcpToolCache: vi.fn(async () => createMcpCache()),
     refreshMcpServerDiscovery: vi.fn(async () => createMcpCache()),
     getMcpOriginPattern: vi.fn(() => 'https://example.test/*'),

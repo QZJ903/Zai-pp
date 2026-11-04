@@ -495,6 +495,18 @@ export const sidepanel = {
       noTools: '尚未发现工具。点「刷新工具」重新发现。',
       recentCalls: '最近调用',
       noHistory: '暂无调用记录',
+      // 服务错误的人话映射 —— 映射不到就原样显示（见 `describeMcpFailure`）。
+      failure: {
+        forbidden: '服务拒绝了这次请求（HTTP 401/403）。请检查密钥或自定义请求头。',
+        hostNotFound: '未找到 Native Host —— 请先运行安装命令，并确保已安装 Node.js/npm。',
+        cannotConnect: '无法连接到这个服务 —— 请确认地址、端口与服务是否已启动。',
+        timeout: '服务响应超时 —— 请确认服务在运行，或调大「请求 ms」。',
+        responseTooLarge: '服务返回的内容超过「结果字节」上限。请在高级设置里调大它，或让服务端少返回一些。',
+        responseInvalid: '服务返回的不是合法 MCP 响应 —— 多半是地址填成了普通 HTTP 接口，或者它不支持这个传输方式。',
+        versionMismatch: '协议版本不匹配 —— 服务端声明的版本不在本扩展支持的清单里。',
+        permissionDenied: '浏览器未授予这个服务地址的访问权限 —— 请回到上一步重新授权。',
+        fallback: '连接失败：{detail}',
+      },
       hintExpand: '展开安装指引',
       toolInfo: {
         riskRead: '只读',

@@ -31,6 +31,7 @@ export interface McpRuntimeHandlerDependencies {
   createMcpServer(input: McpServerCreateInput): Promise<McpServerConfig>;
   updateMcpServer(id: string, patch: McpServerUpdateInput): Promise<McpServerConfig | null>;
   deleteMcpServer(id: string): Promise<void>;
+  deleteMcpCapabilityServerSettings(serverId: string): Promise<McpCapabilitySettings>;
   getMcpToolCache(serverId: string): Promise<McpToolCacheEntry | null>;
   refreshMcpServerDiscovery(serverId: string): Promise<McpToolCacheEntry>;
   getMcpOriginPattern(server: McpServerConfig): string;
@@ -79,6 +80,9 @@ export function createMcpRuntimeHandlers(
     }),
     defineToolPayloadRuntimeCommandHandler('DELETE_MCP_SERVER', async (payload, context) => {
       await dependencies.deleteMcpServer(payload.id);
+      // ⚠️ **成对动作的另一半** —— 服务的暴露设置（`mode` / `pinnedDescriptorIds`）存在
+      // 另一个键里，不删就会随删除次数单调增长（读不到，但也不会自己消失）。
+      await dependencies.deleteMcpCapabilityServerSettings(payload.id);
       await notifyMcpAndTools(context.tabId);
       return { ok: true as const };
     }),

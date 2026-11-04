@@ -144,18 +144,42 @@ function createMcpProvider(): RuntimeToolProvider {
  * distinct servers can collide (e.g. `my-server` vs `my_server`). The registry
  * treats duplicate invocation names as fatal and would disable the whole tool
  * registry (M18); disambiguate the later duplicates deterministically instead.
+ *
+ * ⚠️ **Every allocated name has to be fed back into the occupied set.** A server can
+ * publish `read-file`, `read_file` *and* `read_file_2`: renaming the second one to
+ * `…_read_file_2` without recording it makes it collide with the third, and the registry
+ * then throws `tool_invocation_duplicate` — which disables every tool, not just these
+ * three. Collect the original names first, then allocate with a loop that skips taken
+ * names (same shape as `allocateCapabilityInvocationName`).
  */
-function disambiguateMcpInvocationNames(
+export function disambiguateMcpInvocationNames(
   descriptors: readonly ToolDescriptor[],
 ): ToolDescriptor[] {
   if (!Array.isArray(descriptors)) return descriptors as ToolDescriptor[];
-  const seen = new Map<string, number>();
-  return descriptors.map((descriptor) => {
-    const base = descriptor.invocationName;
-    const occurrence = seen.get(base) ?? 0;
-    seen.set(base, occurrence + 1);
-    if (occurrence === 0) return descriptor;
-    return { ...descriptor, invocationName: `${base}_${occurrence + 1}` };
+  const occupied = new Set<string>();
+  const firstIndexByBase = new Map<string, number>();
+  descriptors.forEach((descriptor, index) => {
+    if (!firstIndexByBase.has(descriptor.invocationName)) {
+      firstIndexByBase.set(descriptor.invocationName, index);
+    }
+  });
+  // Reserve every name that survives unchanged before allocating replacements, so a
+  // generated suffix can never land on a later descriptor's original name.
+  descriptors.forEach((descriptor, index) => {
+    if (firstIndexByBase.get(descriptor.invocationName) === index) {
+      occupied.add(descriptor.invocationName);
+    }
+  });
+  return descriptors.map((descriptor, index) => {
+    if (firstIndexByBase.get(descriptor.invocationName) === index) return descriptor;
+    let suffix = 2;
+    let candidate = `${descriptor.invocationName}_${suffix}`;
+    while (occupied.has(candidate)) {
+      suffix += 1;
+      candidate = `${descriptor.invocationName}_${suffix}`;
+    }
+    occupied.add(candidate);
+    return { ...descriptor, invocationName: candidate };
   });
 }
 

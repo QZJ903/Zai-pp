@@ -107,6 +107,22 @@ describe('Shell Host survives failures that would otherwise orphan sessions', ()
       .rejects.toThrow(/too large/);
     expect(logs.join('\n')).toContain('REJECTED');
   });
+
+  it('keeps the inbound and outbound caps as separate constants', async () => {
+    // ⚠️⚠️ Chrome's two native-messaging directions have different documented caps
+    // (extension→host 64 MiB, host→extension 1 MiB). Both are self-imposed 1 MiB here
+    // today, but they must stay **separate constants** so relaxing one direction later
+    // cannot silently widen the other. This test pins that they are distinct bindings,
+    // not one shared value.
+    // @ts-expect-error 宿主 contracts.mjs 为纯 JS 实现，无类型声明文件
+    const contracts = await import('../packages/shell-host/native/contracts.mjs') as {
+      MAX_NATIVE_REQUEST_BYTES: number;
+      MAX_NATIVE_RESPONSE_BYTES: number;
+    };
+    expect(contracts.MAX_NATIVE_REQUEST_BYTES).toBe(1 * 1024 * 1024);
+    expect(contracts.MAX_NATIVE_RESPONSE_BYTES).toBe(1 * 1024 * 1024);
+    expect(Object.keys(contracts)).not.toContain('MAX_NATIVE_MESSAGE_BYTES');
+  });
 });
 
 describe('Shell Host session output budget', () => {

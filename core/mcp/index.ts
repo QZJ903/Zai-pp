@@ -1,4 +1,6 @@
 export {
+  MAX_DISCOVERY_PAGES,
+  MAX_DISCOVERY_RESPONSE_BYTES,
   MCP_PROTOCOL_VERSION,
   MCP_SUPPORTED_PROTOCOL_VERSIONS,
 } from './constants';
@@ -50,6 +52,7 @@ export {
   McpCapabilitySettingsError,
   createDefaultMcpCapabilitySettings,
   decodeMcpCapabilitySettings,
+  deleteMcpCapabilityServerSettings,
   getMcpCapabilityServerSettings,
   getMcpCapabilitySettings,
   setMcpCapabilityServerExposure,

@@ -337,7 +337,7 @@ describe('callLocalFileReadAuto (扩展侧 auto 续读)', () => {
     expect(data.charsReturned).toBe(5000);
     expect(Array.from(data.content).length).toBeLessThanOrEqual(5000);
     expect(data.truncated).toBe(true); // 文件更长，如实标记未读完
-    // 单窗申请值不得超过总预算，也不得被放大到 12000
+    // 单窗申请值不得超过总预算，也不得被放大到窗口上限（`AUTO_READ_WINDOW_CHARS`，现为 8000）
     expect(Math.max(...requestedMaxChars)).toBeLessThanOrEqual(5000);
   });
 
@@ -356,6 +356,20 @@ describe('callLocalFileReadAuto (扩展侧 auto 续读)', () => {
     const result = await callLocalFileReadAuto(server, transport, { call: hugeCall } as never);
     expect(result.ok).toBe(true);
     expect(autoReadData(result).charsReturned).toBe(100_000);
+  });
+
+  it('单窗申请值不超过 JSON 转义后的响应体上限', async () => {
+    // ⚠️⚠️ 守的是一个真缺陷：窗口原先是 12 000 字符，而注释只按「× 4 字节」估算。
+    // 控制字符（`\u0000`–`\u001F`）进 JSON 要写成 6 字节的 `\u00XX` ⇒ 12 000 × 6 = 72 000，
+    // 超过默认 64 000 的响应体上限，那一窗会被 `assertWithinByteLimit` 拒掉、整条续读失败。
+    // 触发面是「把二进制文件当文本读」（大量 NUL）；普通源码 / 中文 / 日志都远不到这个量。
+    const { transport, requestedMaxChars } = makeBudgetAwareTransport(200_000);
+    const bigCall = { name: 'local_file_read', payload: { path: '/x', max_chars: 100_000 } } as never;
+    const result = await callLocalFileReadAuto(server, transport, { call: bigCall } as never);
+    expect(result.ok).toBe(true);
+    // 单窗申请值 × 最坏 JSON 膨胀（× 6）必须装得进默认响应体上限。
+    const maxWindow = Math.max(...requestedMaxChars);
+    expect(maxWindow * 6).toBeLessThanOrEqual(64_000);
   });
 
   // 聚合结果仍须经统一 normalization 施加 maxResultBytes 字节上限。

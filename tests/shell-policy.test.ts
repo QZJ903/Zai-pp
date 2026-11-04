@@ -5,7 +5,30 @@ import {
   createShellMcpPresetInput,
   isShellMcpServer,
 } from '../core/shell/policy';
-import { SHELL_TOOL_NAMES } from '../core/shell/contracts';
+import { SHELL_MCP_NATIVE_HOST, SHELL_TOOL_NAMES } from '../core/shell/contracts';
+import type { McpServerConfig } from '../core/mcp/types';
+
+/** 一条完整的 MCP 服务记录，用来喂 `isShellMcpServer`（它的入参已收窄成 `Pick<…,'transport'>`）。 */
+function shellServerForTest(): McpServerConfig {
+  return {
+    version: 1,
+    id: 'server-under-test',
+    displayName: 'Shell Local',
+    enabled: true,
+    transport: { kind: 'native_messaging', nativeHost: SHELL_MCP_NATIVE_HOST },
+    headers: [],
+    secrets: [],
+    timeouts: { connectMs: 5_000, requestMs: 120_000, discoveryMs: 10_000 },
+    limits: { maxResultBytes: 128_000, maxToolCount: 12 },
+    allowlist: { mode: 'all', toolNames: [] },
+    execution: { mode: 'auto', enabled: true },
+    status: 'ready',
+    lastConnectedAt: null,
+    lastError: null,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+}
 
 describe('createShellMcpPresetInput', () => {
   it('defaults Shell MCP to auto execution while the server itself stays disabled', () => {
@@ -66,19 +89,38 @@ describe('createShellMcpPresetInput', () => {
     expect(buildShellToolLimitUpgrade({ maxResultBytes: 64_000, maxToolCount: 128 })).toBeNull();
   });
 
-  it('detects the built-in Shell Local server by name or native host', () => {
-    expect(isShellMcpServer({
+  it('identifies the built-in Shell Local server by native host only', () => {
+    expect(isShellMcpServer(shellServerForTest())).toBe(true);
+    const otherHost: McpServerConfig = {
+      ...shellServerForTest(),
+      transport: { kind: 'native_messaging', nativeHost: 'com.example.other' },
+    };
+    expect(isShellMcpServer(otherHost)).toBe(false);
+  });
+
+  it('does not trust a user-typed display name', () => {
+    // ⚠️⚠️ 守的是一个真缺陷：判据里曾经还有 `displayName === 'Shell Local'` 这一半。
+    // 显示名是 MCP 页可编辑的普通字段（没有保留名检查），而这条判据决定工具调用走哪条
+    // 传输路径、本地 Skill 导入跟哪个服务说话、启动预设维护动哪条记录。
+    // 一个第三方服务只要把自己**命名**成 `Shell Local`，它的 `local_file_read` 就会被
+    // 路由进 Shell 的窗口续读路径 —— 形状对不上，每次调用都以「无法从工具结果解析窗口内容」
+    // fail-closed，而用户没有任何线索知道原因。
+    //
+    // ⚠️ 参数类型已经收窄成 `Pick<McpServerConfig, 'transport'>`，所以这里只能先落到
+    // 一个**完整记录**变量上再传 —— 那正好模拟生产：调用方手里是整条 `McpServerConfig`。
+    const impersonator: McpServerConfig = {
+      ...shellServerForTest(),
+      displayName: 'Shell Local',
+      transport: { kind: 'streamable_http', url: 'https://third-party.example/mcp' },
+    };
+    expect(isShellMcpServer(impersonator)).toBe(false);
+
+    const sameNameOtherHost: McpServerConfig = {
+      ...shellServerForTest(),
       displayName: 'Shell Local',
       transport: { kind: 'native_messaging', nativeHost: 'other.host' },
-    })).toBe(true);
-    expect(isShellMcpServer({
-      displayName: 'Anything',
-      transport: { kind: 'native_messaging', nativeHost: 'com.zai_pp.shell' },
-    })).toBe(true);
-    expect(isShellMcpServer({
-      displayName: 'Anything',
-      transport: { kind: 'native_messaging', nativeHost: 'com.example.other' },
-    })).toBe(false);
+    };
+    expect(isShellMcpServer(sameNameOtherHost)).toBe(false);
   });
 });
 

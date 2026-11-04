@@ -2,11 +2,20 @@ import { platform } from 'node:os';
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 128_000;
-// Chrome native messaging caps a single Port message at ~1 MB. The host must
-// respect the same ceiling in both directions or Chrome truncates/disconnects
-// and the user sees opaque "QUOTA_BYTES" failures.
-const MAX_NATIVE_MESSAGE_BYTES = 1 * 1024 * 1024;
-// Headroom under MAX_NATIVE_MESSAGE_BYTES for the JSON-RPC envelope wrapping
+// ⚠️⚠️ **Chrome's two native-messaging directions have different caps**:
+// `extension -> host` is documented at 64 MiB, `host -> extension` at 1 MiB.
+// The two constants below are split accordingly so that relaxing one direction
+// later never widens the other by accident. Both values stay at 1 MiB today —
+// they are **self-imposed** thresholds, not the documented limits.
+//
+// ⚠️ **Do not raise the request ceiling on its own.** The reader accumulates
+// frames with `buffer = Buffer.concat([buffer, chunk])` per `data` event, so a
+// large frame costs quadratic copying, and an oversized frame makes this process
+// exit (which tears down every persistent shell session). Rewrite that
+// accumulator first.
+const MAX_NATIVE_REQUEST_BYTES = 1 * 1024 * 1024;
+const MAX_NATIVE_RESPONSE_BYTES = 1 * 1024 * 1024;
+// Headroom under MAX_NATIVE_REQUEST_BYTES for the JSON-RPC envelope wrapping
 // the file content. Aligned with the extension-side cap so a request that
 // passes one side is never rejected by the other.
 const MAX_LOCAL_FILE_WRITE_BYTES = 900_000;
@@ -257,7 +266,8 @@ export {
   MAX_LOCAL_SKILL_BYTES,
   MAX_LOCAL_SKILLS,
   MAX_LOCAL_TOTAL_CONTENT_BYTES,
-  MAX_NATIVE_MESSAGE_BYTES,
+  MAX_NATIVE_REQUEST_BYTES,
+  MAX_NATIVE_RESPONSE_BYTES,
   MAX_OUTPUT_BYTES,
   MAX_PYTHON_CODE_BYTES,
   MAX_PYTHON_OUTPUT_BYTES,

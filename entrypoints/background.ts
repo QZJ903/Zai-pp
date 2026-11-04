@@ -59,6 +59,7 @@ import {
 import { createProductionToolProviderRegistry } from './background/tool-provider-composition';
 import { createMcpCapabilityInvocationResolver } from '../core/mcp/capability-runtime';
 import {
+  deleteMcpCapabilityServerSettings,
   getMcpCapabilitySettings,
   setMcpCapabilityServerExposure,
   updateMcpCapabilitySettings,
@@ -352,6 +353,7 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         createMcpServer,
         updateMcpServer,
         deleteMcpServer,
+        deleteMcpCapabilityServerSettings,
         getMcpToolCache,
         refreshMcpServerDiscovery,
         getMcpOriginPattern,

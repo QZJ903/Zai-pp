@@ -17,6 +17,7 @@ import type {
   PlatformEnvironment,
 } from '../../../core/types';
 import { SHELL_TOOL_NAMES } from '../../../core/shell/contracts';
+import { isShellMcpServer } from '../../../core/shell/policy';
 import PageIntro from '../components/PageIntro';
 import { useI18n } from '../i18n';
 import {
@@ -26,7 +27,6 @@ import {
   isMcpNativeMessagingSupported,
   isMcpToolEnabled,
   isMcpToolSelected,
-  isShellMcpServer,
   orderMcpToolsByPin,
   visibleMcpTools,
   riskBadgeLabelKey,
@@ -843,9 +843,9 @@ function ServerDetail({
         <Metric label={t('sidepanel.mcpPage.detail.transport')} value={transportLabel(server.transport.kind)} />
       </div>
 
-      {(cache?.health.error || server.lastError) && (
+      {describeMcpFailure(server, cache, t) && (
         <div className="rounded-lg px-3 py-2 text-xs" style={{ color: 'var(--ds-danger)', background: 'var(--ds-danger-bg)', border: '1px solid var(--ds-danger-border)' }}>
-          {cache?.health.error ?? server.lastError}
+          {describeMcpFailure(server, cache, t)}
         </div>
       )}
 
@@ -1464,6 +1464,96 @@ function browserLabel(browser: NativeHostBrowser): string {
 }
 
 /**
+ * 把服务返回的原始英文错误翻成人话。
+ *
+ * ⚠️ **第三方服务没有 `shellSetupMessage` 那一层** —— 它只对内置 Shell 生效，其余服务
+ * 的错误条一直原样渲染 `health.error` / `lastError`，而那里面装的是**上一次发现的原始
+ * 异常 message**（`MCP server returned HTTP 401.` / `Cannot reach MCP server at …` /
+ * `MCP response exceeded 64000 bytes…`）。用户看到一句英文，既不知道是自己哪一项配置
+ * 的问题，也不知道该去哪儿改。
+ *
+ * ⚠️⚠️ **只能按 message 的措辞判，按 `mcp_xxx` 错误码判是死的。**
+ * `McpTransportError` / `McpProtocolError` 都是 `super(message)` —— **code 不在 message 里**。
+ * 而这里拿到的是 `health.error`（= `persistMcpDiscoveryFailure` 里的
+ * `providerError.message`）或 `server.lastError`（= 同一个 `health.error` 抄过去的），
+ * 两者都只有 message、没有 code。实测 24 个 `mcp_*` 码**没有一个把 code 写进 message**：
+ * `mcp_origin_permission_denied` 的原文是 `Host permission was not granted for …`、
+ * `mcp_response_too_large` 是 `MCP response exceeded N bytes…`。
+ * ⇒ 早期版本写的那几个 `lower.includes('mcp_xxx')` 分支**全是死判据**，
+ * `permissionDenied` 那一档更是永远走不到、直接落到 fallback 显示英文。
+ *
+ * ⚠️ **判据按「稳定片段」分档，映射不到就原样回落** —— 不做精确匹配，因为
+ * message 里的 URL / 端口号 / 字节数都是变量，且上游措辞会变。回落那一档保证
+ * 「至少不比现在少信息」。
+ *
+ * ⚠️ **`not found` 不能裸判**：`health.error` 可能是**服务端原文**
+ * （`unwrapMcpResponse` 对 JSON-RPC error 直接 `throw new McpProtocolError(code, response.error.message)`），
+ * 第三方服务返回一句带 `not found` 的话就会被显示成「未找到 Native Host —— 请先运行安装命令」，
+ * 而用户实际遇到的问题跟 host 毫无关系。**只认带 host 语义的组合**。
+ *
+ * ⚠️ **导出是为了可测**：它是这一条的完整判据，页面渲染测试要走三层组件才碰得到。
+ */
+export function describeMcpFailure(
+  server: McpServerConfig,
+  cache: McpToolCacheEntry | null,
+  t: Translator,
+): string | null {
+  const raw = (cache?.health.error ?? server.lastError ?? '').trim();
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  // ⚠️ **`t()` 的模板串后缀必须写成字面量** —— `tests/i18n-unreferenced-keys.test.ts` 靠
+  // 「字面前缀 + 字面后缀」判一个键有没有人引用；抽成 `pick(suffix)` 之后它静态求值不出来，
+  // 那一整段键会被判成零引用（门禁要么假红、要么被迫开白名单）。与 `shellSetupMessage`
+  // 同一个写法。
+  const key = 'sidepanel.mcpPage.detail.failure';
+
+  if (lower.includes('forbidden') || lower.includes('http 401') || lower.includes('http 403') || lower.includes('unauthorized')) {
+    return t(`${key}.forbidden` as LocaleMessageKey);
+  }
+  // ⚠️ **只认带 host 语义的组合**（理由见函数头）。四句覆盖全部 native 侧失败：
+  // `chrome.runtime.lastError` 的原文 `Specified native messaging host not found.`、
+  // `Native messaging host is not configured.`、`Browser native messaging is unavailable.`、
+  // `Native host disconnected.`。
+  if (lower.includes('native messaging host not found')
+    || lower.includes('specified native messaging host')
+    || lower.includes('native messaging host is not configured')
+    || lower.includes('native messaging is unavailable')
+    || lower.includes('native host disconnected')) {
+    return t(`${key}.hostNotFound` as LocaleMessageKey);
+  }
+  // ⚠️ 三句来自 `mcp_origin_permission_denied` / `_check_unavailable` / `_check_failed`。
+  // 按 code 判的那一版是死判据（那几个 message 里都没有 code），这一档曾经永远落到 fallback。
+  if (lower.includes('host permission was not granted')
+    || lower.includes('host permission cannot be verified')
+    || lower.includes('host permission could not be verified')) {
+    return t(`${key}.permissionDenied` as LocaleMessageKey);
+  }
+  if (lower.includes('protocol version mismatch')) {
+    return t(`${key}.versionMismatch` as LocaleMessageKey);
+  }
+  if (lower.includes('exceeded') && lower.includes('bytes')) {
+    return t(`${key}.responseTooLarge` as LocaleMessageKey);
+  }
+  if (lower.includes('was not valid json')
+    || lower.includes('was not a plain json object')
+    || lower.includes('did not include a result')
+    || lower.includes('did not include a body')
+    || lower.includes('ended without a matching response')) {
+    return t(`${key}.responseInvalid` as LocaleMessageKey);
+  }
+  if (lower.includes('timed out')
+    || (lower.includes('exceeded') && lower.includes('ms'))) {
+    return t(`${key}.timeout` as LocaleMessageKey);
+  }
+  if (lower.includes('failed to fetch')
+    || lower.includes('cannot reach')
+    || lower.includes('connection refused')) {
+    return t(`${key}.cannotConnect` as LocaleMessageKey);
+  }
+  return t(`${key}.fallback` as LocaleMessageKey, { detail: raw });
+}
+
+/**
  * Shell Native Host 那一栏该显示什么。
  *
  * ⚠️ **导出是为了可测** —— 它是这一栏的全部判据，而页面渲染测试要走
@@ -1486,14 +1576,26 @@ export function shellSetupMessage(
   if (error.includes('forbidden')) {
     return { message: t(`${setupKey}.forbidden` as LocaleMessageKey), isError: true };
   }
-  if (error.includes('native_host_unavailable') || error.includes('native messaging host not found') || error.includes('not found') || error.includes('specified native messaging host')) {
+  /**
+   * ⚠️⚠️ **下面这两条原先按 `native_host_unavailable` / `native_messaging_unavailable`
+   * 这类 code 判 —— 那是死的**，理由同 `describeMcpFailure` 的函数头：
+   * `McpTransportError` 的 code 不在 message 里，而这里拿到的是 message。
+   * 现在改成按 message 的实际措辞判。
+   *
+   * ⚠️ **`not found` 不能裸判**（同一个坑）：它会把任何带这个词的错误都翻成
+   * 「未找到 Native Host，请先运行安装命令」，而用户可能只是 host 版本旧、或服务端返回了别的错。
+   * 只认带 native messaging 语义的组合。
+   */
+  if (error.includes('native messaging host not found')
+    || error.includes('specified native messaging host')
+    || error.includes('native messaging host is not configured')
+    || error.includes('native host disconnected')) {
     return { message: t(`${setupKey}.notFound` as LocaleMessageKey), isError: true };
   }
-  if (error.includes('native_messaging_unavailable')) {
+  if (error.includes('browser native messaging is unavailable')) {
     return { message: t('sidepanel.mcpPage.shellSetup.unavailable'), isError: true };
   }
   if (error.includes('failed to fetch') ||
-    error.includes('mcp_network_error') ||
     error.includes('cannot reach') ||
     error.includes('connection refused')
   ) {

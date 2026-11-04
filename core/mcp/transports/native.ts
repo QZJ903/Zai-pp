@@ -26,13 +26,20 @@ interface NativePortState {
   pendingRequests: Map<number | string, PendingRequest>;
 }
 
-// Chrome native messaging enforces a ~1 MB cap per message over the Port
-// (chrome.runtime.Port / connectNative). The previous 9 MB ceiling was never
-// reachable in practice — large payloads were silently truncated or the host
-// disconnected — which surfaced as opaque "QUOTA_BYTES" failures during long
-// content writes. Aligning here surfaces the failure early with
-// an actionable message instead.
-const MAX_NATIVE_MESSAGE_BYTES = 1 * 1024 * 1024;
+// Ceiling for a **request** frame sent to the native host.
+//
+// ⚠️⚠️ **Chrome's two directions have different caps** — the documented limits are
+// 64 MiB for extension→host and 1 MiB for host→extension. This constant bounds the
+// request direction, and 1 MiB is a **self-imposed safety threshold**, not Chrome's
+// limit for that direction.
+//
+// ⚠️ **Why not raise it to the documented 64 MiB**: the host reads frames with
+// `buffer = Buffer.concat([buffer, chunk])` on every `data` event, so a large frame
+// costs quadratic copying (measured estimate: an 8 MiB frame re-copies ~516 MiB, a
+// 64 MiB frame ~32.8 GiB). On top of that an oversized frame makes the host exit
+// (dropping every persistent shell session). Raising this number requires rewriting
+// that accumulator first — do not touch it on its own.
+const MAX_NATIVE_REQUEST_BYTES = 1 * 1024 * 1024;
 // local_file_write content cap with headroom for the JSON-RPC envelope. Keep
 // models writing in chunks: write the first section, then append the rest
 // with append=true. This is a *content* cap — it does not replace the envelope
@@ -59,8 +66,14 @@ function getPortState(nativeHost: string): NativePortState {
   nativePortStates.set(nativeHost, state);
 
   port.onMessage.addListener((response: any) => {
-    const id = response?.id ?? response?.result?.id;
-    const rpcId = response?.jsonrpc === '2.0' ? response.id : id;
+    // ⚠️ **只认顶层的 `id`，不看 `result.id`。**
+    // 这里曾经还兜过一层 `response?.result?.id`，那是一条走不到的路径：JSON-RPC 2.0
+    // 的响应把 `id` 放在**顶层**，而 `tools/call` 的 `result` 里根本没有 `id` 字段。
+    // 留着它的唯一效果是：真收到畸形帧时，`rpcId` 可能落到某个不相干的结果字段上，
+    // 那条请求既不该被 resolve、又匹配不上任何 pending，只能白等到 120 秒超时；
+    // 就算凑巧匹配上，`normalizeJsonRpcResponse` 也会因为 `jsonrpc !== '2.0'`
+    // 立刻判 `mcp_response_invalid`。⇒ 让它匹配不上、如实超时，比「匹配到错的东西」好。
+    const rpcId = response?.id;
     if (rpcId != null && state.pendingRequests.has(rpcId)) {
       const pending = state.pendingRequests.get(rpcId)!;
       state.pendingRequests.delete(rpcId);
@@ -102,6 +115,23 @@ export function createMcpNativeMessagingTransport(server: McpServerConfig): McpP
     },
   };
 }
+
+/*
+ * ⚠️⚠️ **本 transport 是四个里唯一不接 `options.maxResponseBytes` 的**（对照
+ * `http.ts` / `sse.ts` 都显式传了）。这不是漏 —— 那一档走的是 HTTP 的按块累计上限，
+ * native 那条链的响应上限由**宿主**在 `framing.mjs` 的 `writeNativeMessage` 里判
+ * （`MAX_NATIVE_RESPONSE_BYTES`，host → extension 方向）。
+ *
+ * ⚠️ **两个方向的常量是分开的，别混**：本文件的 `MAX_NATIVE_REQUEST_BYTES` 管
+ * **extension → host**（`assertNativePayloadSize` 量的就是发出去的信封）；
+ * 宿主侧的 `MAX_NATIVE_RESPONSE_BYTES` 管回来的那一帧。Chrome 官方两个方向的上限
+ * 本来就不同（扩展→host 64 MiB、host→扩展 1 MiB），本项目两个都用 1 MiB 是**自选的
+ * 保守值**，不是照抄官方 —— 理由见 `contracts.mjs` 与 `framing.mjs` 的注释。
+ *
+ * ⚠️ **超限的后果也不一样**：请求方向超限会让宿主 `onInvalidFrame` → `process.exit(1)`
+ * （连带杀掉所有持久 shell 会话）；响应方向超限只是宿主 `reject`，`runtime-dispatcher`
+ * 接住并尝试回一条错误帧，**不杀进程**。
+ */
 
 async function sendNativeMessage<TParams extends Record<string, unknown> | undefined, TResult>(
   server: McpServerConfig,
@@ -243,12 +273,12 @@ function assertNativePayloadSize(nativeHost: string, envelope: McpNativeEnvelope
   // measure the real envelope — a frame past the cap is rejected by the browser
   // and the host exits, which drops every open shell session.
   const envelopeBytes = new Blob([JSON.stringify(envelope)]).size;
-  if (envelopeBytes > MAX_NATIVE_MESSAGE_BYTES) {
+  if (envelopeBytes > MAX_NATIVE_REQUEST_BYTES) {
     throw new McpTransportError(
       'mcp_native_payload_too_large',
       writesFile
-        ? `Native MCP request is too large after escaping (${formatBytes(envelopeBytes)} > ${formatBytes(MAX_NATIVE_MESSAGE_BYTES)}). Write the file in chunks: send the first section now, then call local_file_write again with append=true for each remaining section.`
-        : `Native MCP request is too large (${formatBytes(envelopeBytes)} > ${formatBytes(MAX_NATIVE_MESSAGE_BYTES)}). Reduce the request size or split the work into smaller tool calls.`,
+        ? `Native MCP request is too large after escaping (${formatBytes(envelopeBytes)} > ${formatBytes(MAX_NATIVE_REQUEST_BYTES)}). Write the file in chunks: send the first section now, then call local_file_write again with append=true for each remaining section.`
+        : `Native MCP request is too large (${formatBytes(envelopeBytes)} > ${formatBytes(MAX_NATIVE_REQUEST_BYTES)}). Reduce the request size or split the work into smaller tool calls.`,
       { retryable: false },
     );
   }

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createMcpServer,
+  getAllMcpServers,
   getMcpServerById,
   getMcpToolCache,
   saveMcpDiscoveryResult,
@@ -9,6 +10,7 @@ import {
 import { MCP_STORAGE_KEY } from '../core/mcp/storage-codec';
 import { createShellMcpPresetInput } from '../core/shell';
 import { createMcpDescriptorId, createMcpInvocationName } from '../core/mcp/descriptor-identity';
+import type { McpServerConfig } from '../core/mcp/types';
 import type { ToolDescriptor } from '../core/types';
 
 /**
@@ -272,5 +274,136 @@ describe('MCP 配置指纹：改用等价路径写回时不该误判', () => {
 
     await updateMcpServer(id, { allowlist: { mode: 'deny', toolNames: [] } } as never);
     expect(await getMcpToolCache(id)).not.toBeNull();
+  });
+});
+describe('MCP 发现不改配置时间（页面列表顺序只在用户改配置时变）', () => {
+  /** 按**这台服务自己的 transport** 造描述符 —— 写侧产物必须能过读侧校验（provider.transport 必须相等）。 */
+  function descriptorFor(server: McpServerConfig, name: string): ToolDescriptor {
+    return {
+      id: createMcpDescriptorId(server.id, name),
+      provider: {
+        kind: 'mcp',
+        id: server.id,
+        displayName: server.displayName,
+        transport: server.transport.kind,
+      },
+      name,
+      invocationName: createMcpInvocationName(server.id, name),
+      title: name,
+      description: name,
+      inputSchema: { type: 'object', properties: {} },
+      execution: { mode: 'auto', enabled: true, risk: 'low' },
+    } as ToolDescriptor;
+  }
+
+  /**
+   * ⚠️⚠️ 守的是一个真缺陷：`applyMcpServerHealthPatch` 曾经也写 `updatedAt`，
+   * 而 `getAllMcpServers` **按 `updatedAt` 降序**返回、MCP 页直接照这个顺序渲染。
+   * 于是「发现一次」= 「这条服务跳到列表最前面」，而**发现失败走的是同一个补丁** ——
+   * 一个刚连不上的服务也会被顶到榜首。
+   *
+   * 判据取自 `updateMcpServerHealth` 自己的契约：「records connection health
+   * **without treating it as a configuration mutation**」。
+   */
+  it('一次成功的发现不改 updatedAt', async () => {
+    const { id } = await seedDiscoveredServer();
+    const before = (await getMcpServerById(id))!;
+
+    await saveMcpDiscoveryResult({
+      serverId: id,
+      descriptors: [descriptorFor(before, 'shell_status')],
+      refreshedAt: Date.now() + 1_000,
+      expiresAt: Date.now() + 61_000,
+      health: {
+        serverId: id,
+        status: 'ready',
+        checkedAt: Date.now() + 1_000,
+        latencyMs: 3,
+        toolCount: 1,
+        error: null,
+      },
+    }, before);
+
+    const after = (await getMcpServerById(id))!;
+    expect(after.updatedAt, '发现不是配置变更，不许改 updatedAt').toBe(before.updatedAt);
+    // 但健康字段本身必须照常更新，否则这条用例会因为「什么都没写」而恒绿。
+    expect(after.lastConnectedAt, '成功发现要更新 lastConnectedAt').not.toBe(before.lastConnectedAt);
+    expect(after.status).toBe('ready');
+  });
+
+  it('一次失败的发现既不改 updatedAt、也不动 lastConnectedAt', async () => {
+    const { id } = await seedDiscoveredServer();
+    const before = (await getMcpServerById(id))!;
+
+    await saveMcpDiscoveryResult({
+      serverId: id,
+      descriptors: [],
+      refreshedAt: Date.now(),
+      expiresAt: Date.now() + 30_000,
+      health: {
+        serverId: id,
+        status: 'error',
+        checkedAt: Date.now() + 1_000,
+        latencyMs: null,
+        toolCount: 0,
+        error: 'connect ECONNREFUSED',
+      },
+    }, before);
+
+    const after = (await getMcpServerById(id))!;
+    expect(after.updatedAt, '发现失败同样不是配置变更').toBe(before.updatedAt);
+    expect(after.lastConnectedAt, '失败不许动「上次连接」').toBe(before.lastConnectedAt);
+    expect(after.status).toBe('error');
+    expect(after.lastError).toContain('ECONNREFUSED');
+  });
+
+  it('列表顺序只由配置变更决定', async () => {
+    // ⚠️ **必须控制时钟** —— `updatedAt` 取 `Date.now()`，同一毫秒内建两条会撞成平局、
+    // 排序退回原序，这条用例就变成靠运气绿（第一版实测：`expected 'Second' to be 'First renamed'`）。
+    const clock = vi.spyOn(Date, 'now');
+    try {
+      clock.mockReturnValue(1_000);
+      const first = await createMcpServer({
+        displayName: 'First',
+        transport: { kind: 'streamable_http', url: 'https://a.test/mcp' },
+      });
+      clock.mockReturnValue(2_000);
+      await createMcpServer({
+        displayName: 'Second',
+        transport: { kind: 'streamable_http', url: 'https://b.test/mcp' },
+      });
+
+      // 晚建的在前。
+      let order = (await getAllMcpServers()).map((server) => server.displayName);
+      expect(order.slice(0, 2)).toEqual(['Second', 'First']);
+
+      // 对 First 做一次成功发现：顺序不许变。
+      clock.mockReturnValue(3_000);
+      const firstRecord = (await getMcpServerById(first.id))!;
+      await saveMcpDiscoveryResult({
+        serverId: first.id,
+        descriptors: [descriptorFor(firstRecord, 'a_tool')],
+        refreshedAt: 3_000,
+        expiresAt: 63_000,
+        health: {
+          serverId: first.id,
+          status: 'ready',
+          checkedAt: 3_000,
+          latencyMs: 2,
+          toolCount: 1,
+          error: null,
+        },
+      }, firstRecord);
+      order = (await getAllMcpServers()).map((server) => server.displayName);
+      expect(order.slice(0, 2), '发现一次不许让 First 跳到 Second 前面').toEqual(['Second', 'First']);
+
+      // 用户改配置 ⇒ 这次才该浮到最前。
+      clock.mockReturnValue(4_000);
+      await updateMcpServer(first.id, { displayName: 'First renamed' } as never);
+      order = (await getAllMcpServers()).map((server) => server.displayName);
+      expect(order[0]).toBe('First renamed');
+    } finally {
+      clock.mockRestore();
+    }
   });
 });

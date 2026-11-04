@@ -140,6 +140,9 @@ export async function resolveMcpCapabilityLease(input: {
     }
     changed = bindAndAssertCapabilityScope(lease.owner, owner) || changed;
     if (input.consume && lease.state !== 'active') {
+      // Only reachable for a `consumed` record written by an older build — the current
+      // path deletes on consume instead of marking. Kept so a stale session record still
+      // fails closed rather than being re-executed.
       if (changed) await writeState(state);
       throw new McpCapabilityLeaseError(
         'mcp_capability_handle_replayed',
@@ -160,8 +163,18 @@ export async function resolveMcpCapabilityLease(input: {
       );
     }
     if (input.consume) {
-      lease.state = 'consumed';
-      lease.consumedAt = now;
+      // ⚠️ **`consume` 时这条 lease 直接从池子里删掉，而不是标成 `consumed`。**
+      // 标成 `consumed` 会让它一直占着名额直到 15 分钟 TTL —— 池子 256 个，
+      // `mcp_discover` 一次默认签 8 个 ⇒ 「discover → invoke」这条正常用法会把
+      // 池子越用越满，满之后所有 discover 都报 `mcp_capability_lease_limit`。
+      // 删掉之后每次 invoke 都立即还名额，「正常用着就满」这件事不存在了。
+      //
+      // ⚠️ **代价是重放从 `mcp_capability_handle_replayed` 降级成
+      // `mcp_capability_handle_invalid`** —— 两者对模型/用户是同一个意思（这个句柄
+      // 用不了，重新 discover），只差一句人肉排障时的话术。
+      // ⚠️ **「消费在 provider I/O 之前」这条安全性质不受影响** —— delete 也是消费，
+      // 而且更彻底：条目都不在了，不可能被拿去做第二次 I/O。
+      delete state.leases[handle];
       changed = true;
     }
     if (changed) await writeState(state);
