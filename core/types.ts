@@ -276,7 +276,14 @@ export interface GitHubSkillImportResult {
 export type LocalSkillImportBlockCode =
   | 'shell_host_update_required'
   | 'shell_reader_unavailable'
-  | 'shell_discovery_failed';
+  | 'shell_discovery_failed'
+  /**
+   * The imported folder is gone (moved, renamed, deleted, or no longer readable).
+   *
+   * ⚠️ The only code that justifies asking the user to **re-pick the folder**.
+   * Storage / lock / decode failures deliberately do not carry a block at all.
+   */
+  | 'local_path_unavailable';
 
 export interface LocalSkillImportBlock {
   code: LocalSkillImportBlockCode;

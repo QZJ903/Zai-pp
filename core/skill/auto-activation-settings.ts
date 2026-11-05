@@ -12,7 +12,19 @@
 // stored in chrome.storage.local, read via background's GET/SAVE commands,
 // broadcast via STATE_UPDATED to content scripts, finally entering the request-augmentation state.
 
+import { createSerialOperationQueue } from '../persistence/serial-operation-queue';
+
 const STORAGE_KEY = 'zai_pp_skill_auto_activation';
+
+/**
+ * Serial queue for this one storage key.
+ *
+ * ⚠️ Saving is read → normalize → write. Without a queue two saves interleave as
+ * read, read, write, write: the later writer merges into a snapshot taken before the
+ * earlier write, so one of the two toggles is silently lost. One queue per storage
+ * key (not shared with other stores), matching `core/mcp/capability-settings.ts`.
+ */
+const autoActivationSettingsOperations = createSerialOperationQueue();
 
 export interface SkillAutoActivationSettings {
   firstMessage: boolean;
@@ -27,6 +39,10 @@ export const DEFAULT_SKILL_AUTO_ACTIVATION_SETTINGS: SkillAutoActivationSettings
 };
 
 export async function getSkillAutoActivationSettings(): Promise<SkillAutoActivationSettings> {
+  return autoActivationSettingsOperations.run(readSkillAutoActivationSettings);
+}
+
+async function readSkillAutoActivationSettings(): Promise<SkillAutoActivationSettings> {
   const data = await chrome.storage.local.get(STORAGE_KEY) as Record<string, unknown>;
   return normalizeSkillAutoActivationSettings(data[STORAGE_KEY]);
 }
@@ -34,10 +50,15 @@ export async function getSkillAutoActivationSettings(): Promise<SkillAutoActivat
 export async function saveSkillAutoActivationSettings(
   settings: Partial<SkillAutoActivationSettings>,
 ): Promise<SkillAutoActivationSettings> {
-  const current = await getSkillAutoActivationSettings();
-  const normalized = normalizeSkillAutoActivationSettings({ ...current, ...settings });
-  await chrome.storage.local.set({ [STORAGE_KEY]: normalized });
-  return normalized;
+  // The read must happen inside the same queued operation as the write — calling the
+  // public `get` here would queue a second operation and split read and write across
+  // two critical sections.
+  return autoActivationSettingsOperations.run(async () => {
+    const current = await readSkillAutoActivationSettings();
+    const normalized = normalizeSkillAutoActivationSettings({ ...current, ...settings });
+    await chrome.storage.local.set({ [STORAGE_KEY]: normalized });
+    return normalized;
+  });
 }
 
 export function normalizeSkillAutoActivationSettings(value: unknown): SkillAutoActivationSettings {

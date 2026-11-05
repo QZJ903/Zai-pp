@@ -646,10 +646,30 @@ function normalizeMcpToolResult(
         details: {
           externalOutcome: 'confirmed',
           retrySafe: false,
+          // Host-reported **machine-readable** failure code (`structuredContent.error.code`).
+          // Consumers branch on this instead of matching the message text — a wording
+          // change on the host side must not silently change how a failure is classified.
+          ...readStructuredErrorCode(result),
         },
       }
       : undefined,
   };
+}
+
+/**
+ * Read `structuredContent.error.code` from an `isError` response.
+ *
+ * ⚠️ Only the shape `{ error: { code: string } }` is recognized; anything else returns
+ * an empty object so the caller keeps the generic `mcp_tool_result_error` code.
+ * Servers that predate this contract simply produce no `structuredCode`.
+ */
+function readStructuredErrorCode(result: McpCallToolResult): { structuredCode?: string } {
+  const sc = result.structuredContent;
+  if (!sc || typeof sc !== 'object' || Array.isArray(sc)) return {};
+  const error = (sc as Record<string, unknown>).error;
+  if (!error || typeof error !== 'object' || Array.isArray(error)) return {};
+  const code = (error as Record<string, unknown>).code;
+  return typeof code === 'string' && code ? { structuredCode: code } : {};
 }
 
 function extractMcpErrorMessage(result: McpCallToolResult, fallback: string): string {

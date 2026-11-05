@@ -129,6 +129,7 @@ export const sidepanel = {
       updateHost: '请在 MCP > Shell Local 重新安装 Shell Native Host，重启浏览器后再预览。',
       enableReader: '请将 Shell Local 执行模式设为“自动”，并允许 local_file_read，然后重新预览。',
       checkConnection: '请检查 Shell Local 连接后重新预览。',
+      reselectPath: '原文件夹已不可用（可能被移动、改名或删除），请重新选择该 Skill 所在的文件夹。',
     },
     renamedNotice: '有 {count} 个 Skill 因命名冲突自动加后缀。',
     meta: {

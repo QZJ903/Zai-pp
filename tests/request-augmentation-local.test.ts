@@ -61,10 +61,17 @@ const LEGACY_INSTRUCTIONS = [
 
 /**
  * ⚠️ fixture 全部走 `as unknown as AugmentationSkill` 收口 —— 与上游同一手法。
- * 这里只关心 `isLocalIndexSkill` 真正读的三个字段（`remote.provider` /
- * `instructions` / `remote.localDirectory`），而 `RemoteSkillMetadata` 要求
- * `sourceId` / `path` / `includedFiles` 等一堆与激活判定无关的字段。
- * 逐个补齐只会让 fixture 变成噪音，还会在类型演进时无谓地碎掉。
+ *
+ * ⚠️⚠️ **`remote` 里必须带 `includedFiles` / `scriptFiles` / `omittedFiles`** ——
+ * `composeLocalSkillPrompt` 用它们拼 `knownAbs`（绝对化层的命中清单）。
+ * 这里原先只给了 `provider / localDirectory / localRootPath`，于是**任何依赖清单的
+ * 行为在这批用例里都是盲的**：`skillDir` 恒等于根目录、清单恒为空 ⇒
+ * 「清单按 rootPath 相对生成、拼接按 skillDir」这个基错误永远撞不到。
+ *
+ * 现在默认带一条 `references/guide.md`，并且**让根目录与 skillDir 相同**
+ * （`/skills/demo` + `demo/references/guide.md` 两种基都指向同一结果），
+ * 这样老用例的期望不受影响；嵌套技能（基不同）的场景由
+ * `u17-import-chain.test.ts` 的专门用例覆盖。
  */
 function localIndexSkill(overrides: Partial<AugmentationSkill> = {}): AugmentationSkill {
   return {
@@ -73,7 +80,14 @@ function localIndexSkill(overrides: Partial<AugmentationSkill> = {}): Augmentati
     memoryEnabled: false,
     source: 'remote',
     description: '适用场景：生成周报、日报、总结',
-    remote: { provider: 'local', localDirectory: '/skills/demo', localRootPath: '/skills/demo' },
+    remote: {
+      provider: 'local',
+      localDirectory: '/skills/demo',
+      localRootPath: '/skills/demo',
+      includedFiles: [{ path: 'references/guide.md', bytes: 11 }],
+      omittedFiles: [],
+      scriptFiles: [],
+    },
     ...overrides,
   } as unknown as AugmentationSkill;
 }

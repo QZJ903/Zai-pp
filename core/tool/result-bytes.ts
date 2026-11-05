@@ -58,6 +58,17 @@ export function truncateUtf8ToByteLimit(value: string, maxBytes: number): ByteTr
   };
 }
 
+/**
+ * UTF-8 **字节**长度。
+ *
+ * ⚠️ `string.length` 数的是 UTF-16 单元：中文 1 字 = 3 字节、emoji 1 个 = 4 字节。
+ * 任何与 `*_BYTES` 常量比较、或要按字节累加的量都必须走这里，不能拿 `.length` 顶替 ——
+ * 换过来之后「上限」才真的是上限，中文场景下差三倍。
+ */
+export function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
 /** `10xxxxxx` 是 UTF-8 的**延续字节**（多字节字符的后续），不是字符起点。 */
 function isUtf8ContinuationByte(value: number | undefined): boolean {
   return value !== undefined && (value & 0b1100_0000) === 0b1000_0000;

@@ -69,10 +69,12 @@ export const tool = {
     previewReady: 'Memory import preview ready ({count})',
     previewDetail: '{duplicates} duplicates skipped, {rejected} rejected',
     previewOmitted: '{omitted} more exceeded the single-preview limit and were not listed (import in batches).',
+    previewOverLimit: '{overLimit} more exceeded the {max}-character content limit and were skipped (split and paste again).',
     failed: 'Memory import failed',
     result: {
       metaSummary: '{count} memories · {duplicates} duplicates',
       metaSummaryTruncated: '{count} memories · {duplicates} duplicates · {omitted} more not listed',
+      metaRejected: '{rejected} rejected ({overLimit} over the length limit)',
       importMemories: 'Import memories',
       importing: 'Importing...',
       imported: 'Imported {count}',

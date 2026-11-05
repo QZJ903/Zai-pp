@@ -14,6 +14,7 @@ import { useI18n } from '../i18n';
 import { createRequestGenerationFence } from '../async-state';
 import { formatRuntimeError } from '../runtime-response';
 import { sidepanelRuntimeClient } from '../runtime-client';
+import { formatImportBlockMessage, readLocalSkillImportBlock } from '../local-skill-import-block';
 
 interface SkillSectionProps {
   title: string;
@@ -135,11 +136,13 @@ export default function SkillPage() {
 
   const handleSaveAutoActivation = async (patch: Partial<SkillAutoActivationSettings>) => {
     const previous = autoActivation;
-    const next = normalizeSkillAutoActivationSettings({ ...previous, ...patch });
-    setAutoActivation(next);
+    // The optimistic value is for this pane only; what goes over the wire is the patch.
+    // Sending the full normalized snapshot would write back every field as this pane last
+    // saw it, clobbering whatever another writer changed in between.
+    setAutoActivation(normalizeSkillAutoActivationSettings({ ...previous, ...patch }));
     try {
       const saved = await sidepanelRuntimeClient.request(
-        { type: 'SAVE_SKILL_AUTO_ACTIVATION_SETTINGS', payload: next },
+        { type: 'SAVE_SKILL_AUTO_ACTIVATION_SETTINGS', payload: patch },
         {
           unavailableMessage: t('sidepanel.skillPage.backendUnavailable'),
           decode: (value) => normalizeSkillAutoActivationSettings(value),
@@ -346,6 +349,19 @@ export default function SkillPage() {
         acceptFailure: true,
       });
       if (response && !response.ok) {
+        // Only "the folder is gone" should open the folder picker. A reader problem, or a
+        // storage failure that somehow came back as a block, must surface its reason
+        // instead — re-picking the folder cannot fix either.
+        const importBlock = readLocalSkillImportBlock(response.importBlock);
+        if (importBlock && importBlock.code !== 'local_path_unavailable') {
+          setSourceActions((current) => {
+            const next = { ...current };
+            delete next[sourceId];
+            return next;
+          });
+          showOperationError(new Error(formatImportBlockMessage(importBlock, t)));
+          return;
+        }
         // Original folder moved/invalid: guide the user to re-pick a new path and relocate (keep source.id, link unbroken).
         const newRootPath = await pickNewLocalFolder(defaultPath);
         if (!newRootPath) {

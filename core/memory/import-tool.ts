@@ -1,5 +1,6 @@
 import { DEFAULT_LOCALE, translate, type SupportedLocale } from '../i18n/background';
 import { getAllMemories } from './store';
+import { MEMORY_CONTENT_MAX_CHARS } from '../constants';
 import type { JsonValue, MemoryType, ToolCall, ToolDescriptor, ToolProviderIdentity, ToolResult } from '../types';
 import { previewMemoryImport } from './importer';
 
@@ -66,6 +67,14 @@ export async function executeMemoryImportToolCall(
     const omittedHint = output.omitted > 0
       ? ` ${translate(locale, 'tool.memoryImport.previewOmitted', { omitted: output.omitted })}`
       : '';
+    // ⚠️ **超长是唯一一条用户能自己处理的拒绝成因**（切分后重贴），必须点名；
+    // 只报「拒绝 N 条」等于让人对着一个数字猜是哪几条、为什么拒。
+    const overLimitHint = output.overLimit > 0
+      ? ` ${translate(locale, 'tool.memoryImport.previewOverLimit', {
+        overLimit: output.overLimit,
+        max: String(MEMORY_CONTENT_MAX_CHARS),
+      })}`
+      : '';
     return {
       ok: true,
       name: call.name,
@@ -74,7 +83,7 @@ export async function executeMemoryImportToolCall(
       detail: translate(locale, 'tool.memoryImport.previewDetail', {
         duplicates: output.duplicates,
         rejected: output.rejected,
-      }) + omittedHint,
+      }) + omittedHint + overLimitHint,
       output: output as unknown as JsonValue,
     };
   } catch (error) {

@@ -84,7 +84,7 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
 
 ## 规则
 - 先正常回复用户，工具调用块附在回复最末尾
-- 支持一次操作多条记忆（输出多个 invoke 块）
+- 支持一次操作多条记忆：在回复末尾连续输出多个 <memory_save>{...}</memory_save> / <memory_update>{...}</memory_update> / <memory_delete>{...}</memory_delete> 标签块
 - 如果用户意图模糊，先确认再操作`,
     source: 'builtin',
     memoryEnabled: true,
@@ -149,7 +149,7 @@ List every item from Existing Memories, including IDs. No tool call is needed.
 
 ## Rules
 - Reply normally first, then place tool call blocks at the very end.
-- Multiple memory operations are supported by emitting multiple tool blocks.
+- Multiple memory operations are supported: emit several <memory_save>{...}</memory_save> / <memory_update>{...}</memory_update> / <memory_delete>{...}</memory_delete> tag blocks in a row at the end of the reply.
 - If the user's intent is ambiguous, ask a narrow clarification before changing memory.`,
   },
 };

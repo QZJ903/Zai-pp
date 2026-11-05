@@ -129,6 +129,7 @@ export const sidepanel = {
       updateHost: 'Reinstall Shell Native Host from MCP > Shell Local, restart the browser, then preview again.',
       enableReader: 'Set Shell Local execution mode to Auto and allow local_file_read, then preview again.',
       checkConnection: 'Check the Shell Local connection and preview again.',
+      reselectPath: 'The original folder is no longer available (moved, renamed, or deleted). Pick the folder that now contains this Skill.',
     },
     renamedNotice: '{count} Skills were renamed automatically because of naming conflicts.',
     meta: {

@@ -1,12 +1,16 @@
 import { useMemo, useRef, useState } from 'react';
 import type {
   LocalSkillImportResult,
-  LocalSkillImportBlock,
   LocalSkillPreview,
   LocalSkillPreviewItem,
 } from '../../../core/types';
 import { useI18n } from '../i18n';
 import { sidepanelRuntimeClient } from '../runtime-client';
+import {
+  formatImportBlockMessage,
+  getImportBlockInstructions,
+  readLocalSkillImportBlock,
+} from '../local-skill-import-block';
 
 type ImportState = 'idle' | 'previewing' | 'ready' | 'importing' | 'success' | 'error';
 
@@ -423,49 +427,6 @@ function PreviewSkillRow({ skill, checked, onToggle }: {
       </div>
     </label>
   );
-}
-
-function getImportBlockInstructions(
-  block: LocalSkillImportBlock,
-  t: ReturnType<typeof useI18n>['t'],
-): string {
-  switch (block.code) {
-    case 'shell_host_update_required':
-      return t('sidepanel.localSkillImport.readerActions.updateHost');
-    case 'shell_reader_unavailable':
-      return t('sidepanel.localSkillImport.readerActions.enableReader');
-    case 'shell_discovery_failed':
-      return t('sidepanel.localSkillImport.readerActions.checkConnection');
-  }
-}
-
-function formatImportBlockMessage(
-  block: LocalSkillImportBlock,
-  t: ReturnType<typeof useI18n>['t'],
-): string {
-  return [
-    t('sidepanel.localSkillImport.readerUnavailable'),
-    getImportBlockInstructions(block, t),
-    block.detail
-      ? t('sidepanel.localSkillImport.readerTechnicalDetail', { detail: block.detail })
-      : '',
-  ].filter(Boolean).join(' ');
-}
-
-function readLocalSkillImportBlock(value: unknown): LocalSkillImportBlock | null {
-  if (!value || typeof value !== 'object') return null;
-  const candidate = value as { code?: unknown; detail?: unknown };
-  if (
-    candidate.code !== 'shell_host_update_required' &&
-    candidate.code !== 'shell_reader_unavailable' &&
-    candidate.code !== 'shell_discovery_failed'
-  ) return null;
-  return {
-    code: candidate.code,
-    ...(typeof candidate.detail === 'string' && candidate.detail
-      ? { detail: candidate.detail }
-      : {}),
-  };
 }
 
 function isGenericOmissionWarning(warning: string): boolean {

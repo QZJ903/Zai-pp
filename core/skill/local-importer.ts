@@ -1,6 +1,7 @@
 import { getMcpToolDescriptors, refreshMcpServerDiscovery } from '../mcp/discovery';
 import { getAllMcpServers, getMcpToolCache } from '../mcp/store';
-import { isShellMcpServer } from '../shell';
+import { createMcpDescriptorId } from '../mcp/descriptor-identity';
+import { isLocalSkillPathUnavailableCode, isShellMcpServer } from '../shell';
 import type {
   LocalSkillImportRequest,
   LocalSkillImportBlock,
@@ -16,6 +17,7 @@ import type { McpServerConfig } from '../mcp/types';
 import type { LocalStateMutationRunner } from '../persistence/local-state-mutation';
 import type { JsonValue, ToolResult } from '../tool/types';
 import type { ToolCall } from '../tool/types';
+import { utf8ByteLength } from '../tool/result-bytes';
 import {
   getAllSkillSources,
   getSkillCollisionCandidates,
@@ -23,8 +25,10 @@ import {
   type SkillCollisionCandidate,
 } from './registry';
 import { extractScenarioBlock } from './local-skill-scorer';
-import { slugifySkillName } from './slug';
+import { requireSkillSlug } from './slug';
+import { parseSkillDoc as parseSkillDocShared, type ParsedSkillDoc } from './skill-doc';
 
+/** SKILL.md 的体积上限，单位 **UTF-8 字节**（与 Shell host 的 `stat.size` 判据同单位）。 */
 const MAX_SKILL_BYTES = 120_000;
 const ON_DEMAND_RESOURCE_READER_NAMES = new Set(['local_file_read', 'shell_exec']);
 const STALE_LOCAL_FILE_READ_MESSAGE = [
@@ -62,12 +66,77 @@ class LocalSkillImportBlockedError extends Error {
   }
 }
 
+/**
+ * **「那个文件夹已经不可用」**（挪走 / 改名 / 被删 / 读不出 Skill）。
+ *
+ * ⚠️ 这一档是**唯一**值得引导用户「重新选择路径」的失败。存储写失败、锁恢复失败、
+ * 解码失败都不属于它 —— 那些重选文件夹也修不好，压成 `ok:false` 只会让人白走一遍。
+ */
+class LocalSkillPathUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LocalSkillPathUnavailableError';
+  }
+}
+
+/**
+ * Every path the caller asked for must appear in what was actually loaded.
+ *
+ * ⚠️ **Two call sites** (`importLocalSkillSource` and `relocateLocalSkillSource`) differ
+ * only in *which* list is authoritative — the request's selection vs the stored source's.
+ * Keeping one implementation means the message and the error class can never drift apart
+ * between them; the "everything missing" case is folded into the same check because
+ * `mismatched` then equals the whole list.
+ *
+ * Throws `LocalSkillPathUnavailableError`, which `update`/`relocate` turn into
+ * `ok:false` + `local_path_unavailable` for the UI.
+ */
+function assertSelectedPathsLoaded(
+  requestedPaths: readonly string[],
+  importedPaths: ReadonlySet<string>,
+): void {
+  if (requestedPaths.length === 0) {
+    throw new LocalSkillPathUnavailableError('Selected local Skill paths were not found.');
+  }
+  const missingPaths = requestedPaths.filter((path) => !importedPaths.has(path));
+  if (missingPaths.length > 0) {
+    throw new LocalSkillPathUnavailableError(
+      `Selected local Skill paths were not found: ${missingPaths.join(', ')}`,
+    );
+  }
+}
+
+/** 读 host 回包经 `normalizeMcpToolResult` 透出来的**结构化**失败码。 */
+function readHostErrorCode(result: ToolResult): string | undefined {
+  const details = result.error?.details as Record<string, unknown> | undefined;
+  const code = details?.structuredCode;
+  return typeof code === 'string' && code ? code : undefined;
+}
+
+/**
+ * 把「原路径不可用」的失败包成专用类，其余原样返回。
+ *
+ * ⚠️ **判据是 host 的结构化错误码，不是 message 文案** —— 文案会随 host 迭代漂移，
+ * 而码表两侧各有镜像（`core/shell/contracts.ts` ↔
+ * `packages/shell-host/native/contracts.mjs`），由测试逐码比对。
+ * ⚠️ **旧 host 没有码**时会落到「普通失败」那一支：用户看到原始报错、不被引导重选。
+ * 这是刻意的取舍 —— 宁可少引导，也不按文案猜。
+ */
+function toPathAwareError(error: unknown, hostCode: string | undefined): Error {
+  if (error instanceof LocalSkillPathUnavailableError || error instanceof LocalSkillImportBlockedError) {
+    return error;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return isLocalSkillPathUnavailableCode(hostCode)
+    ? new LocalSkillPathUnavailableError(message)
+    : (error instanceof Error ? error : new Error(message));
+}
+
 interface LocalSkillHostItem {
   path: string;
   directory: string;
   directoryPath: string;
   content: string;
-  bodyBytes: number;
   includedFiles: Array<RemoteSkillFile & { content: string }>;
   omittedFiles: RemoteSkillFile[];
   scriptFiles: RemoteSkillFile[];
@@ -82,15 +151,6 @@ interface LoadedLocalSkill {
 interface LoadedLocalSource {
   preview: LocalSkillPreview;
   skills: LoadedLocalSkill[];
-}
-
-/** Parsed SKILL.md document shape. */
-export interface ParsedSkillDoc {
-  name: string;
-  description: string;
-  body: string;
-  version?: string;
-  lastUpdated?: string;
 }
 
 interface ExistingSkillContext {
@@ -158,13 +218,7 @@ export async function importLocalSkillSource(
   }
   const selected = loaded.skills.filter((skill) => request.selectedPaths.includes(skill.item.path));
   const importedPaths = new Set(selected.map((skill) => skill.item.path));
-  const missingPaths = request.selectedPaths.filter((path) => !importedPaths.has(path));
-  if (missingPaths.length > 0) {
-    throw new Error(`Selected local Skill paths were not found: ${missingPaths.join(', ')}`);
-  }
-  if (selected.length === 0) {
-    throw new Error('Selected local Skill paths were not found.');
-  }
+  assertSelectedPathsLoaded(request.selectedPaths, importedPaths);
 
   const now = Date.now();
   const source: LocalSkillSource = {
@@ -216,26 +270,28 @@ export async function updateLocalSkillSource(
     throw new Error('Local Skill source was not found');
   }
   const localSource = source as LocalSkillSource;
-  // When the original folder is moved/invalid, importLocalSkillSource throws
-  // (e.g. "SKILL.md not found"). Convert it to { ok: false } so the UI's UPDATE
-  // response enters the !response.ok branch, guiding re-selection and triggering
-  // file relocation, instead of letting runtime-client reject and blocking relocation.
+  // 只有两档该转成 `ok:false` 交给 UI 处理：
+  //  · 导入阻塞（缺读取器）—— UI 显示原因，**不**引导重选；
+  //  · 原路径不可用 —— UI 引导重新选择文件夹并 relocate。
+  // 其余（存储写失败、锁恢复失败、解码失败……）一律原样抛：它们重选文件夹也修不好，
+  // 压成 ok:false 只会让用户白走一遍重选流程，最后才看到真正的错。
   try {
     return await importLocalSkillSource(
       { rootPath: localSource.rootPath, selectedPaths: localSource.skillPaths },
       deps,
     );
   } catch (error) {
-    // Preserve the original block code for LocalSkillImportBlockedError (matching
-    // relocateLocalSkillSource); other failures fall back to shell_discovery_failed so
-    // the UI's UPDATE branch still enters !response.ok and guides re-selection.
-    const importBlock: LocalSkillImportBlock =
-      error instanceof LocalSkillImportBlockedError ? error.importBlock : { code: 'shell_discovery_failed' };
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-      importBlock,
-    };
+    if (error instanceof LocalSkillImportBlockedError) {
+      return { ok: false, error: error.message, importBlock: error.importBlock };
+    }
+    if (error instanceof LocalSkillPathUnavailableError) {
+      return {
+        ok: false,
+        error: error.message,
+        importBlock: { code: 'local_path_unavailable' },
+      };
+    }
+    throw error;
   }
 }
 
@@ -266,17 +322,14 @@ export async function relocateLocalSkillSource(
     if (error instanceof LocalSkillImportBlockedError) {
       return { ok: false, error: error.message, importBlock: error.importBlock };
     }
+    if (error instanceof LocalSkillPathUnavailableError) {
+      return { ok: false, error: error.message, importBlock: { code: 'local_path_unavailable' } };
+    }
     throw error;
   }
   const selected = loaded.skills.filter((skill) => localSource.skillPaths.includes(skill.item.path));
   const importedPaths = new Set(selected.map((skill) => skill.item.path));
-  const missingPaths = localSource.skillPaths.filter((path) => !importedPaths.has(path));
-  if (missingPaths.length > 0) {
-    throw new Error(`Selected local Skill paths were not found: ${missingPaths.join(', ')}`);
-  }
-  if (selected.length === 0) {
-    throw new Error('Selected local Skill paths were not found.');
-  }
+  assertSelectedPathsLoaded(localSource.skillPaths, importedPaths);
 
   const now = Date.now();
   // Use the old source as the base, keeping id/provider/importedAt, overwriting fields from the new-path load result.
@@ -330,7 +383,7 @@ async function loadLocalSkillSource(
   if (!deps) throw new Error('Local Skill importer runtime executor is required.');
   const { bundle, onDemandResourceBlock } = await readLocalSkillBundle(rootPath, selectedPaths, deps);
   if (bundle.skills.length === 0) {
-    throw new Error('No SKILL.md was found under this local directory.');
+    throw new LocalSkillPathUnavailableError('No SKILL.md was found under this local directory.');
   }
 
   const now = Date.now();
@@ -381,8 +434,9 @@ function loadLocalSkill(
   selectedImportName?: string,
 ): LoadedLocalSkill {
   const warnings = [...hostSkill.warnings];
-  if (hostSkill.content.length > MAX_SKILL_BYTES) {
-    throw new Error(`${hostSkill.path} is too large to import (${hostSkill.content.length} bytes).`);
+  const bodyBytes = utf8ByteLength(hostSkill.content);
+  if (bodyBytes > MAX_SKILL_BYTES) {
+    throw new Error(`${hostSkill.path} is too large to import (${bodyBytes} bytes).`);
   }
 
   const parsed = parseSkillDoc(hostSkill.content, hostSkill.path);
@@ -427,9 +481,12 @@ function loadLocalSkill(
     localDisplayName: source.displayName,
     upstreamVersion: parsed.version,
     upstreamUpdatedAt: parsed.lastUpdated,
-    includedFiles: hostSkill.includedFiles.map(({ content: _content, ...file }) => file),
-    omittedFiles: hostSkill.omittedFiles,
-    scriptFiles: hostSkill.scriptFiles,
+    // 清单里的路径保持 **rootPath 相对**（Shell host 的口径，`collectLocalSkillResources`
+    // 用 `normalizeRelativePath` 相对 rootPath 生成）。绝对化那一层按同一个基拼接，
+    // 两边基必须一致，否则嵌套技能永远命中不了。
+    includedFiles: toRootRelativeFiles(hostSkill.includedFiles),
+    omittedFiles: toRootRelativeFiles(hostSkill.omittedFiles),
+    scriptFiles: toRootRelativeFiles(hostSkill.scriptFiles),
     warnings,
   };
   const skill: Skill = {
@@ -460,8 +517,8 @@ function loadLocalSkill(
     description: parsed.description,
     version: parsed.version,
     lastUpdated: parsed.lastUpdated,
-    bytes: hostSkill.content.length + includedFiles.reduce((sum, file) => sum + file.bytes, 0),
-    bodyBytes: hostSkill.content.length,
+    bytes: bodyBytes + includedFiles.reduce((sum, file) => sum + file.bytes, 0),
+    bodyBytes,
     includedFiles,
     omittedFiles: remote.omittedFiles,
     scriptFiles: remote.scriptFiles ?? [],
@@ -509,7 +566,7 @@ async function readLocalSkillBundle(
   }, deps);
 
   if (!result.ok) {
-    throw new Error(formatToolFailure(result));
+    throw toPathAwareError(new Error(formatToolFailure(result)), readHostErrorCode(result));
   }
   const bundle = parseLocalSkillHostBundle(result.output);
   const onDemandResourceIssue = await getOnDemandResourceIssue(server, bundle);
@@ -577,7 +634,10 @@ async function executeShellMcpTool(
   payload: Record<string, unknown>,
   deps: LocalSkillImporterDeps,
 ): Promise<ToolResult> {
-  const descriptorId = `mcp:${server.id}:${name}`;
+  // Uses the shared builder rather than spelling the format out: this id is matched
+  // against cache descriptors below, so a format change here would not fail loudly —
+  // it would just stop hitting the cache.
+  const descriptorId = createMcpDescriptorId(server.id, name);
   const cache = await getMcpToolCache(server.id);
   if (!cache?.descriptors.some((descriptor) => descriptor.id === descriptorId)) {
     await refreshMcpServerDiscovery(server.id);
@@ -667,7 +727,8 @@ function parseHostSkill(value: unknown): LocalSkillHostItem {
     directory: readRequiredString(data, 'directory'),
     directoryPath: readRequiredString(data, 'directoryPath'),
     content: readRequiredString(data, 'content'),
-    bodyBytes: readNumber(data.bodyBytes),
+    // The host also publishes `bodyBytes`; it is the same UTF-8 length this module
+    // derives locally, so parsing it would create a second, unused source of truth.
     includedFiles: readArray(data.includedFiles).map(parseContentFile),
     omittedFiles: readArray(data.omittedFiles).map(parseFile),
     scriptFiles: readArray(data.scriptFiles).map(parseFile),
@@ -783,6 +844,19 @@ export function buildLocalExecutionBoundary(skillDir: string): string {
   ].join('\n');
 }
 
+/**
+ * 去掉 `content`（那是正文，不是清单字段），只留 `{ path, bytes }`。
+ *
+ * ⚠️ 路径**不改基**：它们由 Shell host 生成、以 rootPath 为相对根
+ * （`collectLocalSkillResources` 用 `normalizeRelativePath(relativePath)`，
+ * 其根是传入的 rootPath）。消费侧（`composeLocalSkillPrompt` 的绝对化）必须用同一个基。
+ */
+function toRootRelativeFiles(
+  files: ReadonlyArray<RemoteSkillFile & { content?: string }>,
+): RemoteSkillFile[] {
+  return files.map(({ content: _content, ...file }) => file);
+}
+
 function relativeToSkillDirectory(path: string, directory: string): string {
   const normalizedPath = path.replace(/\\/g, '/').replace(/^\/+/, '');
   const normalizedDirectory = directory.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
@@ -792,87 +866,16 @@ function relativeToSkillDirectory(path: string, directory: string): string {
 }
 
 /**
- * Parses a SKILL.md document (agentskills.io / pi-ecosystem format) into the
- * local-import record shape. Exported so the pi-ecosystem bridge and
- * its contract tests share the same parser truth; behavior unchanged.
+ * Parse a SKILL.md document (agentskills.io / pi-ecosystem format).
+ *
+ * Thin wrapper over the shared parser so this module keeps its historical export — the
+ * pi-ecosystem contract tests import it from here. The implementation lives in
+ * `./skill-doc`, shared with the GitHub import chain.
  */
 export function parseSkillDoc(raw: string, path: string): ParsedSkillDoc {
-  // Strip a leading UTF-8/UTF-16 BOM so the `^---` frontmatter fence still
-  // matches. Editors on Windows (notably Notepad/VS Code with BOM presets)
-  // commonly save SKILL.md with a BOM, which previously made the frontmatter
-  // regex miss and dropped `name:` along with it.
-  const bomStripped = raw.replace(/^\uFEFF/, '');
-  const frontmatter = bomStripped.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  const meta = frontmatter ? parseYamlSubset(frontmatter[1]) : {};
-  const body = frontmatter ? bomStripped.slice(frontmatter[0].length).trim() : bomStripped.trim();
-  const name = normalizeSkillName(
-    readString(meta, 'name')
-    ?? extractH1Title(body)
-    ?? parentDirectory(path).split('/').pop()
-    ?? path.replace(/\/?SKILL\.md$/i, ''),
-  );
-  const description = readString(meta, 'description') ?? firstParagraph(body) ?? `Imported local Skill from ${path}`;
-  const metadata = readObject(meta, 'metadata');
-  const version = readString(metadata, 'version') ?? readString(meta, 'version');
-  const lastUpdated = readString(metadata, 'last_updated') ?? readString(metadata, 'lastUpdated') ?? readString(meta, 'last_updated');
-
-  return { name, description, body, version, lastUpdated };
-}
-
-function extractH1Title(body: string): string | undefined {
-  const match = body.match(/^\s*#\s+(.+?)\s*$/m);
-  return match ? match[1] : undefined;
-}
-
-function parseYamlSubset(raw: string): Record<string, unknown> {
-  const lines = raw.replace(/\r\n/g, '\n').split('\n');
-  const result: Record<string, unknown> = {};
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    const match = line.match(/^([A-Za-z0-9_-]+):(?:\s*(.*))?$/);
-    if (!match) continue;
-    const key = match[1];
-    const value = match[2] ?? '';
-    if (value === '|' || value === '|-' || value === '>' || value === '>-') {
-      const block: string[] = [];
-      while (i + 1 < lines.length && /^(\s+|$)/.test(lines[i + 1])) {
-        i += 1;
-        block.push(lines[i].replace(/^\s{2,}/, ''));
-      }
-      result[key] = value.startsWith('>') ? block.join(' ').replace(/\s+/g, ' ').trim() : block.join('\n').trim();
-      continue;
-    }
-    if (value === '') {
-      const nested: Record<string, string> = {};
-      while (i + 1 < lines.length && /^\s+/.test(lines[i + 1])) {
-        i += 1;
-        const nestedMatch = lines[i].match(/^\s+([A-Za-z0-9_-]+):\s*(.*)$/);
-        if (nestedMatch) nested[nestedMatch[1]] = cleanYamlScalar(nestedMatch[2]);
-      }
-      result[key] = nested;
-      continue;
-    }
-    result[key] = cleanYamlScalar(value);
-  }
-  return result;
-}
-
-function cleanYamlScalar(value: string): string {
-  const trimmed = value.trim();
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-function readString(record: Record<string, unknown> | undefined, key: string): string | undefined {
-  const value = record?.[key];
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function readObject(record: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
-  const value = record[key];
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  return parseSkillDocShared(raw, path, {
+    describeFallback: (skillPath) => `Imported local Skill from ${skillPath}`,
+  });
 }
 
 function readRequiredString(record: Record<string, unknown>, key: string): string {
@@ -893,44 +896,12 @@ function readStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
-function firstParagraph(body: string): string | undefined {
-  const paragraph = body
-    .replace(/^# .+$/m, '')
-    .split(/\n\s*\n/)
-    .map((part) => part.replace(/\s+/g, ' ').trim())
-    .find((part) => part.length > 0 && !part.startsWith('```'));
-  return paragraph ? paragraph.slice(0, 240) : undefined;
-}
-
 function createLocalSourceId(rootPath: string): string {
   return `local:${rootPath}`;
 }
 
-function parentDirectory(path: string): string {
-  // Normalize Windows backslashes so D:\foo\bar\SKILL.md resolves correctly.
-  const normalized = path.replace(/\\/g, '/');
-  const parts = normalized.split('/');
-  parts.pop();
-  return parts.join('/');
-}
-
 function normalizeSkillName(name: string): string {
-  const normalized = slugifySkillName(name);
-  // Slug collision with non-ASCII names (Chinese titles, etc.) used to throw a
-  // hard error and block local Skill import entirely. Fall back to
-  // a stable hash-derived slug so the import always succeeds; the user can
-  // rename it from the Skills UI afterwards.
-  if (!normalized) return `skill-${shortHash(name || 'unnamed')}`;
-  return normalized;
-}
-
-function shortHash(input: string): string {
-  let hash = 0;
-  for (let i = 0; i < input.length; i += 1) {
-    hash = (hash << 5) - hash + input.charCodeAt(i);
-    hash |= 0;
-  }
-  return Math.abs(hash).toString(36).slice(0, 8).padStart(2, '0');
+  return requireSkillSlug(name);
 }
 
 function createUniqueSkillName(preferred: string, occupiedNames: Set<string>): string {

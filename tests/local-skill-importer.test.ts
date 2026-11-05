@@ -211,6 +211,52 @@ describe('local Skill importer', () => {
     ]));
   });
 
+  it('reports sizes in UTF-8 bytes, not UTF-16 code units', async () => {
+    // A body made of 3-byte characters: `.length` and the byte count only differ here.
+    const content = ['---', 'name: byte-unit-skill', 'description: 中文', '---', '', '# 中文标题', '', '正文内容。'].join('\n');
+    const guideText = '指南内容。';
+    vi.mocked(executeMcpToolCall).mockResolvedValueOnce({
+      ok: true,
+      summary: 'MCP tool executed',
+      output: {
+        ok: true,
+        data: {
+          rootPath: '/Users/me/.codex/skills/byte-unit',
+          displayName: 'byte-unit',
+          directoryName: 'byte-unit',
+          warnings: [],
+          truncated: false,
+          skills: [{
+            path: 'SKILL.md',
+            directory: '',
+            directoryPath: '/Users/me/.codex/skills/byte-unit',
+            content,
+            includedFiles: [{
+              path: 'references/guide.md',
+              bytes: Buffer.byteLength(guideText, 'utf8'),
+              content: guideText,
+            }],
+            omittedFiles: [],
+            scriptFiles: [],
+            warnings: [],
+          }],
+        },
+      },
+    });
+
+    const preview = await previewLocalSkillSource('/Users/me/.codex/skills/byte-unit');
+    const item = preview.skills[0];
+    const expectedBodyBytes = Buffer.byteLength(content, 'utf8');
+    const expectedGuideBytes = Buffer.byteLength(guideText, 'utf8');
+
+    // 前提自检：这份夹具必须让「字符数」与「字节数」分开，否则断言证明不了任何事。
+    expect(content.length).toBeLessThan(expectedBodyBytes);
+
+    expect(item.bodyBytes).toBe(expectedBodyBytes);
+    expect(item.bytes).toBe(expectedBodyBytes + expectedGuideBytes);
+    expect(item.includedFiles[0].bytes).toBe(expectedGuideBytes);
+  });
+
   it('renders nested local Skill resources relative to the Skill directory', async () => {
     vi.mocked(executeMcpToolCall).mockResolvedValueOnce(createNestedLocalSkillToolResult());
 

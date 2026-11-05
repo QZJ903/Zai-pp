@@ -39,6 +39,20 @@ const MAX_LOCAL_TOTAL_CONTENT_BYTES = 420_000;
 // after JSON escaping depends on its content (quotes/backslashes double, control
 // characters grow six-fold).
 const MAX_LOCAL_PREVIEW_FRAME_BYTES = 900_000;
+// Structured failure codes for `local_skill_preview`.
+//
+// ⚠️ The extension keeps a mirror of this table in `core/shell/contracts.ts` — the host
+// is plain `.mjs` and cannot import TS constants, so both sides spell the codes out and
+// a contract test compares them. Change one, change both.
+const LOCAL_SKILL_ERROR_CODES = Object.freeze({
+  ROOT_UNREADABLE: 'local_skill_root_unreadable',
+  NOT_FOUND: 'local_skill_not_found',
+  PATHS_MISSING: 'local_skill_paths_missing',
+  UNREADABLE: 'local_skill_unreadable',
+  PREVIEW_TOO_LARGE: 'local_skill_preview_too_large',
+  TOO_LARGE: 'local_skill_too_large',
+  PREVIEW_FAILED: 'local_skill_preview_failed',
+});
 const LOCAL_TEXT_RESOURCE_EXTENSIONS = new Set(['.md', '.txt', '.yaml', '.yml', '.json', '.tex']);
 const LOCAL_SCRIPT_EXTENSIONS = new Set(['.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.sh', '.bash', '.zsh', '.ps1', '.rb', '.pl', '.php', '.lua', '.r']);
 const DEFAULT_SHELL = platform() === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/sh';
@@ -256,6 +270,7 @@ export {
   DEFAULT_TIMEOUT_MS,
   HOST_FEATURES,
   LOCAL_SCRIPT_EXTENSIONS,
+  LOCAL_SKILL_ERROR_CODES,
   LOCAL_TEXT_RESOURCE_EXTENSIONS,
   MAX_LOCAL_FILE_READ_CHARS,
   MAX_LOCAL_FILE_WRITE_BYTES,

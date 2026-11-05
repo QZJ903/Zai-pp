@@ -17,11 +17,14 @@ import {
   updateGitHubSkillSourceLastCheckedAt,
   type SkillCollisionCandidate,
 } from './registry';
-import { slugifySkillName } from './slug';
+import { requireSkillSlug } from './slug';
+import { parentDirectory, parseSkillDoc as parseSkillDocShared, type ParsedSkillDoc } from './skill-doc';
+import { utf8ByteLength } from '../tool/result-bytes';
 
 const GITHUB_API_BASE = 'https://api.github.com';
 const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com';
 const MAX_SKILLS_PER_SOURCE = 80;
+/** SKILL.md 的体积上限，单位 **UTF-8 字节**（与本地导入链同口径）。 */
 const MAX_SKILL_BYTES = 120_000;
 const MAX_RESOURCE_FILES_PER_SKILL = 16;
 const MAX_RESOURCE_BYTES_PER_SKILL = 100_000;
@@ -88,14 +91,6 @@ interface LoadedGitHubSource {
   skills: LoadedGitHubSkill[];
 }
 
-interface ParsedSkillDoc {
-  name: string;
-  description: string;
-  body: string;
-  version?: string;
-  lastUpdated?: string;
-}
-
 interface ResourceBundle {
   included: Array<RemoteSkillFile & { content: string }>;
   omitted: RemoteSkillFile[];
@@ -115,7 +110,14 @@ export async function importGitHubSkillSource(
     throw new Error('至少选择一个 Skill 后再导入');
   }
 
-  const loaded = await loadGitHubSkillSource(request.url, new Set(request.selectedPaths));
+  // Paths the caller already holds (an update's previous selection) join the request's
+  // own selection as pinned, so neither can be pushed past the preview cap.
+  const knownPaths = options.expectedSkillPaths ?? request.selectedPaths;
+  const loaded = await loadGitHubSkillSource(
+    request.url,
+    new Set(request.selectedPaths),
+    new Set(knownPaths),
+  );
   const selected = loaded.skills.filter((skill) => request.selectedPaths.includes(skill.item.path));
   const importedPaths = new Set(selected.map((skill) => skill.item.path));
   const missingPaths = request.selectedPaths.filter((path) => !importedPaths.has(path));
@@ -168,7 +170,7 @@ export async function checkGitHubSkillSourceUpdates(sourceId: string): Promise<G
   const source = await getGitHubSkillSourceById(sourceId);
   if (!source) throw new Error('找不到 GitHub Skill 源');
 
-  const loaded = await loadGitHubSkillSource(source.url);
+  const loaded = await loadGitHubSkillSource(source.url, undefined, new Set(source.skillPaths));
   const latestPaths = new Set(loaded.preview.skills.map((skill) => skill.path));
   const currentPaths = new Set(source.skillPaths);
   const missingPaths = source.skillPaths.filter((path) => !latestPaths.has(path));
@@ -201,7 +203,7 @@ export async function updateGitHubSkillSource(
   const source = await getGitHubSkillSourceById(sourceId);
   if (!source) throw new Error('找不到 GitHub Skill 源');
 
-  const loaded = await loadGitHubSkillSource(source.url);
+  const loaded = await loadGitHubSkillSource(source.url, undefined, new Set(source.skillPaths));
   const latestPaths = new Set(loaded.preview.skills.map((skill) => skill.path));
   const selectedPaths = source.skillPaths.filter((path) => latestPaths.has(path));
   if (selectedPaths.length === 0) {
@@ -214,7 +216,11 @@ export async function updateGitHubSkillSource(
   );
 }
 
-async function loadGitHubSkillSource(url: string, selectedPaths?: Set<string>): Promise<LoadedGitHubSource> {
+async function loadGitHubSkillSource(
+  url: string,
+  selectedPaths?: Set<string>,
+  pinnedPaths?: ReadonlySet<string>,
+): Promise<LoadedGitHubSource> {
   const parsedUrl = parseGitHubUrl(url);
   const repo = await fetchGitHubJson<GitHubRepoResponse>(`/repos/${parsedUrl.owner}/${parsedUrl.repo}`);
   const resolved = await resolveSourceLocation(parsedUrl, repo.default_branch);
@@ -232,11 +238,31 @@ async function loadGitHubSkillSource(url: string, selectedPaths?: Set<string>): 
   if (skillPaths.length === 0) {
     throw new Error('没有在这个 GitHub 链接下找到 SKILL.md');
   }
-  if (skillPaths.length > MAX_SKILLS_PER_SOURCE) {
-    warnings.push(`找到 ${skillPaths.length} 个 Skill，仅预览前 ${MAX_SKILLS_PER_SOURCE} 个`);
-  }
 
-  const limitedPaths = skillPaths.slice(0, MAX_SKILLS_PER_SOURCE);
+  // **Pinned first, then cap.** A path the caller already holds must survive the
+  // preview limit: upstream can grow past it, and an update that cannot see the
+  // path would treat it as "no longer upstream" and delete it with the whole source
+  // replacement. Same rule the Shell host preview applies (filter, then cap).
+  const pinned = [...(pinnedPaths ?? [])].filter((path) => skillPaths.includes(path));
+  const pinnedSet = new Set(pinned);
+  const limitedPaths = [
+    ...pinned,
+    ...skillPaths
+      .filter((path) => !pinnedSet.has(path))
+      .slice(0, Math.max(0, MAX_SKILLS_PER_SOURCE - pinned.length)),
+  ];
+
+  // ⚠️ **Phrased after the cap is computed, not before.** With pinned paths the kept
+  // set is no longer "the first N upstream" — the already-imported ones are kept
+  // regardless of where they sort — so saying "the first N" would describe a rule
+  // this code does not follow.
+  if (limitedPaths.length < skillPaths.length) {
+    warnings.push(
+      pinned.length > 0
+        ? `找到 ${skillPaths.length} 个 Skill，预览上限 ${MAX_SKILLS_PER_SOURCE} 个（已导入的 ${pinned.length} 个优先保留）`
+        : `找到 ${skillPaths.length} 个 Skill，仅预览前 ${MAX_SKILLS_PER_SOURCE} 个`,
+    );
+  }
   const now = Date.now();
   const source: GitHubSkillSource = {
     id: sourceId,
@@ -264,12 +290,19 @@ async function loadGitHubSkillSource(url: string, selectedPaths?: Set<string>): 
   const existingContext = await createExistingSkillContext(sourceId);
   const loadedSkills: LoadedGitHubSkill[] = [];
   for (const skillPath of limitedPaths) {
-    if (selectedPaths && !selectedPaths.has(skillPath)) continue;
+    // Pinned paths are loaded even when they are outside the current selection —
+    // the update path needs their metadata to keep the record alive.
+    if (selectedPaths && !selectedPaths.has(skillPath) && !pinnedSet.has(skillPath)) continue;
     loadedSkills.push(await loadGitHubSkill(parsedUrl.owner, parsedUrl.repo, source.commitSha, source, tree, skillPath, existingContext));
   }
 
+  // The preview lists what the current selection covers. Pinned entries that were
+  // loaded only to keep an update from dropping them must not appear as selectable rows.
   const previewSkills = selectedPaths
-    ? limitedPaths.map((skillPath) => loadedSkills.find((skill) => skill.item.path === skillPath)?.item).filter((item): item is GitHubSkillPreviewItem => Boolean(item))
+    ? limitedPaths
+      .filter((skillPath) => selectedPaths.has(skillPath) || pinnedSet.has(skillPath))
+      .map((skillPath) => loadedSkills.find((skill) => skill.item.path === skillPath)?.item)
+      .filter((item): item is GitHubSkillPreviewItem => Boolean(item))
     : loadedSkills.map((skill) => skill.item);
 
   return {
@@ -281,7 +314,10 @@ async function loadGitHubSkillSource(url: string, selectedPaths?: Set<string>): 
       },
       skills: previewSkills,
       warnings,
-      truncated: tree.truncated || skillPaths.length > MAX_SKILLS_PER_SOURCE,
+      // "Was this preview cut short?" — not "did upstream exceed the cap?". Pinned paths
+      // are loaded first and the rest fill up to the cap, so compare the two counts
+      // directly instead of re-deriving it from the upstream total.
+      truncated: tree.truncated || limitedPaths.length < skillPaths.length,
     },
     skills: loadedSkills,
   };
@@ -298,8 +334,9 @@ async function loadGitHubSkill(
 ): Promise<LoadedGitHubSkill> {
   const warnings: string[] = [];
   const content = await fetchGitHubContent(owner, repo, ref, skillPath);
-  if (content.length > MAX_SKILL_BYTES) {
-    throw new Error(`${skillPath} 过大，已停止导入 (${content.length} bytes)`);
+  const bodyBytes = utf8ByteLength(content);
+  if (bodyBytes > MAX_SKILL_BYTES) {
+    throw new Error(`${skillPath} 过大，已停止导入 (${bodyBytes} bytes)`);
   }
 
   const parsed = parseSkillDoc(content, skillPath);
@@ -367,8 +404,8 @@ async function loadGitHubSkill(
     description: parsed.description,
     version: parsed.version,
     lastUpdated: parsed.lastUpdated,
-    bytes: content.length + remote.includedFiles.reduce((sum, file) => sum + file.bytes, 0),
-    bodyBytes: content.length,
+    bytes: bodyBytes + remote.includedFiles.reduce((sum, file) => sum + file.bytes, 0),
+    bodyBytes,
     includedFiles: remote.includedFiles,
     omittedFiles: remote.omittedFiles,
     warnings,
@@ -438,7 +475,7 @@ function parseGitHubUrl(input: string): ParsedGitHubUrl {
     return {
       owner,
       repo: stripGitSuffix(repo),
-      mode: path.endsWith('SKILL.md') ? 'blob' : 'tree',
+      mode: isSkillDocPath(path) ? 'blob' : 'tree',
       ref,
       path,
       refPathParts,
@@ -540,10 +577,23 @@ function dedupeSourceLocationCandidates(
   });
 }
 
+/**
+ * Does this repo path name a Skill definition file?
+ *
+ * Case-insensitive: a repo that stores `skill.md` is still a Skill, and the previous
+ * exact-case check turned it into "no SKILL.md found under this link" — the file was
+ * right there. Only the **last** segment is compared, so `sub/SKILL.md` qualifies.
+ */
+const SKILL_DOC_PATH_RE = /(^|\/)skill\.md$/i;
+
+function isSkillDocPath(path: string): boolean {
+  return SKILL_DOC_PATH_RE.test(path);
+}
+
 function findSkillPaths(tree: GitHubTreeResponse, rootPath: string, mode: ParsedGitHubUrl['mode']): string[] {
   const normalizedRoot = trimSlashes(rootPath);
   if (mode === 'blob') {
-    if (!normalizedRoot.endsWith('SKILL.md')) throw new Error('单文件导入只支持 SKILL.md');
+    if (!isSkillDocPath(normalizedRoot)) throw new Error('单文件导入只支持 SKILL.md');
     const exists = tree.tree.some((entry) => entry.type === 'blob' && entry.path === normalizedRoot);
     if (!exists) throw new Error(`GitHub 源中不存在 ${normalizedRoot}`);
     return [normalizedRoot];
@@ -553,7 +603,7 @@ function findSkillPaths(tree: GitHubTreeResponse, rootPath: string, mode: Parsed
   return tree.tree
     .filter((entry) => entry.type === 'blob')
     .map((entry) => entry.path)
-    .filter((path) => path === `${prefix}SKILL.md` || (path.startsWith(prefix) && path.endsWith('/SKILL.md')))
+    .filter((path) => path.startsWith(prefix) && isSkillDocPath(path))
     .sort((a, b) => a.localeCompare(b));
 }
 
@@ -570,7 +620,9 @@ async function fetchResourceBundle(
   const candidates = tree.tree
     .filter((entry) => entry.type === 'blob')
     .filter((entry) => entry.path.startsWith(prefix))
-    .filter((entry) => entry.path !== skillPath)
+    // A nested SKILL.md belongs to a child Skill, not to this one's supporting files.
+    // (The Shell host's collectLocalSkillResources excludes them the same way.)
+    .filter((entry) => entry.path !== skillPath && !isSkillDocPath(entry.path))
     .filter((entry) => isTextResource(entry.path))
     .sort((a, b) => rankResource(a.path, skillBody) - rankResource(b.path, skillBody) || a.path.localeCompare(b.path));
 
@@ -580,7 +632,17 @@ async function fetchResourceBundle(
   let totalBytes = 0;
 
   for (const candidate of candidates) {
-    const size = candidate.size ?? 0;
+    // ⚠️ **Missing `size` must not mean "zero bytes".** GitHub omits `size` for blobs it
+    // does not size inline; treating that as 0 would pass both caps below and then
+    // download the whole file — for a >100 MB blob, into the extension's heap and
+    // then into the prompt. Unknown size is therefore treated as "too big to bundle":
+    // the file is omitted, and only appears in the on-demand list.
+    const size = candidate.size;
+    if (typeof size !== 'number' || !Number.isFinite(size)) {
+      omitted.push({ path: candidate.path, bytes: 0 });
+      warnings.push(`${candidate.path} 未返回文件大小，已按按需读取处理`);
+      continue;
+    }
     if (included.length >= MAX_RESOURCE_FILES_PER_SKILL) {
       omitted.push({ path: candidate.path, bytes: size });
       continue;
@@ -596,8 +658,9 @@ async function fetchResourceBundle(
     }
 
     const content = await fetchGitHubContent(owner, repo, ref, candidate.path);
-    totalBytes += content.length;
-    included.push({ path: candidate.path, bytes: content.length, content });
+    const contentBytes = utf8ByteLength(content);
+    totalBytes += contentBytes;
+    included.push({ path: candidate.path, bytes: contentBytes, content });
   }
 
   if (omitted.length > 0) {
@@ -660,67 +723,9 @@ function buildImportedInstructions(input: {
 }
 
 function parseSkillDoc(raw: string, path: string): ParsedSkillDoc {
-  const frontmatter = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  const meta = frontmatter ? parseYamlSubset(frontmatter[1]) : {};
-  const body = frontmatter ? raw.slice(frontmatter[0].length).trim() : raw.trim();
-  const name = normalizeSkillName(readString(meta, 'name') ?? parentDirectory(path).split('/').pop() ?? path.replace(/\/?SKILL\.md$/, ''));
-  const description = readString(meta, 'description') ?? firstParagraph(body) ?? `Imported GitHub Skill from ${path}`;
-  const metadata = readObject(meta, 'metadata');
-  const version = readString(metadata, 'version') ?? readString(meta, 'version');
-  const lastUpdated = readString(metadata, 'last_updated') ?? readString(metadata, 'lastUpdated') ?? readString(meta, 'last_updated');
-
-  return { name, description, body, version, lastUpdated };
-}
-
-function parseYamlSubset(raw: string): Record<string, unknown> {
-  const lines = raw.replace(/\r\n/g, '\n').split('\n');
-  const result: Record<string, unknown> = {};
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    const match = line.match(/^([A-Za-z0-9_-]+):(?:\s*(.*))?$/);
-    if (!match) continue;
-    const key = match[1];
-    const value = match[2] ?? '';
-    if (value === '|' || value === '|-' || value === '>' || value === '>-') {
-      const block: string[] = [];
-      while (i + 1 < lines.length && /^(\s+|$)/.test(lines[i + 1])) {
-        i += 1;
-        block.push(lines[i].replace(/^\s{2,}/, ''));
-      }
-      result[key] = value.startsWith('>') ? block.join(' ').replace(/\s+/g, ' ').trim() : block.join('\n').trim();
-      continue;
-    }
-    if (value === '') {
-      const nested: Record<string, string> = {};
-      while (i + 1 < lines.length && /^\s+/.test(lines[i + 1])) {
-        i += 1;
-        const nestedMatch = lines[i].match(/^\s+([A-Za-z0-9_-]+):\s*(.*)$/);
-        if (nestedMatch) nested[nestedMatch[1]] = cleanYamlScalar(nestedMatch[2]);
-      }
-      result[key] = nested;
-      continue;
-    }
-    result[key] = cleanYamlScalar(value);
-  }
-  return result;
-}
-
-function cleanYamlScalar(value: string): string {
-  const trimmed = value.trim();
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-function readString(record: Record<string, unknown> | undefined, key: string): string | undefined {
-  const value = record?.[key];
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function readObject(record: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
-  const value = record[key];
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  return parseSkillDocShared(raw, path, {
+    describeFallback: (skillPath) => `Imported GitHub Skill from ${skillPath}`,
+  });
 }
 
 async function fetchPackageInfo(owner: string, repo: string, ref: string): Promise<{ version?: string; description?: string }> {
@@ -856,15 +861,6 @@ function pathExtension(path: string): string {
   return index >= 0 ? name.slice(index).toLowerCase() : '';
 }
 
-function firstParagraph(body: string): string | undefined {
-  const paragraph = body
-    .replace(/^# .+$/m, '')
-    .split(/\n\s*\n/)
-    .map((part) => part.replace(/\s+/g, ' ').trim())
-    .find((part) => part.length > 0 && !part.startsWith('```'));
-  return paragraph ? paragraph.slice(0, 240) : undefined;
-}
-
 function createSourceId(owner: string, repo: string, ref: string, rootPath: string): string {
   return `github:${owner}/${repo}:${ref}:${rootPath || '.'}`;
 }
@@ -881,16 +877,8 @@ function trimSlashes(value: string): string {
   return value.replace(/^\/+|\/+$/g, '');
 }
 
-function parentDirectory(path: string): string {
-  const parts = path.split('/');
-  parts.pop();
-  return parts.join('/');
-}
-
 function normalizeSkillName(name: string): string {
-  const normalized = slugifySkillName(name);
-  if (!normalized) throw new Error('GitHub Skill 缺少有效名称');
-  return normalized;
+  return requireSkillSlug(name);
 }
 
 function createUniqueSkillName(preferred: string, occupiedNames: Set<string>): string {

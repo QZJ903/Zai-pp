@@ -241,7 +241,14 @@ function renderMemoryImportPreviewResult(input: ToolResultRendererInput): boolea
   meta.className = 'zpp-result-meta';
   // ⚠️ **截断过就把「另有 N 条」写进表头** —— 只列前 5 个名字，用户本来就看不出全貌，
   // 而少掉的 100 条与「本来就只有 100 条」在旧表头下完全同形。
-  meta.textContent = preview.omitted > 0
+  // ⚠️ **拒绝过的也要写** —— 旧表头连 `rejected` 都不显示，被拒的条目等于凭空消失。
+  const rejectedHint = preview.rejected > 0
+    ? ` · ${translate(locale, 'tool.memoryImport.result.metaRejected', {
+      rejected: preview.rejected,
+      overLimit: preview.overLimit,
+    })}`
+    : '';
+  meta.textContent = (preview.omitted > 0
     ? translate(locale, 'tool.memoryImport.result.metaSummaryTruncated', {
       count: preview.memories.length,
       duplicates: preview.duplicates,
@@ -250,7 +257,7 @@ function renderMemoryImportPreviewResult(input: ToolResultRendererInput): boolea
     : translate(locale, 'tool.memoryImport.result.metaSummary', {
       count: preview.memories.length,
       duplicates: preview.duplicates,
-    });
+    })) + rejectedHint;
   const list = document.createElement('div');
   list.className = 'zpp-result-text';
   // 只列有名字的条目 —— 结果对象是外部输入，元素缺 `name` 时直接拼会渲染出 `- undefined`。
@@ -377,6 +384,7 @@ function getMemoryImportPreviewOutput(value: unknown): {
   memories: Array<{ name: string }>;
   duplicates: number;
   rejected: number;
+  overLimit: number;
   omitted: number;
 } | null {
   if (!value || typeof value !== 'object') return null;
@@ -385,6 +393,7 @@ function getMemoryImportPreviewOutput(value: unknown): {
     memories?: unknown;
     duplicates?: unknown;
     rejected?: unknown;
+    overLimit?: unknown;
     omitted?: unknown;
   };
   if (output.kind !== 'memory_import_preview' || !Array.isArray(output.memories)) return null;
@@ -394,8 +403,11 @@ function getMemoryImportPreviewOutput(value: unknown): {
     memories: output.memories as Array<{ name: string }>,
     duplicates: output.duplicates,
     rejected: output.rejected,
-    // ⚠️ **缺失按 0 处理** —— 本字段是后加的，历史里落库的老记录没有它；
-    // 判它必填会让那些卡片**整块退回纯文本**（连带「导入」按钮消失）。
+    // ⚠️ **缺失按 0 处理** —— 本字段是后加的，历史里落库的记录没有它；判它必填会让那些卡片
+    // **整块退回纯文本**（连带「导入」按钮消失）。
+    overLimit: typeof output.overLimit === 'number' && Number.isFinite(output.overLimit)
+      ? output.overLimit
+      : 0,
     omitted: typeof output.omitted === 'number' && Number.isFinite(output.omitted)
       ? output.omitted
       : 0,

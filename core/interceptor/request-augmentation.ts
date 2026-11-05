@@ -22,6 +22,11 @@ export function composeLocalSkillPrompt(skill: AugmentationSkill): string {
   const skillDir = skill.remote?.localDirectory ?? '';
   let prompt = skill.instructions;
   if (skillDir) {
+    // The manifest paths are relative to the imported **root**, while the absolute paths
+    // the index card needs are relative to the Skill's own directory. Resolving them
+    // against `skillDir` would double the sub-directory for any nested Skill
+    // (`root/sub/SKILL.md` → `…/sub/sub/…`), and the lookup would miss every file.
+    const manifestBase = skill.remote?.localRootPath || skillDir;
     const knownAbs = new Set<string>();
     const files = [
       ...(skill.remote?.includedFiles ?? []),
@@ -29,7 +34,7 @@ export function composeLocalSkillPrompt(skill: AugmentationSkill): string {
       ...(skill.remote?.omittedFiles ?? []),
     ];
     for (const file of files) {
-      const abs = joinUnderRoot(skillDir, file.path);
+      const abs = joinUnderRoot(manifestBase, file.path);
       if (abs) knownAbs.add(abs);
     }
     prompt = absolutizeSkillReferences(prompt, {

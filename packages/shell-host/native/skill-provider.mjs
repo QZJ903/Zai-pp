@@ -1,6 +1,7 @@
 import { basename, dirname, join } from 'node:path';
 import {
   LOCAL_SCRIPT_EXTENSIONS,
+  LOCAL_SKILL_ERROR_CODES,
   LOCAL_TEXT_RESOURCE_EXTENSIONS,
   MAX_LOCAL_PREVIEW_FRAME_BYTES,
   MAX_LOCAL_RESOURCE_BYTES_PER_SKILL,
@@ -21,6 +22,23 @@ import {
 export function createSkillToolHandlers() {
   return [{ name: 'local_skill_preview', handle: createLocalSkillPreviewResult }];
 }
+
+/**
+ * A preview failure that carries a **structured code**.
+ *
+ * ⚠️ The extension branches on `code` (only "the folder is gone" leads to a re-pick
+ * prompt), never on the message text. Every `throw` in this file therefore has to carry
+ * one — an uncoded throw degrades to `local_skill_preview_failed`, which the UI reports
+ * as a plain error without offering the folder picker.
+ */
+class LocalSkillPreviewError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'LocalSkillPreviewError';
+    this.code = code;
+  }
+}
+
 function createLocalSkillPreviewResult(args) {
   const rootInput = args?.rootPath;
   if (typeof rootInput !== 'string' || rootInput.trim().length === 0) {
@@ -43,9 +61,19 @@ function createLocalSkillPreviewResult(args) {
       },
     };
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // The failure envelope mirrors the success one (`{ ok, ... }`) so the extension can
+    // read a machine-readable reason instead of pattern-matching `content[0].text`.
+    const code = err instanceof LocalSkillPreviewError
+      ? err.code
+      : LOCAL_SKILL_ERROR_CODES.PREVIEW_FAILED;
     return {
       isError: true,
-      content: [{ type: 'text', text: err instanceof Error ? err.message : String(err) }],
+      content: [{ type: 'text', text: message }],
+      structuredContent: {
+        ok: false,
+        error: { code, message },
+      },
     };
   }
 }
@@ -54,13 +82,13 @@ function scanLocalSkillFolder(rootInput, selectedPaths) {
   const rootPath = resolveLocalPath(rootInput);
   const rootStat = safeStat(rootPath);
   if (!rootStat || !rootStat.isDirectory()) {
-    throw new Error(`Local Skill root is not a readable directory: ${rootPath}`);
+    throw new LocalSkillPreviewError(LOCAL_SKILL_ERROR_CODES.ROOT_UNREADABLE, `Local Skill root is not a readable directory: ${rootPath}`);
   }
 
   const warnings = [];
   const allSkillPaths = findLocalSkillPaths(rootPath);
   if (allSkillPaths.length === 0) {
-    throw new Error(`No SKILL.md found under ${rootPath}`);
+    throw new LocalSkillPreviewError(LOCAL_SKILL_ERROR_CODES.NOT_FOUND, `No SKILL.md found under ${rootPath}`);
   }
   if (allSkillPaths.length > MAX_LOCAL_SKILLS) {
     warnings.push(`Found ${allSkillPaths.length} Skills; preview is limited to ${MAX_LOCAL_SKILLS}.`);
@@ -73,7 +101,7 @@ function scanLocalSkillFolder(rootInput, selectedPaths) {
     ? allSkillPaths.filter(path => selectedPaths.has(path))
     : allSkillPaths;
   if (selectedPaths && requestedPaths.length === 0) {
-    throw new Error('Selected local Skill paths were not found under the root path.');
+    throw new LocalSkillPreviewError(LOCAL_SKILL_ERROR_CODES.PATHS_MISSING, 'Selected local Skill paths were not found under the root path.');
   }
   const selected = requestedPaths.slice(0, MAX_LOCAL_SKILLS);
   if (selectedPaths && requestedPaths.length > MAX_LOCAL_SKILLS) {
@@ -94,7 +122,12 @@ function scanLocalSkillFolder(rootInput, selectedPaths) {
       // turns a missing entry into `Selected local Skill paths were not found`, which
       // points the user at the path when the real cause is the file itself.
       if (selectedPaths) {
-        throw new Error(`Selected local Skill could not be read (${skillPath}): ${reason}`);
+        // Keep the inner code (too-large vs unreadable are different stories) while
+        // wrapping the message so the caller can still tell which Skill failed.
+        throw new LocalSkillPreviewError(
+          error instanceof LocalSkillPreviewError ? error.code : LOCAL_SKILL_ERROR_CODES.UNREADABLE,
+          `Selected local Skill could not be read (${skillPath}): ${reason}`,
+        );
       }
       unreadablePaths.push(skillPath);
       warnings.push(`${skillPath} was skipped: ${reason}`);
@@ -107,7 +140,7 @@ function scanLocalSkillFolder(rootInput, selectedPaths) {
   // Whole-folder preview where nothing at all could be read is not a useful empty
   // result — say so instead of returning an empty list.
   if (skills.length === 0 && unreadablePaths.length > 0) {
-    throw new Error(`No local Skill could be read under ${rootPath}: ${unreadablePaths.join(', ')}`);
+    throw new LocalSkillPreviewError(LOCAL_SKILL_ERROR_CODES.UNREADABLE, `No local Skill could be read under ${rootPath}: ${unreadablePaths.join(', ')}`);
   }
 
   const displayName = basename(rootPath) || rootPath;
@@ -164,7 +197,8 @@ function fitSkillsToPreviewFrame({ rootPath, displayName, directoryName, skills,
   }
 
   if (requestedExplicitly) {
-    throw new Error(
+    throw new LocalSkillPreviewError(
+      LOCAL_SKILL_ERROR_CODES.PREVIEW_TOO_LARGE,
       `Selected ${skills.length} Skills would produce a ${total} byte response, over the ${MAX_LOCAL_PREVIEW_FRAME_BYTES} byte preview limit. Import them in smaller batches.`,
     );
   }
@@ -219,7 +253,8 @@ function fitSkillsToPreviewFrame({ rootPath, displayName, directoryName, skills,
       truncated: true,
     }), 'utf8');
     if (settled > MAX_LOCAL_PREVIEW_FRAME_BYTES) {
-      throw new Error(
+      throw new LocalSkillPreviewError(
+        LOCAL_SKILL_ERROR_CODES.PREVIEW_TOO_LARGE,
         `${only.path} cannot be reduced under the ${MAX_LOCAL_PREVIEW_FRAME_BYTES} byte preview limit (${settled} bytes remain after truncating the body). This Skill lists too many supporting or script files — import it from a folder with fewer files.`,
       );
     }
@@ -257,10 +292,10 @@ function readLocalSkill(rootPath, skillPath, usedContentBytes) {
   const absoluteSkillPath = resolveUnderRoot(rootPath, skillPath);
   const skillStat = safeStat(absoluteSkillPath);
   if (!skillStat || !skillStat.isFile()) {
-    throw new Error(`Local Skill file is not readable: ${skillPath}`);
+    throw new LocalSkillPreviewError(LOCAL_SKILL_ERROR_CODES.UNREADABLE, `Local Skill file is not readable: ${skillPath}`);
   }
   if (skillStat.size > MAX_LOCAL_SKILL_BYTES) {
-    throw new Error(`${skillPath} exceeds the SKILL.md size limit (${skillStat.size} bytes).`);
+    throw new LocalSkillPreviewError(LOCAL_SKILL_ERROR_CODES.TOO_LARGE, `${skillPath} exceeds the SKILL.md size limit (${skillStat.size} bytes).`);
   }
 
   const content = readTextFile(absoluteSkillPath);

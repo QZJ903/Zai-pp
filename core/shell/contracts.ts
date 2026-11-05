@@ -4,6 +4,45 @@ import { isExtensionInternalTool } from '../mcp/internal-tools';
 export const SHELL_MCP_SERVER_NAME = 'Shell Local';
 export const SHELL_MCP_NATIVE_HOST = 'com.zai_pp.shell';
 
+/**
+ * `local_skill_preview` 的**结构化失败码**。
+ *
+ * ⚠️ **与 `packages/shell-host/native/contracts.mjs` 的 `LOCAL_SKILL_ERROR_CODES`
+ * 逐字对齐，改一边要改两边** —— host 侧是纯 `.mjs`，引不到 TS 常量
+ * （`native/` 会被拷到安装目录，与 `packages/shell-host` 是两个独立 npm 包，
+ * 跨包 import 不成立）。对齐由契约测试守着。
+ *
+ * ⚠️ **为什么要有码**：扩展侧靠它决定「这次失败要不要引导用户重新选择文件夹」。
+ * 按 message 文案判会随 host 措辞变化静默失效，而那种失效表现为「明明只需要重选路径，
+ * 却只弹一句原始报错」或反向的「存储失败也让人白选一遍」。
+ */
+export const LOCAL_SKILL_ERROR_CODES = {
+  rootUnreadable: 'local_skill_root_unreadable',
+  notFound: 'local_skill_not_found',
+  pathsMissing: 'local_skill_paths_missing',
+  unreadable: 'local_skill_unreadable',
+  previewTooLarge: 'local_skill_preview_too_large',
+  tooLarge: 'local_skill_too_large',
+  previewFailed: 'local_skill_preview_failed',
+} as const;
+
+/**
+ * 「原文件夹已不可用」这一档 —— **只有它值得引导用户重新选择路径**。
+ *
+ * ⚠️ `previewTooLarge` / `tooLarge` 不在其中：那两个是「这个技能本身有问题」，
+ * 重选文件夹不会变好。
+ */
+export const LOCAL_SKILL_PATH_UNAVAILABLE_CODES: ReadonlySet<string> = new Set([
+  LOCAL_SKILL_ERROR_CODES.rootUnreadable,
+  LOCAL_SKILL_ERROR_CODES.notFound,
+  LOCAL_SKILL_ERROR_CODES.pathsMissing,
+  LOCAL_SKILL_ERROR_CODES.unreadable,
+]);
+
+export function isLocalSkillPathUnavailableCode(code: unknown): boolean {
+  return typeof code === 'string' && LOCAL_SKILL_PATH_UNAVAILABLE_CODES.has(code);
+}
+
 export const SHELL_TOOL_NAMES = ['shell_exec', 'shell_status', 'python_status', 'python_exec', 'local_skill_preview', 'local_folder_pick', 'local_file_stat', 'local_file_read', 'local_file_write', 'shell_session_begin', 'shell_session_exec', 'shell_session_end'] as const;
 export type ShellToolName = typeof SHELL_TOOL_NAMES[number];
 
