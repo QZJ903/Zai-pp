@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 describe('external platform capability contract', () => {
-  it('keeps all 14 serialized capability keys and defaults missing values to false', () => {
+  it('keeps all 12 serialized capability keys and defaults missing values to false', () => {
     expect(Object.keys(EMPTY_PLATFORM_CAPABILITIES)).toEqual(PLATFORM_CAPABILITY_KEYS);
     expect(createCapabilityMap({ storage: true })).toEqual({
       ...Object.fromEntries(PLATFORM_CAPABILITY_KEYS.map((key) => [key, false])),

@@ -129,6 +129,7 @@ import { USAGE_MESSAGE_COUNT } from '../core/constants';
 import { createToolInvocationCatalog } from '../core/tool/invocation';
 import { createLatestSyncGate } from '../core/tool/latest-sync';
 import { MCP_CAPABILITY_TOOL_PROVIDER_ID } from '../core/mcp/capability-contract';
+import { PROMPT_INPUT_NOT_FOUND_CODE } from '../core/messaging/error-code';
 import {
   registerDefaultToolResultRenderers,
   renderToolResultWithRegistry,
@@ -2247,6 +2248,21 @@ async function releaseTabKeepAlive(owner: string | null = null): Promise<void> {
   } catch {
     /* 同上：卸不掉最多让横幅多挂一会儿，不该影响收尾 */
   }
+}
+
+/**
+ * 这条标签**此刻有没有在要保活** —— 两个来源：发送窗口内的临时要（`keepAliveOwner`
+ * 非空）与跑满 3 分钟后的长窗口标记（`sustainedKeepAlive`）。
+ *
+ * ⚠️ 判据是**意图**，不是「后台真挂上没有」—— 后者页面看不到；而意图已经足够：
+ * 要过保活的标签，它的可见性自报就不可信了（`Emulation.setFocusEmulationEnabled`
+ * 会让页面自报可见）。
+ *
+ * ⚠️ **已知残余**：短窗口在「后台挂上 debugger」之前就 release 的话（发送很快、
+ * 而 attach 很慢），那次可见性变化落到判据之外 ⇒ 照旧写一次。方向安全（等于改造前）。
+ */
+function isTabKeepAliveRequested(): boolean {
+  return keepAliveOwner !== null || sustainedKeepAlive;
 }
 
 /**
@@ -4657,7 +4673,7 @@ function insertPromptText(text: string): { ok: true; insertedLength: number } | 
   if (text.length === 0) return { ok: false, error: 'empty_prompt_text' };
   const textarea = document.querySelector<HTMLTextAreaElement>(CHAT_INPUT_SELECTOR)
     ?? document.querySelector<HTMLTextAreaElement>('textarea');
-  if (!textarea) return { ok: false, error: 'prompt_input_not_found' };
+  if (!textarea) return { ok: false, error: PROMPT_INPUT_NOT_FOUND_CODE };
 
   const start = textarea.selectionStart ?? textarea.value.length;
   const end = textarea.selectionEnd ?? start;
@@ -4968,6 +4984,8 @@ export default defineContentScript({
       // 自动化兜底选站）读取。**不 await** —— 写不进去只是那条兜底退回默认站。
       // ⚠️ 调用时机会被 `installZaiCapabilities` 按可见性门控（后台加载不写）。
       rememberViewedSite: () => rememberViewedZaiSite(location.origin),
+      // 「这条标签此刻有没有在要保活」—— 判据见 `isTabKeepAliveRequested`。
+      isTabKeepAliveRequested,
       syncRuntimeState: loadAndSyncRuntimeState,
       // ⚠️ **`onContinuationBubblesHidden` 刻意不传** —— 它存在的唯一用途是打一条
       // 「隐藏了几条气泡」的日志，而那是**正常路径上的成功事件**（每轮续跑都会发生）。

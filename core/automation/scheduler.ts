@@ -30,6 +30,14 @@ import type {
 } from './types';
 
 export const AUTOMATION_WAKE_ALARM_NAME = 'zai_pp_automation_wake';
+/**
+ * 扫描周期（分钟）。
+ *
+ * ⚠️⚠️ **必须 ≥ 1、且只能取整数** —— `chrome.alarms` 的驱动粒度是**分钟**：`0.5` 不会
+ * 报错、只会安静地按 1 分钟跑（声明与行为不符），`2` 以上会让「最小间隔 15 分钟」的
+ * 判据与真实扫描周期错位（漏一次扫描就整体延后一整个周期）。
+ * ⚠️ 不要为它加运行时断言 —— 断言失败等于**整个自动化不跑**，比「扫得慢一点」更糟。
+ */
 export const AUTOMATION_WAKE_INTERVAL_MINUTES = 1;
 export const AUTOMATION_RUN_TIMEOUT_MS = 180_000;
 export const AUTOMATION_MAX_ATTEMPTS = 2;

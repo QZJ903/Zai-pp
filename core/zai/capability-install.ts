@@ -58,6 +58,18 @@ export interface ZaiCapabilityDeps {
    */
   rememberViewedSite: () => Promise<boolean>;
   /**
+   * 这条标签**此刻有没有在要保活**（续跑 / 自动化正在跑，页面需要防节流）。
+   *
+   * ⚠️⚠️ **它存在是为了让 ⑧ / ⑧b 的可见性判据在保活期间失效** —— 保活挂上后会给页面
+   * 发 `Emulation.setFocusEmulationEnabled`，**页面会自报可见**，于是「变可见」这件事
+   * 可能根本不是用户做的。那一刻写下去，等于让一条后台任务把「用户上次看的是哪个站」
+   * 改成它自己那一站。
+   *
+   * ⚠️ 判据取「**有没有在要**」（意图）而不是「有没有真挂上」（结果）—— 真挂上与否在后台，
+   * 页面看不到；而意图已经足够：要过保活的标签，它的可见性自报就不可信了。
+   */
+  isTabKeepAliveRequested: () => boolean;
+  /**
    * 同步运行时状态（记忆 / 技能 / 工具目录 / 预设 / 联网开关）。**这一步要 await**。
    *
    * ⚠️ 返回值类型写成 `Promise<unknown>` 而不是 `Promise<void>` —— 生产的实现
@@ -129,7 +141,7 @@ export function installZaiCapabilities(deps: ZaiCapabilityDeps): () => void {
   //    标签页刷新一次也会跑到这里，无条件写会把记录钉在后台那一站（用户在国际站看着、
   //    后台那个国区站标签页刷新了，记录就变成国区站）。
   //    ⚠️ **不 await** —— 写不进去只是那几条没有页面上下文的兜底链路退回默认站。
-  if (document.visibilityState === 'visible') void deps.rememberViewedSite();
+  if (shouldRememberViewedSite(deps)) void deps.rememberViewedSite();
 
   // ⑧b 页面**重新可见**时再记一次 —— 那是「用户切回这一站」的那一刻，正是要记的时点。
   //    ⚠️ 「变隐藏」时**不写**：那一刻用户已经不在看这个站，而记录停在旧值恰好就是
@@ -138,7 +150,7 @@ export function installZaiCapabilities(deps: ZaiCapabilityDeps): () => void {
   //    ⚠️ 本函数只从内容脚本的 `main()` 调一次（每个页面一个新 document），
   //    所以这里不另加幂等守卫。
   const handleVisibilityChange = () => {
-    if (document.visibilityState === 'visible') void deps.rememberViewedSite();
+    if (shouldRememberViewedSite(deps)) void deps.rememberViewedSite();
   };
   document.addEventListener('visibilitychange', handleVisibilityChange);
 
@@ -146,6 +158,32 @@ export function installZaiCapabilities(deps: ZaiCapabilityDeps): () => void {
     unsubscribe();
     document.removeEventListener('visibilitychange', handleVisibilityChange);
   };
+}
+
+/**
+ * 「这一笔该不该记」—— ⑧ 与 ⑧b 共用。
+ *
+ * 两个条件缺一不可：
+ * ① **页面此刻可见**（后台标签页刷新一次也会跑到这里，不判就会把记录钉在后台那一站）；
+ * ② **这条标签没有在要保活**。
+ *
+ * ⚠️⚠️ **② 是必需的**：保活挂上后会发 `Emulation.setFocusEmulationEnabled`，页面**自报可见**
+ * —— 于是「变可见」可能根本不是用户做的，而是一条后台任务把自己戳成了「用户上次看的站」。
+ * 那一刻不写，记录就保留旧值，恰好就是「沿用上一次」想要的语义（方向安全）。
+ *
+ * ⚠️⚠️ **已知残余（反方向）**：长窗口保活期间，用户**真的**切回这一站同样会被这道判据吞掉
+ * —— 而那次「变可见」是真信号。现状接受，理由是：
+ * ① **读侧第一段会救场** —— `readCurrentZaiSiteOrigin()` 先实时查「最后聚焦窗口的当前标签页」，
+ *    用户真在看这一站时它直接答对，这份记录只是兜底；
+ * ② **要精确区分得先证明一件事，而那件事没验过** —— 保活到底会不会触发 `visibilitychange`
+ *    目前是推断（代码里没有任何一处断言它）。在未验证的前提上做「一次性标记」式的精确判据，
+ *    一旦前提不成立，**第一个真实的切回就会被吞**，比「整段不写」更糟（因为它看起来更准）。
+ * ⇒ **要收紧先跑真机**：后台标签挂保活，页面控制台看有没有一次 `visible` 的 `visibilitychange`；
+ * 验到了再考虑「保活自己造成的那次可见性变化」与「用户切回」怎么分。
+ */
+function shouldRememberViewedSite(deps: Pick<ZaiCapabilityDeps, 'isTabKeepAliveRequested'>): boolean {
+  if (document.visibilityState !== 'visible') return false;
+  return !deps.isTabKeepAliveRequested();
 }
 
 /**
@@ -196,6 +234,7 @@ export const ZAI_CAPABILITY_DEP_KEYS = [
   'handleSessionChange',
   'refreshAuth',
   'rememberViewedSite',
+  'isTabKeepAliveRequested',
   'syncRuntimeState',
   'onContinuationBubblesHidden',
 ] as const satisfies readonly (keyof ZaiCapabilityDeps)[];

@@ -87,11 +87,12 @@ export interface ZaiAuthCaptureInput {
 /**
  * 读存储的上界（**可选**，由调用方显式传入才生效）。
  *
- * ⚠️ **必须有它**：扩展上下文半死时 `chrome.storage.local.get` 的 promise
- * **不是 reject，而是永不 settle** —— 外层的 `try/catch` 接不到一个不落地的 promise，
- * 于是所有 `await` 它的地方都会永久挂住。两个有 `inFlight` 槽位的调用方
- * （模型清单抓取器）会把槽位一直占着，之后每次触发都落「已跳过」分支、
- * **不会自愈**。信号式上界（`AbortSignal.timeout`）对 storage 无效，只能用竞速。
+ * ⚠️ **必须有它**：`chrome.storage.local.get` 在**扩展上下文失效**时是**同步抛错**
+ * （`Extension context invalidated`，`catch` 接得住），但**「读很慢」这一档没有天然上界**
+ * ——半死状态下它能拖很久而不返回，于是所有 `await` 它的地方都会跟着等。两个有
+ * `inFlight` 槽位的调用方（模型清单抓取器）会把槽位一直占着，之后每次触发都落
+ * 「已跳过」分支、**不会自愈**。信号式上界（`AbortSignal.timeout`）对 storage 无效，
+ * 只能用竞速。
  *
  * ⚠️ **写路径刻意不传它** —— `mergeZaiAuthFromCapture` 要读旧记录再覆盖写，
  * 读到 null 会把 `userId` / `feVersion` / `deviceId` / `expiresAt` 一起写成 null。

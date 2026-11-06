@@ -1,16 +1,21 @@
 import React from 'react';
 import { act } from 'react';
 import { readFileSync } from 'node:fs';
+import * as t from '@babel/types';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PROMPT_INJECTION_SETTINGS,
   type PromptInjectionSettings,
 } from '../core/prompt/settings';
-import { PAGE_CONTENT_SCRIPT_MISSING_CODE } from '../core/messaging/error-code';
+import {
+  PAGE_CONTENT_SCRIPT_MISSING_CODE,
+  PROMPT_INPUT_NOT_FOUND_CODE,
+} from '../core/messaging/error-code';
 import PromptControlPanel from '../entrypoints/sidepanel/components/PromptControlPanel';
 import LocalSkillImportPanel from '../entrypoints/sidepanel/components/LocalSkillImportPanel';
 import SavedPage from '../entrypoints/sidepanel/pages/SavedPage';
+import { parseTypeScriptSource, walkSourceAst } from './helpers/typescript-source';
 
 let container: HTMLDivElement;
 let root: Root | null;
@@ -128,6 +133,38 @@ describe('sidepanel interactions', () => {
     expect(container.textContent).toContain('插入到对话失败：请先在 chat.z.ai 登录，或刷新 Zai 页面后重试。');
   });
 
+  it('renders the reload-input-box copy for a missing page input, not the sign-in copy', async () => {
+    // ⚠️⚠️ **两档建议不同**：「页面里找不到输入框」只需刷新；「当前窗口没有 z.ai 页面」
+    // 要用户去打开并登录。共用一句时用户会照着错的那句去做。
+    const sendMessage = vi.fn(async (message: { type: string; payload?: unknown }) => {
+      if (message.type === 'GET_SAVED_ITEMS') {
+        return [{
+          id: 'saved-1',
+          syncId: 'sync-1',
+          kind: 'snippet',
+          title: 'Review prompt',
+          content: 'Summarize this thread.',
+          tags: [],
+          createdAt: 1,
+          updatedAt: 1,
+        }];
+      }
+      if (message.type === 'INSERT_SAVED_PROMPT_INTO_CHAT') {
+        return { ok: false, error: PROMPT_INPUT_NOT_FOUND_CODE };
+      }
+      return null;
+    });
+    stubChrome(sendMessage);
+
+    await renderElement(React.createElement(SavedPage));
+    await flushPromises();
+    await clickButton('插入到对话');
+
+    expect(container.textContent).toContain('找不到页面输入框');
+    expect(container.textContent).not.toContain('请先在 Zai 登录');
+    expect(container.textContent).not.toContain(PROMPT_INPUT_NOT_FOUND_CODE);
+  });
+
   it('renders the shared content-script-missing copy when the background returns that code', async () => {
     // ⚠️⚠️ **这条守的是「后台回码、侧边栏翻文案」那条跨边界契约。**
     //
@@ -189,6 +226,66 @@ describe('sidepanel interactions', () => {
     expect(code).toMatch(/error:\s*PAGE_CONTENT_SCRIPT_MISSING_CODE/);
     // 反面自检：不许写成裸字面量（那样两侧就不同源了）。
     expect(code).not.toMatch(/error:\s*['"]page_content_script_missing['"]/);
+  });
+
+  it('keeps `getPromptInsertionErrorMessage` mapping the code to itself, not to copy', () => {
+    /**
+     * ⚠️⚠️ **同一条契约的第二档：「找不到输入框」必须原样回码、不在后台翻成登录文案。**
+     *
+     * ⇒ 判「后台真的会回这个码」，只能扫源码：`getPromptInsertionErrorMessage` 住在
+     * `entrypoints/background.ts`（`defineBackground(...)` 的宿主文件），import 它就执行
+     * `defineBackground` ⇒ **不能导出后直接调**。
+     *
+     * ⚠️ **这里刻意用 AST、不用正则**：正则版本写的是
+     * `/if \(error === PROMPT_INPUT_NOT_FOUND_CODE\) return PROMPT_INPUT_NOT_FOUND_CODE;/`
+     * —— 它把生产代码**绑死在「单行 if」这一种写法**上。实测换成多行 `if`、换成大括号块、
+     * 合并成映射表，**三档都会红而行为没变**。判据应该是「这个码有没有被原样返回」，
+     * 不是「哪一行长什么样」。
+     */
+    const source = readFileSync('entrypoints/background.ts', 'utf8');
+    const program = parseTypeScriptSource('entrypoints/background.ts', source);
+    const fn = findNamedFunction(program, 'getPromptInsertionErrorMessage');
+    expect(fn, '应当能找到 getPromptInsertionErrorMessage').toBeDefined();
+
+    // ① 正面：它的出口里必须有一条「原样返回这个码」。
+    //    认两种形态 —— `return PROMPT_INPUT_NOT_FOUND_CODE;`（if / switch 各写法都算），
+    //    或映射表里 `[PROMPT_INPUT_NOT_FOUND_CODE]: PROMPT_INPUT_NOT_FOUND_CODE`。
+    const returnsTheCode: boolean[] = [];
+    const mapsToItself: boolean[] = [];
+    walkSourceAst(fn!.body, (node) => {
+      if (t.isReturnStatement(node) && isIdentifierNamed(node.argument, 'PROMPT_INPUT_NOT_FOUND_CODE')) {
+        returnsTheCode.push(true);
+      }
+      if (t.isObjectProperty(node) && isIdentifierNamed(node.value, 'PROMPT_INPUT_NOT_FOUND_CODE')) {
+        mapsToItself.push(true);
+      }
+    });
+    expect(
+      returnsTheCode.length > 0 || mapsToItself.length > 0,
+      '`getPromptInsertionErrorMessage` 必须有一条把这个码**原样**返回的出口',
+    ).toBe(true);
+
+    // ② 反面：这个码**不许**作为任何翻译调用（`backgroundT(...)` / `t(...)`）的实参。
+    //    这一条才是真正的契约 —— 翻了文案，侧边栏就拿不到码、也就翻不出正确建议。
+    const translatedCodeArguments: string[] = [];
+    walkSourceAst(fn!.body, (node) => {
+      if (!t.isCallExpression(node)) return;
+      const callee = node.callee;
+      const calleeName = t.isIdentifier(callee) ? callee.name
+        : (t.isMemberExpression(callee) && t.isIdentifier(callee.property) ? callee.property.name : null);
+      if (calleeName !== 'backgroundT' && calleeName !== 't') return;
+      for (const argument of node.arguments) {
+        walkSourceAst(argument as t.Node, (inner) => {
+          if (isIdentifierNamed(inner, 'PROMPT_INPUT_NOT_FOUND_CODE')) {
+            translatedCodeArguments.push('PROMPT_INPUT_NOT_FOUND_CODE');
+          }
+        });
+      }
+    });
+    expect(
+      translatedCodeArguments,
+      '这个码不许被送进翻译函数 —— 后台回码、文案由侧边栏按码映射',
+    ).toEqual([]);
   });
 
   it('shows saved-item repository failures instead of rendering a fake empty state', async () => {
@@ -652,4 +749,17 @@ function setTextControlValue(input: HTMLInputElement | HTMLTextAreaElement, valu
 function setSelectValue(select: HTMLSelectElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
   setter?.call(select, value);
+}
+
+/** 顶层具名函数声明 —— 只认 `function name(...) {}`，与守卫要断言的那个形态一致。 */
+function findNamedFunction(program: t.Program, name: string): t.FunctionDeclaration | undefined {
+  for (const statement of program.body) {
+    if (t.isFunctionDeclaration(statement) && statement.id?.name === name) return statement;
+  }
+  return undefined;
+}
+
+/** 节点是不是「名字为 `name` 的标识符」；`undefined` / 其它形态一律 false。 */
+function isIdentifierNamed(node: t.Node | null | undefined, name: string): boolean {
+  return Boolean(node && t.isIdentifier(node, { name }));
 }

@@ -26,7 +26,7 @@ describe('runtime update broadcasting', () => {
     expect(sendTabMessage).not.toHaveBeenCalled();
   });
 
-  it('still notifies the sender tab directly when query fails and a sender tab exists', async () => {
+  it('never notifies the excluded tab, even when tab discovery fails', async () => {
     const payload = { type: 'SAVED_ITEMS_UPDATED' };
     const sendTabMessage = vi.fn(async () => undefined);
 
@@ -40,7 +40,30 @@ describe('runtime update broadcasting', () => {
       reportError: vi.fn(),
     });
 
-    expect(sendTabMessage).toHaveBeenCalledWith(12, payload);
+    // ⚠️ `excludeTabId` 是回声抑制 —— 查询失败时给它补发会把抑制反转。
+    expect(sendTabMessage).not.toHaveBeenCalled();
+  });
+
+  it('skips the excluded tab while still delivering to every other matched tab', async () => {
+    const payload = { type: 'STATE_UPDATED' };
+    const delivered: number[] = [];
+    const sendTabMessage = vi.fn(async (tabId: number) => {
+      delivered.push(tabId);
+    });
+
+    await broadcastRuntimeUpdate(payload, 12, {
+      tabUrlPattern: '*://zchat.z.ai/*',
+      additionalTabUrlPatterns: ['*://chat.z.ai/*'],
+      sendRuntimeMessage: vi.fn(async () => undefined),
+      // 两条 pattern 都命中 12 ⇒ 同时验「排除」与「同一 tab 只投一次」。
+      queryTabsByUrl: vi.fn(async (pattern: string) => (
+        pattern.includes('zchat') ? [{ id: 11 }, { id: 12 }] : [{ id: 12 }, { id: 13 }]
+      )),
+      sendTabMessage,
+      reportError: vi.fn(),
+    });
+
+    expect(delivered).toEqual([11, 13]);
   });
 
   it('reports unexpected runtime and tab delivery failures', async () => {

@@ -242,10 +242,10 @@ describe('Skill and library handlers', () => {
       [skill, undefined],
       [skill, 'old-contract-skill'],
     ]);
-    expect(dependencies.broadcastStateUpdate).toHaveBeenCalledTimes(2);
+    expect(dependencies.notifyStateCommitted).toHaveBeenCalledTimes(2);
   });
 
-  it('does not broadcast a blocked local import and propagates a post-commit broadcast failure', async () => {
+  it('does not notify a blocked local import, and a successful write still triggers one notify', async () => {
     const dependencies = createSkillDependencies();
     const blocked: LocalSkillImportResponse = {
       ok: false,
@@ -259,15 +259,55 @@ describe('Skill and library handlers', () => {
       type: 'IMPORT_LOCAL_SKILL_SOURCE',
       payload: { rootPath: '/skills', selectedPaths: ['one/SKILL.md'] },
     })).resolves.toEqual(blocked);
-    expect(dependencies.broadcastStateUpdate).not.toHaveBeenCalled();
+    expect(dependencies.notifyStateCommitted).not.toHaveBeenCalled();
 
-    vi.mocked(dependencies.broadcastStateUpdate)
-      .mockRejectedValueOnce(new Error('state snapshot unavailable'));
-    await expect(dispatch(handlers, {
-      type: 'SAVE_SKILL',
-      payload: skill,
-    })).rejects.toThrow('state snapshot unavailable');
-    expect(dependencies.saveSkill).toHaveBeenCalled();
+    // ⚠️ **handler 这一层只负责「调它」、不负责吞错** —— 吞错在注入的实现里
+    // （`background.ts` 的 `notifyCommittedStateUpdate`）。这里钉的是接线：
+    // 一次成功的写入必须触发一次通知。
+    await dispatch(handlers, { type: 'SAVE_SKILL', payload: skill });
+    expect(dependencies.saveSkill).toHaveBeenCalledWith(skill, undefined);
+    expect(dependencies.notifyStateCommitted).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes post-commit notifications through the swallowing helper, not bare broadcasts', () => {
+    /**
+     * ⚠️⚠️ **这条守的是失败方向，不是接线** —— 上面那些用例只能证明「handler 调了某个
+     * 函数」，证明不了「那个函数不会把已经落库成功的写入变成失败响应」。
+     *
+     * 判定点在 `entrypoints/background.ts`：`notifyCommittedStateUpdate` /
+     * `notifyCommittedSavedItemsUpdate` 内部 `try/catch` + 上报。behavior 用例够不到
+     * 那个文件（它不导出这两函数），只能用剥过注释的源码断言。
+     *
+     * ⚠️ 判据必须剥注释：上面那些说明里就写着这两个函数名与 `broadcastStateUpdate`。
+     */
+    const source = readFileSync('entrypoints/background.ts', 'utf8');
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+    // ① 两个注入点各自指向吞错版本。
+    expect(code).toMatch(/notifyStateCommitted:\s*notifyCommittedStateUpdate/);
+    expect(code).toMatch(/notifySavedItemsCommitted:\s*notifyCommittedSavedItemsUpdate/);
+    // ② 两个吞错版本体内确实有 catch + 上报（去掉 try/catch 的变异体必须红）。
+    for (const fn of ['notifyCommittedStateUpdate', 'notifyCommittedSavedItemsUpdate']) {
+      const start = code.indexOf(`async function ${fn}(`);
+      expect(start, `${fn} 应当存在`).toBeGreaterThan(-1);
+      const body = code.slice(start, code.indexOf('\n}', start));
+      expect(body).toMatch(/try\s*\{/);
+      expect(body).toMatch(/catch\s*\(/);
+      expect(body).toMatch(/reportBackgroundStartupError\(/);
+    }
+    // ③ 反面自检：skill / library 那一侧不许再出现裸广播依赖。
+    for (const file of [
+      'entrypoints/background/skill-handlers.ts',
+      'entrypoints/background/library-handlers.ts',
+    ]) {
+      const handlerCode = readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/.*$/gm, '$1');
+      expect(handlerCode, file).not.toMatch(/dependencies\.broadcastStateUpdate\(/);
+      expect(handlerCode, file).not.toMatch(/dependencies\.broadcastSavedItemsUpdate\(/);
+    }
   });
 
   it('keeps optional picker payload and empty prompt insertion compatibility', async () => {
@@ -388,7 +428,7 @@ function createSkillDependencies(): SkillRuntimeHandlerDependencies {
     checkGitHubSkillSourceUpdates: vi.fn(async () => updatePreview),
     updateGitHubSkillSource: vi.fn(async () => githubImport),
     deleteGitHubSkillSource: vi.fn(async () => undefined),
-    broadcastStateUpdate: vi.fn(async () => undefined),
+    notifyStateCommitted: vi.fn(async () => undefined),
   };
 }
 
@@ -422,14 +462,13 @@ function createLibraryDependencies(): LibraryRuntimeHandlerDependencies {
     insertPromptIntoActiveZaiTab: vi.fn(async (text) => (
       text ? { ok: true as const } : { ok: false as const, error: 'empty_prompt_text' }
     )),
-    broadcastStateUpdate: vi.fn(async () => undefined),
-    broadcastSavedItemsUpdate: vi.fn(async () => undefined),
+    notifyStateCommitted: vi.fn(async () => undefined),
+    notifySavedItemsCommitted: vi.fn(async () => undefined),
   };
 }
 
 function createLocalPreferenceDependencies(): LocalPreferenceRuntimeHandlerDependencies {
   return {
-    broadcastStateUpdate: vi.fn(async () => undefined),
     getBackgroundConfig: vi.fn(async () => null),
     saveBackgroundConfig: vi.fn(async () => undefined),
     clearBackgroundConfig: vi.fn(async () => undefined),

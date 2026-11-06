@@ -12,11 +12,11 @@ export const LOCALE_PREFERENCE_STORAGE_KEY = 'zai_pp_locale_preference';
 /**
  * 读存储的上界（**可选**，由调用方显式传入才生效）。
  *
- * ⚠️ **必须有它**：扩展上下文半死时 `chrome.storage.local.get` 的 promise
- * **不是 reject，而是永不 settle** —— 调用方的 `try/catch` 接不到一个不落地的 promise。
- * 而 `getResolvedLocaleState` 是 `loadAndSyncRuntimeState` 的 `Promise.all` 里
- * **唯一一条可能抛/可能挂的腿**（其余七条走 `sendRuntimeMessage`，自带兜底）⇒
- * 它挂住会让**整个运行时状态同步永不返回**。
+ * ⚠️ **必须有它**：`chrome.storage.local.get` 在**扩展上下文失效**时是**同步抛错**
+ * （`Extension context invalidated`，`catch` 接得住），但**「读很慢」这一档没有天然上界**
+ * —— 半死状态下它能拖很久而不返回。而 `getResolvedLocaleState` 是
+ * `loadAndSyncRuntimeState` 的 `Promise.all` 里**唯一一条可能抛/可能挂的腿**
+ * （其余七条走 `sendRuntimeMessage`，自带兜底）⇒ 它挂住会让**整个运行时状态同步不返回**。
  *
  * ⚠️ **信号式上界（`AbortSignal.timeout`）对 storage 无效**，只能用竞速。
  * 与 `core/zai/auth.ts` 的 `AUTH_READ_TIMEOUT_MS` 同一形态、同一个理由。

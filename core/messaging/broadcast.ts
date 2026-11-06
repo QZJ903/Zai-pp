@@ -12,6 +12,22 @@ export interface RuntimeBroadcastDependencies {
   reportError(code: string, error: unknown): void;
 }
 
+/**
+ * 把一次状态更新推给全部相关上下文。
+ *
+ * 两条通道，职责不同：
+ * - `sendRuntimeMessage` 发给扩展页面（侧边栏），**不排除任何人**；
+ * - `sendTabMessage` 逐条发给匹配 pattern 的标签页，**`excludeTabId` 那条不发**。
+ *
+ * ⚠️⚠️ **`excludeTabId` 是回声抑制，不是「兜底收件人」。** 调用方一律传发起命令的那条
+ * 标签（`context.tabId`），语义是「它自己知道改了什么，不用再通知一遍」；内容脚本侧
+ * 发起保存后靠 `refreshLocalSnapshot()` 自己回填。**例外**是工具执行后的状态通知 ——
+ * 那条要通知的恰恰是发起方，见 `createToolExecutionRuntimeHandlers` 的依赖说明。
+ *
+ * ⚠️ **查询失败时不补发给 `excludeTabId`** —— 那正是要被排除的标签，补发等于把回声
+ * 抑制反转。查询失败只损失「这一轮没通知到其它标签页」，它们会在下一次广播或页面
+ * 刷新时追上。
+ */
 export async function broadcastRuntimeUpdate(
   payload: Record<string, unknown>,
   excludeTabId: number | undefined,
@@ -33,16 +49,7 @@ export async function broadcastRuntimeUpdate(
       dependencies.reportError('broadcast_tabs_query_failed', error);
     }
   }
-  if (tabs.length === 0) {
-    if (excludeTabId) {
-      deliverRuntimeMessageBestEffort(
-        dependencies.sendTabMessage(excludeTabId, payload),
-        'broadcast_tab_delivery_failed',
-        dependencies.reportError,
-      );
-    }
-    return;
-  }
+  if (tabs.length === 0) return;
 
   // 去重（同一 tab 可能被多个 pattern 命中）。
   const seen = new Set<number>();
@@ -55,13 +62,6 @@ export async function broadcastRuntimeUpdate(
         dependencies.reportError,
       );
     }
-  }
-  if (excludeTabId) {
-    deliverRuntimeMessageBestEffort(
-      dependencies.sendTabMessage(excludeTabId, payload),
-      'broadcast_tab_delivery_failed',
-      dependencies.reportError,
-    );
   }
 }
 

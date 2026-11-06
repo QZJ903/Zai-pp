@@ -49,8 +49,16 @@ export interface ToolExecutionRuntimeHandlerDependencies {
   broadcastToolDescriptorsUpdate(excludeTabId?: number): Promise<void>;
   broadcastMcpServersUpdate(excludeTabId?: number): Promise<void>;
   broadcastToolCallHistoryUpdate(excludeTabId?: number): Promise<void>;
-  /** 工具执行后通知记忆/技能等状态已变（memory_save 后 immediate re-broadcast）。 */
-  notifyStateCommitted?(excludeTabId?: number): Promise<void>;
+  /**
+   * 工具执行后通知记忆/技能等状态已变（`memory_save` 后立即重播）。
+   *
+   * ⚠️⚠️ **刻意不传 `excludeTabId`** —— 本条与其它广播的语义相反：其它广播是「发起方不用再听一遍」，
+ * 而工具改的是**后台**状态，发起命令的那条标签**尤其不能漏掉**它（`memory_save` 存完，同标签
+ * 下一轮注入要读到；内容脚本处理手发消息那条路不主动刷新运行时状态）。
+ * ⚠️ **不要理解成「只发给发起方」** —— 不传参数的语义是**发给所有人**（`excludeTabId` 为
+   * `undefined` 时逐条全发），发起方只是其中一员。改成只发一条会让别的标签停在旧状态。
+   */
+  notifyStateCommitted?(): Promise<void>;
 }
 
 export function createToolExecutionRuntimeHandlers(
@@ -143,8 +151,10 @@ export function createToolExecutionRuntimeHandlers(
       await dependencies.broadcastToolCallHistoryUpdate(context.tabId);
       // 工具执行后（尤其 memory_save / shell_exec 等会改状态），补一次状态广播，
       // 保证记忆保存后立即注入到后续请求、UI 状态同步。
+      // ⚠️ **不传 `context.tabId`** —— 见依赖声明处：这一条要通知所有人，
+      // 而发起命令的标签恰恰最需要它。
       if (dependencies.notifyStateCommitted) {
-        await dependencies.notifyStateCommitted(context.tabId);
+        await dependencies.notifyStateCommitted();
       }
       return result;
     }),

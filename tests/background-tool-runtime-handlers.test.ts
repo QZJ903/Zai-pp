@@ -503,6 +503,10 @@ describe('tool execution runtime handlers', () => {
       payload: { ...call, authorizationId: 'grant-1' },
     }, zaiContext);
     expect(events).toEqual(['execute:grant', 'history:broadcast']);
+    // ⚠️⚠️ **状态通知不传 `excludeTabId`** —— 这条与其它广播语义相反：工具改的是
+    // **后台**状态，发起命令的那条标签正是唯一需要知道它的人（下一轮注入要读到刚存的
+    // 记忆）。传 `context.tabId` 会让这次通知恰好漏掉需要它的人。
+    expect(dependencies.notifyStateCommitted).toHaveBeenCalledWith();
     expect(dependencies.executeToolCall).toHaveBeenNthCalledWith(
       1,
       call,
@@ -601,6 +605,26 @@ describe('tool execution runtime handlers', () => {
     await expect(dispatch(handlers, { type: 'GET_TOOL_CALL_HISTORY' }))
       .resolves.toEqual({ records: [history], dropped: 0 });
     expect(dependencies.getToolCallHistory).toHaveBeenCalledWith(undefined);
+
+    // ⚠️ **省略合法、给了就必须是正整数** —— 这个值直接进 `slice(0, limit)`：
+    // 负数会被解释成「从尾部倒数」（`-1` = 去掉最后一条，与「最近 N 条」正好相反）、
+    // 小数得到空数组，两者都不报错。
+    for (const badLimit of [-1, 0, 0.5, 2.5]) {
+      await expect(dispatch(handlers, {
+        type: 'GET_TOOL_CALL_HISTORY',
+        payload: { limit: badLimit },
+      })).rejects.toThrow('GET_TOOL_CALL_HISTORY.payload.limit');
+    }
+    // 合法边界：`1` 必须可用（只写 `> 0` 会放过 `0.5`，`0` 与 `1` 要分开判）。
+    await expect(dispatch(handlers, {
+      type: 'GET_TOOL_CALL_HISTORY',
+      payload: { limit: 1 },
+    })).resolves.toEqual({ records: [history], dropped: 0 });
+    // 大值合法（`slice` 自己会截到实际条数，存储侧本就有条数上限）。
+    await expect(dispatch(handlers, {
+      type: 'GET_TOOL_CALL_HISTORY',
+      payload: { limit: 1_000_000 },
+    })).resolves.toEqual({ records: [history], dropped: 0 });
 
     await expect(dispatch(handlers, { type: 'CLEAR_TOOL_CALL_HISTORY' }))
       .resolves.toEqual({ ok: true });
@@ -708,6 +732,7 @@ function createExecutionDependencies(): ToolExecutionRuntimeHandlerDependencies 
     broadcastToolDescriptorsUpdate: vi.fn(async () => undefined),
     broadcastMcpServersUpdate: vi.fn(async () => undefined),
     broadcastToolCallHistoryUpdate: vi.fn(async () => undefined),
+    notifyStateCommitted: vi.fn(async () => undefined),
     // mock 的本地目录校验默认信任（本用例不针对该校验逻辑）。
     validateLocalSkillDirectory: vi.fn(async () => true),
   };

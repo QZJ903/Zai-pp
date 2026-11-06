@@ -26,24 +26,32 @@ export interface DiagnosticLogBuffer {
 }
 
 const DEFAULT_MAX_ENTRIES = 1000;
-const DEFAULT_MAX_BYTES = 512 * 1024;
+
+/**
+ * 文本预算。
+ *
+ * ⚠️ **单位是「UTF-16 码元数」，不是字节** —— 量它的是 `JSON.stringify(entry).length`：
+ * 中文算 1、emoji 算 2，而字节分别是 3 与 4。这份缓冲只在内存里、不落盘、不跨边界，
+ * 所以按字符量就够了；真要按字节会在这里多一次 `TextEncoder` 编码（热路径）。
+ */
+const DEFAULT_MAX_TEXT_UNITS = 512 * 1024;
 
 export function createDiagnosticLogBuffer(
   maxEntries = DEFAULT_MAX_ENTRIES,
-  maxBytes = DEFAULT_MAX_BYTES,
+  maxTextUnits = DEFAULT_MAX_TEXT_UNITS,
 ): DiagnosticLogBuffer {
   let entries: DiagnosticLogEntry[] = [];
-  let totalBytes = 0;
+  let totalTextUnits = 0;
 
-  const entrySize = (entry: DiagnosticLogEntry): number =>
+  const entryTextUnits = (entry: DiagnosticLogEntry): number =>
     JSON.stringify(entry).length;
 
   const evict = (): void => {
     while (entries.length > 0 && (
-      entries.length > maxEntries || totalBytes > maxBytes
+      entries.length > maxEntries || totalTextUnits > maxTextUnits
     )) {
       const removed = entries.shift();
-      if (removed) totalBytes -= entrySize(removed);
+      if (removed) totalTextUnits -= entryTextUnits(removed);
     }
   };
 
@@ -51,7 +59,7 @@ export function createDiagnosticLogBuffer(
     record(entry) {
       const stamped: DiagnosticLogEntry = { ...entry, ts: Date.now() };
       entries.push(stamped);
-      totalBytes += entrySize(stamped);
+      totalTextUnits += entryTextUnits(stamped);
       evict();
     },
     snapshot() {
@@ -59,7 +67,7 @@ export function createDiagnosticLogBuffer(
     },
     clear() {
       entries = [];
-      totalBytes = 0;
+      totalTextUnits = 0;
     },
   };
 }

@@ -2,8 +2,6 @@ export const PLATFORM_CAPABILITY_KEYS = [
   'storage',
   'runtimeMessaging',
   'downloads',
-  'filePicker',
-  'folderPicker',
   'assetUrl',
   'sidePanel',
   'nativeMessaging',

@@ -67,6 +67,8 @@ function buildDeps(overrides: Partial<ZaiCapabilityDeps> = {}): {
     refreshAuth: async () => { record('refreshAuth'); return true; },
     // 站点记录：与另外两处「可选增强」一样是 `void` 调用（写不进去只是兜底退回默认站）。
     rememberViewedSite: async () => { record('rememberViewedSite'); return true; },
+    // 这条标签没在要保活 ⇒ 可见性自报可信（默认档）。
+    isTabKeepAliveRequested: () => false,
     syncRuntimeState: async () => { record('syncRuntimeState'); },
     onContinuationBubblesHidden: (count) => { hiddenCounts.push(count); },
     ...overrides,
@@ -149,6 +151,55 @@ describe('installZaiCapabilities: every install runs exactly once', () => {
       document.dispatchEvent(new Event('visibilitychange'));
       expect(harness.count('rememberViewedSite')).toBe(before + 1);
     } finally {
+      Reflect.deleteProperty(document, 'visibilityState');
+    }
+  });
+
+  it('does not remember the site while this tab is requesting keep-alive', () => {
+    // ⚠️⚠️ **保活会让页面自报可见** —— `Emulation.setFocusEmulationEnabled` 一发，
+    // 后台标签页的 `visibilityState` 就变成 `visible`、触发一次 `visibilitychange`。
+    // 那一刻的「变可见」不是用户做的，写下去等于让一条后台任务把
+    // 「用户上次看的是哪个站」改成它自己那一站。
+    //
+    // ⇒ 两个时点都必须被这道判据挡住：加载那一次（⑧）与变可见那一次（⑧b）。
+    const harness = buildDeps({ isTabKeepAliveRequested: () => true });
+    const cleanup = installZaiCapabilities(harness.deps);
+    // ⑧：桩里 `visibilityState` 默认就是 visible，加载那一次已经被挡掉。
+    expect(harness.count('rememberViewedSite'), '保活期间加载时不该写').toBe(0);
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    try {
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(harness.count('rememberViewedSite'), '保活期间变可见也不该写').toBe(0);
+    } finally {
+      cleanup();
+      Reflect.deleteProperty(document, 'visibilityState');
+    }
+  });
+
+  it('remembers the site again once keep-alive is released', () => {
+    // ⚠️ 判据读的是**调用那一刻**的值，不是安装时快照下来的 ——
+    // 保活是「这一段窗口内要」，不是这条标签的永久属性。
+    let wantsKeepAlive = true;
+    const harness = buildDeps({ isTabKeepAliveRequested: () => wantsKeepAlive });
+    const cleanup = installZaiCapabilities(harness.deps);
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    try {
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(harness.count('rememberViewedSite')).toBe(0);
+
+      wantsKeepAlive = false;
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(harness.count('rememberViewedSite')).toBe(1);
+    } finally {
+      cleanup();
       Reflect.deleteProperty(document, 'visibilityState');
     }
   });

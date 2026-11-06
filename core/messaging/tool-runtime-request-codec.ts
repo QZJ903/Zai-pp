@@ -219,8 +219,11 @@ export const TOOL_RUNTIME_PAYLOAD_DECODERS: ToolRuntimePayloadDecoderMap = {
   GET_TOOL_CALL_HISTORY(value) {
     if (value === undefined) return undefined;
     const payload = recordValue(value, 'GET_TOOL_CALL_HISTORY.payload');
+    // ⚠️ **必须是正整数**：这个值直接进 `history.slice(0, limit)`。只判「是有限数」时，
+    // 负数会被 `slice` 解释成「从尾部倒数」（`-1` = 去掉最后一条，与「最近 N 条」正好
+    // 相反）、小数得到空数组 —— 两种都不报错。省略（`undefined`）仍合法，走默认值。
     if (payload.limit !== undefined) {
-      finiteNumber(payload.limit, 'GET_TOOL_CALL_HISTORY.payload.limit');
+      positiveInteger(payload.limit, 'GET_TOOL_CALL_HISTORY.payload.limit');
     }
     return typedPayload<'GET_TOOL_CALL_HISTORY'>(payload);
   },

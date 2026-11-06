@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LocaleMessageKey, MessageParams } from '../../../core/i18n';
-import { PAGE_CONTENT_SCRIPT_MISSING_CODE } from '../../../core/messaging/error-code';
+import {
+  PAGE_CONTENT_SCRIPT_MISSING_CODE,
+  PROMPT_INPUT_NOT_FOUND_CODE,
+} from '../../../core/messaging/error-code';
 import type { SavedItem, SavedItemInput } from '../../../core/saved-items/types';
 import { createRequestGenerationFence } from '../async-state';
 import { formatRuntimeError } from '../runtime-response';
@@ -125,7 +128,11 @@ export function useSavedPageController(t: Translator, confirm: Confirm, feedback
       const raw = formatRuntimeError(error, t, { bare: true });
       const message = raw === PAGE_CONTENT_SCRIPT_MISSING_CODE
         ? t('common.pageContentScriptMissing')
-        : raw;
+        // 「页面里找不到输入框」只需刷新；与上面那档（没有可用内容脚本）不是一回事，
+        // 也与「当前窗口没有 z.ai 页面」不同 —— 后者会引导用户去登录。
+        : raw === PROMPT_INPUT_NOT_FOUND_CODE
+          ? t('sidepanel.automationPage.error.pageNoInput')
+          : raw;
       feedback.error(t('sidepanel.savedPage.insertFailed', { error: message }));
     }
   }, [feedback, t]);

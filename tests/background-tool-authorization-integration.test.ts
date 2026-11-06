@@ -109,8 +109,6 @@ describe('real tool authorization handler composition', () => {
           storage: true,
           runtimeMessaging: true,
           downloads: false,
-          filePicker: false,
-          folderPicker: false,
           assetUrl: true,
           sidePanel: true,
           nativeMessaging: false,

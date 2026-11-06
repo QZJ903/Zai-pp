@@ -50,3 +50,18 @@ export const PAGE_CONTENT_SCRIPT_MISSING_CODE = 'page_content_script_missing';
  * 当失败会让整个清空中断在半路）。
  */
 export const MEMORY_RECORD_MISSING_CODE = 'memory_record_missing';
+
+/**
+ * 「z.ai 页面里找不到输入框」—— 由内容脚本的 `insertPromptText` 判定，经后台转给侧边栏。
+ *
+ * ⚠️⚠️ **生产端与判定端必须同源**：生产端在 `entrypoints/background.ts` 的
+ * `getPromptInsertionErrorMessage`（把它原样回出去，不在后台翻文案），判定端在侧边栏
+ * `useSavedPageController`（换成「请刷新 Zai 页面后重试」那一句）。
+ *
+ * ⚠️ **不能与「当前窗口没有 z.ai 页面」共用一句建议** —— 后者该让用户去打开并登录，
+ * 前者只需要刷新。混成一句时用户会照着错的那句去做。
+ *
+ * ⚠️ **为什么后台回码、不回文案**：`BACKGROUND_LOCALE_SECTIONS` 只含
+ * `content` / `background` / `tool` / `prompt` 四段，侧边栏那批文案不在里面。
+ */
+export const PROMPT_INPUT_NOT_FOUND_CODE = 'prompt_input_not_found';

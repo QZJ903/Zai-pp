@@ -38,7 +38,16 @@ export interface SkillRuntimeHandlerDependencies {
   checkGitHubSkillSourceUpdates(sourceId: string): Promise<GitHubSkillUpdatePreview>;
   updateGitHubSkillSource(sourceId: string): Promise<GitHubSkillImportResult>;
   deleteGitHubSkillSource(sourceId: string): Promise<void>;
-  broadcastStateUpdate(excludeTabId?: number): Promise<void>;
+  /**
+   * 通知各上下文「技能状态已提交」。
+   *
+   * ⚠️⚠️ **`notify*` 而不是 `broadcast*`：它是尽力通知** —— 广播失败被吞掉并上报，
+   * 不会把一次**已经落库成功**的写入变成失败响应。广播的第一步要读五路状态
+   * （记忆 / 技能 / 预设 / 提示词设置 / 自动激活），任何一路读失败（例如记忆库里有
+   * 一条坏记录）都会让那次读抛错；若直接 `await` 它，用户会看到「保存技能失败」，
+   * 而技能其实已经存进去了 —— 重试还会因重名再失败一次。
+   */
+  notifyStateCommitted(excludeTabId?: number): Promise<void>;
 }
 
 export function createSkillRuntimeHandlers(
@@ -60,22 +69,22 @@ export function createSkillRuntimeHandlers(
     definePersistencePayloadRuntimeCommandHandler('SAVE_SKILL', async (payload, context) => {
       const { skill, previousName } = splitSaveSkillPayload(payload);
       await dependencies.saveSkill(skill, previousName);
-      await dependencies.broadcastStateUpdate(context.tabId);
+      await dependencies.notifyStateCommitted(context.tabId);
       return { ok: true as const };
     }),
     definePersistencePayloadRuntimeCommandHandler('DELETE_SKILL', async (payload, context) => {
       await dependencies.deleteSkill(payload.name);
-      await dependencies.broadcastStateUpdate(context.tabId);
+      await dependencies.notifyStateCommitted(context.tabId);
       return { ok: true as const };
     }),
     definePersistencePayloadRuntimeCommandHandler('SET_SKILL_ENABLED', async (payload, context) => {
       await dependencies.setSkillEnabled(payload.name, payload.enabled);
-      await dependencies.broadcastStateUpdate(context.tabId);
+      await dependencies.notifyStateCommitted(context.tabId);
       return { ok: true as const };
     }),
     definePersistencePayloadRuntimeCommandHandler('SET_SKILLS_ENABLED', async (payload, context) => {
       await dependencies.setSkillsEnabled(payload.updates);
-      await dependencies.broadcastStateUpdate(context.tabId);
+      await dependencies.notifyStateCommitted(context.tabId);
       return { ok: true as const };
     }),
     definePersistencePayloadRuntimeCommandHandler('PREVIEW_GITHUB_SKILL_SOURCE', (payload) => (
@@ -83,7 +92,7 @@ export function createSkillRuntimeHandlers(
     )),
     definePersistencePayloadRuntimeCommandHandler('IMPORT_GITHUB_SKILL_SOURCE', async (request, context) => {
       const result = await dependencies.importGitHubSkillSource(request);
-      await dependencies.broadcastStateUpdate(context.tabId);
+      await dependencies.notifyStateCommitted(context.tabId);
       return result;
     }),
     definePersistencePayloadRuntimeCommandHandler('PREVIEW_LOCAL_SKILL_SOURCE', (payload) => (
@@ -95,19 +104,19 @@ export function createSkillRuntimeHandlers(
     definePersistencePayloadRuntimeCommandHandler('IMPORT_LOCAL_SKILL_SOURCE', async (request, context) => {
       const result = await dependencies.importLocalSkillSource(request);
       if (!result.ok) return result;
-      await dependencies.broadcastStateUpdate(context.tabId);
+      await dependencies.notifyStateCommitted(context.tabId);
       return result;
     }),
     definePersistencePayloadRuntimeCommandHandler('UPDATE_LOCAL_SKILL_SOURCE', async (payload, context) => {
       const result = await dependencies.updateLocalSkillSource(payload.sourceId);
       if (!result.ok) return result;
-      await dependencies.broadcastStateUpdate(context.tabId);
+      await dependencies.notifyStateCommitted(context.tabId);
       return result;
     }),
     definePersistencePayloadRuntimeCommandHandler('RELOCATE_LOCAL_SKILL_SOURCE', async (payload, context) => {
       const result = await dependencies.relocateLocalSkillSource(payload.sourceId, payload.newRootPath);
       if (!result.ok) return result;
-      await dependencies.broadcastStateUpdate(context.tabId);
+      await dependencies.notifyStateCommitted(context.tabId);
       return result;
     }),
     definePersistencePayloadRuntimeCommandHandler('CHECK_GITHUB_SKILL_SOURCE_UPDATES', (payload) => (
@@ -115,12 +124,12 @@ export function createSkillRuntimeHandlers(
     )),
     definePersistencePayloadRuntimeCommandHandler('UPDATE_GITHUB_SKILL_SOURCE', async (payload, context) => {
       const result = await dependencies.updateGitHubSkillSource(payload.sourceId);
-      await dependencies.broadcastStateUpdate(context.tabId);
+      await dependencies.notifyStateCommitted(context.tabId);
       return result;
     }),
     definePersistencePayloadRuntimeCommandHandler('DELETE_GITHUB_SKILL_SOURCE', async (payload, context) => {
       await dependencies.deleteGitHubSkillSource(payload.sourceId);
-      await dependencies.broadcastStateUpdate(context.tabId);
+      await dependencies.notifyStateCommitted(context.tabId);
       return { ok: true as const };
     }),
   ]);

@@ -9,8 +9,6 @@ export type PlatformCapability =
   | 'storage'
   | 'runtimeMessaging'
   | 'downloads'
-  | 'filePicker'
-  | 'folderPicker'
   | 'assetUrl'
   | 'sidePanel'
   | 'nativeMessaging'
@@ -33,8 +31,6 @@ export const EMPTY_PLATFORM_CAPABILITIES: PlatformCapabilityMap = {
   storage: false,
   runtimeMessaging: false,
   downloads: false,
-  filePicker: false,
-  folderPicker: false,
   assetUrl: false,
   sidePanel: false,
   nativeMessaging: false,
@@ -87,8 +83,6 @@ export function getCurrentPlatformEnvironment(): PlatformEnvironment {
       runtimeMessaging: Boolean(readOptionalChromeApi(() => runtime?.sendMessage)),
       downloads: hasDeclaredManifestPermission(runtime, 'downloads')
         && Boolean(readOptionalChromeApi(() => chromeApi?.downloads?.download)),
-      filePicker: typeof document !== 'undefined',
-      folderPicker: typeof document !== 'undefined',
       assetUrl: Boolean(readOptionalChromeApi(() => runtime?.getURL)),
       sidePanel: Boolean(readOptionalChromeApi(() => chromeApi?.sidePanel)),
       nativeMessaging: Boolean(

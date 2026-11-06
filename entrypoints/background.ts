@@ -146,7 +146,10 @@ import { AUTH_READ_TIMEOUT_MS, loadZaiAuthFromStorage } from '../core/zai/auth';
 import { createZaiModelCatalog } from '../core/zai/models';
 import { createDomTaskRuntimeHandlers } from './background/dom-task-handlers';
 import { broadcastRuntimeUpdate, isMissingRuntimeMessageReceiverError } from '../core/messaging/broadcast';
-import { PAGE_CONTENT_SCRIPT_MISSING_CODE } from '../core/messaging/error-code';
+import {
+  PAGE_CONTENT_SCRIPT_MISSING_CODE,
+  PROMPT_INPUT_NOT_FOUND_CODE,
+} from '../core/messaging/error-code';
 import { createBackgroundErrorResponse } from '../core/messaging/background-error';
 import {
   authorizeRuntimeMessage,
@@ -308,7 +311,7 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         checkGitHubSkillSourceUpdates,
         updateGitHubSkillSource: persistenceMutations.updateGitHubSkillSource,
         deleteGitHubSkillSource: persistenceMutations.deleteGitHubSkillSource,
-        broadcastStateUpdate,
+        notifyStateCommitted: notifyCommittedStateUpdate,
       },
       library: {
         getAllPresets,
@@ -324,11 +327,10 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         saveSavedItem,
         deleteSavedItem,
         insertPromptIntoActiveZaiTab,
-        broadcastStateUpdate,
-        broadcastSavedItemsUpdate,
+        notifyStateCommitted: notifyCommittedStateUpdate,
+        notifySavedItemsCommitted: notifyCommittedSavedItemsUpdate,
       },
       localPreference: {
-        broadcastStateUpdate,
         getBackgroundConfig,
         saveBackgroundConfig,
         clearBackgroundConfig,
@@ -600,6 +602,10 @@ function enableSidePanelActionClick() {
     //（既不是扩展的问题，也没法照做），只会让人以为扩展坏了。
     // ⚠️ **`.catch` 必须保留**：去掉它就成了 unhandled rejection，
     // 那在错误面板里比原来更显眼。
+    // ⚠️ 前面的可选链只挡住「`sidePanel` 或该方法不存在」，**挡不住「它返回非 Promise」**
+    // —— 那时 `.catch` 会同步抛 `TypeError`。当前 Chrome 的签名是 `=> Promise<void>`、
+    // 且本地的 `SidePanelApi` 也这么声明，所以这一档只在浏览器改了契约时才出现；
+    // 保留 `.catch` 正是为了那一刻不至于把启动链炸掉。
     .catch(() => undefined);
 }
 
@@ -681,6 +687,7 @@ const QUIET_BACKGROUND_ERROR_CODES: ReadonlySet<string> = new Set([
   'whats_new_update_failed',
   'automation_session_persist_failed',
   'committed_state_broadcast_failed',
+  'committed_saved_items_broadcast_failed',
   'broadcast_runtime_delivery_failed',
   'broadcast_tab_delivery_failed',
   'broadcast_tabs_query_failed',
@@ -768,11 +775,28 @@ async function broadcastStateUpdate(excludeTabId?: number) {
   await broadcastToTabs({ type: 'STATE_UPDATED', memories, skills, activePreset, promptSettings, skillAutoActivation }, excludeTabId);
 }
 
+/**
+ * 通知各上下文「状态已提交」—— **尽力而为，失败只上报、不抛出**。
+ *
+ * ⚠️⚠️ **与直接 `await broadcastStateUpdate(...)` 的区别是失败方向**：广播的第一步要读
+ * 五路状态（记忆 / 技能 / 预设 / 提示词设置 / 自动激活），任何一路读失败都会让那次读
+ * 抛错。而在 handler 里那一刻**写入已经落库成功**了 —— 把读失败抛给调用方，用户会看到
+ * 「保存失败」，实际数据已经存好，重试还会因重名再失败一次。
+ */
 async function notifyCommittedStateUpdate(excludeTabId?: number): Promise<void> {
   try {
     await broadcastStateUpdate(excludeTabId);
   } catch (error) {
     reportBackgroundStartupError('committed_state_broadcast_failed', error);
+  }
+}
+
+/** 同 `notifyCommittedStateUpdate`，只是通知的是「收藏项」那一份。 */
+async function notifyCommittedSavedItemsUpdate(excludeTabId?: number): Promise<void> {
+  try {
+    await broadcastSavedItemsUpdate(excludeTabId);
+  } catch (error) {
+    reportBackgroundStartupError('committed_saved_items_broadcast_failed', error);
   }
 }
 
@@ -866,7 +890,10 @@ async function insertPromptIntoActiveZaiTab(
 
 function getPromptInsertionErrorMessage(error: unknown): string {
   if (error === 'empty_prompt_text') return 'empty_prompt_text';
-  if (error === 'prompt_input_not_found') return backgroundT('background.auth.missingZai');
+  // ⚠️ **原样回码、不在这里翻文案**：「找不到输入框」与「当前窗口没有 z.ai 页面」是两件事
+  // —— 前者只需刷新页面，后者才要去打开并登录。两者共用一句建议会让用户照着错的那句做。
+  // 文案由侧边栏按码映射（见 `useSavedPageController`）。
+  if (error === PROMPT_INPUT_NOT_FOUND_CODE) return PROMPT_INPUT_NOT_FOUND_CODE;
   return typeof error === 'string' && error.length > 0
     ? error
     : backgroundT('background.auth.missingZai');
