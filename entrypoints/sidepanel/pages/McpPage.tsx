@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import type { LocaleMessageKey, MessageParams, SupportedLocale } from '../../../core/i18n';
 import type {
   McpCapabilityExposureMode,
@@ -19,6 +19,7 @@ import type {
 import { SHELL_TOOL_NAMES } from '../../../core/shell/contracts';
 import { isShellMcpServer } from '../../../core/shell/policy';
 import PageIntro from '../components/PageIntro';
+import { SVG_PATHS } from '../constants';
 import { useI18n } from '../i18n';
 import {
   countEnabledMcpTools,
@@ -153,7 +154,7 @@ export default function McpPage() {
               className="ds-btn-primary px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-all duration-150 flex items-center gap-1"
             >
               <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                <path strokeLinecap="round" strokeLinejoin="round" d={SVG_PATHS.plus} />
               </svg>
               {t('sidepanel.mcpPage.addServer')}
             </button>
@@ -202,7 +203,7 @@ export default function McpPage() {
                 className="ds-btn-primary px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-all duration-150 flex items-center gap-1"
               >
                 <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d={SVG_PATHS.plus} />
                 </svg>
                 {t('sidepanel.mcpPage.emptyCreateAction')}
               </button>
@@ -368,6 +369,28 @@ function McpServerForm({
   );
   const transportOptions = TRANSPORT_OPTIONS.filter((item) => supportedTransportKinds.includes(item.kind));
   const selectedTransport = transportOptions.find((item) => item.kind === form.transportKind) ?? transportOptions[0] ?? TRANSPORT_OPTIONS[0];
+  const transportGroupRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Roving focus for the transport radio group — same contract as `SegmentedControl`
+   * and the language group in `GeneralSubPage`: one Tab stop for the whole group, arrows
+   * move focus AND selection. This strip is hand-rolled (its own pill styling), so it
+   * does not inherit that behaviour from the shared component.
+   */
+  const onTransportKeyDown = (event: React.KeyboardEvent, index: number) => {
+    const isForward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
+    const isBackward = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
+    const isEdge = event.key === 'Home' || event.key === 'End';
+    if (!isForward && !isBackward && !isEdge) return;
+    event.preventDefault();
+    const next = isEdge
+      ? (event.key === 'Home' ? 0 : transportOptions.length - 1)
+      : isForward
+        ? (index + 1) % transportOptions.length
+        : (index - 1 + transportOptions.length) % transportOptions.length;
+    setTransportKind(transportOptions[next].kind);
+    transportGroupRef.current?.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
+  };
 
   useEffect(() => {
     if (supportedTransportKinds.includes(form.transportKind)) return;
@@ -429,8 +452,13 @@ function McpServerForm({
 
         <div>
           <span className="block text-xs mb-1" style={{ color: 'var(--ds-text-secondary)' }}>{t('sidepanel.mcpPage.form.transport')}</span>
-          <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t('sidepanel.mcpPage.form.transport')}>
-            {transportOptions.map((item) => {
+          <div
+            ref={transportGroupRef}
+            className="flex flex-wrap gap-1.5"
+            role="radiogroup"
+            aria-label={t('sidepanel.mcpPage.form.transport')}
+          >
+            {transportOptions.map((item, index) => {
               const active = item.kind === form.transportKind;
               return (
                 <button
@@ -438,6 +466,8 @@ function McpServerForm({
                   type="button"
                   role="radio"
                   aria-checked={active}
+                  tabIndex={active ? 0 : -1}
+                  onKeyDown={(event) => onTransportKeyDown(event, index)}
                   onClick={() => setTransportKind(item.kind)}
                   className="px-2.5 py-1.5 text-[11px] font-medium rounded-lg border transition-all duration-150"
                   style={{

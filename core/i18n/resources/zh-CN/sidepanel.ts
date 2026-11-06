@@ -172,6 +172,10 @@ export const sidepanel = {
       automation: '自动化：把固定任务交给独立会话，手动触发或按 Cron / RRULE 定时执行。',
     },
   },
+  errorBoundary: {
+    title: '这一页出错了',
+    reload: '重新加载',
+  },
   memoryPage: {
     title: '记忆',
     description: '管理会长期影响 Zai++ 回复的用户偏好、反馈、话题背景和参考资料。',
@@ -263,7 +267,10 @@ export const sidepanel = {
     languageChinese: '简体中文',
     languageEnglish: 'English',
     languageCurrent: '当前：{language}',
-    operationFailed: '操作失败',
+    backgroundSaveFailed: '背景设置保存失败：{error}',
+    exportMemoriesFailed: '导出记忆失败：{error}',
+    exportLogsFailed: '导出诊断日志失败：{error}',
+    clearAllFailed: '清除记忆失败：{error}',
     importMemoryArrayError: '导入文件必须是记忆数组',
     importSuccess: '已导入 {count} 条记忆',
     jsonFormatError: 'JSON 格式错误',

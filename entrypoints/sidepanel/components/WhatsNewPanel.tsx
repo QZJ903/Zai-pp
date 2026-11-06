@@ -24,6 +24,9 @@ export default function WhatsNewPanel() {
     if (!state?.visible) return;
     dismissRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
+      // 对话框会 `preventDefault()` 认领 Esc。关掉公告是**永久**的（写存储 + 清角标），
+      // 所以不能搭上一个用户按来关别的东西的键。
+      if (e.defaultPrevented) return;
       if (e.key === 'Escape') {
         setState((current) => current ? { ...current, visible: false, pendingUpdate: false } : current);
         void dismissWhatsNew()

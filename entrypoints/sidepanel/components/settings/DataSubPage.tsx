@@ -21,9 +21,10 @@ export default function DataSubPage({ state }: { state: SettingsState }) {
     // ⚠️ **必须 catch** —— 不加的话 `handleClearAllMemories` 抛出的错误会变成
     // 未处理的 promise rejection：用户看到的是「点了按钮、什么都没发生」，
     // 而真实原因（存储坏了 / 配额满了）只在 DevTools 里。
-    // ⚠️ 与旁边「导出日志」那条同一形态（`void ... .catch(() => banner.show(...))`）。
     await state.handleClearAllMemories()
-      .catch(() => banner.show('error', t('sidepanel.settings.operationFailed')));
+      .catch((error) => banner.show('error', t('sidepanel.settings.clearAllFailed', {
+        error: formatRuntimeError(error, t, { bare: true }),
+      })));
   };
 
   return (
@@ -47,7 +48,9 @@ export default function DataSubPage({ state }: { state: SettingsState }) {
 
         <div className="flex gap-2">
           <button
-            onClick={state.handleExport}
+            onClick={() => void state.handleExport().catch((error) => banner.show('error', t('sidepanel.settings.exportMemoriesFailed', {
+              error: formatRuntimeError(error, t, { bare: true }),
+            })))}
             className="ds-btn-secondary flex-1 py-2.5 text-xs font-medium rounded-lg transition-all duration-150 flex items-center justify-center gap-1.5"
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -56,7 +59,9 @@ export default function DataSubPage({ state }: { state: SettingsState }) {
             {t('sidepanel.settings.exportMemories')}
           </button>
           <button
-            onClick={() => void state.handleExportLogs().catch(() => banner.show('error', t('sidepanel.settings.operationFailed')))}
+            onClick={() => void state.handleExportLogs().catch((error) => banner.show('error', t('sidepanel.settings.exportLogsFailed', {
+              error: formatRuntimeError(error, t, { bare: true }),
+            })))}
             className="ds-btn-secondary flex-1 py-2.5 text-xs font-medium rounded-lg transition-all duration-150 flex items-center justify-center gap-1.5"
             title={t('sidepanel.settings.exportLogsHint')}
           >

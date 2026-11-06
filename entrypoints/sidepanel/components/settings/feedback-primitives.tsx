@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useI18n } from '../../i18n';
 
 export function StatusMessage({
   tone,
@@ -9,6 +10,7 @@ export function StatusMessage({
   children: ReactNode;
   onDismiss?: () => void;
 }) {
+  const { t } = useI18n();
   const palette = {
     success: { color: 'var(--ds-success)', bg: 'var(--ds-success-bg)' },
     error: { color: 'var(--ds-danger)', bg: 'var(--ds-danger-bg)' },
@@ -31,7 +33,7 @@ export function StatusMessage({
         <button
           type="button"
           onClick={onDismiss}
-          aria-label="dismiss"
+          aria-label={t('common.close')}
           className="shrink-0 opacity-60 hover:opacity-100"
           style={{ color: palette.color, lineHeight: 'inherit' }}
         >
@@ -47,13 +49,28 @@ export function StatusMessage({
  * stay within the extension UI and preserve keyboard focus handling.
  */
 export function useConfirm() {
+  // 只存渲染用的四段文案。resolver **不**放这里 —— 它由 `pendingRef` 独占，
+  // 两份 resolver 并存会让后来的人在其中一处「修」出分叉。
   const [state, setState] = useState<{
     title: string;
     message: string;
     confirmLabel: string;
     cancelLabel: string;
-    resolve: (ok: boolean) => void;
   } | null>(null);
+  /**
+   * 当前那个还没被回答的确认框的 resolver。
+   *
+   * ⚠️ 没有它的话，第二次 `confirm()` 会把 state 整个覆盖掉 —— 第一个 Promise 的
+   * resolver 就此丢失，那个 `await confirm(...)` **永远挂着**，调用方 `await` 之后的
+   * 清理动作（清 loading、删 sourceActions 条目）也就永远不跑。
+   * 顶掉前一个时以「取消」收尾：用户显然已经转向另一个操作了。
+   */
+  const pendingRef = useRef<((ok: boolean) => void) | null>(null);
+  useEffect(() => () => {
+    // 卸载时也要收尾，否则挂着的 await 一样不停。
+    pendingRef.current?.(false);
+    pendingRef.current = null;
+  }, []);
 
   const confirm = (options: {
     title: string;
@@ -61,8 +78,17 @@ export function useConfirm() {
     confirmLabel: string;
     cancelLabel: string;
   }) => new Promise<boolean>((resolve) => {
-    setState({ ...options, resolve });
+    pendingRef.current?.(false);
+    pendingRef.current = resolve;
+    setState(options);
   });
+
+  const settle = (ok: boolean) => {
+    const resolve = pendingRef.current;
+    pendingRef.current = null;
+    resolve?.(ok);
+    setState(null);
+  };
 
   const node = state ? (
     <ConfirmDialog
@@ -70,14 +96,8 @@ export function useConfirm() {
       message={state.message}
       confirmLabel={state.confirmLabel}
       cancelLabel={state.cancelLabel}
-      onConfirm={() => {
-        state.resolve(true);
-        setState(null);
-      }}
-      onCancel={() => {
-        state.resolve(false);
-        setState(null);
-      }}
+      onConfirm={() => settle(true)}
+      onCancel={() => settle(false)}
     />
   ) : null;
 
@@ -102,7 +122,12 @@ function ConfirmDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onCancel();
+      if (event.key === 'Escape') {
+        // 认领这个键：让其它挂在 window 上的监听（更新公告浮层）看出「Esc 已被对话框
+        // 消费掉了」，不要再跟着关一次。
+        event.preventDefault();
+        onCancel();
+      }
       if (event.key !== 'Tab') return;
       const focusable = dialogRef.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])');
       if (!focusable?.length) return;
@@ -116,8 +141,15 @@ function ConfirmDialog({
         first.focus();
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    // ⚠️ **必须走捕获阶段**：这个对话框与更新公告浮层都挂在 `window` 上，而同一个
+    // EventTarget 上的监听按**注册顺序**调用 —— 公告是 App 启动时挂的，bubble 阶段的
+    // 这里永远是第二个跑，看不到「已被消费」。捕获阶段保证它先跑，与注册顺序无关。
+    // 效果：一次 Esc 只关对话框，不会顺手把公告永久标记为已读。
+    //
+    // ⚠️ 清理处必须带同样的 `true` —— capture 标志是 `removeEventListener` 的匹配条件，
+    // 漏了它监听删不掉。
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [onCancel]);
 
   return (

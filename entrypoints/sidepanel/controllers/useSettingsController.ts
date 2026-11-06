@@ -7,11 +7,9 @@ import {
 import { decodeRuntimeConfigResponse } from '../../../core/messaging/bootstrap-client';
 import { MEMORY_RECORD_MISSING_CODE } from '../../../core/messaging/error-code';
 import { getRuntimeErrorMessage } from '../runtime-response';
-import type {
-  BackgroundConfig,
-  Memory,
-} from '../../../core/types';
+import type { BackgroundConfig } from '../../../core/types';
 import { sidepanelRuntimeClient } from '../runtime-client';
+import { createSerialOperationQueue } from '../../../core/persistence/serial-operation-queue';
 import { libraryController } from './library-controller';
 
 /**
@@ -31,6 +29,19 @@ const DEFAULT_BACKGROUND_CONFIG: BackgroundConfig = {
   opacity: DEFAULT_BACKGROUND_OPACITY,
 };
 
+/**
+ * 背景设置写入的串行队列（一个存储键一条）。
+ *
+ * 这些写入是「拿 ref 读 → 合并 → 写」，两次请求重叠时后完成的那个会把更旧的快照
+ * 写回去。与 `core/browser-control/settings.ts` 同形 —— 那边把同一条危害写在了注释里。
+ *
+ * ⚠️ **它是模块级单例，而本 controller 有两个实例**（`SettingsPage` 与 `LibraryPage`
+ * 各挂一个）。对「同一个存储键」来说这是**对的**：队列要串的是对那个键的写入，
+ * 不是某个组件实例的写入。但 `LibraryPage` 那份走默认的 `LOG_BACKGROUND_ERROR`，
+ * 它若哪天也发起背景写入，失败提示只会进控制台 —— 那种情况下要把它的 feedback 接上。
+ */
+const backgroundWriteQueue = createSerialOperationQueue();
+
 function settingsLoadFallback<T>(label: string, fallback: T): (error: unknown) => T {
   return (error) => {
     console.log(`[Zai++] Failed to load ${label} settings.`, error);
@@ -38,7 +49,26 @@ function settingsLoadFallback<T>(label: string, fallback: T): (error: unknown) =
   };
 }
 
-export function useSettingsController() {
+/**
+ * 背景设置写入失败的出口。
+ *
+ * 设置壳自己没有任何提示条（`GeneralSubPage` 不渲染 `StatusMessage`），所以由持有它的
+ * 页面注入 —— 与 `useMemoryPageController` 的 feedback 通道同一个形状。没有它，一次
+ * 失败的保存是不可见的，界面会继续显示一个从未写入过的值。
+ */
+export interface SettingsBackgroundFeedback {
+  /** 拿到原始错误 —— 调用方持有 `t`，所以本地化也归它。 */
+  error(error: unknown): void;
+}
+
+/** 默认只打日志：`LibraryPage` 也用这个 controller（为了记忆总数），但它不显示背景控件。 */
+const LOG_BACKGROUND_ERROR: SettingsBackgroundFeedback = {
+  error(error: unknown) {
+    console.log('[Zai++] background settings write failed.', error);
+  },
+};
+
+export function useSettingsController(feedback: SettingsBackgroundFeedback = LOG_BACKGROUND_ERROR) {
   // --- shared / general ---
   /**
    * 记忆总数 —— **`null` 表示「没读到」，不是「没有记忆」**。
@@ -73,6 +103,12 @@ export function useSettingsController() {
   const [bgImageData, setBgImageData] = useState('');
   const [bgOpacity, setBgOpacity] = useState(DEFAULT_BACKGROUND_OPACITY);
 
+  const feedbackRef = useRef(feedback);
+  feedbackRef.current = feedback;
+  const onBackgroundError = useCallback((error: unknown) => {
+    feedbackRef.current.error(error);
+  }, []);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bgConfigRef = useRef<BackgroundConfig>(DEFAULT_BACKGROUND_CONFIG);
 
@@ -93,8 +129,13 @@ export function useSettingsController() {
     let cancelled = false;
     (async () => {
       const [memories, cfg, bgCfg, keepalive] = await Promise.all([
-        libraryController.getMemories()
-          .catch(settingsLoadFallback<Memory[] | null>('memory count', null)),
+        // ⚠️ **这里只量长度，不解码。** 走 `libraryController.getMemories()` 会把整份记忆解一遍，
+        // 而任何一条形状不合都会让这次读抛错 ⇒ 「设置页读不到记忆总数」。
+        // 与下面 `STATE_UPDATED` 的处置同口径：只需要 `.length` 就不该承担解码的失败面。
+        // 导出与清空那两处仍然解码 —— 它们要的是记录本身，不是长度。
+        sidepanelRuntimeClient.request({ type: 'GET_MEMORIES' })
+          .then((value) => (Array.isArray(value) ? value.length : null))
+          .catch(settingsLoadFallback<number | null>('memory count', null)),
         sidepanelRuntimeClient.request(
           { type: 'GET_CONFIG' },
           { decode: decodeRuntimeConfigResponse },
@@ -106,7 +147,7 @@ export function useSettingsController() {
           .catch(settingsLoadFallback('tab keepalive', null)),
       ]);
       if (cancelled) return;
-      setMemoryCount(memories ? memories.length : null);
+      setMemoryCount(memories);
       setVersion(cfg && 'version' in cfg ? cfg.version : '');
       const normalizedBg = normalizeBackgroundConfig(bgCfg as BackgroundConfig | null);
       if (normalizedBg) syncBgState(normalizedBg);
@@ -123,18 +164,48 @@ export function useSettingsController() {
     };
   }, [syncBgState]);
 
+  /**
+   * 记忆总数跟着每一次已提交的记忆变更走。
+   *
+   * 只为拿一个 `.length` 而把整份记忆解一遍不划算，而且**一条形状不合的记忆会让
+   * 「设置页读不到总数」** —— 所以这里只测量广播里的数组，不 decode。
+   * `useMemoryPageController` 那边要渲染记录，才必须 decode，两种需求不该抄。
+   */
+  useEffect(() => {
+    const applyMemoryCount = (message: { type?: string; memories?: unknown }) => {
+      if (message.type !== 'STATE_UPDATED') return;
+      if (!Array.isArray(message.memories)) return;
+      setMemoryCount(message.memories.length);
+    };
+    // 兜一层：这个 controller 也被只桩了部分 runtime 面的单测挂载，
+    // 缺了监听注册表不该把整页带崩。
+    const messageBus = typeof chrome !== 'undefined' ? chrome.runtime?.onMessage : undefined;
+    if (!messageBus) return;
+    messageBus.addListener(applyMemoryCount);
+    return () => messageBus.removeListener(applyMemoryCount);
+  }, []);
+
   // --- background ---
+  /**
+   * 落盘一份背景补丁。
+   *
+   * ⚠️ **内存里的 ref 只在写入成功后才推进** —— 先推进会让一次失败的保存泄进下一次
+   * 写入（实测：把开关关掉落库失败后再拖透明度，那个从未写成功的 `enabled: false`
+   * 会跟着新透明度一起发出去）。
+   */
   const saveBgConfig = useCallback(async (patch: Partial<BackgroundConfig>) => {
-    const config = normalizeBackgroundConfig({
-      ...bgConfigRef.current,
-      ...patch,
+    return backgroundWriteQueue.run(async () => {
+      const config = normalizeBackgroundConfig({
+        ...bgConfigRef.current,
+        ...patch,
+      });
+      if (!config) return;
+      await sidepanelRuntimeClient.request({ type: 'SAVE_BACKGROUND', payload: config });
+      bgConfigRef.current = config;
+      // 落库成功才推进「已保存的 URL」—— 预览与开关的可用性都跟着它走，
+      // 保证它们描述的是**实际生效**的背景，而不是输入框里正在打的字。
+      setBgConfirmedUrl(config.url ?? '');
     });
-    if (!config) return;
-    bgConfigRef.current = config;
-    await sidepanelRuntimeClient.request({ type: 'SAVE_BACKGROUND', payload: config });
-    // 落库成功才推进「已保存的 URL」—— 预览与开关的可用性都跟着它走，
-    // 保证它们描述的是**实际生效**的背景，而不是输入框里正在打的字。
-    setBgConfirmedUrl(config.url ?? '');
   }, []);
 
   /**
@@ -151,16 +222,20 @@ export function useSettingsController() {
       });
       setKeepaliveEnabled(enabled);
     } catch (error) {
-      console.log('[Zai++] setting the tab keepalive switch failed', error);
+      onBackgroundError(error);
     }
-  }, []);
+  }, [onBackgroundError]);
 
   const handleBgToggle = useCallback(
     async (enabled: boolean) => {
-      setBgEnabled(enabled);
-      await saveBgConfig({ enabled });
+      try {
+        await saveBgConfig({ enabled });
+        setBgEnabled(enabled);
+      } catch (error) {
+        onBackgroundError(error);
+      }
     },
-    [saveBgConfig],
+    [onBackgroundError, saveBgConfig],
   );
 
   const resizeImage = useCallback((file: File): Promise<string> => {
@@ -200,60 +275,73 @@ export function useSettingsController() {
       } catch {
         return;
       }
-      setBgType('upload');
-      setBgImageData(data);
-      setBgEnabled(true);
-      bgConfigRef.current = {
-        ...bgConfigRef.current,
-        enabled: true,
-        type: 'upload',
-        imageData: data,
-        url: '',
-      };
-      await saveBgConfig({ enabled: true, type: 'upload', imageData: data, url: '' });
-      e.target.value = '';
+      try {
+        await saveBgConfig({ enabled: true, type: 'upload', imageData: data, url: '' });
+        setBgType('upload');
+        setBgImageData(data);
+        setBgEnabled(true);
+        setBgConfirmedUrl('');
+      } catch (error) {
+        onBackgroundError(error);
+      } finally {
+        e.target.value = '';
+      }
     },
-    [resizeImage, saveBgConfig],
+    [onBackgroundError, resizeImage, saveBgConfig],
   );
 
   const handleUrlConfirm = useCallback(async () => {
     if (!bgUrl.trim()) return;
-    setBgType('url');
-    setBgImageData('');
-    setBgEnabled(true);
-    bgConfigRef.current = {
-      ...bgConfigRef.current,
-      enabled: true,
-      type: 'url',
-      url: bgUrl,
-      imageData: '',
-    };
-    await saveBgConfig({ enabled: true, type: 'url', url: bgUrl, imageData: '' });
-  }, [bgUrl, saveBgConfig]);
+    try {
+      await saveBgConfig({ enabled: true, type: 'url', url: bgUrl, imageData: '' });
+      setBgType('url');
+      setBgImageData('');
+      setBgEnabled(true);
+    } catch (error) {
+      onBackgroundError(error);
+    }
+  }, [bgUrl, onBackgroundError, saveBgConfig]);
 
-  const handleOpacityChange = useCallback(
+  /**
+   * 透明度只在松手时提交。
+   *
+   * 每格 `input` 落一次盘的话，一个有 20 格的滑块一次拖动就是 20 次整份写入 + 20 次广播。
+   */
+  const handleOpacityCommit = useCallback(
     (val: number) => {
       const opacity = clampBackgroundOpacity(val);
-      setBgOpacity(opacity);
-      bgConfigRef.current = {
-        ...bgConfigRef.current,
-        opacity,
-      };
-      void saveBgConfig({ opacity });
+      saveBgConfig({ opacity })
+        .then(() => setBgOpacity(opacity))
+        .catch(onBackgroundError);
     },
-    [saveBgConfig],
+    [onBackgroundError, saveBgConfig],
   );
 
+  /**
+   * 清除背景。
+   *
+   * ⚠️ **必须和 `saveBgConfig` 走同一条队列** —— 它也是「改变这个存储键」的写，
+   * 而队列存在的理由正是「后完成的那次会把更旧的快照写回去」。不改的话实测能复现：
+   * 拖透明度的 `SAVE_BACKGROUND` 还在飞时点清除，序列是
+   * `SAVE start → CLEAR start → CLEAR done → SAVE done` ⇒ 后完成的 SAVE 把 ref 改回
+   * 清除前那份配置并 `setBgConfirmedUrl(url)`，界面又长回预览图，而存储是干净的。
+   */
   const handleClearBg = useCallback(async () => {
-    setBgEnabled(false);
-    setBgType('upload');
-    setBgUrl('');
-    setBgConfirmedUrl('');
-    setBgImageData('');
-    setBgOpacity(DEFAULT_BACKGROUND_OPACITY);
-    bgConfigRef.current = DEFAULT_BACKGROUND_CONFIG;
-    await sidepanelRuntimeClient.request({ type: 'CLEAR_BACKGROUND' });
-  }, []);
+    try {
+      await backgroundWriteQueue.run(async () => {
+        await sidepanelRuntimeClient.request({ type: 'CLEAR_BACKGROUND' });
+        bgConfigRef.current = DEFAULT_BACKGROUND_CONFIG;
+      });
+      setBgEnabled(false);
+      setBgType('upload');
+      setBgUrl('');
+      setBgConfirmedUrl('');
+      setBgImageData('');
+      setBgOpacity(DEFAULT_BACKGROUND_OPACITY);
+    } catch (error) {
+      onBackgroundError(error);
+    }
+  }, [onBackgroundError]);
 
   // --- data ---
   const handleExport = useCallback(async () => {
@@ -303,7 +391,8 @@ export function useSettingsController() {
             throw new Error(result?.error || labels.jsonError);
           }
           const imported = typeof result.count === 'number' ? result.count : parsed.length;
-          setMemoryCount((count) => (count === null ? null : count + imported));
+          // 这里不做 `+ imported` 的乐观更新：handler 在写入之后会广播 STATE_UPDATED，
+          // 那份广播带的就是权威列表，两者相加会双计。
           onResult?.({ ok: true, imported });
         } catch (error) {
           onResult?.({ ok: false, error: error instanceof Error ? error.message : labels.jsonError });
@@ -357,7 +446,7 @@ export function useSettingsController() {
     handleBgToggle,
     handleFileSelect,
     handleUrlConfirm,
-    handleOpacityChange,
+    handleOpacityCommit,
     handleClearBg,
     // data
     handleExport,

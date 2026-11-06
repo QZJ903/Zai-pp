@@ -29,6 +29,7 @@ import {
   useBanner,
   useConfirm,
 } from '../components/settings/primitives';
+import { SVG_PATHS } from '../constants';
 import { useI18n } from '../i18n';
 import { isSidepanelRuntimeEvent } from '../runtime-event-codec';
 import { formatRuntimeError } from '../runtime-response';
@@ -358,7 +359,7 @@ export default function AutomationPage() {
           className="ds-btn-primary px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-all duration-150 flex items-center gap-1"
         >
           <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            <path strokeLinecap="round" strokeLinejoin="round" d={SVG_PATHS.plus} />
           </svg>
           {t('sidepanel.automationPage.create')}
         </button>

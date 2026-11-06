@@ -41,7 +41,15 @@ export class RuntimeCommandError extends Error {
   }
 }
 
+/**
+ * 从任意抛出物里取一句话。
+ *
+ * ⚠️ **`undefined` / `null` 表示「没有话可说」，返回空串** —— 不能落到 `String(value)`
+ * 那条路上：它俩会变成字面量 `'undefined'` / `'null'`，长得像个错误码，
+ * 最后渲染成「操作失败（undefined）」。空串由调用方的兜底文案接住。
+ */
 export function getRuntimeErrorMessage(error: unknown): string {
+  if (error === undefined || error === null) return '';
   return error instanceof Error ? error.message : String(error);
 }
 

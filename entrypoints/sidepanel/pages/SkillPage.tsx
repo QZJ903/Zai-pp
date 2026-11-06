@@ -11,6 +11,7 @@ import SkillForm from '../components/SkillForm';
 import { SkeletonList, ToggleRow, useBanner, useConfirm } from '../components/settings/primitives';
 import { requestGitHubApiPermission } from '../github-permission';
 import { useI18n } from '../i18n';
+import { SVG_PATHS } from '../constants';
 import { createRequestGenerationFence } from '../async-state';
 import { formatRuntimeError } from '../runtime-response';
 import { sidepanelRuntimeClient } from '../runtime-client';
@@ -501,7 +502,7 @@ export default function SkillPage() {
               className="ds-btn-primary px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-all duration-150 flex items-center gap-1"
             >
               <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                <path strokeLinecap="round" strokeLinejoin="round" d={SVG_PATHS.plus} />
               </svg>
               {t('sidepanel.skillPage.createCustom')}
             </button>

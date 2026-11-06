@@ -11,6 +11,7 @@ import {
   getImportBlockInstructions,
   readLocalSkillImportBlock,
 } from '../local-skill-import-block';
+import { Spinner } from './settings/primitives';
 
 type ImportState = 'idle' | 'previewing' | 'ready' | 'importing' | 'success' | 'error';
 
@@ -463,10 +464,6 @@ function Meta({ label, value }: { label: string; value: string }) {
       <div className="text-[11px] font-medium truncate" style={{ color: 'var(--ds-text)' }}>{value}</div>
     </div>
   );
-}
-
-function Spinner() {
-  return <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />;
 }
 
 function FolderPickerIcon() {

@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState } from 'react';
 import type { LocaleMessageKey } from '../../core/i18n';
+import RouteErrorBoundary from './components/RouteErrorBoundary';
 import RouteFallback from './components/RouteFallback';
 import WhatsNewPanel from './components/WhatsNewPanel';
 import { useI18n } from './i18n';
@@ -53,11 +54,16 @@ export default function App() {
 
       <main className="ds-app-main">
         <WhatsNewPanel />
-        <Suspense fallback={<RouteFallback />}>
-          {tab === 'library' && <LibraryPage />}
-          {tab === 'capabilities' && <CapabilitiesPage />}
-          {tab === 'settings' && <SettingsPage />}
-        </Suspense>
+        <RouteErrorBoundary
+          title={t('sidepanel.errorBoundary.title')}
+          reloadLabel={t('sidepanel.errorBoundary.reload')}
+        >
+          <Suspense fallback={<RouteFallback />}>
+            {tab === 'library' && <LibraryPage />}
+            {tab === 'capabilities' && <CapabilitiesPage />}
+            {tab === 'settings' && <SettingsPage />}
+          </Suspense>
+        </RouteErrorBoundary>
       </main>
     </div>
   );

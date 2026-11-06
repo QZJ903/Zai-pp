@@ -172,6 +172,10 @@ export const sidepanel = {
       automation: 'Automation: hand fixed tasks to a dedicated session, triggered manually or on a Cron / RRULE schedule.',
     },
   },
+  errorBoundary: {
+    title: 'This page ran into an error',
+    reload: 'Reload',
+  },
   memoryPage: {
     title: 'Memory',
     description: 'Manage the preferences, feedback, topic context, and references that influence future Zai++ replies.',
@@ -263,7 +267,10 @@ export const sidepanel = {
     languageChinese: 'Simplified Chinese',
     languageEnglish: 'English',
     languageCurrent: 'Current: {language}',
-    operationFailed: 'Operation failed',
+    backgroundSaveFailed: 'Could not save the background settings: {error}',
+    exportMemoriesFailed: 'Could not export memories: {error}',
+    exportLogsFailed: 'Could not export diagnostic logs: {error}',
+    clearAllFailed: 'Could not clear memories: {error}',
     importMemoryArrayError: 'Import file must be a memory array',
     importSuccess: 'Imported {count} memories',
     jsonFormatError: 'Invalid JSON format',

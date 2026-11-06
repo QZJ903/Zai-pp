@@ -4,7 +4,7 @@ import MemoryCard from '../components/MemoryCard';
 import MemoryForm from '../components/MemoryForm';
 import PageIntro from '../components/PageIntro';
 import { SegmentedControl, SkeletonList, useBanner, useConfirm } from '../components/settings/primitives';
-import { MEMORY_TYPE_CONFIG } from '../constants';
+import { MEMORY_TYPE_CONFIG, SVG_PATHS } from '../constants';
 import { useMemoryPageController } from '../controllers/useMemoryPageController';
 import { useI18n } from '../i18n';
 
@@ -60,7 +60,7 @@ export default function MemoryPage() {
           className="ds-btn-primary px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-all duration-150 flex items-center gap-1"
         >
           <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            <path strokeLinecap="round" strokeLinejoin="round" d={SVG_PATHS.plus} />
           </svg>
           {t('common.add')}
         </button>

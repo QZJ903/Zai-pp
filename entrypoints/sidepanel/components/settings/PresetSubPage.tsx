@@ -4,6 +4,7 @@ import { decodeActivePreset, decodePresetCollection } from '../../../../core/pre
 import PresetCard from '../PresetCard';
 import PresetForm from '../PresetForm';
 import { SkeletonList, SettingsSection, useBanner, useConfirm } from './primitives';
+import { SVG_PATHS } from '../../constants';
 import { useI18n } from '../../i18n';
 import { createRequestGenerationFence } from '../../async-state';
 import {
@@ -208,7 +209,7 @@ export default function PresetSubPage() {
               className="ds-btn-primary px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-all duration-150 flex items-center gap-1"
             >
               <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                <path strokeLinecap="round" strokeLinejoin="round" d={SVG_PATHS.plus} />
               </svg>
               {t('sidepanel.presetPage.create')}
             </button>

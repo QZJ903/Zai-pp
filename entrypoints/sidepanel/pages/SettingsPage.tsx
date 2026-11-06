@@ -2,8 +2,9 @@ import { lazy, Suspense, useState } from 'react';
 import type { LocaleMessageKey } from '../../../core/i18n';
 import PageIntro from '../components/PageIntro';
 import RouteFallback from '../components/RouteFallback';
-import { SkeletonList, SubTabs } from '../components/settings/primitives';
+import { SkeletonList, SubTabs, useBanner } from '../components/settings/primitives';
 import { useSettingsController } from '../controllers/useSettingsController';
+import { formatRuntimeError } from '../runtime-response';
 import { useI18n } from '../i18n';
 
 const GeneralSubPage = lazy(() => import('../components/settings/GeneralSubPage'));
@@ -33,7 +34,15 @@ const SUB_DESCRIPTION_KEY: Record<SubTab, LocaleMessageKey> = {
 export default function SettingsPage() {
   const { t } = useI18n();
   const [sub, setSub] = useState<SubTab>('general');
-  const state = useSettingsController();
+  const banner = useBanner();
+  const state = useSettingsController({
+    error: (error) => banner.show(
+      'error',
+      t('sidepanel.settings.backgroundSaveFailed', {
+        error: formatRuntimeError(error, t, { bare: true }),
+      }),
+    ),
+  });
 
   return (
     <div className="ds-settings-shell">
@@ -57,7 +66,7 @@ export default function SettingsPage() {
           <SkeletonList rows={3} />
         ) : (
           <Suspense fallback={<RouteFallback />}>
-            {sub === 'general' && <GeneralSubPage state={state} />}
+            {sub === 'general' && <GeneralSubPage state={state} banner={banner.node} />}
             {sub === 'preset' && <PresetSubPage />}
             {sub === 'prompt' && <PromptSubPage />}
             {sub === 'usage' && <UsageSubPage />}

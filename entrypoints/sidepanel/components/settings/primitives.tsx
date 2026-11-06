@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { useI18n } from '../../i18n';
 import { StatusMessage } from './feedback-primitives';
 
@@ -88,6 +88,7 @@ export function Slider({
   disabled,
   format,
   onChange,
+  onCommit,
 }: {
   label: string;
   value: number;
@@ -96,123 +97,82 @@ export function Slider({
   step: number;
   disabled?: boolean;
   format?: (value: number) => string;
-  onChange: (value: number) => void;
+  /**
+   * 每次 `input` 触发 —— 拖动时每过一格就一次。只在调用方**不落库**时用。
+   *
+   * ⚠️ range 控件拖动过程中每格发 `input`，`change` 只在松手时发一次。
+   */
+  onChange?: (value: number) => void;
+  /**
+   * 松手（或键盘步进）时触发一次 —— 落库走这个。
+   *
+   * 返回 Promise 时，落库期间滑块保持松手位置；reject 会丢掉草稿值、回弹到已存的值。
+   */
+  onCommit?: (value: number) => void | Promise<void>;
 }) {
-  const pct = ((value - min) / (max - min)) * 100;
+  const inputId = useId();
+  // 只提交的滑块要留一份草稿，否则松手前 `value` 不会变、滑块拖不动。
+  // 草稿在松手后释放：万一保存失败，滑块回弹到库里真正存着的值，
+  // 而不是停在一个从未写入过的数字上。
+  const [draft, setDraft] = useState<number | null>(null);
+  const shown = onCommit ? (draft ?? value) : value;
+  const pct = ((shown - min) / (max - min)) * 100;
+  const commitRef = useRef<HTMLInputElement | null>(null);
+  const onCommitRef = useRef(onCommit);
+  onCommitRef.current = onCommit;
+  // 落库的值追上来之后释放草稿，免得成功时闪一帧旧值。
+  useEffect(() => {
+    if (draft !== null && draft === value) setDraft(null);
+  }, [draft, value]);
+  // `onCommit` 被撤掉时也要释放：那时 `shown` 已经回到 `value`，草稿留着只会在
+  // 下次把 `onCommit` 加回来时先显示一帧旧数字。
+  useEffect(() => {
+    if (!onCommit) setDraft(null);
+  }, [onCommit]);
+  // React 的 `onChange` 对 range 就是原生 `input`，原生 `change`（松手一次）只能直接挂。
+  useEffect(() => {
+    const el = commitRef.current;
+    if (!el || !onCommit) return;
+    const commit = () => {
+      const committed = parseFloat(el.value);
+      const result = onCommitRef.current?.(committed);
+      if (result && typeof result.then === 'function') {
+        result.then(undefined, () => setDraft(null));
+      }
+    };
+    el.addEventListener('change', commit);
+    return () => el.removeEventListener('change', commit);
+  }, [onCommit]);
   return (
     <div>
       <div className="flex justify-between items-center mb-1.5">
-        <label className="text-[11px]" style={{ color: 'var(--ds-text-secondary)' }}>
+        <label htmlFor={inputId} className="text-[11px]" style={{ color: 'var(--ds-text-secondary)' }}>
           {label}
         </label>
         <span className="text-[11px] font-mono" style={{ color: 'var(--ds-text-tertiary)' }}>
-          {format ? format(value) : value}
+          {format ? format(shown) : shown}
         </span>
       </div>
       <input
+        id={inputId}
+        ref={commitRef}
         type="range"
         min={min}
         max={max}
         step={step}
-        value={value}
+        value={shown}
         disabled={disabled}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
+        onChange={(e) => {
+          const next = parseFloat(e.target.value);
+          if (onCommit) setDraft(next);
+          onChange?.(next);
+        }}
         className="ds-range w-full h-1.5 rounded-full appearance-none cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
         style={{
           background: `linear-gradient(to right, var(--ds-blue) ${pct}%, var(--ds-border) ${pct}%)`,
         }}
       />
     </div>
-  );
-}
-
-const inputClass =
-  'w-full px-3 py-2 text-xs border outline-none transition-colors focus:border-[var(--ds-blue)]';
-
-const inputStyle = {
-  background: 'var(--ds-bg)',
-  borderColor: 'var(--ds-border)',
-  color: 'var(--ds-text)',
-  borderRadius: 'var(--radius-ctrl)',
-};
-
-export function TextField({
-  label,
-  hint,
-  type = 'text',
-  value,
-  placeholder,
-  autoComplete,
-  disabled = false,
-  onChange,
-  onKeyDown,
-  trailing,
-}: {
-  label?: string;
-  hint?: string;
-  type?: string;
-  value: string;
-  placeholder?: string;
-  autoComplete?: string;
-  disabled?: boolean;
-  onChange: (value: string) => void;
-  onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
-  trailing?: ReactNode;
-}) {
-  const input = (
-    <input
-      type={type}
-      value={value}
-      placeholder={placeholder}
-      autoComplete={autoComplete}
-      disabled={disabled}
-      onChange={(e) => onChange(e.target.value)}
-      onKeyDown={onKeyDown}
-      className={`${inputClass} ${trailing ? 'flex-1' : ''} disabled:cursor-not-allowed disabled:opacity-50`}
-      style={inputStyle}
-    />
-  );
-  return (
-    <label className="block space-y-1">
-      {(label || hint) && (
-        <span className="block text-[10px] font-medium" style={{ color: 'var(--ds-text-tertiary)' }}>
-          {label}
-        </span>
-      )}
-      {trailing ? (
-        <div className="flex gap-2 items-stretch">{input}{trailing}</div>
-      ) : (
-        input
-      )}
-      {hint && (
-        <span className="block text-[10px]" style={{ color: 'var(--ds-text-tertiary)' }}>
-          {hint}
-        </span>
-      )}
-    </label>
-  );
-}
-
-export function StatusBadge({
-  configured,
-  configuredLabel,
-  notConfiguredLabel,
-}: {
-  configured: boolean;
-  configuredLabel: string;
-  notConfiguredLabel: string;
-}) {
-  return (
-    <span
-      className="shrink-0 text-[10px] px-2 py-0.5 uppercase tracking-wide font-medium"
-      style={{
-        color: configured ? 'var(--ds-success)' : 'var(--ds-text-tertiary)',
-        background: configured ? 'var(--ds-success-bg)' : 'var(--ds-surface)',
-        borderRadius: 'var(--radius-ctrl)',
-      }}
-    >
-      {configured ? configuredLabel : notConfiguredLabel}
-    </span>
   );
 }
 
@@ -247,7 +207,9 @@ export function SubTabs<T extends string>({
   // Stable key for the tab set: label changes (e.g. locale switch) or a
   // different tab count re-run the layout effects without depending on the
   // identity of the caller-provided array.
-  const tabsKey = tabs.map((tab) => tab.label).join('\u0000');
+  // ⚠️ `key` 也要进去：只按 label 拼的话，「文案相同、key 不同」的集合（例如两种语言
+  // 下恰好同名的项）不会让 key 变化 ⇒ 布局 effect 不重算。
+  const tabsKey = tabs.map((tab) => `${tab.key}\u0001${tab.label}`).join('\u0000');
 
   const updateArrows = useCallback(() => {
     const el = listRef.current;
@@ -288,13 +250,31 @@ export function SubTabs<T extends string>({
     updateArrows();
   }, [value, tabsKey, updateArrows]);
 
+  /**
+   * Roving focus. Arrow keys must MOVE FOCUS, not just the selection: `tabIndex` is
+   * driven by `value`, but React does not move DOM focus when it flips, so a
+   * selection-only handler leaves the focus ring on the old tab. The next keypress then
+   * reads the OLD tab's index again — pressing Right a second time recomputes the same
+   * target and does nothing, while Left jumps to the last tab.
+   *
+   * Focus has to move inside this event rather than from an effect on `value`: two
+   * presses batched into one render would make such an effect fire only once.
+   */
   const onKeyDown = (e: React.KeyboardEvent, index: number) => {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    const isRight = e.key === 'ArrowRight';
+    const isLeft = e.key === 'ArrowLeft';
+    const isEdge = e.key === 'Home' || e.key === 'End';
+    if (!isRight && !isLeft && !isEdge) return;
     e.preventDefault();
-    const next = e.key === 'ArrowRight'
-      ? (index + 1) % tabs.length
-      : (index - 1 + tabs.length) % tabs.length;
+    const next = isEdge
+      ? (e.key === 'Home' ? 0 : tabs.length - 1)
+      : isRight
+        ? (index + 1) % tabs.length
+        : (index - 1 + tabs.length) % tabs.length;
     onChange(tabs[next].key);
+    // `preventScroll` keeps the layout effect above as the single owner of scrolling.
+    const buttons = listRef.current?.querySelectorAll<HTMLElement>('[role="tab"]');
+    buttons?.[next]?.focus({ preventScroll: true });
   };
 
   const scrollByPage = (direction: 1 | -1) => {
@@ -379,9 +359,27 @@ export function SegmentedControl<T extends string>({
   disabled?: boolean;
 }) {
   const padding = size === 'sm' ? 'px-2 py-1 text-[11px]' : 'px-2.5 py-1.5 text-[11px]';
+  const groupRef = useRef<HTMLDivElement | null>(null);
+  // Same contract as SubTabs: one Tab stop for the whole group, and the arrow keys move
+  // focus AND selection (radio semantics, per ARIA's Radio Group pattern). Without the
+  // roving tabIndex every option is tabbable, so Tab walks through all of them.
+  const onKeyDown = (e: React.KeyboardEvent, index: number) => {
+    const isForward = e.key === 'ArrowRight' || e.key === 'ArrowDown';
+    const isBackward = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
+    const isEdge = e.key === 'Home' || e.key === 'End';
+    if (!isForward && !isBackward && !isEdge) return;
+    e.preventDefault();
+    const next = isEdge
+      ? (e.key === 'Home' ? 0 : options.length - 1)
+      : isForward
+        ? (index + 1) % options.length
+        : (index - 1 + options.length) % options.length;
+    onChange(options[next].key);
+    groupRef.current?.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
+  };
   return (
-    <div className="ds-segmented flex flex-wrap gap-1.5" role="radiogroup" aria-label={ariaLabel}>
-      {options.map((option) => {
+    <div ref={groupRef} className="ds-segmented flex flex-wrap gap-1.5" role="radiogroup" aria-label={ariaLabel}>
+      {options.map((option, index) => {
         const active = option.key === value;
         return (
           <button
@@ -389,6 +387,8 @@ export function SegmentedControl<T extends string>({
             type="button"
             role="radio"
             aria-checked={active}
+            tabIndex={active ? 0 : -1}
+            onKeyDown={(e) => onKeyDown(e, index)}
             disabled={disabled}
             onClick={() => onChange(option.key)}
             className={`${padding} font-medium border transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50`}
@@ -477,12 +477,13 @@ export function Meta({ label, value }: { label: string; value: string }) {
 }
 
 /** Small inline spinner. Promoted from 2 duplicated definitions + ad-hoc markup. */
-export function Spinner({ className = 'w-3 h-3' }: { className?: string }) {
+export function Spinner({ className = 'w-3 h-3', label }: { className?: string; label?: string }) {
+  const { t } = useI18n();
   return (
     <span
       className={`inline-block border-2 border-current border-t-transparent rounded-full animate-spin ${className}`}
       role="status"
-      aria-label="loading"
+      aria-label={label ?? t('common.loading')}
     />
   );
 }
@@ -495,6 +496,13 @@ export function Spinner({ className = 'w-3 h-3' }: { className?: string }) {
 export function useBanner(dismissMs = 4000) {
   const [banner, setBanner] = useState<{ tone: 'success' | 'error' | 'warning' | 'info'; text: string } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 卸载时把定时器清掉。React 18 对已卸载组件的 setState 是 no-op，所以这不是「修 bug」，
+  // 是为了与 `useMcpPageController` 里那份同款 `dismissTimer` 保持同一个口径 ——
+  // 一个清一个不清，下次改的人不知道该照哪个抄。
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+  }, []);
 
   const show = (tone: 'success' | 'error' | 'warning' | 'info', text: string) => {
     if (timer.current) clearTimeout(timer.current);

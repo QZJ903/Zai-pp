@@ -8,13 +8,22 @@
  * （`Automation run exceeded 300 seconds.`）比任何通用兜底文案都有信息量。
  * 句子带大写首字母与空格，天然不匹配这条正则。
  *
+ * ⚠️⚠️ **`String(undefined)` / `String(null)` 的产物（`'undefined'` / `'null'`）也匹配这条
+ * 正则** —— 它们真的长得像码。调用方拿一个缺失的 `error` 进来时，正确语义是「没有话可说」，
+ * 不是「这里有个叫 undefined 的错误码」。所以这两个字面量要显式排除，否则界面会出现
+ * 「操作失败（undefined）」。
+ *
  * ⚠️⚠️ **三处消费者共用这一份**：自动化失败卡片、侧边栏通用失败提示、
  * 工具结果卡片（内容脚本）。各写一份必然分叉，而分叉时没有报错。
  * 放在 `core/` 是因为第三个消费者在内容脚本的 bundle 里，引不到 `entrypoints/`。
  */
 const LOOKS_LIKE_ERROR_CODE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 
+/** `String(value)` 对这两个值给出的字面量，不对应任何真实错误码。 */
+const STRINGIFIED_ABSENT_VALUES: ReadonlySet<string> = new Set(['undefined', 'null']);
+
 export function looksLikeErrorCode(value: string): boolean {
+  if (STRINGIFIED_ABSENT_VALUES.has(value)) return false;
   return LOOKS_LIKE_ERROR_CODE.test(value);
 }
 

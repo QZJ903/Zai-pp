@@ -1,11 +1,13 @@
+import { useRef, type ReactNode } from 'react';
 import type { LocalePreference } from '../../../../core/i18n';
 import { SVG_PATHS } from '../../constants';
 import { useI18n } from '../../i18n';
 import { SettingsSection, Slider, ToggleRow } from './primitives';
 import type { SettingsState } from '../../controllers/useSettingsController';
 
-export default function GeneralSubPage({ state }: { state: SettingsState }) {
+export default function GeneralSubPage({ state, banner }: { state: SettingsState; banner?: ReactNode }) {
   const { t, locale, preference: localePreference, setPreference: setLocalePreference } = useI18n();
+  const languageGroupRef = useRef<HTMLDivElement | null>(null);
 
   const currentLanguageLabel =
     locale === 'en'
@@ -17,8 +19,31 @@ export default function GeneralSubPage({ state }: { state: SettingsState }) {
     { value: 'en', label: t('sidepanel.settings.languageEnglish') },
   ];
 
+  /**
+   * Roving focus for the hand-rolled language radio group.
+   *
+   * `setPreference` is async (it writes storage first), so the selected option only
+   * changes after the write lands — moving focus here, inside the event, is what keeps
+   * repeated presses from computing the same target over and over.
+   */
+  const onLanguageKeyDown = (event: React.KeyboardEvent, index: number) => {
+    const isForward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
+    const isBackward = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
+    const isEdge = event.key === 'Home' || event.key === 'End';
+    if (!isForward && !isBackward && !isEdge) return;
+    event.preventDefault();
+    const next = isEdge
+      ? (event.key === 'Home' ? 0 : languageOptions.length - 1)
+      : isForward
+        ? (index + 1) % languageOptions.length
+        : (index - 1 + languageOptions.length) % languageOptions.length;
+    void setLocalePreference(languageOptions[next].value);
+    languageGroupRef.current?.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
+  };
+
   return (
     <div className="space-y-5">
+      {banner}
       <SettingsSection
         title={t('sidepanel.settings.interfaceSection')}
         description={t('sidepanel.settings.interfaceLanguageDescription')}
@@ -31,8 +56,13 @@ export default function GeneralSubPage({ state }: { state: SettingsState }) {
             {t('sidepanel.settings.languageCurrent', { language: currentLanguageLabel })}
           </div>
         </div>
-        <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label={t('sidepanel.settings.interfaceLanguage')}>
-          {languageOptions.map((option) => {
+        <div
+          ref={languageGroupRef}
+          className="grid grid-cols-3 gap-2"
+          role="radiogroup"
+          aria-label={t('sidepanel.settings.interfaceLanguage')}
+        >
+          {languageOptions.map((option, index) => {
             const active = localePreference === option.value;
             return (
               <button
@@ -40,6 +70,11 @@ export default function GeneralSubPage({ state }: { state: SettingsState }) {
                 type="button"
                 role="radio"
                 aria-checked={active}
+                // Same roving contract as SegmentedControl: one Tab stop for the whole
+                // group, arrows move focus AND selection. This strip is hand-rolled, so
+                // it does not inherit that behaviour from the shared component.
+                tabIndex={active ? 0 : -1}
+                onKeyDown={(event) => onLanguageKeyDown(event, index)}
                 onClick={() => void setLocalePreference(option.value)}
                 className="min-w-0 px-2 py-2.5 text-[11px] leading-tight font-medium rounded-lg border transition-all duration-150"
                 style={{
@@ -155,7 +190,7 @@ export default function GeneralSubPage({ state }: { state: SettingsState }) {
           max={1}
           step={0.05}
           format={(v) => v.toFixed(2)}
-          onChange={state.handleOpacityChange}
+          onCommit={state.handleOpacityCommit}
         />
 
         {state.bgPreview && (

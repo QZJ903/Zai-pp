@@ -245,7 +245,7 @@ export default function BrowserControlPage() {
           max={1500}
           step={50}
           disabled={busy !== 'idle'}
-          onChange={(value) => savePatch({ maxSnapshotNodes: value })}
+          onCommit={(value) => savePatch({ maxSnapshotNodes: value })}
         />
         <Slider
           label={t('sidepanel.browserControlPage.maxBytes')}
@@ -257,7 +257,7 @@ export default function BrowserControlPage() {
           max={24000}
           step={2000}
           disabled={busy !== 'idle'}
-          onChange={(value) => savePatch({ maxSnapshotTextBytes: value })}
+          onCommit={(value) => savePatch({ maxSnapshotTextBytes: value })}
         />
       </SettingsSection>
     </div>

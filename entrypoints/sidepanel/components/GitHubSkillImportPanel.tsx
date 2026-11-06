@@ -5,6 +5,7 @@ import type {
   GitHubSkillPreviewItem,
 } from '../../../core/types';
 import { requestGitHubApiPermission } from '../github-permission';
+import { Spinner } from './settings/primitives';
 import { useI18n } from '../i18n';
 import { sidepanelRuntimeClient } from '../runtime-client';
 
@@ -350,10 +351,6 @@ function Meta({ label, value }: { label: string; value: string }) {
       <div className="text-[11px] font-medium truncate" style={{ color: 'var(--ds-text)' }}>{value}</div>
     </div>
   );
-}
-
-function Spinner() {
-  return <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />;
 }
 
 function shortSha(sha: string): string {
