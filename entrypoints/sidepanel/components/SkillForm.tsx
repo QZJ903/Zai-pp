@@ -43,7 +43,22 @@ export default function SkillForm({ initialSkill, occupiedNames, onSave, onCance
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!normalizedName || !instructions.trim()) return;
+    // ⚠️⚠️ **三档必须各说一句，不能都 `return`** —— 静默返回的表现是「点了保存，
+    // 表单不关、不报错、也不保存」。而且不能把三档混成一句：
+    // 名字打了中文却说「名称不能为空」等于在骗人（用户明明输了字）。
+    if (!name.trim()) {
+      setValidationError(t('sidepanel.skill.form.nameRequired'));
+      return;
+    }
+    if (!normalizedName) {
+      // 归一后为空 = 打进去的字符全部不合法（中文、空格、符号都会被换成短横线再去掉）。
+      setValidationError(t('sidepanel.skill.form.nameCharset'));
+      return;
+    }
+    if (!instructions.trim()) {
+      setValidationError(t('sidepanel.skill.form.instructionsRequired'));
+      return;
+    }
     // ⚠️ **`initialSkill?.name` 的豁免不能省** —— 编辑一条技能时它的名字本来就在
     // `occupiedNames` 里，不豁免的话「只改描述」也会被自己挡住。
     if (occupiedNames?.has(normalizedName) && normalizedName !== initialSkill?.name) {

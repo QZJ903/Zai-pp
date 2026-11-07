@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { homedir, platform } from 'node:os';
 import { promisify } from 'node:util';
-import { DEFAULT_TIMEOUT_MS, WINDOWS_POWERSHELL_UTF8_PREAMBLE } from './contracts.mjs';
+import { DEFAULT_TIMEOUT_MS, LOCAL_SKILL_ERROR_CODES, WINDOWS_POWERSHELL_UTF8_PREAMBLE } from './contracts.mjs';
 import { resolveLocalPath, safeStat } from './file-provider.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -30,7 +30,17 @@ async function createLocalFolderPickResult(args) {
       structuredContent: { ok: true, data: { path: normalizedPath } },
     };
   } catch (error) {
-    return { isError: true, content: [{ type: 'text', text: normalizeFolderPickerError(error) }] };
+    const message = normalizeFolderPickerError(error);
+    // ⚠️ **用户取消不是失败** —— 回一个机器可读的码，让扩展那边直接当作「什么都没发生」。
+    // 不给码的话，扩展只能按 message 文案判（那是 UI 字符串，改一次措辞就静默失效）。
+    const code = message === FOLDER_PICK_CANCELLED_MESSAGE
+      ? LOCAL_SKILL_ERROR_CODES.FOLDER_PICK_CANCELLED
+      : LOCAL_SKILL_ERROR_CODES.FOLDER_PICK_FAILED;
+    return {
+      isError: true,
+      content: [{ type: 'text', text: message }],
+      structuredContent: { ok: false, error: { code, message } },
+    };
   }
 }
 
@@ -123,6 +133,26 @@ function ensureTrailingPathSeparator(value) {
   return value.endsWith('/') ? value : `${value}/`;
 }
 
+/**
+ * The one sentence the picker produces when the user dismisses the dialog.
+ *
+ * ⚠️ **Kept as a single constant so the "is this a cancellation?" test compares against
+ * the same string it emits** — that is also why the machine-readable code above exists;
+ * the extension must not have to match on this text.
+ */
+const FOLDER_PICK_CANCELLED_MESSAGE = 'Folder selection was cancelled.';
+
+/**
+ * Wording that only ever appears when the user actually dismissed the dialog.
+ *
+ * ⚠️⚠️ **Deliberately narrow** — `The operation couldn't be completed.` used to be in
+ * here, and it is macOS's *generic* AppleScript failure text: a denied Automation
+ * permission or a system-blocked `osascript` matches it too. Treating that as a cancel
+ * turns a real fault into "nothing happened" (the extension drops the pick silently
+ * instead of showing an error). Only keep phrasings that cannot mean anything else.
+ */
+const CANCELLED_MESSAGE_PATTERN = /User canceled|User cancelled/i;
+
 export function normalizeFolderPickerError(error) {
   const message = error instanceof Error ? error.message : String(error);
   // `execFile` reports the exit code on the error object, not inside the message
@@ -130,9 +160,9 @@ export function normalizeFolderPickerError(error) {
   // Cancel sees the whole command line — including the base64 payload — instead of
   // "cancelled".
   if (error && typeof error === 'object' && error.code === 2) {
-    return 'Folder selection was cancelled.';
+    return FOLDER_PICK_CANCELLED_MESSAGE;
   }
-  return /User canceled|cancelled|canceled|exit code 2|The operation couldn.?t be completed/i.test(message)
-    ? 'Folder selection was cancelled.'
+  return CANCELLED_MESSAGE_PATTERN.test(message)
+    ? FOLDER_PICK_CANCELLED_MESSAGE
     : message;
 }

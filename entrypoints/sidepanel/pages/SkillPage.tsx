@@ -316,23 +316,37 @@ export default function SkillPage() {
     }
   };
 
-  const pickNewLocalFolder = async (defaultPath: string): Promise<string | null> => {
-    try {
-      const response = await sidepanelRuntimeClient.request({
-        type: 'PICK_LOCAL_SKILL_FOLDER',
-        payload: defaultPath ? { defaultPath } : {},
-      }, { unavailableMessage: t('sidepanel.skillPage.backendUnavailable') });
-      const pickedPath = typeof response?.path === 'string' ? response.path.trim() : '';
-      return pickedPath || null;
-    } catch {
-      return null;
-    }
+  /**
+   * 弹文件夹选择框。
+   *
+   * 三种结果必须分开：
+   * - `{ path }` —— 选了；
+   * - `{ path: null }` —— **用户取消**（后台已把它从「失败」里分出来）；
+   * - reject —— 选择器真的坏了 / 后台不可用。
+   *
+   * ⚠️⚠️ **取消和失败不能都收敛成 `null`** —— 之前就是这么写的，于是用户点一下取消
+   * 就会被告知「原文件夹已挪动或不存在，请重新选择」，而他压根没打算换文件夹。
+   */
+  const pickNewLocalFolder = async (
+    defaultPath: string,
+  ): Promise<{ path: string } | { cancelled: true }> => {
+    const response = await sidepanelRuntimeClient.request({
+      type: 'PICK_LOCAL_SKILL_FOLDER',
+      payload: defaultPath ? { defaultPath } : {},
+    }, { unavailableMessage: t('sidepanel.skillPage.backendUnavailable') });
+    const pickedPath = typeof response?.path === 'string' ? response.path.trim() : '';
+    return pickedPath ? { path: pickedPath } : { cancelled: true };
   };
 
   const handleUpdateLocalSkill = async (skill: Skill) => {
     const sourceId = skill.remote?.sourceId;
     if (!sourceId) return;
-    const defaultPath = skill.remote?.localDirectory ?? skill.remote?.localRootPath ?? '';
+    // ⚠️ **基必须是「源的根目录」，不是「技能自己的目录」。**
+    // `relocateLocalSkillSource` 拿 `source.skillPaths`（**rootPath 相对**，见
+    // `local-importer.ts` 的 `toRootRelativeFiles`）去新根下比对；给 `localDirectory`
+    // （= `dirname(SKILL.md)`）会让嵌套技能恒 `local_path_unavailable`，而失败后
+    // 用户再点「更新」拿到的还是同一个错的默认值。
+    const defaultPath = skill.remote?.localRootPath ?? skill.remote?.localDirectory ?? '';
     // Immediately enter the loading state: disable the local skill's "Update" button and show a spinner, removing the "unresponsive" feel.
     setSourceActions((current) => ({
       ...current,
@@ -350,31 +364,44 @@ export default function SkillPage() {
         acceptFailure: true,
       });
       if (response && !response.ok) {
-        // Only "the folder is gone" should open the folder picker. A reader problem, or a
-        // storage failure that somehow came back as a block, must surface its reason
-        // instead — re-picking the folder cannot fix either.
+        // 只有「原文件夹不可用」才该弹选择框；读取器故障、存储故障等必须把**原因**
+        // 报出来 —— 重选文件夹修不好那两类。
+        //
+        // ⚠️⚠️ **`importBlock` 为 `null` 也要报到「原因」那一档**，不能掉进「重选文件夹」：
+        // 那个 `null` 的含义是「host 回了一个白名单外的码」（见 `readLocalSkillImportBlock`），
+        // 属于契约不认识的新错误，而不是「路径没了」。掉进重选分支会让用户白选一遍文件夹。
         const importBlock = readLocalSkillImportBlock(response.importBlock);
-        if (importBlock && importBlock.code !== 'local_path_unavailable') {
+        if (!importBlock || importBlock.code !== 'local_path_unavailable') {
           setSourceActions((current) => {
             const next = { ...current };
             delete next[sourceId];
             return next;
           });
-          showOperationError(new Error(formatImportBlockMessage(importBlock, t)));
+          showOperationError(new Error(
+            importBlock
+              ? formatImportBlockMessage(importBlock, t)
+              // 认不出的码：原样把 host 的 error 带出来（它比任何兜底文案都有信息量）。
+              : response.error,
+          ));
           return;
         }
         // Original folder moved/invalid: guide the user to re-pick a new path and relocate (keep source.id, link unbroken).
-        const newRootPath = await pickNewLocalFolder(defaultPath);
-        if (!newRootPath) {
-          // User cancelled re-pick: clear the loading state and give a gentle hint.
+        // ⚠️ **先说明为什么弹框** —— 用户点的是「更新」，突然弹出文件夹选择框会莫名其妙。
+        // 这句原先是在「用户取消」之后才报的（等于对一次主动取消报假故障），位置反了。
+        banner.show('info', t('sidepanel.skillPage.relocatePrompt'));
+        const picked = await pickNewLocalFolder(defaultPath);
+        if ('cancelled' in picked) {
+          // ⚠️ **用户取消就静默收尾** —— 清掉 loading 状态即可，不弹任何提示。
+          // 之前这里是 `showOperationError(relocatePrompt)`（「原文件夹已挪动或不存在」），
+          // 等于对一次主动取消报了一个假的故障。
           setSourceActions((current) => {
             const next = { ...current };
             delete next[sourceId];
             return next;
           });
-          showOperationError(new Error(t('sidepanel.skillPage.relocatePrompt')));
           return;
         }
+        const newRootPath = picked.path;
         const relocateResponse = await sidepanelRuntimeClient.request({
           type: 'RELOCATE_LOCAL_SKILL_SOURCE',
           payload: { sourceId, newRootPath },
@@ -715,7 +742,10 @@ function ThirdPartySkillSection({ groups, expandedGroups, onToggleGroup, onToggl
               >
                 {group.skills.map((skill, index) => {
                   const localAction = skill.remote?.sourceId ? sourceActions[skill.remote.sourceId] : undefined;
-                  const localBusy = localAction?.status === 'updating' || localAction?.status === 'checking';
+                  // ⚠️ **只认 `updating`** —— `checking` 是 GitHub 源那条链的状态（按 source.id 存），
+                  // 而本地源的 id 前缀是 `local:`、两条链不会撞；把 `checking` 也算进来只会让
+                  // 「本地技能卡为什么会转圈」变得不可解释（它永远进不到那一档）。
+                  const localBusy = localAction?.status === 'updating';
                   return (
                   <SkillCard
                     key={`${group.id}:${skill.name}:${index}`}
@@ -897,7 +927,13 @@ function getThirdPartyGroupDescriptor(
   throw new Error(`Unexpected skill source "${skill.source}"`);
 }
 
-function formatUpdateMessage(
+/**
+ * 把「检查更新」的三段结果拼成一句话。
+ *
+ * ⚠️ **导出只是为了能喂真实输入测它**（同 `McpPage` 的 `describeMcpFailure`）——
+ * 走页面渲染要三层组件才碰得到。
+ */
+export function formatUpdateMessage(
   update: GitHubSkillUpdatePreview,
   t: (key: LocaleMessageKey, params?: MessageParams) => string,
 ): string {
@@ -912,7 +948,9 @@ function formatUpdateMessage(
   if (update.missingPaths.length > 0) {
     parts.push(t('sidepanel.skillPage.missingSkills', { count: update.missingPaths.length }));
   }
-  return parts.join('，') || t('sidepanel.skillPage.updatesFound');
+  // ⚠️ **分隔符取自 i18n，不写死** —— 英文界面里用中文全角逗号是看得出来的，
+  // 而两道 i18n 门禁都不查标点（`i18n-coverage-audit` 只按汉字脚本属性判）。
+  return parts.join(t('sidepanel.skillPage.listSeparator')) || t('sidepanel.skillPage.updatesFound');
 }
 
 function shortSha(sha: string): string {

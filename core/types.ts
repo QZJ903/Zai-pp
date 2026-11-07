@@ -444,6 +444,23 @@ export type MessageAction =
   | { type: 'GET_MCP_SERVER'; payload: { id: McpServerId } }
   | { type: 'CREATE_MCP_SERVER'; payload: McpServerCreateInput }
   | { type: 'UPDATE_MCP_SERVER'; payload: { id: McpServerId; patch: McpServerUpdateInput } }
+  /**
+   * 按**单个工具**增删白名单。
+   *
+   * ⚠️ **不要用 `UPDATE_MCP_SERVER` 的整份 patch 替代它** —— 这条存在的唯一理由是
+   * 「读-改-写要在后台的存储事务里完成」。侧边栏自己算名单再整份提交时，连点两个不同
+   * 工具的开关，第二次算出的名单不含第一次的改动 ⇒ 第一次被静默覆盖（点两个只开一个）。
+   */
+  | {
+    type: 'SET_MCP_TOOL_SELECTION';
+    payload: {
+      id: McpServerId;
+      toolName: string;
+      /** 老数据里可能存的是带 server 前缀的那种名字，一起清掉。 */
+      invocationName?: string;
+      selected: boolean;
+    };
+  }
   | { type: 'DELETE_MCP_SERVER'; payload: { id: McpServerId } }
   | { type: 'GET_MCP_TOOL_CACHE'; payload: { serverId: McpServerId } }
   | { type: 'REFRESH_MCP_SERVER_TOOLS'; payload: { serverId: McpServerId } }
@@ -464,7 +481,12 @@ export type MessageAction =
   }
   | { type: 'CLOSE_TOOL_AUTHORIZATION'; payload: { authorizationId: string } }
   | { type: 'EXECUTE_TOOL_CALL'; payload: ToolCall & { authorizationId?: string } }
-  | { type: 'GET_TOOL_CALL_HISTORY'; payload?: { limit?: number } }
+  /**
+   * ⚠️ **`serverId` 存在时 `limit` 的含义是「这个服务最近 N 条」**，不存在时是
+   * 「全体最近 N 条」。后台必须先按 `serverId` 筛、再 `slice(0, limit)` ——
+   * 顺序反了会让不活跃的服务恒显示「暂无调用」。
+   */
+  | { type: 'GET_TOOL_CALL_HISTORY'; payload?: { limit?: number; serverId?: string } }
   | { type: 'CLEAR_TOOL_CALL_HISTORY' }
   | { type: 'GET_PLATFORM_CAPABILITIES' }
   | { type: 'GET_CONFIG' }

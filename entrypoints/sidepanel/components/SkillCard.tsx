@@ -156,7 +156,7 @@ export default function SkillCard({ skill, onEdit, onDelete, onToggleEnabled, on
             <span>{skill.remote.path}</span>
           )}
           {skill.remote && skill.remote.provider === 'local' && skill.remote.localDirectory && (
-            <span className="font-mono">{skill.remote.localDirectory ?? skill.remote.localRootPath}</span>
+            <span className="font-mono">{skill.remote.localDirectory}</span>
           )}
           {skill.memoryEnabled && (
             <span className="inline-flex items-center gap-1" style={{ color: 'var(--ds-success)' }}>

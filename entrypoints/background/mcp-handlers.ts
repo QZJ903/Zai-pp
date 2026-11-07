@@ -30,6 +30,12 @@ export interface McpRuntimeHandlerDependencies {
   getMcpServerById(id: string): Promise<McpServerConfig | null>;
   createMcpServer(input: McpServerCreateInput): Promise<McpServerConfig>;
   updateMcpServer(id: string, patch: McpServerUpdateInput): Promise<McpServerConfig | null>;
+  /** 按单个工具增删白名单，读-改-写在存储队列内完成（见 `core/mcp/store.ts`）。 */
+  setMcpToolSelection(
+    id: string,
+    tool: { name: string; invocationName?: string },
+    selected: boolean,
+  ): Promise<McpServerConfig | null>;
   deleteMcpServer(id: string): Promise<void>;
   deleteMcpCapabilityServerSettings(serverId: string): Promise<McpCapabilitySettings>;
   getMcpToolCache(serverId: string): Promise<McpToolCacheEntry | null>;
@@ -75,6 +81,17 @@ export function createMcpRuntimeHandlers(
     }),
     defineToolPayloadRuntimeCommandHandler('UPDATE_MCP_SERVER', async (payload, context) => {
       const server = await dependencies.updateMcpServer(payload.id, payload.patch);
+      await notifyMcpAndTools(context.tabId);
+      return server;
+    }),
+    defineToolPayloadRuntimeCommandHandler('SET_MCP_TOOL_SELECTION', async (payload, context) => {
+      // ⚠️ **读-改-写全在 `setMcpToolSelection` 的存储事务里** —— 侧边栏算好整份名单
+      // 再提交时，连点两个工具的开关会丢掉第一次（第二次基于旧快照算）。
+      const server = await dependencies.setMcpToolSelection(
+        payload.id,
+        { name: payload.toolName, invocationName: payload.invocationName },
+        payload.selected,
+      );
       await notifyMcpAndTools(context.tabId);
       return server;
     }),

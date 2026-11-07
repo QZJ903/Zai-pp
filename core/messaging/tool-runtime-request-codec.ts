@@ -110,6 +110,21 @@ export const TOOL_RUNTIME_PAYLOAD_DECODERS: ToolRuntimePayloadDecoderMap = {
     validateMcpServerUpdateInput(patch, 'UPDATE_MCP_SERVER.payload.patch');
     return typedPayload<'UPDATE_MCP_SERVER'>({ ...payload, patch });
   },
+  SET_MCP_TOOL_SELECTION(value) {
+    const payload = recordValue(value, 'SET_MCP_TOOL_SELECTION.payload');
+    stringValue(payload.id, 'SET_MCP_TOOL_SELECTION.payload.id');
+    // ⚠️ 工具名要非空 —— 空串会被当成一个「名字是空串的工具」写进/移出白名单，
+    // 而它永远匹配不到任何 descriptor，用户只会看到「勾了没反应」。
+    const toolName = stringValue(payload.toolName, 'SET_MCP_TOOL_SELECTION.payload.toolName');
+    if (!toolName.trim()) {
+      throw new Error('SET_MCP_TOOL_SELECTION.payload.toolName must not be blank');
+    }
+    if (payload.invocationName !== undefined) {
+      optionalString(payload.invocationName, 'SET_MCP_TOOL_SELECTION.payload.invocationName');
+    }
+    booleanValue(payload.selected, 'SET_MCP_TOOL_SELECTION.payload.selected');
+    return typedPayload<'SET_MCP_TOOL_SELECTION'>(payload);
+  },
   DELETE_MCP_SERVER(value) {
     return decodeStringFieldPayload<'DELETE_MCP_SERVER'>(value, 'DELETE_MCP_SERVER.payload', 'id');
   },
@@ -224,6 +239,14 @@ export const TOOL_RUNTIME_PAYLOAD_DECODERS: ToolRuntimePayloadDecoderMap = {
     // 相反）、小数得到空数组 —— 两种都不报错。省略（`undefined`）仍合法，走默认值。
     if (payload.limit !== undefined) {
       positiveInteger(payload.limit, 'GET_TOOL_CALL_HISTORY.payload.limit');
+    }
+    // ⚠️ **`serverId` 必须是非空字符串** —— 它会被拿去和 `record.call.provider?.id`
+    // 逐字比较，空串会静默筛出 0 条（界面读作「暂无调用」，与真实情况不符）。
+    if (payload.serverId !== undefined) {
+      optionalString(payload.serverId, 'GET_TOOL_CALL_HISTORY.payload.serverId');
+      if (typeof payload.serverId === 'string' && payload.serverId.trim() === '') {
+        throw new Error('GET_TOOL_CALL_HISTORY.payload.serverId must not be blank.');
+      }
     }
     return typedPayload<'GET_TOOL_CALL_HISTORY'>(payload);
   },

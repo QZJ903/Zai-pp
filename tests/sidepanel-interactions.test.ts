@@ -460,7 +460,10 @@ describe('sidepanel interactions', () => {
   });
 
   it('explains that non-bundled local Skill resources remain available on demand', async () => {
-    const legacyWarning = '13 local supporting file(s) were omitted.';
+    // ⚠️ 用**当前 host 真的会发**的措辞。旧版那句 `N local supporting file(s) were omitted.`
+    // 已经没有任何生产者（本项目自用、不存在旧 host ⇒ 那层兼容过滤已删），拿它当夹具
+    // 等于在测一条走不到的路。
+    const skillWarning = 'references/17.md was omitted because the local Skill preview reached the content budget.';
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type !== 'PREVIEW_LOCAL_SKILL_SOURCE') return null;
       return {
@@ -474,7 +477,7 @@ describe('sidepanel interactions', () => {
           importedSkillNames: ['demo'],
           importedAt: 1,
           updatedAt: 1,
-          warnings: [legacyWarning],
+          warnings: [],
         },
         skills: [{
           path: 'SKILL.md',
@@ -486,10 +489,10 @@ describe('sidepanel interactions', () => {
           includedFiles: Array.from({ length: 16 }, (_, index) => ({ path: `references/${index + 1}.md`, bytes: 100 })),
           omittedFiles: Array.from({ length: 13 }, (_, index) => ({ path: `references/${index + 17}.md`, bytes: 100 })),
           scriptFiles: [],
-          warnings: [legacyWarning],
+          warnings: [skillWarning],
           nameChanged: false,
         }],
-        warnings: [legacyWarning],
+        warnings: [],
         truncated: false,
       };
     });
@@ -505,7 +508,38 @@ describe('sidepanel interactions', () => {
 
     expect(container.textContent).toContain('按需读取 13');
     expect(container.textContent).toContain('文件没有被删除');
-    expect(container.textContent).not.toContain(legacyWarning);
+    // 技能级警告带上技能名做前缀，用户才知道是哪一条技能的问题。
+    expect(container.textContent).toContain(`demo: ${skillWarning}`);
+  });
+
+  /**
+   * ⚠️⚠️ **用户点「取消」不是失败。**
+   *
+   * 后台的 `pickLocalSkillFolder` 现在把取消折成 `{ path: null }`（不再抛错），
+   * 而面板这边必须**什么都不做**：不弹红条、不清已经填好的路径。
+   * 改前这里抛 `pickFailed` ⇒ 用户点一下取消就看到一条红色错误。
+   */
+  it('stays quiet when the user dismisses the folder picker', async () => {
+    const sendMessage = vi.fn(async (message: { type: string }) => {
+      if (message.type === 'PICK_LOCAL_SKILL_FOLDER') return { path: null };
+      return null;
+    });
+    stubChrome(sendMessage);
+
+    await renderElement(React.createElement(LocalSkillImportPanel, {
+      onImported: vi.fn(),
+      onCancel: vi.fn(),
+    }));
+    await enterText('/Users/me/.codex/skills/my-skill', '/Users/me/.codex/skills/demo');
+    await clickButton('选择');
+    await flushPromises();
+
+    // ⚠️ 判据是**不该出现任何错误条**（`StatusMessage` 只在 `message` 非空时渲染，
+    // 而取消时 `message` 必须保持空）。改回「取消就抛错」时这里会红。
+    expect(container.querySelectorAll('[style*="--ds-danger-bg"]')).toHaveLength(0);
+    // 反面自检：也不能是「静默清空」—— 已填的路径要原样留着。
+    expect((inputByPlaceholder('/Users/me/.codex/skills/my-skill') as HTMLInputElement).value)
+      .toBe('/Users/me/.codex/skills/demo');
   });
 
   it('keeps safe local Skills selectable when a sibling needs an unavailable reader', async () => {

@@ -4,6 +4,7 @@ import { getMcpToolDescriptors, refreshMcpServerDiscovery } from '../core/mcp/di
 import {
   createMcpServer,
   getAllMcpServers,
+  getAllMcpToolCaches,
   getMcpServerById,
   getMcpToolCache,
   updateMcpServer,
@@ -110,6 +111,8 @@ describe('MCP persisted-config contract', () => {
 
     expect(migrateMcpStorageState(raw)).toEqual({
       migrated: true,
+      // v1 的缓存按设计整批作废，不算「丢了几条坏数据」。
+      droppedCaches: 0,
       state: {
         ...MCP_STORAGE_V2,
         additiveField: { preserve: true },
@@ -279,9 +282,6 @@ describe('MCP persisted-config contract', () => {
     ['corrupt server', MCP_STORAGE_CORRUPT_SERVER, 'mcp_storage_corrupt'],
     ['corrupt legacy server', MCP_STORAGE_V1_CORRUPT_SERVER, 'mcp_storage_corrupt'],
     ['duplicate server', MCP_STORAGE_DUPLICATE_SERVER, 'mcp_storage_corrupt'],
-    ['orphan cache', MCP_STORAGE_ORPHAN_CACHE, 'mcp_storage_corrupt'],
-    ['forged cache annotation', MCP_STORAGE_V2_FORGED_CACHE_ANNOTATION, 'mcp_storage_corrupt'],
-    ['forged cache transport', MCP_STORAGE_V2_FORGED_CACHE_TRANSPORT, 'mcp_storage_corrupt'],
   ])('rejects %s before mutation and preserves the raw record', async (_name, fixture, code) => {
     const raw = structuredClone(fixture);
     const originalJson = JSON.stringify(raw);
@@ -305,6 +305,46 @@ describe('MCP persisted-config contract', () => {
     expect(connectNative).not.toHaveBeenCalled();
     expect(permissionContains).not.toHaveBeenCalled();
     expect(permissionRequest).not.toHaveBeenCalled();
+  });
+
+  /**
+   * ⚠️⚠️ **坏缓存要「跳过」而不是「整份抛」** —— 它是派生数据（下次发现重建即可），
+   * 而整份抛的后果是**整个 MCP 存储打不开**：页面只剩一条错误横幅、模型侧的工具目录
+   * 也抛（含内置 Shell 全部消失），而且删不掉、改不了、新建不了 —— 用户没有任何自救动作。
+   *
+   * ⚠️ 与**服务记录**的区别是本质的：`servers` 是权威数据，跳过一条会被下一次写整份
+   * 覆盖掉（= 静默删除），所以那一半的严格校验一字不动（见上一组用例）。
+   */
+  it.each([
+    ['orphan cache', MCP_STORAGE_ORPHAN_CACHE],
+    ['forged cache annotation', MCP_STORAGE_V2_FORGED_CACHE_ANNOTATION],
+    ['forged cache transport', MCP_STORAGE_V2_FORGED_CACHE_TRANSPORT],
+  ])('drops a malformed %s instead of failing the whole read', async (_name, fixture) => {
+    const raw = structuredClone(fixture);
+    const originalJson = JSON.stringify(raw);
+    storage[MCP_STORAGE_KEY] = raw;
+
+    // ① 服务配置照常读得出来 —— 这正是这条修复的全部意义。
+    // ⚠️ 不比 `toEqual(MCP_STORAGE_V2.servers)`：`getAllMcpServers` 按 `updatedAt` 降序
+    // 返回，顺序与夹具不同。比 id 集合。
+    const servers = await getAllMcpServers();
+    expect(servers.map((server) => server.id).sort())
+      .toEqual(MCP_STORAGE_V2.servers.map((server) => server.id).sort());
+    // ② 那条坏缓存被跳过、没进结果。
+    await expect(getAllMcpToolCaches()).resolves.toEqual([]);
+    // ③ 读本身不改盘（自愈交给「下一次写入带上不含它的 state」）。
+    // ⚠️⚠️ **这条必须紧跟在读之后** —— 后面那步 `createMcpServer` 必然写盘，
+    // 把断言放到它后面就恒成立，等于什么都没测。
+    expect(storageSet).not.toHaveBeenCalled();
+    expect(JSON.stringify(storage[MCP_STORAGE_KEY])).toBe(originalJson);
+    expect(storageRemove).not.toHaveBeenCalled();
+    // ④ 写操作也照常能跑（用户无需手删 storage 才能自救）。
+    await expect(createMcpServer({
+      displayName: 'Created after a dropped cache',
+      transport: { kind: 'http', url: 'https://created.test/mcp' },
+    })).resolves.toMatchObject({ displayName: 'Created after a dropped cache' });
+    // 写完之后坏缓存确实被清掉了 —— 这才叫「下一次写入自愈」。
+    expect(JSON.stringify(storage[MCP_STORAGE_KEY])).not.toBe(originalJson);
   });
 
   it('rejects corrupt persisted state before discovery or descriptor reads can perform provider I/O', async () => {

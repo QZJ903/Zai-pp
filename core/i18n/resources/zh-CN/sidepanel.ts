@@ -69,6 +69,9 @@ export const sidepanel = {
       instructionsPlaceholder: '你是一位...\n\n## 核心原则\n- ...',
       memoryInjectionLabel: '启用记忆注入',
       nameTaken: '这个名字已被其它 Skill 使用（含内置与已导入）。名字是激活命令的身份，不能重复。',
+      nameRequired: '请先填写名称。',
+      nameCharset: '名称只能包含小写字母、数字和短横线 —— 它同时是你的触发命令 /名称。',
+      instructionsRequired: '请填写指令。',
     },
     sources: {
       builtin: '内置',
@@ -107,7 +110,6 @@ export const sidepanel = {
     description: '通过 Shell MCP 读取本地 Skill 文件夹。Zai++ 会保留文件夹引用，导入时不会执行脚本。',
     pathPlaceholder: '/Users/me/.codex/skills/my-skill',
     pickFolder: '选择',
-    pickFailed: '选择文件夹失败',
     importFailed: '导入失败',
     importedMessage: '已导入 {count} 个本地 Skill',
     selectAll: '全选',
@@ -242,6 +244,14 @@ export const sidepanel = {
     newSkills: '{count} 个新增 Skill',
     missingSkills: '{count} 个已导入 Skill 在上游消失',
     updatesFound: '发现上游更新',
+    /**
+     * 拼接「N 个可能更新」这类多段摘要用的分隔符。
+     *
+     * ⚠️ **不要写死在全角/半角任一侧**：中文用全角逗号、英文必须用 `, `，
+     * 而两道 i18n 门禁都不查标点（`i18n-coverage-audit` 只按汉字脚本属性判，
+     * 全角逗号不带汉字属性）⇒ 写死的话英文界面会冒出中文标点且静默通过。
+     */
+    listSeparator: '，',
     backendUnavailable: 'Skill 存储不可用，请重新加载扩展后再试。',
     operationFailed: 'Skill 操作失败：{error}',
     relocatePrompt: '原文件夹已挪动或不存在，请重新选择本地 Skill 文件夹。',
@@ -459,6 +469,7 @@ export const sidepanel = {
     validation: {
       nameRequired: '名称不能为空',
       positiveInteger: '{label} 必须是正整数',
+      timeoutOutOfRange: '{label} 必须在 {min}–{max} 毫秒之间',
       nativeHostRequired: 'Native Host 不能为空',
       nativeHostInvalid: 'Native Host 只能包含字母、数字、点、下划线和短横线',
       serviceUrlRequired: '服务 URL 不能为空',

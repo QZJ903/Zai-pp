@@ -103,7 +103,9 @@ export default function LocalSkillImportPanel({ onImported, onCancel }: Props) {
         },
       });
       const pickedPath = typeof response?.path === 'string' ? response.path.trim() : '';
-      if (!pickedPath) throw new Error(t('sidepanel.localSkillImport.pickFailed'));
+      // ⚠️ **取消不是失败** —— 什么都不做、保持面板原样。之前这里抛
+      // `pickFailed`，于是用户点一下取消就看到一条红色错误。
+      if (!pickedPath) return;
       setRootPath(pickedPath);
       latestPathRef.current = pickedPath;
       await runPreviewForPath(pickedPath);
@@ -304,12 +306,13 @@ function SourceSummary({ preview }: { preview: LocalSkillPreview }) {
     .filter((skill) => skill.importBlock)
     .reduce((sum, skill) => sum + skill.omittedFiles.length, 0);
   const sourceWarningSet = new Set(preview.warnings);
+  // ⚠️ 源级警告去重 + 技能级警告加前缀，都是「同一条别显示两遍」。
   const warnings = [
     ...preview.warnings,
     ...preview.skills.flatMap((skill) => skill.warnings
-      .filter((warning) => !sourceWarningSet.has(warning) && !isGenericOmissionWarning(warning))
+      .filter((warning) => !sourceWarningSet.has(warning))
       .map((warning) => `${skill.importName}: ${warning}`)),
-  ].filter((warning) => !isGenericOmissionWarning(warning));
+  ];
 
   return (
     <div className="ds-surface-panel rounded-xl p-3 space-y-2">
@@ -428,10 +431,6 @@ function PreviewSkillRow({ skill, checked, onToggle }: {
       </div>
     </label>
   );
-}
-
-function isGenericOmissionWarning(warning: string): boolean {
-  return /^\d+ local supporting file\(s\) were omitted\.$/.test(warning.trim());
 }
 
 function StatusMessage({ state, message, result }: {

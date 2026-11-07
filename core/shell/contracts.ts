@@ -24,6 +24,22 @@ export const LOCAL_SKILL_ERROR_CODES = {
   previewTooLarge: 'local_skill_preview_too_large',
   tooLarge: 'local_skill_too_large',
   previewFailed: 'local_skill_preview_failed',
+  /**
+   * 用户在文件夹选择框里点了取消。
+   *
+   * ⚠️⚠️ **这不是失败** —— 它只是「什么都没发生」。所以它**不在**
+   * `LOCAL_SKILL_PATH_UNAVAILABLE_CODES` 里（那一档会引导用户重选文件夹），
+   * 也不该显示成错误。给它一个码而不是靠 message 文案，是因为文案是 UI 字符串，
+   * 改一次措辞就静默失效。
+   */
+  folderPickCancelled: 'local_folder_pick_cancelled',
+  /**
+   * 文件夹选择器**真的失败了**（osascript 被拦、PowerShell 起不来等）。
+   *
+   * ⚠️ 与 `folderPickCancelled` 分开是因为两者语义相反：那个是「什么都没发生」，
+   * 这个要如实报错。共用一个码会让后续消费者把真实故障读成用户取消。
+   */
+  folderPickFailed: 'local_folder_pick_failed',
 } as const;
 
 /**

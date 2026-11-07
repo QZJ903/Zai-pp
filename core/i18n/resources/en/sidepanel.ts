@@ -69,6 +69,9 @@ export const sidepanel = {
       instructionsPlaceholder: 'You are a...\n\n## Core principles\n- ...',
       memoryInjectionLabel: 'Enable memory injection',
       nameTaken: 'That name is already used by another Skill (built-in or imported). The name is the activation command identity, so it must be unique.',
+      nameRequired: 'Enter a name first.',
+      nameCharset: 'A name may only contain lowercase letters, digits and hyphens — it doubles as your trigger command /name.',
+      instructionsRequired: 'Enter the instructions.',
     },
     sources: {
       builtin: 'Built-in',
@@ -107,7 +110,6 @@ export const sidepanel = {
     description: 'Reads a local Skill folder through Shell MCP. Zai++ keeps the folder reference and never executes scripts during import.',
     pathPlaceholder: '/Users/me/.codex/skills/my-skill',
     pickFolder: 'Choose',
-    pickFailed: 'Folder selection failed',
     importFailed: 'Import failed',
     importedMessage: 'Imported {count} local Skills',
     selectAll: 'Select all',
@@ -241,6 +243,7 @@ export const sidepanel = {
     changedUpdates: '{count} imported Skills may have updates',
     newSkills: '{count} new Skills',
     missingSkills: '{count} imported Skills disappeared upstream',
+    listSeparator: ', ',
     updatesFound: 'Upstream updates found',
     backendUnavailable: 'Skill storage is unavailable. Reload the extension and try again.',
     operationFailed: 'Skill operation failed: {error}',
@@ -459,6 +462,7 @@ export const sidepanel = {
     validation: {
       nameRequired: 'Name is required',
       positiveInteger: '{label} must be a positive integer',
+      timeoutOutOfRange: '{label} must be between {min} and {max} ms',
       nativeHostRequired: 'Native Host is required',
       nativeHostInvalid: 'Native Host can only contain letters, numbers, dots, underscores, and hyphens',
       serviceUrlRequired: 'Service URL is required',

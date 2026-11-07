@@ -52,6 +52,15 @@ const LOCAL_SKILL_ERROR_CODES = Object.freeze({
   PREVIEW_TOO_LARGE: 'local_skill_preview_too_large',
   TOO_LARGE: 'local_skill_too_large',
   PREVIEW_FAILED: 'local_skill_preview_failed',
+  // The user dismissed the folder picker. **Not a failure** — the extension turns this
+  // back into "nothing happened" instead of showing an error. It needs its own code
+  // because the message text is a UI string: matching on wording would break silently
+  // the day the wording changes.
+  FOLDER_PICK_CANCELLED: 'local_folder_pick_cancelled',
+  // The picker itself broke (osascript blocked, PowerShell missing, …). Kept apart from
+  // the cancellation code because the two mean opposite things: "nothing happened"
+  // versus "this is a real failure and must be reported".
+  FOLDER_PICK_FAILED: 'local_folder_pick_failed',
 });
 const LOCAL_TEXT_RESOURCE_EXTENSIONS = new Set(['.md', '.txt', '.yaml', '.yml', '.json', '.tex']);
 const LOCAL_SCRIPT_EXTENSIONS = new Set(['.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.sh', '.bash', '.zsh', '.ps1', '.rb', '.pl', '.php', '.lua', '.r']);

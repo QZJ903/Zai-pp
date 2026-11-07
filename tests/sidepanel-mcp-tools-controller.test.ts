@@ -30,17 +30,34 @@ describe('sidepanel MCP and Tools controller', () => {
     await expect(controller.loadMcpSnapshot()).resolves.toMatchObject({
       servers: [server],
       caches: { 'server-1': null },
-      history: [],
       platform,
       capabilitySettings,
     });
+    // ⚠️ **快照里不再带 history** —— 「最近调用」按服务单独取，不跟着整页刷新走。
+    await expect(controller.loadMcpSnapshot()).resolves.not.toHaveProperty('history');
     expect(requests).toEqual(expect.arrayContaining([
       { type: 'GET_MCP_SERVERS' },
       { type: 'GET_PLATFORM_CAPABILITIES' },
       { type: 'GET_MCP_TOOL_CACHE', payload: { serverId: 'server-1' } },
-      { type: 'GET_TOOL_CALL_HISTORY', payload: { limit: 12 } },
       { type: 'GET_MCP_CAPABILITY_SETTINGS' },
     ]));
+    expect(requests).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'GET_TOOL_CALL_HISTORY' }),
+    ]));
+  });
+
+  it('asks the background for one server history instead of filtering a global page', async () => {
+    const requests: unknown[] = [];
+    const controller = createMcpToolsController(createSidepanelRuntimeClient(async (request) => {
+      requests.push(request);
+      if (request.type === 'GET_TOOL_CALL_HISTORY') return { records: [], dropped: 0 };
+      throw new Error(`Unexpected command: ${request.type}`);
+    }));
+
+    await expect(controller.getServerHistory('server-1')).resolves.toEqual([]);
+    expect(requests).toEqual([
+      { type: 'GET_TOOL_CALL_HISTORY', payload: { serverId: 'server-1', limit: 20 } },
+    ]);
   });
 
   it('uses the typed capability exposure setting command and preserves a copied pin list', async () => {

@@ -45,6 +45,12 @@ export class McpStorageContractError extends Error {
 export interface McpStorageMigration {
   state: McpServerStorageState;
   migrated: boolean;
+  /**
+   * 这次读**丢掉了几条形状不合的工具缓存**（见 `decodeMcpStorageStateTolerant`）。
+   *
+   * ⚠️ 服务记录永远是 0 —— 那一半一坏就抛，不会被跳过。
+   */
+  droppedCaches: number;
 }
 
 export function createEmptyMcpStorageState(): McpServerStorageState {
@@ -55,9 +61,63 @@ export function createEmptyMcpStorageState(): McpServerStorageState {
   };
 }
 
-/** Pure v2 decoder. It never repairs, mutates, timestamps, or allocates IDs. */
+/**
+ * 一次读的结果 + **被丢掉的缓存条数**。
+ *
+ * ⚠️ 只对 `toolCaches` 计数 —— 服务记录永远严格，见 `decodeMcpStorageStateTolerant`。
+ */
+export interface McpStorageReadResult {
+  state: McpServerStorageState;
+  droppedCaches: number;
+}
+
+/**
+ * Pure v2 decoder. It never repairs, mutates, timestamps, or allocates IDs.
+ *
+ * ⚠️⚠️ **坏缓存必须抛，不能静默跳过** —— 这条同时守着两个方向：
+ *
+ * - **写侧**：`encodeMcpStorageState` 就是本函数。跳过坏缓存意味着写入畸形数据时
+ *   不报错，而是把它丢掉、再把「不含它」的 state 写回磁盘 ⇒ 工具凭空消失、零提示。
+ * - **响应解码**：`decodeRequiredMcpToolCache` 依赖「坏数据必然抛」才敢写 `caches[0]!`。
+ *   跳过之后数组会空，`undefined` 顺着非空断言往下流。
+ *
+ * 容错只属于**读盘**那一侧，见 `decodeMcpStorageStateTolerant`。
+ */
 export function decodeMcpStorageState(raw: unknown): McpServerStorageState {
-  if (raw === undefined) return createEmptyMcpStorageState();
+  return decodeMcpStorageStateWithReport(raw, false).state;
+}
+
+/**
+ * 读侧容错版：**只放过形状不合的工具缓存，服务记录仍然严格**。
+ *
+ * ⚠️⚠️ **为什么必须分这两档** —— 两个数组的失败方向完全相反：
+ *
+ * - `toolCaches` 是**派生数据**（每次发现重新生成）。一条缓存形状不合就整份抛时，
+ *   后果是「整个 MCP 存储打不开」：页面只剩一条错误横幅、模型侧的
+ *   `getRuntimeToolDescriptors` 也抛 ⇒ **含内置 Shell 在内的所有 MCP 工具全部消失**，
+ *   而且**删不掉、改不了、新建不了**（每个写入口都要先读整份）⇒ 用户没有任何自救动作。
+ *   丢掉一条的代价只是「那个服务要重新刷新一次工具」，所以跳过即可。
+ *
+ * - `servers` 是**权威数据**（用户手填的地址、请求头、密钥）。跳过一条的后果不是
+ *   「少显示一行」——所有写入口都是「读整份 → 改 → 写整份」，所以下一次**任何**
+ *   写入（改别的服务、点删除、刷新工具）都会把「不含那条服务的 state」写回磁盘
+ *   ⇒ **那条记录被永久删除，而用户只看到它不见了**。所以 `servers` 必须保持严格。
+ *
+ * ⚠️ **读路径不写盘**：被跳过的缓存不会在这里被抹掉，但下一次任何写入都会带上
+ * 不含它的 state ⇒ 自愈是自动的。反过来在这里写回会让「打开一次 MCP 页」变成
+ * N+1 次整份 re-encode（每个 `getMcpToolCache` 都会读一次），代价远大于收益。
+ */
+export function decodeMcpStorageStateTolerant(raw: unknown): McpStorageReadResult {
+  return decodeMcpStorageStateWithReport(raw, true);
+}
+
+function decodeMcpStorageStateWithReport(
+  raw: unknown,
+  tolerantCaches: boolean,
+): McpStorageReadResult {
+  if (raw === undefined) {
+    return { state: createEmptyMcpStorageState(), droppedCaches: 0 };
+  }
   const state = requireRecord(raw, '$');
   requireStorageVersion(state.version, '$.version');
   const servers = requireArray(state.servers, '$.servers');
@@ -67,8 +127,21 @@ export function decodeMcpStorageState(raw: unknown): McpServerStorageState {
 
   const cacheServerIds = new Set<string>();
   const decodedToolCaches: McpToolCacheEntry[] = [];
+  let droppedCaches = 0;
   toolCaches.forEach((cache, index) => {
-    const decoded = validateToolCache(cache, `$.toolCaches[${index}]`, serversById);
+    let decoded: McpToolCacheEntry;
+    try {
+      decoded = validateToolCache(cache, `$.toolCaches[${index}]`, serversById);
+    } catch (error) {
+      // ⚠️ **只吞 `McpStorageContractError`** —— 那是「形状不合」这一档。
+      // 其它异常（例如 `chrome.storage` 层面的错）必须照旧往外抛，别一起静音。
+      // ⚠️ 严格档下连这一档也抛：写侧与响应解码都靠「坏数据必然报错」。
+      if (!tolerantCaches || !(error instanceof McpStorageContractError)) throw error;
+      droppedCaches += 1;
+      return;
+    }
+    // ⚠️ 重复的 serverId **仍然整份抛** —— 那说明这个键被写坏了（同一服务两条缓存），
+    // 跳过任一条都会掩盖真正的成因。
     if (cacheServerIds.has(decoded.serverId)) {
       fail(`$.toolCaches[${index}].serverId`, 'Duplicate MCP tool cache.');
     }
@@ -79,10 +152,13 @@ export function decodeMcpStorageState(raw: unknown): McpServerStorageState {
   // Serve the validated (and legacy-normalized) records, not the raw stored
   // objects: decode must never leak a released `manual` mode value.
   return {
-    ...state,
-    servers: Array.from(serversById.values()),
-    toolCaches: decodedToolCaches,
-  } as unknown as McpServerStorageState;
+    state: {
+      ...state,
+      servers: Array.from(serversById.values()),
+      toolCaches: decodedToolCaches,
+    } as unknown as McpServerStorageState,
+    droppedCaches,
+  };
 }
 
 export function encodeMcpStorageState(state: McpServerStorageState): McpServerStorageState {
@@ -94,15 +170,18 @@ export function encodeMcpStorageState(state: McpServerStorageState): McpServerSt
  * mutation. Server configuration remains v1 and is validated exactly; v1 tool
  * caches are non-authoritative derived data from before the strict descriptor
  * contract, so they are deliberately invalidated rather than repaired.
+ *
+ * ⚠️ **v2 那一档必须走容错读** —— 否则 `readStateAlreadyOwned` 先调本函数就会在
+ * 坏缓存上抛，后面的容错分支永远走不到（那正是「一条坏缓存锁死整份存储」的入口）。
  */
 export function migrateMcpStorageState(raw: unknown): McpStorageMigration {
   if (raw === undefined) {
-    return { state: createEmptyMcpStorageState(), migrated: false };
+    return { state: createEmptyMcpStorageState(), migrated: false, droppedCaches: 0 };
   }
 
   const state = requireRecord(raw, '$');
   if (state.version === MCP_STORAGE_VERSION) {
-    return { state: decodeMcpStorageState(state), migrated: false };
+    return { ...decodeMcpStorageStateTolerant(state), migrated: false };
   }
   if (state.version !== MCP_LEGACY_STORAGE_VERSION) {
     requireStorageVersion(state.version, '$.version');
@@ -113,6 +192,8 @@ export function migrateMcpStorageState(raw: unknown): McpStorageMigration {
   validateServers(servers);
 
   return {
+    // v1 的缓存本来就整批作废（契约不同），所以这一档的 `droppedCaches` 记 0：
+    // 那不是「丢了几条坏数据」，是「按设计全部重建」。
     state: decodeMcpStorageState({
       ...state,
       version: MCP_STORAGE_VERSION,
@@ -120,6 +201,7 @@ export function migrateMcpStorageState(raw: unknown): McpStorageMigration {
       toolCaches: [],
     }),
     migrated: true,
+    droppedCaches: 0,
   };
 }
 

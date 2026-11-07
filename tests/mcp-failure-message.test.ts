@@ -70,6 +70,33 @@ describe('describeMcpFailure', () => {
     expect(message).toMatch(/结果字节/);
   });
 
+  /**
+   * ⚠️⚠️ `describeMcpFailure` 有八个分支，而它们**只靠 message 措辞区分** ——
+   * 所以「`exceeded` + `bytes`」与「`exceeded` + `ms`」这两条必须各有一条用例：
+   * 它们共享 `exceeded` 这个词，谁排前面谁赢。少一条就会让「超时被报成结果太大」
+   * （或反过来）静默通过。
+   */
+  it('maps a timeout to the timeout sentence, not the response-size one', () => {
+    const message = describeMcpFailure(server(), cacheWith('MCP request exceeded 60000 ms.'), t)!;
+    expect(message).toMatch(/超时/);
+    // 反面自检：不能落到「结果字节」那一档。
+    expect(message).not.toMatch(/结果字节/);
+  });
+
+  it('maps an unparseable response to the "not a valid MCP response" sentence', () => {
+    const cases = [
+      'MCP response body was not valid json.',
+      'MCP response was not a plain json object.',
+      'MCP response did not include a result.',
+      'MCP response did not include a body.',
+      'MCP stream ended without a matching response.',
+    ];
+    for (const wording of cases) {
+      const message = describeMcpFailure(server(), cacheWith(wording), t)!;
+      expect(message, wording).toMatch(/不是合法 MCP 响应/);
+    }
+  });
+
   it('maps a protocol version mismatch', () => {
     const message = describeMcpFailure(
       server(),

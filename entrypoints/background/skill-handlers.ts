@@ -31,7 +31,8 @@ export interface SkillRuntimeHandlerDependencies {
   previewGitHubSkillSource(url: string): Promise<GitHubSkillPreview>;
   importGitHubSkillSource(request: GitHubSkillImportRequest): Promise<GitHubSkillImportResult>;
   previewLocalSkillSource(rootPath: string): Promise<LocalSkillPreview>;
-  pickLocalSkillFolder(defaultPath?: string): Promise<string>;
+  /** 返回 `null` = 用户点了取消（**不是失败**，不应当走错误通道）。 */
+  pickLocalSkillFolder(defaultPath?: string): Promise<string | null>;
   importLocalSkillSource(request: LocalSkillImportRequest): Promise<LocalSkillImportResponse>;
   updateLocalSkillSource(sourceId: string): Promise<LocalSkillImportResponse>;
   relocateLocalSkillSource(sourceId: string, newRootPath: string): Promise<LocalSkillImportResponse>;

@@ -378,7 +378,19 @@ describe('Shell Host folder picker cancellation', () => {
 
   it('keeps the message-based fallbacks for the other platforms', () => {
     expect(normalizeFolderPickerError(new Error('execution error: User canceled. (-128)'))).toBe('Folder selection was cancelled.');
-    expect(normalizeFolderPickerError(new Error('The operation couldn’t be completed.'))).toBe('Folder selection was cancelled.');
+    expect(normalizeFolderPickerError(new Error('User cancelled the operation'))).toBe('Folder selection was cancelled.');
+  });
+
+  /**
+   * ⚠️⚠️ `The operation couldn't be completed.` 是 macOS/AppleScript 的**通用失败文案** ——
+   * Automation 权限被拒、`osascript` 被系统拦下都会命中它。把它当取消，一次真实故障
+   * 就会从「红色报错」降级成「什么都没发生」（扩展侧按取消码静默收尾）。
+   */
+  it('does not mistake a generic AppleScript failure for a cancellation', () => {
+    expect(normalizeFolderPickerError(new Error('The operation couldn’t be completed. (OSStatus -1743)')))
+      .toBe('The operation couldn’t be completed. (OSStatus -1743)');
+    expect(normalizeFolderPickerError(new Error('The operation couldn\'t be completed. Operation not permitted')))
+      .toBe('The operation couldn\'t be completed. Operation not permitted');
   });
 
   it('passes a real failure through unchanged', () => {

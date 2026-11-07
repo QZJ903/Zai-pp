@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendToolCallHistory, clearToolCallHistory, getToolCallHistory } from '../core/tool/history';
+import {
+  appendToolCallHistory,
+  clearToolCallHistory,
+  getToolCallHistory,
+  getToolCallHistoryReport,
+  TOOL_HISTORY_STORAGE_KEY,
+} from '../core/tool/history';
 import type { ToolCall, ToolResult } from '../core/tool/types';
 
 // Regression tests: a growing tool history must not make every
@@ -92,6 +98,59 @@ function sampleResult(index: number): ToolResult {
     detail: 'd'.repeat(20),
   };
 }
+
+describe('tool history scoping by provider', () => {
+  // ⚠️⚠️ 这一组守「**先筛后截**」。反过来的写法（先 `slice` 再 `filter`）在单服务夹具下
+  // 完全看不出来 —— 只有另一个 provider 把名额占满时，本服务才会静默变成 0 条，
+  // 而界面照旧显示「暂无调用」。所以夹具里必须有**两个** provider。
+  //
+  // ⚠️ 本组要多写几条，而外层 `beforeEach` 把配额压到 600 字节（专为裁剪用例设的）
+  // ⇒ 必须先放开配额，否则记录在**写入侧**就被 `trimToFit` 砍掉了，测不到读取侧过滤。
+  const widenQuota = () => {
+    (chrome.storage.local as unknown as { QUOTA_BYTES: number }).QUOTA_BYTES = 10_485_760;
+  };
+
+  const scopedCall = (index: number, providerId: string): ToolCall => ({
+    ...sampleCall(index),
+    provider: { kind: 'mcp', id: providerId, displayName: providerId, transport: 'http' },
+  });
+
+  it('counts the limit per provider instead of taking a global window first', async () => {
+    widenQuota();
+    // 先写 6 条 A（更早），再写 2 条 B（更晚）—— 全局最近 3 条全是 B。
+    for (let i = 0; i < 6; i += 1) {
+      await appendToolCallHistory(scopedCall(i, 'server-a'), sampleResult(i), 'manual_chat');
+    }
+    for (let i = 0; i < 2; i += 1) {
+      await appendToolCallHistory(scopedCall(100 + i, 'server-b'), sampleResult(i), 'manual_chat');
+    }
+
+    // 先截后筛时这里拿到 0 条（3 个名额被 B 占满）—— 那就是「暂无调用」那个缺陷。
+    const scoped = await getToolCallHistory({ serverId: 'server-a', limit: 3 });
+    expect(scoped).toHaveLength(3);
+    expect(scoped.every((record) => record.call.provider?.id === 'server-a')).toBe(true);
+  });
+
+  it('returns every provider when no serverId is given', async () => {
+    widenQuota();
+    await appendToolCallHistory(scopedCall(0, 'server-a'), sampleResult(0), 'manual_chat');
+    await appendToolCallHistory(scopedCall(1, 'server-b'), sampleResult(1), 'manual_chat');
+
+    const all = await getToolCallHistory({ limit: 10 });
+    expect(new Set(all.map((record) => record.call.provider?.id)))
+      .toEqual(new Set(['server-a', 'server-b']));
+  });
+
+  it('keeps dropped in the global reading even when scoping', async () => {
+    await appendToolCallHistory(scopedCall(0, 'server-a'), sampleResult(0), 'manual_chat');
+    const stored = storage[TOOL_HISTORY_STORAGE_KEY] as unknown[];
+    storage[TOOL_HISTORY_STORAGE_KEY] = [...stored, { totally: 'broken' }];
+
+    const report = await getToolCallHistoryReport({ serverId: 'server-a', limit: 5 });
+    expect(report.records).toHaveLength(1);
+    expect(report.dropped).toBe(1);
+  });
+});
 
 describe('tool history output round-trip', () => {
   it('restores a structured output snapshot back into an object', async () => {

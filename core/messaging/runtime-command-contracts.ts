@@ -97,6 +97,12 @@ export const RUNTIME_COMMAND_CONTRACTS = {
   GET_MCP_SERVER: typedCommand('payload-decoded', 'nullable-value'),
   CREATE_MCP_SERVER: typedCommand('payload-decoded', 'value'),
   UPDATE_MCP_SERVER: typedCommand('payload-decoded', 'nullable-value'),
+  /**
+   * ⚠️ `live-and-declared`（与 `UPDATE_MCP_SERVER` 同档）—— 它由侧边栏发起、
+   * 也出现在 `MessageAction` 并集里。**不进** `ZAI_CONTENT_RUNTIME_COMMANDS`：
+   * 那个白名单只管 content → background 方向。
+   */
+  SET_MCP_TOOL_SELECTION: typedCommand('payload-decoded', 'nullable-value'),
   DELETE_MCP_SERVER: typedCommand('payload-decoded', 'ack'),
   GET_MCP_TOOL_CACHE: typedCommand('payload-decoded', 'nullable-value'),
   REFRESH_MCP_SERVER_TOOLS: typedCommand('payload-decoded', 'value'),

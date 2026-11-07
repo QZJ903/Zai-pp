@@ -83,6 +83,10 @@ export interface ToolRuntimeCommandContracts {
     request: DeclaredRuntimeRequest<'UPDATE_MCP_SERVER'>;
     response: McpServerConfig | null;
   };
+  SET_MCP_TOOL_SELECTION: {
+    request: DeclaredRuntimeRequest<'SET_MCP_TOOL_SELECTION'>;
+    response: McpServerConfig | null;
+  };
   DELETE_MCP_SERVER: {
     request: DeclaredRuntimeRequest<'DELETE_MCP_SERVER'>;
     response: Ack;

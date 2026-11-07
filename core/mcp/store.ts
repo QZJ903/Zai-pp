@@ -8,16 +8,17 @@ import type {
   McpServerStatus,
   McpServerStorageState,
   McpServerUpdateInput,
+  McpToolAllowlist,
   McpToolCacheEntry,
 } from './types';
 import { MCP_DEFAULT_LIMITS, MCP_DEFAULT_TIMEOUTS } from './constants';
 import { createSerialOperationQueue } from '../persistence/serial-operation-queue';
 import {
-  decodeMcpStorageState,
   encodeMcpStorageState,
   MCP_SERVER_CONFIG_VERSION,
   MCP_STORAGE_KEY,
   migrateMcpStorageState,
+  type McpStorageMigration,
 } from './storage-codec';
 
 const REDACTED_SECRET_VALUE = '********';
@@ -142,6 +143,69 @@ export async function updateMcpServer(
     });
     return sanitizeMcpServerConfig(updated);
   });
+}
+
+/**
+ * 按**单个工具**增删白名单，读-改-写在同一个存储事务里完成。
+ *
+ * ⚠️⚠️ **为什么必须有这个入口，而不是让侧边栏算好整份名单再 `updateMcpServer`**：
+ * 侧边栏算名单时用的是**它手上那份快照**，而快照要等后台广播回来才更新。
+ * 用户连着点两个不同工具的开关，第二次算出的名单里没有第一次的改动 ⇒
+ * **第一次被整份覆盖掉**（表现：点两个只开了一个，没有任何报错）。
+ *
+ * ⚠️ `invocationName` 也要一并删 —— 老数据里可能存的是带 server 前缀的那种名字。
+ */
+export async function setMcpToolSelection(
+  id: McpServerId,
+  tool: { name: string; invocationName?: string },
+  selected: boolean,
+): Promise<McpServerConfig | null> {
+  return mcpStorageOperations.run(async () => {
+    const state = await readStateAlreadyOwned();
+    let updated: McpServerConfig | null = null;
+    const servers = state.servers.map((server) => {
+      if (server.id !== id) return server;
+      updated = normalizeServerForMutation({
+        ...server,
+        allowlist: nextAllowlistForTool(server.allowlist, tool, selected),
+        updatedAt: Date.now(),
+      });
+      return updated;
+    });
+    if (!updated) return null;
+    await writeStateAlreadyOwned({ ...state, servers });
+    return sanitizeMcpServerConfig(updated);
+  });
+}
+
+/**
+ * 白名单增删的**唯一实现** —— 侧边栏与后台共用。
+ *
+ * ⚠️ 三条语义都在这里：`allow` 档点名启用、`deny` 档点名禁用、`all` 档关掉某个时
+ * 才降级成 `deny`。任何一处各写一份，用户就会看到「面板勾了、实际没生效」。
+ */
+export function nextAllowlistForTool(
+  allowlist: McpToolAllowlist,
+  tool: { name: string; invocationName?: string },
+  shouldEnable: boolean,
+): McpToolAllowlist {
+  const names = new Set(allowlist.toolNames);
+  const removeTool = () => {
+    names.delete(tool.name);
+    if (tool.invocationName) names.delete(tool.invocationName);
+  };
+
+  if (allowlist.mode === 'allow') {
+    if (shouldEnable) names.add(tool.name);
+    else removeTool();
+    return { mode: 'allow', toolNames: [...names] };
+  }
+  if (allowlist.mode === 'deny') {
+    if (shouldEnable) removeTool();
+    else names.add(tool.name);
+    return { mode: names.size === 0 ? 'all' : 'deny', toolNames: [...names] };
+  }
+  return shouldEnable ? allowlist : { mode: 'deny', toolNames: [tool.name] };
 }
 
 /** Records connection health without treating it as a configuration mutation. */
@@ -290,11 +354,42 @@ export function buildMcpRequestHeaders(server: McpServerConfig): Record<string, 
   return Object.fromEntries([...headers.values()].map((entry) => [entry.name, entry.value]));
 }
 
+/**
+ * 读整份 MCP 状态。
+ *
+ * ⚠️⚠️ **工具缓存走容错读、服务记录保持严格** —— 理由见
+ * `decodeMcpStorageStateTolerant` 的说明：缓存是派生数据（丢一条只是要重新发现），
+ * 服务是权威数据（丢一条等于静默删掉用户的配置，因为下游写操作会带著不含它的
+ * state 整份写回）。迁移仍然走严格版：那一档判的是**版本**，不该被容错掩盖。
+ *
+ * ⚠️ **这里不写回被跳过的缓存** —— 自愈靠「下一次任何写入都带著不含它的 state」，
+ * 在这里写回会让打开一次 MCP 页变成 N+1 次整份 re-encode。
+ */
 async function readStateAlreadyOwned(): Promise<McpServerStorageState> {
   const data = await chrome.storage.local.get(MCP_STORAGE_KEY) as Record<string, unknown>;
+  // ⚠️ **只走这一条**：`migrateMcpStorageState` 的 v2 分支内部已经用容错读，
+  // 在它之后再单独 decode 一次会拿**原始**（可能是 v1）的 raw 再解一遍 ⇒
+  // 老版本存储会在这里抛 `mcp_storage_version_unsupported`。
   const migration = migrateMcpStorageState(data[MCP_STORAGE_KEY]);
   if (migration.migrated) await writeStateAlreadyOwned(migration.state);
+  logDroppedCaches(migration);
   return migration.state;
+}
+
+// ⚠️ **按「丢了几条」去重** —— 一次 `loadMcpSnapshot` 会读 1 + N 次（每个服务一次
+// `getMcpToolCache`），而坏缓存不会在用户不写盘时被清掉 ⇒ 打开一次 MCP 页会打 N+1 条
+// 一模一样的日志。同一个数字只报一次就够；数目变了（又坏了一条）才重新报。
+let lastLoggedDroppedCaches = 0;
+
+function logDroppedCaches(migration: McpStorageMigration): void {
+  if (migration.droppedCaches <= 0 || migration.droppedCaches === lastLoggedDroppedCaches) return;
+  lastLoggedDroppedCaches = migration.droppedCaches;
+  // ⚠️ `log` 级、不是 `error` —— 丢弃是**自愈动作**（下次写入即清），
+  // 而这条只在 `chrome://extensions` 的 SW 控制台可见，不进扩展错误面板。
+  console.log('[Zai++] dropped malformed MCP tool caches', {
+    dropped: migration.droppedCaches,
+    kept: migration.state.toolCaches.length,
+  });
 }
 
 async function writeStateAlreadyOwned(state: McpServerStorageState): Promise<void> {

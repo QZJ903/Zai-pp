@@ -50,7 +50,7 @@ const inventorySource = readFileSync('docs/compatibility/runtime-command-invento
 const COMMAND_GROUP_SECTIONS = [
   ['Group A — Typed seam bootstrap (2)', 2],
   ['Group B — Persistence, library, and local preferences (41)', 41],
-  ['Group C — MCP, tool, browser control, and sandbox (30)', 30],
+  ['Group C — MCP, tool, browser control, and sandbox (31)', 31],
   ['Group D — DOM task lifecycle (3)', 3],
   ['Group E — Automation, usage, models, and lifecycle closure (13)', 13],
 ] as const;
@@ -97,10 +97,10 @@ describe('runtime command compatibility contract', () => {
       expect(commands, heading).toHaveLength(count);
       return commands;
     });
-    expect(groupedLedger).toHaveLength(89);
+    expect(groupedLedger).toHaveLength(90);
     expect(new Set(groupedLedger).size).toBe(groupedLedger.length);
     expectSortedEqual(groupedLedger, live);
-    expect(registryEntries).toHaveLength(91);
+    expect(registryEntries).toHaveLength(92);
     for (const contract of liveContracts) {
       const registered = RUNTIME_COMMAND_CONTRACTS[contract.type as keyof typeof RUNTIME_COMMAND_CONTRACTS];
       expect(registered.owner).toBe(getRuntimeCommandOwner(contract.type));
@@ -166,11 +166,15 @@ describe('runtime command compatibility contract', () => {
       String(liveOnly),
       ENGLISH_NUMBER_WORDS[declaredOnly].toLowerCase(),
     ]]);
-    // ⚠️ 数词在句首大写、句中全小写（`Sixty-two … and two are declared-only`）
-    // ⇒ 上面那条比较要归一成小写再比。
 
-    expect(groups(/It freezes `89\/(\d+)\/(\d+)\/(\d+)\/(\d+)`/g).map((row) => row.map(Number)),
-      '契约测试段：declared / shared / liveOnly / declaredOnly')
+    // ⚠️⚠️ **第一个数字也要校验** —— 直接写成 `\d+` 会让「文档把总数写错」静默通过。
+    // 用模板插值，加一条命令时 `${liveCommands}` 自动跟随，同时保留对文档的校验。
+    // ⚠️ 第一个数字是 **`liveCommands`**（活路由名数），不是 `declaredActions`：
+    // 文档写的是 `It freezes `90/65/63/27/2``，后四位才是
+    // declared / shared / liveOnly / declaredOnly（由 `groups()` 的捕获组给出）。
+    expect(groups(new RegExp(`It freezes \`${liveCommands}/(\\d+)/(\\d+)/(\\d+)/(\\d+)\``, 'g'))
+      .map((row) => row.map(Number)),
+    '契约测试段：liveCommands / declared / shared / liveOnly / declaredOnly')
       .toEqual([[declaredActions, shared, liveOnly, declaredOnly]]);
     expect(groups(/current `(\d+)\/(\d+)` payload access/g).map((row) => row.map(Number)),
       '契约测试段：readsPayload / ignoresPayload')

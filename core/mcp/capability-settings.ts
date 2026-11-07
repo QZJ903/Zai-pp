@@ -17,10 +17,20 @@ export const DEFAULT_MCP_CAPABILITY_SETTINGS: McpCapabilitySettings = Object.fre
   servers: {},
 });
 
-const MIN_ADAPTIVE_DIRECT_TOOLS = 1;
-const MAX_ADAPTIVE_DIRECT_TOOLS = 64;
-const MIN_ADAPTIVE_PROMPT_BYTES = 2_000;
-const MAX_ADAPTIVE_PROMPT_BYTES = 256_000;
+/**
+ * 自适应预算的合法区间 —— **唯一真源**。
+ *
+ * ⚠️⚠️ **这四个常量必须导出：侧边栏表单也拿它们做校验**
+ * （`entrypoints/sidepanel/pages/McpPage.tsx` 的 `AdaptiveCapabilityBudget`）。
+ * 那边曾经手抄过一份同样的数字，两侧一旦分叉：放宽后台区间时 UI 仍然拒绝新值
+ * （用户看到「数值无效」而配置其实合法）；收窄后台区间时 UI 放行后
+ * `boundedInteger` 抛 `mcp_capability_settings_corrupt` ⇒ 读设置整条失败。
+ * ⇒ 改数值只改这里，别在任何地方再写一份字面量。
+ */
+export const MIN_ADAPTIVE_DIRECT_TOOLS = 1;
+export const MAX_ADAPTIVE_DIRECT_TOOLS = 64;
+export const MIN_ADAPTIVE_PROMPT_BYTES = 2_000;
+export const MAX_ADAPTIVE_PROMPT_BYTES = 256_000;
 const capabilitySettingsOperations = createSerialOperationQueue();
 
 export type McpCapabilitySettingsErrorCode =

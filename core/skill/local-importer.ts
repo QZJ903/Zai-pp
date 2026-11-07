@@ -1,7 +1,7 @@
 import { getMcpToolDescriptors, refreshMcpServerDiscovery } from '../mcp/discovery';
 import { getAllMcpServers, getMcpToolCache } from '../mcp/store';
 import { createMcpDescriptorId } from '../mcp/descriptor-identity';
-import { isLocalSkillPathUnavailableCode, isShellMcpServer } from '../shell';
+import { isLocalSkillPathUnavailableCode, isShellMcpServer, LOCAL_SKILL_ERROR_CODES } from '../shell';
 import type {
   LocalSkillImportRequest,
   LocalSkillImportBlock,
@@ -172,10 +172,22 @@ export async function previewLocalSkillSource(
   return (await loadLocalSkillSource(rootPath, undefined, undefined, deps)).preview;
 }
 
+/**
+ * 弹系统文件夹选择框。
+ *
+ * 返回 `null` = **用户点了取消**；抛错 = 真的失败（host 不可用、路径不可读等）。
+ *
+ * ⚠️⚠️ **取消不能和失败共用一个出口** —— 之前两处调用点都把它当失败：导入面板弹出
+ * 一条红色 `Folder selection was cancelled.`，技能页更糟 —— `catch { return null }`
+ * 把取消与「选择器坏了」压成同一个值，于是界面报「原文件夹已挪动或不存在」，
+ * 用户只是不想选了却被告知文件夹出事了。
+ *
+ * ⚠️ 判据是 host 回的**结构化错误码**，不是 message 文案（那是 UI 字符串）。
+ */
 export async function pickLocalSkillFolder(
   defaultPath?: string,
   deps?: LocalSkillImporterDeps,
-): Promise<string> {
+): Promise<string | null> {
   if (!deps) throw new Error('Local Skill importer runtime executor is required.');
   const server = await getShellMcpServer();
   const result = await executeShellMcpTool(server, 'local_folder_pick', {
@@ -184,6 +196,7 @@ export async function pickLocalSkillFolder(
   }, deps);
 
   if (!result.ok) {
+    if (readHostErrorCode(result) === LOCAL_SKILL_ERROR_CODES.folderPickCancelled) return null;
     throw new Error(formatToolFailure(result));
   }
   return parseLocalFolderPickOutput(result.output);

@@ -131,7 +131,17 @@ const BASELINE = Object.freeze({
   // （336356 > 335812+512），一直到本版才发现。**不是本版改动带来的**：
   // 本版构建与 `6b0df13` 干净构建的实测值逐字节相同（都是 336356）。
   // ⚠️ 三条文案各自对应一条新加的失败分档，删掉会退回「静默失败」⇒ **有意增长，回写基线**。
-  initialShell: { raw: 336_356, gzip: 106_254 },
+  //
+  // ⚠️⚠️ **2026-11-07 重测**：实测 raw **342463** / gzip **107921**。
+  // 这一版涨得比以往任何一次都多，来源分两批，**都不是意外膨胀**：
+  // ① **侧边栏外壳与共享 UI 那批**（新增 `errorBoundary.*` 两条 + 若干设置页文案，
+  //    以及 `RouteErrorBoundary` 组件本身进了初始 shell）—— 单独构建实测 341826 / 107733；
+  // ② **MCP 与 Skill 配置页那批**（+637 raw / +188 gzip）：`skill.form` 三档校验提示、
+  //    `skillPage.listSeparator`、`mcpPage.validation.timeoutOutOfRange`，
+  //    以及 `capability-settings` 的四个边界常量随 `McpPage` 进包。
+  // ⚠️ **①的那 341826 是上一批加的、当时没构建** ⇒ 门禁从那次起就红着（同 5da43a4 那次）。
+  // 判据：每一条新键都对应一处「界面原先什么都没说」或「说了假话」，删了就退回去。
+  initialShell: { raw: 342_463, gzip: 107_921 },
   // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
   // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
   // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，
@@ -183,7 +193,12 @@ const BUDGET = Object.freeze({
     // + 风险徽章三档）后实测 raw 57501 / gzip 14119，原预算 56000 差 1501 字节。
     // 这是**真实增长**（不是合并），来源是 `classifyAugmentRequest` 那套判定
     // 与 12 个工具的中文说明进了同一个 chunk。抬预算时留了 ~2500 / ~880 余量。
-    McpPage: { raw: 60_000, gzip: 15_000 },
+    // ⚠️ **2026-11-07 抬到 63_000 / 15_500** —— 实测 raw 60444 / gzip 14886，原预算 60000 差 444 字节。
+    // 增量来源全是**这一轮的功能**，不是意外膨胀：`SET_MCP_TOOL_SELECTION` 的调用点、
+    // 按服务取历史（`getServerHistory` + 独立的 `refreshHistory` + 切换选中只刷历史）、
+    // 三个 ms 字段的上界校验与那句「必须在 {min}–{max} 之间」的文案。
+    // ⚠️ gzip 只涨了 186、余量本来就紧（15000 只差 114），所以两档一起抬。
+    McpPage: { raw: 63_000, gzip: 15_500 },
     BrowserControlPage: { raw: 10_000, gzip: 4_000 },
     // 自动化仍是能力页的一个 tab，独立懒加载 chunk。
     AutomationPage: { raw: 35_000, gzip: 10_000 },

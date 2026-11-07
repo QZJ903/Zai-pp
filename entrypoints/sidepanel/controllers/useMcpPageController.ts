@@ -21,7 +21,6 @@ import {
   isMcpNativeMessagingSupported,
   isMcpToolSelected,
   mcpToolsController,
-  nextMcpToolAllowlist,
   visibleMcpTools,
   type McpConnectionAction,
   type McpPresetKind,
@@ -40,6 +39,8 @@ type Confirm = (options: {
 export function useMcpPageController(t: Translator, confirm: Confirm) {
   const [servers, setServers] = useState<McpServerConfig[]>([]);
   const [caches, setCaches] = useState<Record<string, McpToolCacheEntry | null>>({});
+  // ⚠️ **这是「当前选中那个服务」的记录**，不是全体最近 N 条 —— 后者会让不活跃的
+  // 服务恒显示「暂无调用」（名额被别的服务占满）。取数带 `serverId`，先筛后截在后台。
   const [history, setHistory] = useState<ToolCallHistoryRecord[]>([]);
   const [capabilitySettings, setCapabilitySettings] = useState<McpCapabilitySettings | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -52,6 +53,10 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectionInitialized = useRef(false);
   const requestFence = useRef(createRequestGenerationFence());
+  // 历史单独一条闸门：它在「切换选中服务」时独立触发，不能占用整页 load 的那条。
+  const historyFence = useRef(createRequestGenerationFence());
+  // `load()` 里要按「此刻选中的是谁」决定取哪份历史，而 state 在闭包里是旧值。
+  const selectedIdRef = useRef<string | null>(null);
 
   const clearBanner = useCallback(() => {
     if (dismissTimer.current) clearTimeout(dismissTimer.current);
@@ -67,6 +72,28 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
       : null;
   }, []);
 
+  /**
+   * 拉「某个服务」的最近调用。
+   *
+   * ⚠️ **失败只弹横幅、不动已有记录** —— 与整页 load 同口径：一次读失败不能把上一次
+   * 已确认的列表清空（那会让用户以为记录凭空消失）。
+   */
+  const refreshHistory = useCallback(async (serverId: string | null) => {
+    const generation = historyFence.current.begin();
+    if (!serverId) {
+      setHistory([]);
+      return;
+    }
+    try {
+      const records = await mcpToolsController.getServerHistory(serverId);
+      if (historyFence.current.isCurrent(generation)) setHistory(records);
+    } catch (error) {
+      if (historyFence.current.isCurrent(generation)) {
+        showBanner('error', formatRuntimeError(error, t));
+      }
+    }
+  }, [showBanner, t]);
+
   const load = useCallback(async () => {
     const generation = requestFence.current.begin();
     setLoading(true);
@@ -76,15 +103,20 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
       setPlatform(snapshot.platform);
       setServers(snapshot.servers);
       setCaches(snapshot.caches);
-      setHistory(snapshot.history);
       setCapabilitySettings(snapshot.capabilitySettings);
       const shouldSelectInitialServer = !selectionInitialized.current
         && snapshot.servers.length > 0;
       if (shouldSelectInitialServer) selectionInitialized.current = true;
-      setSelectedId((current) => {
-        if (current && snapshot.servers.some((server) => server.id === current)) return current;
-        return shouldSelectInitialServer ? snapshot.servers[0]?.id ?? null : null;
-      });
+      const current = selectedIdRef.current;
+      const nextSelected = current && snapshot.servers.some((server) => server.id === current)
+        ? current
+        : (shouldSelectInitialServer ? snapshot.servers[0]?.id ?? null : null);
+      selectedIdRef.current = nextSelected;
+      setSelectedId(nextSelected);
+      // ⚠️ 历史不在 `loadMcpSnapshot` 里一起取 —— 它只跟「选中了谁」有关，与列表/缓存
+      // 无关。这里补刷一次是因为 `focus` / `visibilitychange` 也会调 `load()`：那两条
+      // 路径下选中项不一定变，光靠下面的 effect 刷不到（历史也可能已经过时）。
+      void refreshHistory(nextSelected);
     } catch (error) {
       if (requestFence.current.isCurrent(generation)) {
         showBanner('error', formatRuntimeError(error, t) || t('sidepanel.mcpPage.messages.loadFailed'));
@@ -92,16 +124,28 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
     } finally {
       if (requestFence.current.isCurrent(generation)) setLoading(false);
     }
-  }, [showBanner, t]);
+  }, [refreshHistory, showBanner, t]);
+
+  // ⚠️⚠️ **ref 必须跟着 state 走** —— 只靠 `load()` 内部回填会让「外部改选中项」全部丢失：
+  // 用户点 B（只调 `setSelectedId`）、下一次 `load()` 读到 ref 还是 A、且 A 仍在列表里
+  // ⇒ 详情面板从 B 跳回 A。所有 `setSelectedId` 的调用点（点服务行、新建预设命中已存在、
+  // 删除服务）都经这一行同步，不依赖调用方自己记得改 ref。
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
 
   useEffect(() => {
     void load();
     const reloadForRuntimeUpdate = (message: { type?: string }) => {
-      if (
-        message.type === 'MCP_SERVERS_UPDATED'
-        || message.type === 'TOOL_DESCRIPTORS_UPDATED'
-        || message.type === 'TOOL_CALL_HISTORY_UPDATED'
-      ) {
+      // ⚠️⚠️ **历史变了只刷历史，不整页重载** —— 工具每执行一次后台都会发
+      // `TOOL_CALL_HISTORY_UPDATED`，而整页 `load()` 要发 1 + N 次 `GET_MCP_TOOL_CACHE`
+      // （每个服务一次），每次后台还要解一遍整份 MCP state。那份开销原本是用来
+      // 刷新「最近调用」的，而现在历史由 `refreshHistory` 单独取 ⇒ 整页重载纯属浪费。
+      if (message.type === 'TOOL_CALL_HISTORY_UPDATED') {
+        void refreshHistory(selectedIdRef.current);
+        return;
+      }
+      if (message.type === 'MCP_SERVERS_UPDATED' || message.type === 'TOOL_DESCRIPTORS_UPDATED') {
         void load();
       }
     };
@@ -113,12 +157,20 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
     window.addEventListener('focus', reloadWhenVisible);
     return () => {
       requestFence.current.invalidate();
+      historyFence.current.invalidate();
       if (dismissTimer.current) clearTimeout(dismissTimer.current);
       chrome.runtime.onMessage.removeListener(reloadForRuntimeUpdate);
       document.removeEventListener('visibilitychange', reloadWhenVisible);
       window.removeEventListener('focus', reloadWhenVisible);
     };
-  }, [load]);
+  }, [load, refreshHistory]);
+
+  // 切换选中服务只影响「最近调用」那一块 ⇒ 只刷历史，不整页重载。
+  // ⚠️ 首次挂载时选中项由 `load()` 设进来，这里会跟着跑一次；与 `load()` 里那次并发
+  // 由 `historyFence` 收敛成「最后一次生效」，不会双写。
+  useEffect(() => {
+    void refreshHistory(selectedId);
+  }, [refreshHistory, selectedId]);
 
   const startCreate = useCallback(() => {
     setEditing(null);
@@ -252,10 +304,17 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
 
   const toggleTool = useCallback(async (server: McpServerConfig, tool: ToolDescriptor) => {
     const selected = isMcpToolSelected(server, tool);
-    await patchServer(server, {
-      allowlist: nextMcpToolAllowlist(server.allowlist, tool, !selected),
-    });
-  }, [patchServer]);
+    try {
+      // ⚠️⚠️ **走「按单个工具改」的命令，不在这里算整份 allowlist** —— 这里的 `server`
+      // 是上一次快照，连点两个不同工具的开关时，第二次算出的名单里没有第一次的改动
+      // ⇒ 第一次被整份覆盖（用户看到「点了两个只开了一个」）。后台在存储事务里读-改-写。
+      const saved = await mcpToolsController.setToolSelection(server.id, tool, !selected);
+      if (!saved) throw new Error('MCP server no longer exists.');
+      await load();
+    } catch (error) {
+      showBanner('error', formatRuntimeError(error, t));
+    }
+  }, [load, showBanner, t]);
 
   const setServerExposure = useCallback(async (
     server: McpServerConfig,
@@ -304,7 +363,7 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
   return {
     servers,
     caches,
-    mcpHistory: history.filter((record) => record.call.provider?.kind === 'mcp'),
+    selectedServerHistory: history,
     capabilitySettings,
     selected,
     selectedId,

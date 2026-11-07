@@ -91,7 +91,7 @@ const call: ToolCall = {
 };
 
 describe('tool runtime handler ownership', () => {
-  it('creates exactly the 30 inventory-assigned handlers without duplicate ownership', () => {
+  it('creates exactly the 31 inventory-assigned handlers without duplicate ownership', () => {
     const handlers = createToolRuntimeHandlers({
       mcp: createMcpDependencies(),
       browser: createBrowserDependencies(),
@@ -99,11 +99,11 @@ describe('tool runtime handler ownership', () => {
     });
     const types = handlers.map((handler) => handler.type);
     const expected = readInventoryCommands(
-      'Group C — MCP, tool, browser control, and sandbox (30)',
+      'Group C — MCP, tool, browser control, and sandbox (31)',
     );
 
-    expect(types).toHaveLength(30);
-    expect(new Set(types).size).toBe(30);
+    expect(types).toHaveLength(31);
+    expect(new Set(types).size).toBe(31);
     expect([...types].sort()).toEqual([...expected].sort());
     for (const type of types) expect(getRuntimeCommandOwner(type)).toBe('typed-handler');
 
@@ -113,7 +113,7 @@ describe('tool runtime handler ownership', () => {
       .filter((type) => expected.includes(type))
       .sort();
     expect(Object.keys(TOOL_RUNTIME_PAYLOAD_DECODERS).sort()).toEqual(decodedTypes);
-    expect(decodedTypes).toHaveLength(18);
+    expect(decodedTypes).toHaveLength(19);
   });
 
   it('rejects malformed nested MCP input before persistence or external I/O', async () => {
@@ -599,12 +599,14 @@ describe('tool execution runtime handlers', () => {
       type: 'GET_TOOL_CALL_HISTORY',
       payload: { limit: 5 },
     })).resolves.toEqual({ records: [history], dropped: 0 });
-    expect(dependencies.getToolCallHistory).toHaveBeenCalledWith(5);
+    // ⚠️ 依赖签名是**对象参数**（`{ limit, serverId }`）—— 两个位置参数一个数字一个
+    // 字符串，传反了 `slice(0, 'abc')` 不抛错、只返回空数组，界面读作「暂无调用」。
+    expect(dependencies.getToolCallHistory).toHaveBeenCalledWith({ limit: 5 });
 
     vi.mocked(dependencies.getToolCallHistory).mockClear();
     await expect(dispatch(handlers, { type: 'GET_TOOL_CALL_HISTORY' }))
       .resolves.toEqual({ records: [history], dropped: 0 });
-    expect(dependencies.getToolCallHistory).toHaveBeenCalledWith(undefined);
+    expect(dependencies.getToolCallHistory).toHaveBeenCalledWith({});
 
     // ⚠️ **省略合法、给了就必须是正整数** —— 这个值直接进 `slice(0, limit)`：
     // 负数会被解释成「从尾部倒数」（`-1` = 去掉最后一条，与「最近 N 条」正好相反）、
@@ -625,6 +627,31 @@ describe('tool execution runtime handlers', () => {
       type: 'GET_TOOL_CALL_HISTORY',
       payload: { limit: 1_000_000 },
     })).resolves.toEqual({ records: [history], dropped: 0 });
+
+    // ⚠️ **`serverId` 必须原样透传到依赖** —— 「先筛后截」在 `core/tool/history.ts`
+    // 里落地，handler 少传一次，侧边栏就退回「全体最近 N 条」（不活跃服务恒空）。
+    vi.mocked(dependencies.getToolCallHistory).mockClear();
+    await expect(dispatch(handlers, {
+      type: 'GET_TOOL_CALL_HISTORY',
+      payload: { serverId: 'server-9', limit: 20 },
+    })).resolves.toEqual({ records: [history], dropped: 0 });
+    expect(dependencies.getToolCallHistory).toHaveBeenCalledWith({ serverId: 'server-9', limit: 20 });
+
+    // 只给 `serverId`、不给 `limit` 也合法（`limit` 走默认值）。
+    vi.mocked(dependencies.getToolCallHistory).mockClear();
+    await expect(dispatch(handlers, {
+      type: 'GET_TOOL_CALL_HISTORY',
+      payload: { serverId: 'server-9' },
+    })).resolves.toEqual({ records: [history], dropped: 0 });
+    expect(dependencies.getToolCallHistory).toHaveBeenCalledWith({ serverId: 'server-9' });
+
+    // blank 的 `serverId` 必须拒 —— 空串会被拿去和 `provider.id` 逐字比、静默筛出 0 条。
+    for (const badServerId of ['', '   ', 42]) {
+      await expect(dispatch(handlers, {
+        type: 'GET_TOOL_CALL_HISTORY',
+        payload: { serverId: badServerId },
+      })).rejects.toThrow('GET_TOOL_CALL_HISTORY.payload.serverId');
+    }
 
     await expect(dispatch(handlers, { type: 'CLEAR_TOOL_CALL_HISTORY' }))
       .resolves.toEqual({ ok: true });
@@ -665,6 +692,7 @@ function createMcpDependencies(): McpRuntimeHandlerDependencies {
     getMcpServerById: vi.fn(async () => createMcpServer()),
     createMcpServer: vi.fn(async () => createMcpServer()),
     updateMcpServer: vi.fn(async () => createMcpServer()),
+    setMcpToolSelection: vi.fn(async () => createMcpServer()),
     deleteMcpServer: vi.fn(async () => undefined),
     deleteMcpCapabilityServerSettings: vi.fn(async () => createMcpCapabilitySettings()),
     getMcpToolCache: vi.fn(async () => createMcpCache()),

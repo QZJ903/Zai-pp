@@ -18,7 +18,10 @@ import type {
   ToolResult,
   TrustedToolExecutionContext,
 } from '../../core/tool/types';
-import type { ToolCallHistoryReadResult } from '../../core/tool/history';
+import type {
+  ToolCallHistoryReadOptions,
+  ToolCallHistoryReadResult,
+} from '../../core/tool/history';
 import type { RuntimeMessageContext } from '../../core/messaging/runtime-boundary';
 import { defineToolPayloadRuntimeCommandHandler } from './runtime-handler';
 
@@ -41,7 +44,7 @@ export interface ToolExecutionRuntimeHandlerDependencies {
     authorization: RuntimeToolAuthorizationContext,
     locale: SupportedLocale,
   ): Promise<ToolResult>;
-  getToolCallHistory(limit?: number): Promise<ToolCallHistoryReadResult>;
+  getToolCallHistory(options?: ToolCallHistoryReadOptions): Promise<ToolCallHistoryReadResult>;
   clearToolCallHistory(): Promise<void>;
   getPlatformEnvironment(): PlatformEnvironment;
   createRequestId(): string;
@@ -159,7 +162,12 @@ export function createToolExecutionRuntimeHandlers(
       return result;
     }),
     defineToolPayloadRuntimeCommandHandler('GET_TOOL_CALL_HISTORY', (payload) => (
-      dependencies.getToolCallHistory(payload?.limit)
+      // 两个字段一起传、都保持可选 —— 省略 `serverId` 就是「全体最近 N 条」，
+      // 内容脚本那条路（工具面板）走的就是这个形态，别在这里拆成两个分支。
+      dependencies.getToolCallHistory({
+        ...(payload?.limit === undefined ? {} : { limit: payload.limit }),
+        ...(payload?.serverId === undefined ? {} : { serverId: payload.serverId }),
+      })
     )),
     definePayloadlessRuntimeCommandHandler('CLEAR_TOOL_CALL_HISTORY', async (context) => {
       await dependencies.clearToolCallHistory();

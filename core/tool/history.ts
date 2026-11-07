@@ -73,18 +73,44 @@ export interface ToolCallHistoryReadResult {
   dropped: number;
 }
 
+export interface ToolCallHistoryReadOptions {
+  limit?: number;
+  /**
+   * 只看某一个 provider（MCP 服务）的记录。
+   *
+   * ⚠️⚠️ **必须先筛再截** —— 界面说的是「这个服务的最近调用」，那这个条数就必须
+   * 只数它自己的。先 `slice` 再筛时，别的服务活跃几次就能把它挤到 0 条，而界面
+   * 照旧显示「暂无调用」。
+   *
+   * ⚠️ **`limit` 的语义随它变**：给了 `serverId` 是「这个服务最近 N 条」，没给是
+   * 「全体最近 N 条」。这也是本函数收对象入参的原因 —— 两个位置参数一个数字一个
+   * 字符串，传反了 `slice(0, 'abc')` 不抛错、只是返回空数组。
+   */
+  serverId?: string;
+}
+
 export async function getToolCallHistoryReport(
-  limit: number = MAX_HISTORY,
+  options: ToolCallHistoryReadOptions = {},
 ): Promise<ToolCallHistoryReadResult> {
+  const limit = options.limit ?? MAX_HISTORY;
+  const serverId = options.serverId;
   return toolHistoryOperations.barrier(async () => {
     const { records, dropped } = await readToolHistoryBare();
-    const history = orderToolCallHistory(records);
-    return { records: history.slice(0, limit).map(restoreOutputSnapshot), dropped };
+    const ordered = orderToolCallHistory(records);
+    // ⚠️ **`dropped` 恒为全量口径** —— 它是解码整键时丢掉的坏记录数，与过滤无关。
+    // 给了 `serverId` 之后，「这个服务 3 条 + 丢了 5 条」里的那 5 条可能全属于别的
+    // 服务，别把两个数并起来读。
+    const scoped = serverId === undefined
+      ? ordered
+      : ordered.filter((record) => record.call.provider?.id === serverId);
+    return { records: scoped.slice(0, limit).map(restoreOutputSnapshot), dropped };
   });
 }
 
-export async function getToolCallHistory(limit: number = MAX_HISTORY): Promise<ToolCallHistoryRecord[]> {
-  return (await getToolCallHistoryReport(limit)).records;
+export async function getToolCallHistory(
+  options: ToolCallHistoryReadOptions = {},
+): Promise<ToolCallHistoryRecord[]> {
+  return (await getToolCallHistoryReport(options)).records;
 }
 
 export async function clearToolCallHistory(): Promise<void> {

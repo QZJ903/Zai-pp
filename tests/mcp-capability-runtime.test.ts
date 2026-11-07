@@ -136,7 +136,7 @@ describe('MCP capability invoke runtime', () => {
       expect.any(Object),
     );
 
-    const history = await getToolCallHistory(20);
+    const history = await getToolCallHistory({ limit: 20 });
     expect(history.find((record) => record.call.id === 'call-invoke')).toMatchObject({
       call: {
         name: target.name,

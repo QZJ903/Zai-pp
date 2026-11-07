@@ -16,6 +16,12 @@ import type {
   ToolExecutionMode,
   PlatformEnvironment,
 } from '../../../core/types';
+import {
+  MAX_ADAPTIVE_DIRECT_TOOLS,
+  MAX_ADAPTIVE_PROMPT_BYTES,
+  MIN_ADAPTIVE_DIRECT_TOOLS,
+  MIN_ADAPTIVE_PROMPT_BYTES,
+} from '../../../core/mcp/capability-settings';
 import { SHELL_TOOL_NAMES } from '../../../core/shell/contracts';
 import { isShellMcpServer } from '../../../core/shell/policy';
 import PageIntro from '../components/PageIntro';
@@ -101,7 +107,7 @@ export default function McpPage() {
   const {
     servers,
     caches,
-    mcpHistory,
+    selectedServerHistory,
     capabilitySettings,
     selected,
     selectedId,
@@ -239,7 +245,7 @@ export default function McpPage() {
                   <ServerDetail
                     server={server}
                     cache={caches[server.id] ?? null}
-                    history={mcpHistory}
+                    history={selectedServerHistory}
                     busy={busy[server.id] ?? null}
                     exposureMode={capabilitySettings?.servers[server.id]?.mode ?? 'direct'}
                     pinnedDescriptorIds={capabilitySettings?.servers[server.id]?.pinnedDescriptorIds ?? []}
@@ -289,11 +295,11 @@ function AdaptiveCapabilityBudget({
     const adaptiveMaxPromptBytes = Number(maxBytes);
     if (
       !Number.isInteger(adaptiveMaxDirectTools) ||
-      adaptiveMaxDirectTools < 1 ||
-      adaptiveMaxDirectTools > 64 ||
+      adaptiveMaxDirectTools < MIN_ADAPTIVE_DIRECT_TOOLS ||
+      adaptiveMaxDirectTools > MAX_ADAPTIVE_DIRECT_TOOLS ||
       !Number.isInteger(adaptiveMaxPromptBytes) ||
-      adaptiveMaxPromptBytes < 2_000 ||
-      adaptiveMaxPromptBytes > 256_000
+      adaptiveMaxPromptBytes < MIN_ADAPTIVE_PROMPT_BYTES ||
+      adaptiveMaxPromptBytes > MAX_ADAPTIVE_PROMPT_BYTES
     ) {
       setError(t('sidepanel.mcpPage.detail.adaptiveBudgetInvalid'));
       return;
@@ -316,8 +322,8 @@ function AdaptiveCapabilityBudget({
         <Field label={t('sidepanel.mcpPage.detail.adaptiveMaxTools')}>
           <input
             type="number"
-            min="1"
-            max="64"
+            min={MIN_ADAPTIVE_DIRECT_TOOLS}
+            max={MAX_ADAPTIVE_DIRECT_TOOLS}
             value={maxTools}
             onChange={(event) => setMaxTools(event.target.value)}
             className="ds-input w-full rounded-lg px-2 py-1.5 text-xs"
@@ -326,8 +332,8 @@ function AdaptiveCapabilityBudget({
         <Field label={t('sidepanel.mcpPage.detail.adaptiveMaxPromptBytes')}>
           <input
             type="number"
-            min="2000"
-            max="256000"
+            min={MIN_ADAPTIVE_PROMPT_BYTES}
+            max={MAX_ADAPTIVE_PROMPT_BYTES}
             step="1000"
             value={maxBytes}
             onChange={(event) => setMaxBytes(event.target.value)}
@@ -847,7 +853,11 @@ function ServerDetail({
   const tools = visibleMcpTools(cache);
   // Pinning only reorders this list; the Schema projection keeps the server order.
   const orderedTools = orderMcpToolsByPin(tools, pinnedDescriptorIds);
-  const serverHistory = history.filter((record) => record.call.provider?.id === server.id).slice(0, 5);
+  // 交给页面时已经是「这个服务」的记录（后台先按服务筛、再截），这里只裁展示条数。
+  const serverHistory = history.slice(0, 5);
+  // ⚠️ **算一次就够** —— 原先条件与正文各调一遍 `describeMcpFailure`，同一个 render
+  // 走两遍那串 message 匹配（八档 `includes`）。
+  const failureMessage = describeMcpFailure(server, cache, t);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   return (
@@ -873,9 +883,9 @@ function ServerDetail({
         <Metric label={t('sidepanel.mcpPage.detail.transport')} value={transportLabel(server.transport.kind)} />
       </div>
 
-      {describeMcpFailure(server, cache, t) && (
+      {failureMessage && (
         <div className="rounded-lg px-3 py-2 text-xs" style={{ color: 'var(--ds-danger)', background: 'var(--ds-danger-bg)', border: '1px solid var(--ds-danger-border)' }}>
-          {describeMcpFailure(server, cache, t)}
+          {failureMessage}
         </div>
       )}
 
@@ -1180,8 +1190,8 @@ function formFromServer(server: McpServerConfig): FormState {
     args: server.transport.args?.join(' ') ?? '',
     cwd: server.transport.cwd ?? '',
     env: Object.entries(server.transport.env ?? {}).map(([key, value]) => `${key}=${value}`).join('\n'),
-    headers: server.headers.length > 0 ? server.headers : [],
-    secrets: server.secrets.length > 0 ? server.secrets : [],
+    headers: server.headers,
+    secrets: server.secrets,
     connectMs: String(server.timeouts.connectMs),
     requestMs: String(server.timeouts.requestMs),
     discoveryMs: String(server.timeouts.discoveryMs),
@@ -1201,9 +1211,9 @@ function payloadFromForm(
   if (!displayName) return { error: t('sidepanel.mcpPage.validation.nameRequired') };
 
   const timeouts = {
-    connectMs: positiveInt(form.connectMs, t('sidepanel.mcpPage.form.connectMs'), t),
-    requestMs: positiveInt(form.requestMs, t('sidepanel.mcpPage.form.requestMs'), t),
-    discoveryMs: positiveInt(form.discoveryMs, t('sidepanel.mcpPage.form.discoveryMs'), t),
+    connectMs: boundedTimeoutMs(form.connectMs, t('sidepanel.mcpPage.form.connectMs'), t),
+    requestMs: boundedTimeoutMs(form.requestMs, t('sidepanel.mcpPage.form.requestMs'), t),
+    discoveryMs: boundedTimeoutMs(form.discoveryMs, t('sidepanel.mcpPage.form.discoveryMs'), t),
   };
   const limits = {
     maxResultBytes: positiveInt(form.maxResultBytes, t('sidepanel.mcpPage.form.resultBytes'), t),
@@ -1345,10 +1355,44 @@ function parseEnv(value: string, t: Translator): { env: Record<string, string> }
   return { env };
 }
 
+/** 毫秒类字段（连接 / 请求 / 发现）的合法区间：1 秒 ~ 30 分钟。 */
+const MIN_TIMEOUT_MS = 1_000;
+const MAX_TIMEOUT_MS = 1_800_000;
+
 function positiveInt(value: string, label: string, t: Translator): number | string {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     return t('sidepanel.mcpPage.validation.positiveInteger', { label });
+  }
+  return parsed;
+}
+
+/**
+ * 毫秒字段专用校验：正整数 **且有上界**。
+ *
+ * ⚠️⚠️ **上界不是「顺手加的防呆」，是硬的** —— 这三个值最终进 `setTimeout`，而它的
+ * `delay` 按 **signed 32-bit** 存储：超过 2_147_483_647 会溢出成「立刻触发」
+ * （实测 `setTimeout(fn, 2**31)` 4ms 就跑）。用户填 3000000000 想表达「50 分钟」，
+ * 实际效果是每次请求刚发出就超时，而界面只报「服务响应超时」，指不到这一项。
+ *
+ * ⚠️ 超范围时**不能复用 `positiveInteger`** —— 那句「必须是正整数」对一个
+ * 3000000000 是误导（它确实是正整数），用户会一头雾水。
+ *
+ * ⚠️ 导出只是为了能喂真实输入测它（同 `describeMcpFailure` / `shellSetupMessage`）。
+ */
+export function boundedTimeoutMs(
+  value: string,
+  label: string,
+  t: Translator,
+): number | string {
+  const parsed = positiveInt(value, label, t);
+  if (typeof parsed === 'string') return parsed;
+  if (parsed < MIN_TIMEOUT_MS || parsed > MAX_TIMEOUT_MS) {
+    return t('sidepanel.mcpPage.validation.timeoutOutOfRange', {
+      label,
+      min: MIN_TIMEOUT_MS,
+      max: MAX_TIMEOUT_MS,
+    });
   }
   return parsed;
 }

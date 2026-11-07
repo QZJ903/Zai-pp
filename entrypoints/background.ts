@@ -102,6 +102,7 @@ import {
   getMcpToolCache,
   getMcpServerById,
   updateMcpServer,
+  setMcpToolSelection,
 } from '../core/mcp/store';
 import { refreshMcpServerDiscovery } from '../core/mcp/discovery';
 import { getMcpOriginPattern, hasMcpServerOriginPermission } from '../core/mcp/transports';
@@ -346,6 +347,7 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         getMcpServerById,
         createMcpServer,
         updateMcpServer,
+        setMcpToolSelection,
         deleteMcpServer,
         deleteMcpCapabilityServerSettings,
         getMcpToolCache,

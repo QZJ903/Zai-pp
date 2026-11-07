@@ -1,5 +1,6 @@
 import { decodeMcpCapabilitySettings } from '../../../core/mcp/capability-settings';
 import { decodeMcpStorageState, MCP_STORAGE_VERSION } from '../../../core/mcp/storage-codec';
+import { nextAllowlistForTool } from '../../../core/mcp/store';
 import { getMcpOriginPattern } from '../../../core/mcp/transports';
 import {
   getSupportedMcpTransportKinds,
@@ -140,6 +141,14 @@ const SHELL_TOOL_RISK: Record<ShellToolName, McpToolRiskBadge> = {
 
 const SHELL_TOOL_NAME_SET = new Set<string>(SHELL_TOOL_NAMES);
 
+/**
+ * 服务详情里「最近调用」取几条。
+ *
+ * ⚠️ 这是**按服务**的条数（后台先按服务筛、再截到这个数），不是全体共享的名额。
+ * 面板列表自己还会再 `slice(0, 5)`，这里留余量是为了「展示口径要变时不必改请求」。
+ */
+const DEFAULT_SERVER_HISTORY_LIMIT = 20;
+
 function isShellToolName(name: string): name is ShellToolName {
   return SHELL_TOOL_NAME_SET.has(name);
 }
@@ -203,7 +212,6 @@ export function riskBadgeLabelKey(risk: McpToolRiskBadge): LocaleMessageKey {
 export interface McpSnapshot {
   servers: McpServerConfig[];
   caches: Record<string, McpToolCacheEntry | null>;
-  history: ToolCallHistoryRecord[];
   platform: PlatformEnvironment;
   capabilitySettings: McpCapabilitySettings;
 }
@@ -218,8 +226,28 @@ export interface McpToolsController {
   loadMcpSnapshot(): Promise<McpSnapshot>;
   loadMcpServerState(): Promise<Pick<McpSnapshot, 'servers' | 'platform'>>;
   getToolCache(server: McpServerConfig): Promise<McpToolCacheEntry | null>;
+  /**
+   * 某一个服务最近 `limit` 条调用记录。
+   *
+   * ⚠️⚠️ **必须带 `serverId` 问后台，不能「取全体最近 N 条再自己筛」** ——
+   * 后者会让不活跃的服务恒拿到空数组（名额被别的服务占满），而界面照旧显示
+   * 「暂无调用」。「先筛后截」这条判据落在 `core/tool/history.ts`。
+   */
+  getServerHistory(serverId: string, limit?: number): Promise<ToolCallHistoryRecord[]>;
   createServer(payload: McpServerCreateInput): Promise<McpServerConfig>;
   updateServer(server: McpServerConfig, patch: Partial<McpServerConfig>): Promise<McpServerConfig | null>;
+  /**
+   * 按单个工具增删白名单。
+   *
+   * ⚠️⚠️ **工具开关必须走这条，不要用 `updateServer({ allowlist })`** ——
+   * 后者要调用方先算出整份名单，而侧边栏手上那份快照要等广播回来才更新：
+   * 连点两个不同工具的开关时，第二次算出的名单不含第一次的改动 ⇒ 第一次被静默覆盖。
+   */
+  setToolSelection(
+    serverId: string,
+    tool: Pick<ToolDescriptor, 'name' | 'invocationName'>,
+    selected: boolean,
+  ): Promise<McpServerConfig | null>;
   deleteServer(id: string): Promise<void>;
   updateCapabilitySettings(patch: McpCapabilitySettingsPatch): Promise<McpCapabilitySettings>;
   setServerExposure(input: {
@@ -280,16 +308,10 @@ export function createMcpToolsController(
   const controller: McpToolsController = {
     async loadMcpSnapshot() {
       const { servers, platform } = await loadMcpServerState();
-      const [cacheEntries, history, capabilitySettings] = await Promise.all([
+      const [cacheEntries, capabilitySettings] = await Promise.all([
         Promise.all(servers.map(async (server) => (
           [server.id, await getToolCache(server)] as const
         ))),
-        runtimeClient.request(
-          { type: 'GET_TOOL_CALL_HISTORY', payload: { limit: 12 } },
-          // ⚠️ 响应是 `{ records, dropped }` 而不是裸数组 —— `dropped` 是给内容脚本
-          // 打页面控制台日志用的，侧边栏只关心 `records`。
-          { decode: (value) => decodeToolCallHistoryEnvelope(value, 'GET_TOOL_CALL_HISTORY response') },
-        ).then((report) => report.records),
         runtimeClient.request(
           { type: 'GET_MCP_CAPABILITY_SETTINGS' },
           { decode: decodeMcpCapabilitySettings },
@@ -299,18 +321,37 @@ export function createMcpToolsController(
         servers,
         platform,
         caches: Object.fromEntries(cacheEntries),
-        history,
         capabilitySettings,
       };
     },
     loadMcpServerState,
     getToolCache,
+    getServerHistory(serverId, limit = DEFAULT_SERVER_HISTORY_LIMIT) {
+      return runtimeClient.request(
+        { type: 'GET_TOOL_CALL_HISTORY', payload: { serverId, limit } },
+        // ⚠️ 响应是 `{ records, dropped }` 而不是裸数组 —— `dropped` 是给内容脚本
+        // 打页面控制台日志用的，侧边栏只关心 `records`。
+        { decode: (value) => decodeToolCallHistoryEnvelope(value, 'GET_TOOL_CALL_HISTORY response') },
+      ).then((report) => report.records);
+    },
     createServer: (payload) => runtimeClient.request(
       { type: 'CREATE_MCP_SERVER', payload },
       { decode: decodeMcpServer },
     ),
     updateServer: (server, patch) => runtimeClient.request(
       { type: 'UPDATE_MCP_SERVER', payload: { id: server.id, patch } },
+      { decode: (value) => value === null ? null : decodeMcpServer(value) },
+    ),
+    setToolSelection: (serverId, tool, selected) => runtimeClient.request(
+      {
+        type: 'SET_MCP_TOOL_SELECTION',
+        payload: {
+          id: serverId,
+          toolName: tool.name,
+          ...(tool.invocationName ? { invocationName: tool.invocationName } : {}),
+          selected,
+        },
+      },
       { decode: (value) => value === null ? null : decodeMcpServer(value) },
     ),
     async deleteServer(id) {
@@ -462,28 +503,20 @@ export function orderMcpToolsByPin(
   return [...pinnedTools, ...tools.filter((tool) => !pinned.has(tool.id))];
 }
 
+/**
+ * 白名单增删的**唯一实现**。
+ *
+ * ⚠️⚠️ **真正生效的那份在 `core/mcp/store.ts`** —— 工具开关现在走
+ * `SET_MCP_TOOL_SELECTION`，由后台在自己的存储事务里读-改-写，用的是那边同一个函数。
+ * 这里留一层转发，是因为 `createPythonToolTogglePatch`（零消费者、刻意保留）仍要用它。
+ * **别在这里另写一份逻辑** —— 两份必然分叉，而分叉时用户看到的是「勾了没生效」。
+ */
 export function nextMcpToolAllowlist(
   allowlist: McpToolAllowlist,
   tool: ToolDescriptor,
   shouldEnable: boolean,
 ): McpToolAllowlist {
-  const names = new Set(allowlist.toolNames);
-  const removeTool = () => {
-    names.delete(tool.name);
-    names.delete(tool.invocationName);
-  };
-
-  if (allowlist.mode === 'allow') {
-    if (shouldEnable) names.add(tool.name);
-    else removeTool();
-    return { mode: 'allow', toolNames: [...names] };
-  }
-  if (allowlist.mode === 'deny') {
-    if (shouldEnable) removeTool();
-    else names.add(tool.name);
-    return { mode: names.size === 0 ? 'all' : 'deny', toolNames: [...names] };
-  }
-  return shouldEnable ? allowlist : { mode: 'deny', toolNames: [tool.name] };
+  return nextAllowlistForTool(allowlist, tool, shouldEnable);
 }
 
 /**

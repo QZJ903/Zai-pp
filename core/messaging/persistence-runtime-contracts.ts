@@ -99,7 +99,14 @@ export interface PersistenceRuntimeCommandContracts {
   };
   PICK_LOCAL_SKILL_FOLDER: {
     request: DeclaredRuntimeRequest<'PICK_LOCAL_SKILL_FOLDER'>;
-    response: { path: string };
+    /**
+     * `path` 为 `null` = **用户点了取消**，不是失败。
+     *
+     * ⚠️ 取消与失败必须分得开：失败要走错误通道并显示原因，取消应当什么都不做
+     * （用户已经知道自己取消了）。把两者压成一个「没拿到路径」，界面就会对着
+     * 一次取消说「原文件夹已挪动或不存在」。
+     */
+    response: { path: string | null };
   };
   IMPORT_LOCAL_SKILL_SOURCE: {
     request: DeclaredRuntimeRequest<'IMPORT_LOCAL_SKILL_SOURCE'>;

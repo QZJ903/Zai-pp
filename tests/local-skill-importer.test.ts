@@ -176,6 +176,43 @@ describe('local Skill importer', () => {
     await expect(pick).rejects.not.toThrow('Reinstall');
   });
 
+  it('treats a dismissed picker as "nothing happened" rather than a failure', async () => {
+    // ⚠️ host 回的是**结构化错误码**，不是 message 文案 —— 判据必须落在码上，
+    // 否则 host 改一次措辞，用户的取消就会重新变成一条红色报错。
+    vi.mocked(executeMcpToolCall).mockResolvedValueOnce({
+      ok: false,
+      summary: 'MCP tool failed',
+      detail: 'Folder selection was cancelled.',
+      name: 'local_folder_pick',
+      error: {
+        code: 'mcp_tool_result_error',
+        message: 'Folder selection was cancelled.',
+        retryable: false,
+        details: { structuredCode: 'local_folder_pick_cancelled' },
+      },
+    });
+
+    await expect(pickLocalSkillFolder()).resolves.toBeNull();
+  });
+
+  it('still fails loudly when the picker breaks without a cancellation code', async () => {
+    // 反面自检：同样一句 message、但没有那个码 ⇒ 必须仍然抛错。
+    vi.mocked(executeMcpToolCall).mockResolvedValueOnce({
+      ok: false,
+      summary: 'MCP tool failed',
+      detail: 'Folder selection was cancelled.',
+      name: 'local_folder_pick',
+      error: {
+        code: 'mcp_tool_result_error',
+        message: 'Folder selection was cancelled.',
+        retryable: false,
+      },
+    });
+
+    const pick = pickLocalSkillFolder();
+    await expect(pick).rejects.toThrow('Folder selection was cancelled.');
+  });
+
   it('previews and imports local Skills while preserving script execution boundaries', async () => {
     const preview = await previewLocalSkillSource('/Users/me/.codex/skills/demo');
 

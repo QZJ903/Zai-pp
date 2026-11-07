@@ -6,6 +6,14 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const failures = [];
 const hanText = /\p{Script=Han}/u;
+/**
+ * 「整段字面量都是全角标点」—— 即中文字符串被写死在代码里当分隔符/包裹符。
+ *
+ * ⚠️ 只认引号**直接包住**的一串标点（`'，'` / `"，"` / `` `、` ``）。刻意不认：
+ * ① 混着汉字的字面量（那本来就该被 `hanText` 抓到）；
+ * ② 正则字符类里的（`/[,，]/`）—— 那是在「认」全角标点，不是在输出它。
+ */
+const PUNCTUATION_ONLY_LITERAL = /(['"`])([　-〿＀-￯]+)\1/g;
 const scannableExtensions = new Set(['.js', '.jsx', '.json', '.mjs', '.ts', '.tsx']);
 const scanTargets = [
   'core',
@@ -78,9 +86,12 @@ const allowed = [];
 for (const absolutePath of files) {
   const relativePath = toProjectPath(absolutePath);
   const text = readFileSync(absolutePath, 'utf8');
-  if (!hanText.test(text)) continue;
-
   const pathReason = getPathAllowlistReason(relativePath);
+
+  // ⚠️⚠️ **`if (!hanText.test(text)) continue;` 不能留在这里** —— 它会把整份文件
+  // 跳过，包括下面那段全角标点扫描。判据 `\p{Script=Han}` 看不见 `，`（U+FF0C）这类
+  // 无汉字脚本属性的标点，所以「零汉字 + 只含 `parts.join('，')`」的文件两头都不报。
+  // 汉字扫描逐行判定（下一行那个 `continue`），文件级门禁只做加速、不能做准入。
   const lines = text.split(/\r?\n/);
   for (const [index, line] of lines.entries()) {
     if (!hanText.test(line)) continue;
@@ -106,6 +117,36 @@ for (const absolutePath of files) {
       line: index + 1,
       text: code,
     });
+  }
+
+  /* -------------------------------------------------------------------------- */
+  /* 全角标点：汉字门禁的盲区                                                    */
+  /* -------------------------------------------------------------------------- */
+  // ⚠️⚠️ **为什么单独扫** —— 上面的判据是 `\p{Script=Han}`，而 `，`（U+FF0C）、
+  // `。`（U+3002）、`、`（U+3001）这些**没有汉字脚本属性** ⇒ 一行只有中文标点时
+  // 整条门禁看不见它。实测漏过一处 `parts.join('，')`：英文界面里拼出来的三段文案
+  // 之间冒出中文全角逗号，而两道 i18n 门禁都放行。
+  //
+  // 判据刻意收窄到「**整段字符串字面量都是全角标点**」—— 那正是「当分隔符/包裹符用」
+  // 的形状。混着汉字的不报（那本来就该被上面的判据抓到），正则字符类里的（如
+  // `split(/[,，]/)`）也不报：那是在**认**全角标点，不是在输出它。
+  if (!pathReason) {
+    for (const [index, line] of text.split(/\r?\n/).entries()) {
+      const code = stripLineComment(line);
+      if (!code) continue;
+      for (const match of code.matchAll(PUNCTUATION_ONLY_LITERAL)) {
+        const lineReason = getLineAllowlistReason(relativePath, line);
+        if (lineReason) {
+          allowed.push({ path: relativePath, line: index + 1, reason: lineReason });
+          continue;
+        }
+        offenders.push({
+          path: relativePath,
+          line: index + 1,
+          text: `全角标点被当成字面量（应走 i18n）：${match[0]}`,
+        });
+      }
+    }
   }
 }
 
