@@ -46,7 +46,10 @@ export default function SavedPage() {
       kind,
       title,
       content,
-      tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+      // Both comma forms: the placeholder asks for a comma-separated list and a
+      // Chinese IME types the fullwidth one, which would otherwise stay glued to
+      // the tag before it.
+      tags: tags.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
     };
     if (await saveItem(payload)) {
       setTitle('');

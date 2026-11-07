@@ -53,6 +53,10 @@ export interface PersistenceRuntimeCommandContracts {
     request: { type: 'TOUCH_MEMORIES'; payload: { ids: number[] } };
     response: Ack;
   };
+  CLEAR_MEMORIES: {
+    request: { type: 'CLEAR_MEMORIES' };
+    response: Ack;
+  };
   GET_SKILLS: {
     request: DeclaredRuntimeRequest<'GET_SKILLS'>;
     response: Skill[];

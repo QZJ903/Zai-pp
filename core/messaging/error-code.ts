@@ -53,10 +53,8 @@ export const PAGE_CONTENT_SCRIPT_MISSING_CODE = 'page_content_script_missing';
  * （都拿它换可读文案）。两边各写一遍字面量就是「生产端与判定端各写一遍」
  * 的老形态 —— 改一处另一处不报错，只会让那条文案静默退回英文技术串。
  *
- * ⚠️⚠️ **同一条码在「清空全部」里有相反的处置，那是有意的**：
- * `useSettingsController.handleClearAllMemories` 遇到它**跳过继续**
- * （遍历清空的目标就是「让这些 id 都不存在」，已经不在了 ⇒ 目标已达成；
- * 当失败会让整个清空中断在半路）。
+ * ⚠️ **「清空全部」不走这条码**：它是一条 `CLEAR_MEMORIES` 命令、一次事务清完，
+ * 本来就幂等 —— 不再有「遍历到某条已不在」那个竞态，也不需要在这里约定处置。
  */
 export const MEMORY_RECORD_MISSING_CODE = 'memory_record_missing';
 

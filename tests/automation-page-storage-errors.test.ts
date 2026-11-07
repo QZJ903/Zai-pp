@@ -42,7 +42,7 @@ beforeEach(() => {
     runtime: {
       sendMessage: vi.fn(async (message: { type?: string }) => {
         if (message.type === 'GET_AUTOMATIONS') return automationResponse;
-        if (message.type === 'GET_AUTOMATION_RUNS') return [];
+        if (message.type === 'GET_AUTOMATION_RUNS_BATCH') return {};
         if (message.type === 'RUN_AUTOMATION_NOW') return runNowResponse ?? { ok: true };
         // 本项目页面挂载时另拉模型清单（后台带 5 分钟缓存）。给一份最小合法清单，
         // 免得它走 fallback 分支往页面上写一条提示、干扰下面的文案断言。
@@ -195,6 +195,12 @@ async function settle() {
       await Promise.resolve();
     });
   }
+  // The page coalesces back-to-back invalidation broadcasts over a short timer
+  // before reloading, so a microtask flush alone is not enough to observe the
+  // reload these cases assert on.
+  await act(async () => {
+    await new Promise((resolve) => { setTimeout(resolve, 80); });
+  });
 }
 
 const automation: Automation = {

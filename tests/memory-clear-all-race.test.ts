@@ -5,23 +5,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSettingsController } from '../entrypoints/sidepanel/controllers/useSettingsController';
 
 /**
- * 「清空全部记忆」遇到某条已经被删掉时**不能中断**。
+ * Clearing all memories is ONE background command, not one delete per record.
  *
- * ⚠️⚠️ 判据是语义的：这个函数的目标是「让这些 id 都不存在」，已经不在了 ⇒ 目标已达成。
- * 而**记忆页的单条删除相反** —— 那里「不在了」是意外，要给用户一句人话。
- * 两条链路的处置**相反是有意的**，别统一。
+ * ⚠️⚠️ This file used to assert the opposite behaviour: a loop that deleted rows
+ * one by one and treated "that row is already gone" as success (the goal was
+ * "none of these ids exist", so a row that was already missing had already met
+ * it). Clearing now happens in a single transaction, so that race cannot occur
+ * and the assertion is gone with it — keeping it would suggest the clear is
+ * still per-record.
+ *
+ * What is worth pinning now: one command (per-record deletion is what made this
+ * unusably slow), and a real failure still reaching the caller.
  */
 
-const deleted: number[] = [];
-let failureMode: 'ok' | 'missing' | 'boom' = 'ok';
+const calls: string[] = [];
+let clearFailure: Error | null = null;
 
 vi.mock('../entrypoints/sidepanel/controllers/library-controller', () => ({
   libraryController: {
     getMemories: async () => [{ id: 1 }, { id: 2 }, { id: 3 }],
-    deleteMemory: async (id: number) => {
-      if (failureMode === 'missing' && id === 2) throw new Error('memory_record_missing');
-      if (failureMode === 'boom' && id === 2) throw new Error('quota exceeded');
-      deleted.push(id);
+    deleteMemory: async () => { calls.push('deleteMemory'); },
+    clearMemories: async () => {
+      calls.push('clearMemories');
+      if (clearFailure) throw clearFailure;
     },
   },
 }));
@@ -47,8 +53,8 @@ async function mount() {
 }
 
 beforeEach(() => {
-  deleted.length = 0;
-  failureMode = 'ok';
+  calls.length = 0;
+  clearFailure = null;
   captured = null;
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -61,19 +67,17 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('clear all memories vs a concurrent delete', () => {
-  it('keeps going when one row is already gone', async () => {
-    failureMode = 'missing';
+describe('clear all memories', () => {
+  it('issues one clear command instead of one delete per record', async () => {
     await mount();
     await act(async () => {
       await expect(captured!.handleClearAllMemories()).resolves.toBeUndefined();
     });
-    // 1 与 3 都删掉了；2 那条「已经不在了」不算失败。
-    expect(deleted).toEqual([1, 3]);
+    expect(calls).toEqual(['clearMemories']);
   });
 
   it('still surfaces a real storage failure', async () => {
-    failureMode = 'boom';
+    clearFailure = new Error('quota exceeded');
     await mount();
     await act(async () => {
       await expect(captured!.handleClearAllMemories()).rejects.toThrow('quota exceeded');

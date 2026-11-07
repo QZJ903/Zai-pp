@@ -39,7 +39,7 @@ const ENGLISH_NUMBER_WORDS: Record<number, string> = {
   6: 'Six', 7: 'Seven', 8: 'Eight', 9: 'Nine', 10: 'Ten',
   11: 'Eleven', 12: 'Twelve', 13: 'Thirteen', 14: 'Fourteen', 15: 'Fifteen',
   16: 'Sixteen', 17: 'Seventeen', 18: 'Eighteen', 19: 'Nineteen', 20: 'Twenty',
-  27: 'Twenty-seven', 30: 'Thirty', 56: 'Fifty-six', 59: 'Fifty-nine',
+  27: 'Twenty-seven', 29: 'Twenty-nine', 30: 'Thirty', 56: 'Fifty-six', 59: 'Fifty-nine',
   60: 'Sixty', 62: 'Sixty-two', 63: 'Sixty-three', 64: 'Sixty-four',
   65: 'Sixty-five', 89: 'Eighty-nine', 91: 'Ninety-one',
 };
@@ -49,10 +49,10 @@ const typesSource = readFileSync('core/types.ts', 'utf8');
 const inventorySource = readFileSync('docs/compatibility/runtime-command-inventory.md', 'utf8');
 const COMMAND_GROUP_SECTIONS = [
   ['Group A — Typed seam bootstrap (2)', 2],
-  ['Group B — Persistence, library, and local preferences (41)', 41],
+  ['Group B — Persistence, library, and local preferences (42)', 42],
   ['Group C — MCP, tool, browser control, and sandbox (31)', 31],
   ['Group D — DOM task lifecycle (3)', 3],
-  ['Group E — Automation, usage, models, and lifecycle closure (13)', 13],
+  ['Group E — Automation, usage, models, and lifecycle closure (14)', 14],
 ] as const;
 
 describe('runtime command compatibility contract', () => {
@@ -97,10 +97,10 @@ describe('runtime command compatibility contract', () => {
       expect(commands, heading).toHaveLength(count);
       return commands;
     });
-    expect(groupedLedger).toHaveLength(90);
+    expect(groupedLedger).toHaveLength(92);
     expect(new Set(groupedLedger).size).toBe(groupedLedger.length);
     expectSortedEqual(groupedLedger, live);
-    expect(registryEntries).toHaveLength(92);
+    expect(registryEntries).toHaveLength(94);
     for (const contract of liveContracts) {
       const registered = RUNTIME_COMMAND_CONTRACTS[contract.type as keyof typeof RUNTIME_COMMAND_CONTRACTS];
       expect(registered.owner).toBe(getRuntimeCommandOwner(contract.type));

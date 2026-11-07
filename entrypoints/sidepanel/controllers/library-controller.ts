@@ -12,6 +12,7 @@ export interface LibraryController {
   saveMemory(memory: NewMemory): Promise<number>;
   updateMemory(memory: Memory): Promise<void>;
   deleteMemory(id: number): Promise<void>;
+  clearMemories(): Promise<void>;
   getSavedItems(): Promise<SavedItem[]>;
   saveSavedItem(item: SavedItemInput): Promise<SavedItem>;
   deleteSavedItem(id: string): Promise<void>;
@@ -62,6 +63,9 @@ export function createLibraryController(
         { type: 'DELETE_MEMORY', payload: { id } },
         { decode: decodeAck },
       );
+    },
+    async clearMemories() {
+      await runtimeClient.request({ type: 'CLEAR_MEMORIES' }, { decode: decodeAck });
     },
     getSavedItems: () => runtimeClient.request(
       { type: 'GET_SAVED_ITEMS' },

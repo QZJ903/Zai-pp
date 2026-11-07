@@ -44,7 +44,7 @@ import {
  * 持久化处理器组（inventory 的 **Group B**）的**注册面与领域失败语义**。
  *
  * 从上游 `background-persistence-handlers.test.ts`（633 行）移植。改动清单：
- *  - inventory 标题串与计数：上游 `R4.1 / #360 — … (61)` → 本项目 `Group B — … (41)`
+ *  - inventory 标题串与计数：上游 `R4.1 / #360 — … (61)` → 本项目 `Group B — … (42)`
  *  - 删掉 5 组本项目已移除的命令：`GET_ARTIFACT`、`GET/SET_DEEPSEEK_THEME`、
  *    `GET/SET_MODEL_TYPE`、`GET/SAVE/CLEAR_PET`、voice 三项（`GET_VOICE_SETTINGS` /
  *    `SAVE_VOICE_SETTINGS` / `GET_VOICE_CAPABILITIES`）
@@ -111,7 +111,7 @@ const savedItem: SavedItem = {
 };
 
 describe('Group B persistence runtime handler ownership', () => {
-  it('creates exactly the 41 inventory-assigned handlers and completes the sole registry', async () => {
+  it('creates exactly the 42 inventory-assigned handlers and completes the sole registry', async () => {
     const handlers = createPersistenceRuntimeHandlers({
       memory: createMemoryDependencies(),
       skill: createSkillDependencies(),
@@ -119,10 +119,10 @@ describe('Group B persistence runtime handler ownership', () => {
       localPreference: createLocalPreferenceDependencies(),
     });
     const types = handlers.map((handler) => handler.type);
-    const expected = readInventoryCommands('Group B — Persistence, library, and local preferences (41)');
+    const expected = readInventoryCommands('Group B — Persistence, library, and local preferences (42)');
 
-    expect(types).toHaveLength(41);
-    expect(new Set(types).size).toBe(41);
+    expect(types).toHaveLength(42);
+    expect(new Set(types).size).toBe(42);
     expect([...types].sort()).toEqual([...expected].sort());
     for (const type of types) expect(getRuntimeCommandOwner(type)).toBe('typed-handler');
     const decodedTypes = Object.entries(RUNTIME_COMMAND_CONTRACTS)
@@ -398,6 +398,7 @@ function createMemoryDependencies(): MemoryRuntimeHandlerDependencies {
     importMemoriesAtomically: vi.fn(async () => [7]),
     updateMemory: vi.fn(async () => undefined),
     deleteMemory: vi.fn(async () => undefined),
+    clearMemories: vi.fn(async () => undefined),
     touchMemories: vi.fn(async () => undefined),
     notifyCommittedStateUpdate: vi.fn(async () => undefined),
   };

@@ -218,7 +218,19 @@ export default function PresetSubPage() {
 
         {showForm && (
           <div className="animate-slide-down">
-            <PresetForm initial={editing} onSave={handleSave} onCancel={handleCancel} />
+            {/*
+              `key` is load-bearing, for the same reason as the memory and skill
+              forms: this form seeds its state from props once, at mount, and it
+              renders next to the list. Editing A and then clicking edit on B
+              changes props without remounting, so the form would still hold A's
+              content while saving into B's id.
+            */}
+            <PresetForm
+              key={editing?.id ?? 'new'}
+              initial={editing}
+              onSave={handleSave}
+              onCancel={handleCancel}
+            />
           </div>
         )}
 

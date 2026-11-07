@@ -32,11 +32,23 @@ import {
 import { SVG_PATHS } from '../constants';
 import { useI18n } from '../i18n';
 import { isSidepanelRuntimeEvent } from '../runtime-event-codec';
-import { formatRuntimeError } from '../runtime-response';
+import { formatRuntimeError, isRuntimeFailure } from '../runtime-response';
 import { sidepanelRuntimeClient } from '../runtime-client';
 
 const DEFAULT_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai';
 const AUTOMATION_UPDATE_EVENTS = ['AUTOMATIONS_UPDATED', 'AUTOMATION_RUNS_UPDATED'] as const;
+
+/** How many recent runs each automation row shows. */
+const RECENT_RUNS_PER_AUTOMATION = 3;
+
+/**
+ * How long to wait before reloading after an invalidation broadcast.
+ *
+ * A finished run emits two broadcasts in a row, from two separate messages, so
+ * merging them needs a time window rather than a microtask. Long enough to cover
+ * that gap, short enough that the refresh still looks immediate.
+ */
+const RELOAD_COALESCE_MS = 50;
 
 const DEFAULT_PROMPT_OPTIONS: AutomationPromptOptions = {
   model: null,
@@ -77,6 +89,15 @@ export default function AutomationPage() {
   const [modelOptions, setModelOptions] = useState<ZaiModelOption[]>([]);
   const [modelsFallback, setModelsFallback] = useState(false);
   const loadFence = useRef(createRequestGenerationFence());
+  /**
+   * The mount effect registers its listeners once, so anything it captures is
+   * frozen at that render. `load` is captured too, which means every reload
+   * triggered by a broadcast would keep the locale that was current at mount.
+   * Reading the translator through a ref keeps those paths on the live locale
+   * without re-registering the listeners on every language switch.
+   */
+  const translatorRef = useRef(t);
+  translatorRef.current = t;
   const banner = useBanner();
   const { confirm, node: confirmNode } = useConfirm();
 
@@ -97,7 +118,7 @@ export default function AutomationPage() {
       const list = await sidepanelRuntimeClient.request(
         { type: 'GET_ZAI_MODELS' },
         {
-          unavailableMessage: t('sidepanel.automationPage.modelListLoadFailed'),
+          unavailableMessage: translatorRef.current('sidepanel.automationPage.modelListLoadFailed'),
           decode: (value) => decodeZaiModelListResponse(value, 'GET_ZAI_MODELS response'),
         },
       );
@@ -117,36 +138,49 @@ export default function AutomationPage() {
       const items = await sidepanelRuntimeClient.request(
         { type: 'GET_AUTOMATIONS' },
         {
-          unavailableMessage: t('sidepanel.automationPage.loadFailed'),
+          unavailableMessage: translatorRef.current('sidepanel.automationPage.loadFailed'),
           decode: (value) => decodeAutomationList(value, 'GET_AUTOMATIONS response'),
         },
       );
-      const runEntries = await Promise.all(
-        items.map(async (automation) => {
-          const recent = await sidepanelRuntimeClient.request(
-            {
-              type: 'GET_AUTOMATION_RUNS',
-              payload: { automationId: automation.id, limit: 3 },
-            },
-            {
-              unavailableMessage: t('sidepanel.automationPage.loadFailed'),
-              decode: (value) => decodeAutomationRunList(
-                value,
-                'GET_AUTOMATION_RUNS response',
-              ),
-            },
-          );
-          return [automation.id, recent] as const;
-        }),
-      );
+      // The list is committed before the runs are fetched. They used to share a
+      // single `try`, so a failed runs read also discarded a perfectly good list:
+      // a task created elsewhere stayed invisible until some later refresh
+      // happened to succeed. Runs are display-only, the list is not.
       if (!loadFence.current.isCurrent(generation)) return;
       setAutomations(items);
-      setRuns(Object.fromEntries(runEntries));
       setHasConfirmedSnapshot(true);
+
+      // One batched read for every automation's recent runs. The per-automation
+      // command re-reads and re-decodes the whole automation storage state on
+      // every call, so asking N times cost N+1 full decodes per refresh.
+      let recentRuns: Record<string, AutomationRun[]> = {};
+      if (items.length > 0) {
+        try {
+          recentRuns = await sidepanelRuntimeClient.request(
+            { type: 'GET_AUTOMATION_RUNS_BATCH', payload: { limit: RECENT_RUNS_PER_AUTOMATION } },
+            {
+              unavailableMessage: translatorRef.current('sidepanel.automationPage.loadFailed'),
+              decode: (value) => decodeAutomationRunsByAutomation(value, 'GET_AUTOMATION_RUNS_BATCH response'),
+            },
+          );
+        } catch (error) {
+          // Keep whatever runs are already on screen rather than blanking the
+          // column, and report it without touching the list.
+          if (!loadFence.current.isCurrent(generation)) return;
+          setLoadError(
+            formatRuntimeError(error, translatorRef.current)
+              || translatorRef.current('sidepanel.automationPage.loadFailed'),
+          );
+          return;
+        }
+      }
+      if (!loadFence.current.isCurrent(generation)) return;
+      setRuns(recentRuns);
     } catch (error) {
       if (!loadFence.current.isCurrent(generation)) return;
       setLoadError(
-        formatRuntimeError(error, t) || t('sidepanel.automationPage.loadFailed'),
+        formatRuntimeError(error, translatorRef.current)
+          || translatorRef.current('sidepanel.automationPage.loadFailed'),
       );
     } finally {
       if (loadFence.current.isCurrent(generation)) setLoading(false);
@@ -159,8 +193,30 @@ export default function AutomationPage() {
     // 会先渲染出兜底选项、等清单回来再换成正式条目 —— 表现为下拉文字闪一下。
     void loadModels();
 
+    // Back-to-back broadcasts are one event, not two. A finished run emits
+    // `AUTOMATIONS_UPDATED` and `AUTOMATION_RUNS_UPDATED` in a row, and reacting
+    // to each refreshed the whole page twice for the same change.
+    //
+    // ⚠️ The window has to be a real time window, not a microtask: the two
+    // broadcasts come from two separate `chrome.runtime` messages, so they land
+    // in two separate tasks — measured, a microtask-based merge still reloaded
+    // twice, and so did `setTimeout(…, 0)` once the two messages were more than
+    // a tick apart. `RELOAD_COALESCE_MS` is short enough to be invisible to the
+    // user and long enough to cover the gap between the two broadcasts.
+    let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
+    const scheduleReload = () => {
+      if (disposed || reloadTimer !== null) return;
+      reloadTimer = setTimeout(() => {
+        reloadTimer = null;
+        // A queued callback outlives the unmount; firing `load()` afterwards
+        // would send a request whose result nobody can render.
+        if (disposed) return;
+        void load();
+      }, RELOAD_COALESCE_MS);
+    };
     const handleUpdate = (message: unknown) => {
-      if (isSidepanelRuntimeEvent(message, AUTOMATION_UPDATE_EVENTS)) void load();
+      if (isSidepanelRuntimeEvent(message, AUTOMATION_UPDATE_EVENTS)) scheduleReload();
     };
     const refreshWhenVisible = () => {
       if (!document.hidden) void load();
@@ -171,6 +227,9 @@ export default function AutomationPage() {
     window.addEventListener('focus', refreshWhenVisible);
 
     return () => {
+      disposed = true;
+      if (reloadTimer !== null) clearTimeout(reloadTimer);
+      reloadTimer = null;
       loadFence.current.invalidate();
       chrome.runtime.onMessage.removeListener(handleUpdate);
       document.removeEventListener('visibilitychange', refreshWhenVisible);
@@ -208,19 +267,38 @@ export default function AutomationPage() {
     }
     const scheduleValidation = validateAutomationSchedule(payload.schedule);
     if (!scheduleValidation.ok) {
-      banner.show('error', scheduleValidation.error.message);
+      // `ScheduleError` carries the same `{ code, message }` shape the failure
+      // card uses, so it goes through the same projection. Rendering the raw
+      // `message` here would show the parser's English sentence in a localized
+      // UI and leave the existing code table unreachable from this entry point.
+      banner.show('error', formatAutomationError(scheduleValidation.error, t));
       return;
     }
 
     try {
+      // Both branches take the same failure handling: `acceptFailure` plus the
+      // same decoder, so a domain failure yields the same copy whether the record
+      // is being created or edited. The response is checked with
+      // `isRuntimeFailure()` rather than `'ok' in response` — the automation
+      // decoder spreads the stored record, so a record that happens to carry an
+      // `ok` key would otherwise be read as a failure.
       const response = editing
         ? await sidepanelRuntimeClient.request({
           type: 'UPDATE_AUTOMATION',
           payload: { id: editing.id, patch: payload },
-        }, { acceptFailure: true })
-        : await sidepanelRuntimeClient.request({ type: 'CREATE_AUTOMATION', payload });
+        }, {
+          acceptFailure: true,
+          decode: decodeAutomationWriteResponse,
+        })
+        : await sidepanelRuntimeClient.request(
+          { type: 'CREATE_AUTOMATION', payload },
+          {
+            acceptFailure: true,
+            decode: decodeAutomationWriteResponse,
+          },
+        );
 
-      if ('ok' in response) {
+      if (isRuntimeFailure(response)) {
         // 后台回的是裸码，不能直出 —— 走与卡片红条同一层的三级回退。
         banner.show('error', formatAutomationError({ code: response.error, message: response.error }, t));
         return;
@@ -344,7 +422,19 @@ export default function AutomationPage() {
   const openSession = async (automation: Automation) => {
     const url = resolveSessionUrl(automation);
     if (!url) return;
-    await chrome.tabs.create({ url, active: true });
+    try {
+      await chrome.tabs.create({ url, active: true });
+    } catch (error) {
+      // `chrome.tabs.create` rejects when the `tabs` permission is absent (the
+      // Firefox manifest does not request it) or when `url` is not openable at
+      // all. Without this the click does nothing and the reason only shows up
+      // in DevTools.
+      //
+      // ⚠️ Reloading the extension is NOT one of these cases: the side panel is
+      // an extension page, so it is torn down and rebuilt with the extension and
+      // can never be left running against a dead context.
+      banner.show('error', formatRuntimeError(error, t));
+    }
   };
 
   return (
@@ -483,7 +573,7 @@ function AutomationForm({
       )}
 
       <label className="space-y-1 block">
-        <span className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>Prompt</span>
+        <span className="text-[11px]" style={{ color: 'var(--ds-text-tertiary)' }}>{t('sidepanel.automationPage.form.prompt')}</span>
         <textarea
           value={form.prompt}
           onChange={(e) => update('prompt', e.target.value)}
@@ -680,6 +770,56 @@ function fromAutomation(automation: Automation): FormState {
     model: automation.promptOptions.model ?? '',
     fixedSession: automation.promptOptions.fixedSession ?? false,
   };
+}
+
+/**
+ * Decodes the batched "recent runs" response into an id-keyed map.
+ *
+ * Each value goes through the same run decoder the single-automation command
+ * used, so the field-level contract is unchanged; only the transport is batched.
+ */
+function decodeAutomationRunsByAutomation(
+  value: unknown,
+  path: string,
+): Record<string, AutomationRun[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${path} must be an object.`);
+  }
+  const decoded: Record<string, AutomationRun[]> = {};
+  for (const [automationId, runs] of Object.entries(value as Record<string, unknown>)) {
+    decoded[automationId] = decodeAutomationRunList(runs, `${path}.${automationId}`);
+  }
+  return decoded;
+}
+
+/**
+ * Decodes a write response, which is either the saved record or a domain failure.
+ *
+ * The storage decoder only exposes whole-collection entry points and a write
+ * returns a single record, so the success case is wrapped as a one-element
+ * collection. Keeping both cases here means the call site has one shape to
+ * reason about instead of testing the raw response for an `ok` key.
+ */
+function decodeAutomationWriteResponse(
+  value: unknown,
+): Automation | { ok: false; error: string } {
+  // Decode first, ask about `ok` second. A saved record is a plain object the
+  // storage decoder spreads verbatim, so a record carrying an `ok` field would
+  // be read as a domain failure if the runtime check ran first.
+  try {
+    const decoded = decodeAutomationList([value], 'automation response')[0];
+    // ⚠️ **The decoded record keeps every unknown key**, including `ok` — and
+    // the caller tests `isRuntimeFailure()` on what this returns. Dropping `ok`
+    // here is what keeps a stored `ok: false` from being read as a failure; the
+    // field is not part of the record's contract, so nothing reads it later.
+    const { ok: _envelopeField, ...record } = decoded as Automation & { ok?: unknown };
+    return record as Automation;
+  } catch (error) {
+    if (isRuntimeFailure(value)) {
+      return { ok: false, error: String(value.error ?? '') };
+    }
+    throw error;
+  }
 }
 
 function toAutomationInput(form: FormState): AutomationCreateInput {

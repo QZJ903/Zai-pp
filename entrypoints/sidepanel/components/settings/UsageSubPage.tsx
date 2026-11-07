@@ -268,7 +268,7 @@ function UsageHeatmap({ summary, locale }: { summary: UsageSummary; locale: stri
             role="listitem"
             className="usage-heat-cell"
             data-level={cell.level}
-            title={`${formatDate(cell.timestamp, locale)} · ${formatInteger(cell.tokens, locale)} tokens`}
+            title={`${formatDate(cell.timestamp, locale)} · ${t('sidepanel.settings.usage.tokenCount', { count: formatInteger(cell.tokens, locale) })}`}
           />
         ))}
       </div>
@@ -311,7 +311,7 @@ function UsageDailyTrend({ summary, locale }: { summary: UsageSummary; locale: s
             <div
               key={day.day}
               className="usage-bar-column"
-              title={`${formatDate(day.timestamp, locale)} · ${formatInteger(day.tokens, locale)} tokens`}
+              title={`${formatDate(day.timestamp, locale)} · ${t('sidepanel.settings.usage.tokenCount', { count: formatInteger(day.tokens, locale) })}`}
             >
               <div className="usage-bar-track">
                 <div className="usage-bar-stack" style={{ height: `${height}%` }}>
@@ -361,7 +361,7 @@ function UsageModelSplit({
         <div className="usage-donut" style={donutStyle}>
           <div className="usage-donut-hole">
             <strong>{formatCompactTokens(summary.totalTokens, locale)}</strong>
-            <span>tokens</span>
+            <span>{t('sidepanel.settings.usage.tokensUnit')}</span>
           </div>
         </div>
         <div className="usage-model-list">
@@ -373,7 +373,9 @@ function UsageModelSplit({
               />
               <div className="min-w-0 flex-1">
                 <div className="usage-model-name">{resolveModelLabel(model, modelLabel)}</div>
-                <div className="usage-model-tokens">{formatCompactTokens(model.totalTokens, locale)} tokens</div>
+                <div className="usage-model-tokens">
+                  {t('sidepanel.settings.usage.tokenCount', { count: formatCompactTokens(model.totalTokens, locale) })}
+                </div>
               </div>
               <div className="usage-model-share">{formatPercent(model.share, locale)}</div>
             </div>

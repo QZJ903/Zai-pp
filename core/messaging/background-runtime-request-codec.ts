@@ -2,14 +2,16 @@ import {
   decodeAutomationCreateInput,
   decodeAutomationIdRequest,
   decodeAutomationRunsRequest,
+  decodeRecentAutomationRunsRequest,
   decodeAutomationStatusRequest,
   decodeAutomationUpdateRequest,
   type AutomationIdRequest,
+  type AutomationRecentRunsRequest,
   type AutomationRunsRequest,
   type AutomationStatusRequest,
   type AutomationUpdateRequest,
 } from '../automation/runtime-request-codec';
-import type { AutomationCreateInput } from '../automation/types';
+import type { AutomationCreateInput, AutomationRecentRunsOptions } from '../automation/types';
 import { normalizeUsageRangeDays } from '../usage/stats';
 import { normalizeUsageTurnInput } from '../usage/input-codec';
 import type { UsageRangeDays, UsageTurnRecord } from '../usage/types';
@@ -21,6 +23,7 @@ interface DecodedBackgroundRuntimePayloads {
   RECORD_USAGE_TURN: UsageTurnRecord;
   GET_USAGE_SUMMARY: { rangeDays: UsageRangeDays };
   GET_AUTOMATION_RUNS: AutomationRunsRequest;
+  GET_AUTOMATION_RUNS_BATCH: AutomationRecentRunsOptions;
   CREATE_AUTOMATION: AutomationCreateInput;
   UPDATE_AUTOMATION: AutomationUpdateRequest;
   SET_AUTOMATION_STATUS: AutomationStatusRequest;
@@ -48,6 +51,7 @@ export const BACKGROUND_RUNTIME_PAYLOAD_DECODERS: BackgroundRuntimePayloadDecode
     return { rangeDays: normalizeUsageRangeDays(payload.rangeDays) };
   },
   GET_AUTOMATION_RUNS: decodeAutomationRunsRequest,
+  GET_AUTOMATION_RUNS_BATCH: decodeRecentAutomationRunsRequest,
   CREATE_AUTOMATION: decodeAutomationCreateInput,
   UPDATE_AUTOMATION: decodeAutomationUpdateRequest,
   SET_AUTOMATION_STATUS: decodeAutomationStatusRequest,

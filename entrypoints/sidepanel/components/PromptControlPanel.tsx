@@ -6,16 +6,44 @@ import {
   type PromptInjectionSettings,
   type PromptPresetCadence,
 } from '../../../core/prompt/settings';
+import { createSerialOperationQueue } from '../../../core/persistence/serial-operation-queue';
 import { createRequestGenerationFence } from '../async-state';
 import { useI18n } from '../i18n';
 import { formatRuntimeError } from '../runtime-response';
 import { sidepanelRuntimeClient } from '../runtime-client';
+
+/**
+ * One queue for this settings key.
+ *
+ * Module level on purpose: it serialises writes to a storage key, and that key
+ * is shared by every mount of this panel, not owned by one component instance.
+ */
+const saveQueue = createSerialOperationQueue();
 
 export default function PromptControlPanel() {
   const { t } = useI18n();
   const [settings, setSettings] = useState<PromptInjectionSettings>(DEFAULT_PROMPT_INJECTION_SETTINGS);
   const [statusMessage, setStatusMessage] = useState('');
   const requestFence = useRef(createRequestGenerationFence());
+  /**
+   * The value the UI is currently showing, readable without waiting for a render.
+   *
+   * Two toggles can be clicked inside one tick, before React re-renders; without
+   * this the second save would build its payload from the pre-first-click state
+   * and silently undo it.
+   */
+  const settingsRef = useRef<PromptInjectionSettings>(DEFAULT_PROMPT_INJECTION_SETTINGS);
+  /**
+   * The last configuration the background confirmed, i.e. what a failed save has
+   * to fall back to. Kept separately from `settings` because the shown value is
+   * optimistically ahead of the store while a save is in flight.
+   */
+  const confirmedRef = useRef<PromptInjectionSettings>(DEFAULT_PROMPT_INJECTION_SETTINGS);
+
+  const apply = (next: PromptInjectionSettings) => {
+    settingsRef.current = next;
+    setSettings(next);
+  };
 
   useEffect(() => {
     const generation = requestFence.current.begin();
@@ -30,42 +58,69 @@ export default function PromptControlPanel() {
       },
     )
       .then((loaded) => {
-        if (requestFence.current.isCurrent(generation)) setSettings(loaded);
+        if (!requestFence.current.isCurrent(generation)) return;
+        confirmedRef.current = loaded;
+        apply(loaded);
       })
       .catch((error) => {
         if (!requestFence.current.isCurrent(generation)) return;
-        setSettings(DEFAULT_PROMPT_INJECTION_SETTINGS);
+        confirmedRef.current = DEFAULT_PROMPT_INJECTION_SETTINGS;
+        apply(DEFAULT_PROMPT_INJECTION_SETTINGS);
         setStatusMessage(t('sidepanel.promptControls.loadFailed', { error: formatRuntimeError(error, t, { bare: true }) }));
       });
     return () => requestFence.current.invalidate();
   }, [t]);
 
+  /**
+   * Persists a patch, one request at a time.
+   *
+   * Two toggles can be clicked faster than a round trip, and this panel sends
+   * the **whole** settings object on every save. Overlapping requests therefore
+   * race on that object: the older one either carries the newer one's change
+   * back to its old value, or (on failure) reverts a field the newer save had
+   * already committed. Serialising means each save reads the state the previous
+   * one left behind, so the last click wins and every failure rolls back exactly
+   * its own field.
+   *
+   * The optimistic update still happens on click — the switch has to move
+   * immediately — and the queued body recomputes from the live value, so a
+   * rollback from an earlier save is already folded in by the time this one runs.
+   *
+   * ⚠️ A failed save reverts the **whole** configuration to the last confirmed
+   * one, which briefly also undoes a later click that is still queued. That is
+   * deliberate: the queued slot then recomputes from the reverted value and
+   * re-applies its own change, so the end state is right — only the intermediate
+   * frame shows the rollback. Reverting per field would be enough only if the
+   * payload were built per field, and it is not.
+   */
   const save = async (patch: Partial<PromptInjectionSettings>) => {
-    const previous = settings;
-    const next = normalizePromptInjectionSettings({ ...settings, ...patch });
-    setSettings(next);
+    apply(normalizePromptInjectionSettings({ ...settingsRef.current, ...patch }));
     setStatusMessage('');
-    const generation = requestFence.current.begin();
-    try {
-      const saved = await sidepanelRuntimeClient.request(
-        {
-          type: 'SAVE_PROMPT_INJECTION_SETTINGS',
-          payload: next,
-        },
-        {
-          unavailableMessage: t('sidepanel.promptControls.backendUnavailable'),
-          decode: (value) => decodePromptSettings(
-            value,
-            t('sidepanel.promptControls.backendUnavailable'),
-          ),
-        },
-      );
-      if (requestFence.current.isCurrent(generation)) setSettings(saved);
-    } catch (error) {
-      if (!requestFence.current.isCurrent(generation)) return;
-      setSettings(previous);
-      setStatusMessage(t('sidepanel.promptControls.saveFailed', { error: formatRuntimeError(error, t, { bare: true }) }));
-    }
+    return saveQueue.run(async () => {
+      const next = normalizePromptInjectionSettings({ ...settingsRef.current, ...patch });
+      apply(next);
+      try {
+        const saved = await sidepanelRuntimeClient.request(
+          {
+            type: 'SAVE_PROMPT_INJECTION_SETTINGS',
+            payload: next,
+          },
+          {
+            unavailableMessage: t('sidepanel.promptControls.backendUnavailable'),
+            decode: (value) => decodePromptSettings(
+              value,
+              t('sidepanel.promptControls.backendUnavailable'),
+            ),
+          },
+        );
+        confirmedRef.current = saved;
+        apply(saved);
+        setStatusMessage('');
+      } catch (error) {
+        apply(confirmedRef.current);
+        setStatusMessage(t('sidepanel.promptControls.saveFailed', { error: formatRuntimeError(error, t, { bare: true }) }));
+      }
+    });
   };
 
   return (

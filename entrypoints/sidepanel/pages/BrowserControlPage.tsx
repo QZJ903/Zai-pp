@@ -10,6 +10,7 @@ import {
   decodeBrowserControlTarget,
 } from '../../../core/browser-control/codec';
 import { DEFAULT_BROWSER_CONTROL_SETTINGS } from '../../../core/browser-control/settings';
+import type { LocaleMessageKey } from '../../../core/i18n';
 import { isZaiSiteOrigin } from '../../../core/zai/contracts';
 import { createRequestGenerationFence } from '../async-state';
 import PageIntro from '../components/PageIntro';
@@ -23,9 +24,28 @@ import {
 } from '../components/settings/primitives';
 import { useI18n } from '../i18n';
 import { isSidepanelRuntimeEvent } from '../runtime-event-codec';
+import { formatRuntimeError } from '../runtime-response';
 import { sidepanelRuntimeClient } from '../runtime-client';
 
 type BusyState = 'idle' | 'loading' | 'saving' | 'targeting' | 'detaching';
+
+/**
+ * The single failure exit for this page.
+ *
+ * Every request here ends in the runtime client's `Error.message`, which for a
+ * rejected command is whatever the background put in `{ ok: false, error }` — a
+ * sentence written for a developer (`No browser tab is attached.`,
+ * `No tab with id: 99.`). Showing it verbatim puts an English technical string in
+ * a localized UI, so it goes through the same projection every other page uses
+ * and lands inside a localized shell.
+ */
+function formatBrowserControlError(
+  error: unknown,
+  t: ReturnType<typeof useI18n>['t'],
+  fallbackKey: LocaleMessageKey,
+): string {
+  return t(fallbackKey, { error: formatRuntimeError(error, t, { bare: true }) });
+}
 
 const BROWSER_CONTROL_UPDATE_EVENTS = ['BROWSER_CONTROL_UPDATED', 'TOOL_DESCRIPTORS_UPDATED'] as const;
 
@@ -74,13 +94,21 @@ export default function BrowserControlPage() {
       setState(nextState);
     } catch (error) {
       if (loadFence.current.isCurrent(generation)) {
-        banner.show('error', error instanceof Error ? error.message : String(error));
+        banner.show('error', formatBrowserControlError(error, t, 'sidepanel.browserControlPage.messages.loadFailed'));
       }
     } finally {
       if (loadFence.current.isCurrent(generation)) setBusy('idle');
     }
   };
 
+  /**
+   * Persists a settings patch.
+   *
+   * `Slider` rolls its draft value back only when `onCommit` rejects, so this
+   * stays a rejecting function: it reports through the banner and then rethrows.
+   * Swallowing the error would leave the thumb on a number that was never
+   * written, next to a banner saying the write failed.
+   */
   const savePatch = async (patch: Partial<BrowserControlSettings>) => {
     setBusy('saving');
     banner.clear();
@@ -92,7 +120,8 @@ export default function BrowserControlPage() {
       setSettings(next);
       await load();
     } catch (error) {
-      banner.show('error', error instanceof Error ? error.message : String(error));
+      banner.show('error', formatBrowserControlError(error, t, 'sidepanel.browserControlPage.messages.saveFailed'));
+      throw error;
     } finally {
       setBusy('idle');
     }
@@ -112,7 +141,7 @@ export default function BrowserControlPage() {
         : t('sidepanel.browserControlPage.messages.disabled'));
       await load();
     } catch (error) {
-      banner.show('error', error instanceof Error ? error.message : String(error));
+      banner.show('error', formatBrowserControlError(error, t, 'sidepanel.browserControlPage.messages.enableFailed'));
     } finally {
       setBusy('idle');
     }
@@ -127,12 +156,14 @@ export default function BrowserControlPage() {
         { type: 'SET_BROWSER_CONTROL_TARGET', payload: { tabId: target.id } },
         {
           decode(value) {
+            // Shape failures stay as thrown decodes: the catch below localizes
+            // them with the same shell, so this branch must not pre-localize.
             if (!value || typeof value !== 'object' || Array.isArray(value)) {
-              throw new Error(t('sidepanel.browserControlPage.messages.targetFailed'));
+              throw new Error('SET_BROWSER_CONTROL_TARGET response must be an object.');
             }
             const response = value as Record<string, unknown>;
             if (response.ok !== true) {
-              throw new Error(t('sidepanel.browserControlPage.messages.targetFailed'));
+              throw new Error('SET_BROWSER_CONTROL_TARGET response.ok was not true.');
             }
             return decodeBrowserControlTarget(
               response.target,
@@ -144,7 +175,7 @@ export default function BrowserControlPage() {
       banner.show('success', t('sidepanel.browserControlPage.messages.targetSelected', { id: target.id }));
       await load();
     } catch (error) {
-      banner.show('error', error instanceof Error ? error.message : String(error));
+      banner.show('error', formatBrowserControlError(error, t, 'sidepanel.browserControlPage.messages.targetFailed'));
     } finally {
       setBusy('idle');
     }
@@ -158,7 +189,7 @@ export default function BrowserControlPage() {
       banner.show('success', t('sidepanel.browserControlPage.messages.detached'));
       await load();
     } catch (error) {
-      banner.show('error', error instanceof Error ? error.message : String(error));
+      banner.show('error', formatBrowserControlError(error, t, 'sidepanel.browserControlPage.messages.detachFailed'));
     } finally {
       setBusy('idle');
     }
@@ -236,7 +267,9 @@ export default function BrowserControlPage() {
           description={t('sidepanel.browserControlPage.includeSnapshotDescription')}
           enabled={settings.includeSnapshotAfterActions}
           disabled={busy !== 'idle'}
-          onToggle={(next) => savePatch({ includeSnapshotAfterActions: next })}
+          // `savePatch` rejects so the sliders can roll back; a toggle has no
+          // such contract, so the rejection is acknowledged here.
+          onToggle={(next) => { void savePatch({ includeSnapshotAfterActions: next }).catch(() => {}); }}
         />
         <Slider
           label={t('sidepanel.browserControlPage.maxNodes')}

@@ -75,6 +75,10 @@ export default function DataSubPage({ state }: { state: SettingsState }) {
               {
                 arrayError: t('sidepanel.settings.importMemoryArrayError'),
                 jsonError: t('sidepanel.settings.jsonFormatError'),
+                entryInvalid: (index: number, field: string) => t(
+                  'sidepanel.settings.importEntryInvalid',
+                  { index, field },
+                ),
               },
               (result) => {
                 if (result.ok) {

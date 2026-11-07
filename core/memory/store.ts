@@ -173,6 +173,26 @@ export async function updateMemory(mem: Memory): Promise<void> {
   }));
 }
 
+/**
+ * Deletes every stored memory in one transaction.
+ *
+ * The per-record delete is the wrong unit for "clear everything": it takes the
+ * state lock and runs a full validity read for each row, so clearing N records
+ * costs N sequential transactions whose read side grows with N. One `clear()`
+ * inside a single locked transaction is the same operation done once.
+ *
+ * ⚠️ **Still reads first.** The read validates the stored rows before anything
+ * is dropped, so a corrupted store reports the corruption instead of silently
+ * clearing it — the same fail-closed stance as the other write paths.
+ */
+export async function clearMemories(): Promise<void> {
+  await assertCurrentMemoryDatabaseVersion();
+  await withSyncLocalStateLock(() => db.transaction('rw', memories, async (tx) => {
+    await readValidatedMemoryRecords(tx);
+    await tx.table(MEMORY_TABLE_NAME).clear();
+  }));
+}
+
 export async function deleteMemory(id: number): Promise<void> {
   await assertCurrentMemoryDatabaseVersion();
   await withSyncLocalStateLock(() => db.transaction('rw', memories, async (tx) => {

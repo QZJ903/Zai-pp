@@ -12,6 +12,7 @@ export interface MemoryRuntimeHandlerDependencies {
   importMemoriesAtomically(memories: readonly NewMemory[]): Promise<number[]>;
   updateMemory(memory: Memory): Promise<void>;
   deleteMemory(id: number): Promise<void>;
+  clearMemories(): Promise<void>;
   touchMemories(ids: number[]): Promise<void>;
   notifyCommittedStateUpdate(excludeTabId?: number): Promise<void>;
 }
@@ -50,6 +51,11 @@ export function createMemoryRuntimeHandlers(
     }),
     definePersistencePayloadRuntimeCommandHandler('UPDATE_MEMORY', async (memory, context) => {
       await dependencies.updateMemory(memory);
+      await dependencies.notifyCommittedStateUpdate(context.tabId);
+      return { ok: true as const };
+    }),
+    definePayloadlessRuntimeCommandHandler('CLEAR_MEMORIES', async (context) => {
+      await dependencies.clearMemories();
       await dependencies.notifyCommittedStateUpdate(context.tabId);
       return { ok: true as const };
     }),

@@ -1,3 +1,4 @@
+import { MEMORY_CONTENT_MAX_CHARS } from '../constants';
 import type { Memory, MemoryType, NewMemory } from '../types';
 
 const MEMORY_TYPES: readonly MemoryType[] = ['user', 'feedback', 'topic', 'reference'];
@@ -49,7 +50,7 @@ export function decodeImportedMemory(
       : nonEmptyString(object.syncId, `${path}.syncId`),
     type: enumValue(object.type, MEMORY_TYPES, `${path}.type`),
     name: nonEmptyString(object.name, `${path}.name`),
-    content: nonEmptyString(object.content, `${path}.content`),
+    content: boundedContent(object.content, `${path}.content`),
     description: stringValue(object.description, `${path}.description`),
     tags: stringArray(object.tags, `${path}.tags`),
     pinned: booleanValue(object.pinned, `${path}.pinned`),
@@ -61,6 +62,22 @@ function objectValue(value: unknown, path: string): Record<string, unknown> {
     throw new Error(`${path} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+/**
+ * Applies the one content limit every write path shares.
+ *
+ * The limit is `string.length` — UTF-16 units — which is the same unit HTML's
+ * `maxLength` uses on the form's textarea. That is what keeps the form and the
+ * JSON import accepting exactly the same input; switching to code points would
+ * make one accept an astral character the other truncates.
+ */
+function boundedContent(value: unknown, path: string): string {
+  const content = nonEmptyString(value, path);
+  if (content.length > MEMORY_CONTENT_MAX_CHARS) {
+    throw new Error(`${path} must be at most ${MEMORY_CONTENT_MAX_CHARS} characters`);
+  }
+  return content;
 }
 
 function nonEmptyString(value: unknown, path: string): string {

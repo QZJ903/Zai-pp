@@ -5,6 +5,7 @@ import {
   saveMemory,
   updateMemory,
   deleteMemory,
+  clearMemories,
   touchMemories,
   archiveStaleMemories,
 } from '../core/memory/store';
@@ -117,6 +118,7 @@ import {
   getAllAutomations,
   getAutomationById,
   getAutomationRuns,
+  getRecentAutomationRuns,
   setAutomationStatus,
   updateAutomation,
   updateAutomationRuntime,
@@ -284,6 +286,7 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
         importMemoriesAtomically,
         updateMemory,
         deleteMemory,
+        clearMemories,
         touchMemories,
         notifyCommittedStateUpdate,
       },
@@ -433,6 +436,7 @@ const runtimeCommandRegistry = createRuntimeCommandRegistry({
       automation: {
         getAllAutomations,
         getAutomationRuns,
+        getRecentAutomationRuns,
         createAutomation,
         updateAutomation,
         setAutomationStatus,

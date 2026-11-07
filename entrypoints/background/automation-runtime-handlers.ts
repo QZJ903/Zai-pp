@@ -2,6 +2,7 @@ import type {
   Automation,
   AutomationCreateInput,
   AutomationRun,
+  AutomationRecentRunsOptions,
   AutomationRunListOptions,
   AutomationStatus,
   AutomationUpdateInput,
@@ -17,6 +18,7 @@ type AutomationDomainFailure = { ok: false; error: string };
 export interface AutomationRuntimeHandlerDependencies {
   getAllAutomations(): Promise<Automation[]>;
   getAutomationRuns(options: AutomationRunListOptions): Promise<AutomationRun[]>;
+  getRecentAutomationRuns(options: AutomationRecentRunsOptions): Promise<Record<string, AutomationRun[]>>;
   createAutomation(input: AutomationCreateInput): Promise<Automation>;
   updateAutomation(id: string, patch: AutomationUpdateInput): Promise<Automation | null>;
   setAutomationStatus(id: string, status: AutomationStatus): Promise<Automation | null>;
@@ -45,6 +47,9 @@ export function createAutomationRuntimeHandlers(
     )),
     defineBackgroundPayloadRuntimeCommandHandler('GET_AUTOMATION_RUNS', (payload) => (
       dependencies.getAutomationRuns(payload)
+    )),
+    defineBackgroundPayloadRuntimeCommandHandler('GET_AUTOMATION_RUNS_BATCH', (payload) => (
+      dependencies.getRecentAutomationRuns(payload)
     )),
     defineBackgroundPayloadRuntimeCommandHandler('CREATE_AUTOMATION', async (input, context) => {
       const automation = await dependencies.createAutomation(input);

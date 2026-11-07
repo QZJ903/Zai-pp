@@ -1,6 +1,7 @@
 import type {
   Automation,
   AutomationCreateInput,
+  AutomationRecentRunsOptions,
   AutomationRun,
   AutomationStatus,
   AutomationUpdateInput,
@@ -49,6 +50,13 @@ export interface BackgroundRuntimeCommandContracts {
       payload: { automationId: string; limit?: number };
     };
     response: AutomationRun[];
+  };
+  GET_AUTOMATION_RUNS_BATCH: {
+    request: {
+      type: 'GET_AUTOMATION_RUNS_BATCH';
+      payload: AutomationRecentRunsOptions;
+    };
+    response: Record<string, AutomationRun[]>;
   };
   CREATE_AUTOMATION: {
     request: { type: 'CREATE_AUTOMATION'; payload: AutomationCreateInput };

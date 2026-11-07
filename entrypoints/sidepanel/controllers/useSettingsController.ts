@@ -5,8 +5,6 @@ import {
   normalizeBackgroundConfig,
 } from '../../../core/background/config';
 import { decodeRuntimeConfigResponse } from '../../../core/messaging/bootstrap-client';
-import { MEMORY_RECORD_MISSING_CODE } from '../../../core/messaging/error-code';
-import { getRuntimeErrorMessage } from '../runtime-response';
 import type { BackgroundConfig } from '../../../core/types';
 import { sidepanelRuntimeClient } from '../runtime-client';
 import { createSerialOperationQueue } from '../../../core/persistence/serial-operation-queue';
@@ -47,6 +45,62 @@ function settingsLoadFallback<T>(label: string, fallback: T): (error: unknown) =
     console.log(`[Zai++] Failed to load ${label} settings.`, error);
     return fallback;
   };
+}
+
+/**
+ * Re-reads the stored background configuration for a write with no known base.
+ *
+ * Unlike the mount-time read this one **does not fall back**: the whole point is
+ * to learn the current value, and a default would be written back as if it were
+ * the truth. `null` normalizes to the empty config here, which is a real value —
+ * the caller merges a patch into it either way.
+ */
+async function readBackgroundConfigForWrite(): Promise<BackgroundConfig> {
+  const stored = await sidepanelRuntimeClient.request({ type: 'GET_BACKGROUND' });
+  return normalizeBackgroundConfig(stored as BackgroundConfig | null) ?? DEFAULT_BACKGROUND_CONFIG;
+}
+
+/**
+ * Copy for the memory-import entry point.
+ *
+ * `entryInvalid` is a function rather than a template string so the message goes
+ * through the translator's own parameter formatting instead of hand-rolled
+ * placeholder replacement.
+ */
+export interface ImportLabels {
+  arrayError: string;
+  jsonError: string;
+  entryInvalid(index: number, field: string): string;
+}
+
+/**
+ * A failure whose message is already the copy to show.
+ *
+ * The import path produces two kinds of error: ones that need translating (the
+ * background's field paths, the parser's position string) and ones built from a
+ * localized label here. This marks the second kind so the shared catch does not
+ * run it through the translator twice.
+ */
+class LocalizedImportError extends Error {}
+
+/**
+ * Turns a background import failure into something a user can act on.
+ *
+ * `IMPORT_MEMORY_DRAFTS` reports the field-level decoder error verbatim, so the
+ * raw value is a path string like `memories[3].content must be a non-empty
+ * string`. The record index is the only part of that a user can use — it points
+ * at the entry they have to fix in their file — so it is lifted out and wrapped
+ * in localized copy. Anything else is passed through: an unrecognized message is
+ * more useful than a generic one.
+ */
+function describeImportFailure(error: unknown, labels: ImportLabels): string {
+  const raw = typeof error === 'string' ? error : '';
+  if (!raw) return labels.jsonError;
+  const entry = /^memories\[(\d+)\]\.([A-Za-z0-9_]+)/.exec(raw);
+  // The decoder reports a zero-based index; the user is looking at a file,
+  // where the first record is number one.
+  if (entry) return labels.entryInvalid(Number(entry[1]) + 1, entry[2]);
+  return raw;
 }
 
 /**
@@ -110,7 +164,16 @@ export function useSettingsController(feedback: SettingsBackgroundFeedback = LOG
   }, []);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const bgConfigRef = useRef<BackgroundConfig>(DEFAULT_BACKGROUND_CONFIG);
+  /**
+   * Last background configuration this controller knows to be on disk.
+   *
+   * `null` means **unknown**, not "no background". The two are different states
+   * and only one of them may be used as the base of a write: when the mount-time
+   * read fails (an invalidated extension context, a slow service worker),
+   * merging a patch into the default value would persist "background off, no
+   * image" over whatever the user had.
+   */
+  const bgConfigRef = useRef<BackgroundConfig | null>(DEFAULT_BACKGROUND_CONFIG);
 
   const bgPreview = bgType === 'url' ? bgConfirmedUrl : bgImageData;
 
@@ -149,8 +212,16 @@ export function useSettingsController(feedback: SettingsBackgroundFeedback = LOG
       if (cancelled) return;
       setMemoryCount(memories);
       setVersion(cfg && 'version' in cfg ? cfg.version : '');
+      // A failed read (`settingsLoadFallback` hands back `null`) must NOT be
+      // projected onto the default configuration: `bgConfigRef` is the base every
+      // write merges into, so "empty" here would be written back over the user's
+      // saved background the next time any control on the page is touched.
       const normalizedBg = normalizeBackgroundConfig(bgCfg as BackgroundConfig | null);
-      if (normalizedBg) syncBgState(normalizedBg);
+      if (normalizedBg) {
+        syncBgState(normalizedBg);
+      } else {
+        bgConfigRef.current = null;
+      }
       // ⚠️ **读不到就保持 false** —— 与后台的归一化同口径
       // （`normalizeTabKeepaliveSettings` 只在显式 `=== true` 时开）。
       if (keepalive && typeof keepalive === 'object' && 'enabled' in keepalive) {
@@ -195,8 +266,12 @@ export function useSettingsController(feedback: SettingsBackgroundFeedback = LOG
    */
   const saveBgConfig = useCallback(async (patch: Partial<BackgroundConfig>) => {
     return backgroundWriteQueue.run(async () => {
+      // The base of the write is the last configuration known to be on disk.
+      // When it is unknown, read it once more inside the same queue slot rather
+      // than merging into a default: a failed read is not an empty background.
+      const base = bgConfigRef.current ?? await readBackgroundConfigForWrite();
       const config = normalizeBackgroundConfig({
-        ...bgConfigRef.current,
+        ...base,
         ...patch,
       });
       if (!config) return;
@@ -310,9 +385,15 @@ export function useSettingsController(feedback: SettingsBackgroundFeedback = LOG
   const handleOpacityCommit = useCallback(
     (val: number) => {
       const opacity = clampBackgroundOpacity(val);
-      saveBgConfig({ opacity })
+      // Returns the promise on purpose: `Slider` rolls the thumb back only when
+      // `onCommit` rejects. The banner is the user-visible report, the rethrow is
+      // what keeps the control from claiming a value that was never stored.
+      return saveBgConfig({ opacity })
         .then(() => setBgOpacity(opacity))
-        .catch(onBackgroundError);
+        .catch((error) => {
+          onBackgroundError(error);
+          throw error;
+        });
     },
     [onBackgroundError, saveBgConfig],
   );
@@ -366,10 +447,18 @@ export function useSettingsController(feedback: SettingsBackgroundFeedback = LOG
     URL.revokeObjectURL(url);
   }, []);
 
+  /**
+   * Imports a memory JSON file.
+   *
+   * `readText` is injected so the read itself can be exercised: `file.text()`
+   * rejects when the file was moved or locked, and that rejection used to escape
+   * before the `try` existed — the click looked like it did nothing at all.
+   */
   const handleImport = useCallback(
     async (
-      labels: { arrayError: string; jsonError: string },
+      labels: ImportLabels,
       onResult?: (result: { ok: boolean; imported?: number; error?: string }) => void,
+      readText: (file: File) => Promise<string> = (file) => file.text(),
     ) => {
       const input = document.createElement('input');
       input.type = 'file';
@@ -377,25 +466,44 @@ export function useSettingsController(feedback: SettingsBackgroundFeedback = LOG
       input.onchange = async () => {
         const file = input.files?.[0];
         if (!file) return;
-        const text = await file.text();
         try {
-          const parsed: unknown = JSON.parse(text);
+          const text = await readText(file);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            // A syntax error carries the parser's own English position string.
+            // Someone who broke a comma needs to be told it is the JSON, not
+            // where the engine gave up.
+            throw new LocalizedImportError(labels.jsonError);
+          }
           if (!Array.isArray(parsed)) {
-            throw new Error(labels.arrayError);
+            throw new LocalizedImportError(labels.arrayError);
           }
           const result = await sidepanelRuntimeClient.request({
             type: 'IMPORT_MEMORY_DRAFTS',
             payload: { memories: parsed },
           });
           if (!result?.ok) {
-            throw new Error(result?.error || labels.jsonError);
+            throw new Error(String(result?.error ?? labels.jsonError));
           }
           const imported = typeof result.count === 'number' ? result.count : parsed.length;
           // 这里不做 `+ imported` 的乐观更新：handler 在写入之后会广播 STATE_UPDATED，
           // 那份广播带的就是权威列表，两者相加会双计。
           onResult?.({ ok: true, imported });
         } catch (error) {
-          onResult?.({ ok: false, error: error instanceof Error ? error.message : labels.jsonError });
+          if (error instanceof LocalizedImportError) {
+            onResult?.({ ok: false, error: error.message });
+            return;
+          }
+          // The runtime client rejects on a domain failure unless `acceptFailure`
+          // is set, so the background's field-level message arrives here as an
+          // exception. It is translated on the way out for the same reason.
+          const message = error instanceof Error ? error.message : '';
+          onResult?.({
+            ok: false,
+            error: message ? describeImportFailure(message, labels) : labels.jsonError,
+          });
         }
       };
       input.click();
@@ -403,27 +511,22 @@ export function useSettingsController(feedback: SettingsBackgroundFeedback = LOG
     [],
   );
 
+  /**
+   * Clears every stored memory.
+   *
+   * One background command, one transaction, one state broadcast. Driving this
+   * from a loop of `DELETE_MEMORY` calls meant N sequential round trips and N
+   * full re-reads of the memory store (each delete acknowledged its own state
+   * update), so the cost grew faster than the record count — a few hundred
+   * memories already took seconds and left a half-cleared store on any failure.
+   *
+   * ⚠️ **"That record is already gone" no longer needs its own branch here** —
+   * a single clear is idempotent by construction, so the race the loop had to
+   * tolerate cannot occur. Other failures still propagate: a corrupted store or
+   * a full quota has to reach the user.
+   */
   const handleClearAllMemories = useCallback(async () => {
-    const memories = await libraryController.getMemories();
-    for (const mem of memories) {
-      const id = mem.id;
-      if (typeof id !== 'number' || !Number.isSafeInteger(id)) {
-        throw new Error('Memory id is missing.');
-      }
-      try {
-        await libraryController.deleteMemory(id);
-      } catch (error) {
-        // ⚠️ **「这一条已经不在了」在这里算成功，不报错** —— 本函数的语义是
-        // 「让这些 id 都不存在」，已经不在了 ⇒ 目标已达成。
-        // ⚠️ **与记忆页单条删除的口径不同是有意的**：那里「不在了」是**意外**
-        // （用户以为删掉了、其实这条早被别处删了，界面要告诉他），而这里是**遍历清空**，
-        // 中间任何一条被别处删掉都属正常竞态；把它当失败会让整个「清空全部」中断在
-        // 半路，且报出一个用户无法理解的蛇形码。
-        // ⚠️ **其它错误照抛** —— 存储坏了、配额满了这些必须让用户看见。
-        if (getRuntimeErrorMessage(error) === MEMORY_RECORD_MISSING_CODE) continue;
-        throw error;
-      }
-    }
+    await libraryController.clearMemories();
     setMemoryCount(0);
   }, []);
 

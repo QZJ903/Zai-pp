@@ -12,10 +12,20 @@ export default function PresetForm({ initial, onSave, onCancel }: Props) {
   const { t } = useI18n();
   const [name, setName] = useState(initial?.name ?? '');
   const [content, setContent] = useState(initial?.content ?? '');
+  /**
+   * Validation message. A bare `return` leaves the form open with nothing
+   * reported and nothing saved — the button looks dead and the only thing the
+   * user can do is press it again.
+   */
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !content.trim()) return;
+    if (!name.trim() || !content.trim()) {
+      setValidationError(t('sidepanel.preset.form.requiredFields'));
+      return;
+    }
+    setValidationError(null);
     const now = Date.now();
     onSave({
       id: initial?.id ?? crypto.randomUUID(),
@@ -32,7 +42,10 @@ export default function PresetForm({ initial, onSave, onCancel }: Props) {
         type="text"
         placeholder={t('sidepanel.preset.form.namePlaceholder')}
         value={name}
-        onChange={(e) => setName(e.target.value)}
+        onChange={(e) => {
+          setName(e.target.value);
+          if (validationError) setValidationError(null);
+        }}
         className="ds-input w-full px-3 py-2 text-sm rounded-lg transition-all duration-150"
       />
 
@@ -44,10 +57,23 @@ export default function PresetForm({ initial, onSave, onCancel }: Props) {
           rows={8}
           placeholder={t('sidepanel.preset.form.contentPlaceholder')}
           value={content}
-          onChange={(e) => setContent(e.target.value)}
+          onChange={(e) => {
+            setContent(e.target.value);
+            if (validationError) setValidationError(null);
+          }}
           className="ds-input w-full px-3 py-2 text-sm font-mono rounded-lg resize-none transition-all duration-150"
         />
       </div>
+
+      {validationError && (
+        <div className="text-[11px] rounded-lg px-2.5 py-1.5" style={{
+          color: 'var(--ds-danger)',
+          background: 'var(--ds-danger-bg)',
+          border: '1px solid var(--ds-danger-border)',
+        }} role="alert">
+          {validationError}
+        </div>
+      )}
 
       <div className="flex gap-2 justify-end pt-1">
         <button

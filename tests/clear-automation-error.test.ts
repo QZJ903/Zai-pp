@@ -63,6 +63,7 @@ function createDependencies(): AutomationRuntimeHandlerDependencies & {
   return {
     getAllAutomations: vi.fn(async () => [automation]),
     getAutomationRuns: vi.fn(async () => []),
+    getRecentAutomationRuns: vi.fn(async () => ({})),
     createAutomation: vi.fn(async () => automation),
     updateAutomation: vi.fn(async () => automation),
     setAutomationStatus: vi.fn(async () => automation),

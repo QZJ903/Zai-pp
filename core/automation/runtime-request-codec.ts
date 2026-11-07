@@ -12,6 +12,11 @@ export interface AutomationRunsRequest {
   limit?: number;
 }
 
+export interface AutomationRecentRunsRequest {
+  limit?: number;
+  automationIds?: string[];
+}
+
 export interface AutomationUpdateRequest {
   id: string;
   patch: AutomationUpdateInput;
@@ -34,6 +39,27 @@ export function decodeAutomationRunsRequest(value: unknown): AutomationRunsReque
     throw new Error('Automation run limit must be a positive integer.');
   }
   return { automationId, limit: payload.limit };
+}
+
+export function decodeRecentAutomationRunsRequest(value: unknown): AutomationRecentRunsRequest {
+  const payload = recordValue(value, 'GET_AUTOMATION_RUNS_BATCH.payload');
+  assertOnlyKeys(payload, ['automationIds', 'limit'], 'GET_AUTOMATION_RUNS_BATCH.payload');
+  const decoded: AutomationRecentRunsRequest = {};
+  if (payload.limit !== undefined) {
+    if (typeof payload.limit !== 'number' || !Number.isInteger(payload.limit) || payload.limit < 1) {
+      throw new Error('Automation run limit must be a positive integer.');
+    }
+    decoded.limit = payload.limit;
+  }
+  if (payload.automationIds !== undefined) {
+    if (!Array.isArray(payload.automationIds)) {
+      throw new Error('Automation ids must be an array.');
+    }
+    decoded.automationIds = payload.automationIds.map((id, index) => (
+      nonEmptyString(id, `automationIds[${index}]`)
+    ));
+  }
+  return decoded;
 }
 
 export function decodeAutomationCreateInput(value: unknown): AutomationCreateInput {

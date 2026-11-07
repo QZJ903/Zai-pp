@@ -3,6 +3,7 @@ import type {
   AutomationCreateInput,
   AutomationId,
   AutomationRun,
+  AutomationRecentRunsOptions,
   AutomationRunId,
   AutomationRunListOptions,
   AutomationRunnerRequest,
@@ -329,6 +330,35 @@ export async function getAutomationRuns(
       .filter((run) => run.automationId === options.automationId)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit);
+  });
+}
+
+/**
+ * The most recent runs of **every** automation in one read.
+ *
+ * The per-automation command re-reads and re-decodes the whole storage state on
+ * every call, so a page that shows N automations paid N+1 full decodes per
+ * refresh. One call answers the same question for all of them.
+ *
+ * ⚠️ **Order is "newest first, per automation", not globally** — callers index
+ * the result by automation id and show the first few.
+ */
+export async function getRecentAutomationRuns(
+  options: AutomationRecentRunsOptions,
+): Promise<Record<AutomationId, AutomationRun[]>> {
+  return automationOperations.run(async () => {
+    const state = await readStateAlreadyOwned();
+    const limit = options.limit ?? DEFAULT_RUN_HISTORY_LIMIT;
+    const wanted = options.automationIds ? new Set(options.automationIds) : null;
+    const grouped: Record<string, AutomationRun[]> = {};
+    for (const run of state.runs) {
+      if (wanted && !wanted.has(run.automationId)) continue;
+      (grouped[run.automationId] ??= []).push(run);
+    }
+    for (const id of Object.keys(grouped)) {
+      grouped[id] = grouped[id].sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+    }
+    return grouped;
   });
 }
 

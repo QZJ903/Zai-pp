@@ -209,3 +209,14 @@ export interface AutomationRunListOptions {
   automationId: AutomationId;
   limit?: number;
 }
+
+/**
+ * Options for the batched "recent runs" read.
+ *
+ * `automationIds` is optional: omitting it means "every automation currently in
+ * storage", which is what the side panel needs after a list read.
+ */
+export interface AutomationRecentRunsOptions {
+  limit?: number;
+  automationIds?: readonly AutomationId[];
+}
