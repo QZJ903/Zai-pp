@@ -2,29 +2,23 @@ import type {
   BrowserSnapshotNode,
   BrowserSnapshotResult,
 } from './types';
-
-/**
- * 一个字符串的 **UTF-8 字节数**。
- *
- * ⚠️ **不能用 `value.length`** —— 那是 UTF-16 码元数：中文 1 字 = 1 码元但 **3 字节**，
- * emoji 1 字 = **2 码元**但 4 字节。预算名叫 `maxTextBytes`、面板文案写「字节数」，
- * 判据就必须是字节。
- * ⚠️ **也不能在每个节点上 `new TextEncoder().encode(整段 text)`** —— 那是 O(n²)：
- * 每次都要把已经拼好的全文再编码一遍。这里的用法是**只编码新增的那一行**，
- * 然后累加（见 `textBytes`）。
- */
-function utf8Length(value: string): number {
-  return new TextEncoder().encode(value).length;
-}
+import { utf8ByteLength } from '../tool/result-bytes';
 
 /**
  * 超预算时追加在 `text` 末尾的标记。
  *
  * ⚠️ **它自己的字节数也要算进预算** —— 见下面那段说明。单独提成常量是为了
  * 「加标记」与「量标记」用的是同一个真源，别在两处各写一份字面量。
+ *
+ * ⚠️ **量长度走共享的 `utf8ByteLength`** —— 那个函数是「UTF-8 字节」这件事的
+ * 唯一实现，`core/tool` / `core/skill` / `core/mcp` 也用它。这里**不自己写一份**：
+ * 早先本文件有个私有的 `utf8Length`，与共享版语义相同但写法不同（`.length` vs
+ * `.byteLength`），两份各自被各自的用例守着 —— 而那种「看起来一样、改一处不影响另一处」
+ * 的形态正是重复实现最容易漂的地方。
+ * ⚠️ **它按「新增的那一行」调用、不按整段 `text`** —— 每个节点上编码整段已是 O(n²)。
  */
 const SNAPSHOT_TRUNCATION_MARKER = '\n...[snapshot truncated]';
-const SNAPSHOT_TRUNCATION_MARKER_BYTES = utf8Length(SNAPSHOT_TRUNCATION_MARKER);
+const SNAPSHOT_TRUNCATION_MARKER_BYTES = utf8ByteLength(SNAPSHOT_TRUNCATION_MARKER);
 
 interface AxNode {
   nodeId?: string;
@@ -74,7 +68,7 @@ export function formatAccessibilitySnapshot(input: SnapshotInput): FormattedSnap
   let text = `URL: ${input.url || '(unknown)'}\nTitle: ${input.title || '(untitled)'}\n`;
   // ⚠️ **累计字节必须跟着 `text` 一起长** —— 逐行累加（每行只编码一次），
   // 不在循环里重新编码全文。
-  let textBytes = utf8Length(text);
+  let textBytes = utf8ByteLength(text);
   let truncated = false;
 
   while (queue.length > 0) {
@@ -99,7 +93,7 @@ export function formatAccessibilitySnapshot(input: SnapshotInput): FormattedSnap
     // （`DOM.resolveNode` 认的是映射）⇒ **看不见却能点**，`nodeCount` 也比实际可见的多 1。
     // 两个预算的截断点必须同源（`maxNodes` 那条本来就在 push 之前）。
     const nextLine = formatSnapshotLine(normalizedNode);
-    const nextLineBytes = utf8Length(nextLine);
+    const nextLineBytes = utf8ByteLength(nextLine);
     if (textBytes + nextLineBytes > input.maxTextBytes) {
       truncated = true;
       break;

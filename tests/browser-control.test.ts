@@ -809,6 +809,55 @@ describe('browser control: closeTab does not overwrite a concurrent target chang
       (storage.get(BROWSER_CONTROL_STORAGE_KEY) as { targetTabId?: number | null }).targetTabId,
     ).toBeNull();
   });
+
+  /**
+   * ⚠️⚠️ **「存着的目标标签没了」这条判据不能只认一种大小写。**
+   *
+   * Chromium 自己的两条措辞并不统一：`chrome.tabs.*` 是 `No tab with id: N`（小写），
+   * 而 `chrome.debugger.*` 与部分 `chrome.scripting` 路径是 `Invalid tab ID: N`（大写）。
+   * 只认一种 ⇒ 另一种会被当成真故障抛出去，用户看到「浏览器控制失败」而不是
+   * 「自动换了个标签继续」。
+   *
+   * ⚠️ 这条用例守的是**两个措辞都能落到「清空并重选」分支**，不是措辞本身 ——
+   * 所以断言的是「换到了另一个可控标签」，不是「没抛错」。
+   */
+  it.each([
+    ['chrome.tabs 的措辞', 'No tab with id: 12'],
+    ['chrome.debugger 的措辞（大写 ID）', 'Invalid tab ID: 12'],
+  ])('recovers from a vanished target using %s', async (_label, message) => {
+    const storage = new Map<string, unknown>();
+    storage.set(BROWSER_CONTROL_STORAGE_KEY, {
+      ...DEFAULT_BROWSER_CONTROL_SETTINGS,
+      enabled: true,
+      targetTabId: 12,
+      includeSnapshotAfterActions: false,
+    });
+    const chromeStub = createChromeStub(storage, [
+      createTab({ id: 13, active: true, title: 'Example', url: 'https://example.com/' }),
+    ]);
+    // 存着的 12 已经不在了，且措辞由用例指定。
+    chromeStub.tabs.get = vi.fn(async (tabId: number) => {
+      if (tabId === 12) throw new Error(message);
+      return {
+        id: tabId,
+        windowId: 1,
+        active: true,
+        title: 'Example',
+        url: 'https://example.com/',
+      } as chrome.tabs.Tab;
+    });
+    vi.stubGlobal('chrome', chromeStub);
+
+    const service = new BrowserControlService({ chromeApi: chromeStub as unknown as typeof chrome });
+    const result = await service.execute('browser_snapshot', {});
+
+    expect(result.ok, `${message} 应当被当成「目标没了」而不是真故障`).toBe(true);
+    // 换到了 13，并把新的 target 落库。
+    expect(chromeStub.debugger.attach).toHaveBeenCalledWith({ tabId: 13 }, '1.3');
+    expect(
+      (storage.get(BROWSER_CONTROL_STORAGE_KEY) as { targetTabId?: number | null }).targetTabId,
+    ).toBe(13);
+  });
 });
 
 describe('browser fill writes through the native value setter', () => {

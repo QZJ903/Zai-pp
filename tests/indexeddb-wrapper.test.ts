@@ -463,4 +463,44 @@ describe('IndexedDb thin wrapper', () => {
     })).rejects.toThrow('requires a readwrite transaction');
     expect(await memories.count()).toBe(1);
   });
+
+  /**
+   * ⚠️⚠️ **事务已经自动提交后，表操作必须 reject，不能同步抛。**
+   *
+   * `IDBObjectStore` 的失败分两种：走 `request.onerror`（异步，各表方法的 `new Promise`
+   * 执行器接得住），以及**同步抛**。实测（fake-indexeddb 与 Chromium 同形）：
+   * 在事务里 `await` 了一个**非 IDB 的 promise**（这里是一个 10ms 定时器）⇒ 事务自动提交
+   * ⇒ 之后再碰表，`boundTx.objectStore(name)` **同步抛 `InvalidStateError`**。
+   *
+   * 各表方法都是 `new Promise((resolve, reject) => { store.get(…) })` —— 执行器里同步抛
+   * 会被 Promise 构造器接住，所以**操作体内部安全**。裸奔的是 `run()` 自己那两行
+   * （`boundTx.objectStore(name)` / `database.implicit(...)`）：同步抛会让调用方拿到
+   * 异常，而签名承诺的是 `Promise<T>` —— 调用方写 `await table.x()` 时 await 不到它。
+   *
+   * ⚠️ 这个触发面**不是理论上的**：任何在事务里等一次网络 / 定时器 / 加锁的 store 代码
+   * 都会走到这里，而那正是「批量写入中途做了一次异步校验」这种常见写法。
+   */
+  it('returns a rejected promise instead of throwing synchronously after the transaction auto-commits', async () => {
+    const db = freshDb();
+    const memories = db.table('memories');
+    await memories.add({ id: 1, type: 'topic', name: 'a', pinned: false, syncId: 's1' });
+
+    const outcome = await db.transaction('r', memories, async (tx) => {
+      // 等一个非 IDB 的 promise ⇒ 事务在下一轮微任务后自动提交。
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      let result: Promise<unknown>;
+      try {
+        result = tx.table('memories').toArray();
+      } catch (error) {
+        // 同步抛到调用方 —— 正是这条用例要拦的形态。
+        return { syncThrew: true, rejected: false, name: (error as Error)?.name ?? '' };
+      }
+      const rejected = await result.then(() => false, () => true);
+      return { syncThrew: false, rejected, name: '' };
+    }).catch((error) => ({ outerRejected: true, message: String(error) }));
+
+    expect(outcome, '事务本身也可能因此 reject —— 那是允许的').not.toHaveProperty('syncThrew', true);
+    if ('outerRejected' in outcome) return;
+    expect(outcome.rejected, '表操作必须返回 rejected promise').toBe(true);
+  });
 });

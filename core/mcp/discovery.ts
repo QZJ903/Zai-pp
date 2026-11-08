@@ -148,7 +148,7 @@ export async function executeMcpToolCall(
   if (!serverId) {
     return {
       ok: false,
-      summary: 'MCP 服务缺失',
+      summary: 'MCP server id missing',
       detail: 'Tool call does not include an MCP server id.',
       name: call.name,
       error: {
@@ -163,7 +163,7 @@ export async function executeMcpToolCall(
   if (!server || !server.enabled) {
     return {
       ok: false,
-      summary: 'MCP 服务不可用',
+      summary: 'MCP server unavailable',
       detail: server ? 'MCP server is disabled.' : `MCP server not found: ${serverId}`,
       name: call.name,
       error: {
@@ -176,7 +176,7 @@ export async function executeMcpToolCall(
   if (!server.execution.enabled || server.execution.mode === 'disabled') {
     return {
       ok: false,
-      summary: 'MCP 工具执行已禁用',
+      summary: 'MCP tool execution disabled',
       detail: `MCP execution is disabled on server ${server.displayName}.`,
       name: call.name,
       provider: call.provider,
@@ -195,7 +195,7 @@ export async function executeMcpToolCall(
   if (!descriptor) {
     return {
       ok: false,
-      summary: 'MCP 工具不可用',
+      summary: 'MCP tool unavailable',
       detail: `MCP tool is not available on server ${server.displayName}.`,
       name: call.name,
       provider: call.provider,
@@ -210,7 +210,7 @@ export async function executeMcpToolCall(
   if (!descriptor.execution.enabled || descriptor.execution.mode === 'disabled') {
     return {
       ok: false,
-      summary: 'MCP 工具已禁用',
+      summary: 'MCP tool disabled',
       detail: `MCP tool ${descriptor.name} is disabled by server policy.`,
       name: descriptor.name,
       provider: descriptor.provider,
@@ -225,7 +225,7 @@ export async function executeMcpToolCall(
   if (!await haveEquivalentToolDescriptorSecurity(authorizedDescriptor, descriptor)) {
     return {
       ok: false,
-      summary: 'MCP 工具授权已过期',
+      summary: 'MCP tool authorization expired',
       detail: `MCP tool ${authorizedDescriptor.name} changed after it was authorized.`,
       name: authorizedDescriptor.name,
       provider: authorizedDescriptor.provider,
@@ -265,7 +265,7 @@ export async function executeMcpToolCall(
       : {};
     return {
       ok: false,
-      summary: 'MCP 服务初始化失败',
+      summary: 'MCP server initialization failed',
       detail: message,
       name: descriptor.name,
       provider: descriptor.provider,

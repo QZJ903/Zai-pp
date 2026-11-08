@@ -57,36 +57,41 @@ afterEach(() => {
 });
 
 describe('versioned browser repositories', () => {
-  it('guards sync replacements against overwriting local future state', async () => {
-    const presetRepo = createVersionedRepository({
-      label: 'presets',
-      createDefault: () => [],
-      codec: presetCollectionCodec,
-      storage: createChromeStorageSlot(PRESETS_STORAGE_KEY),
-    });
-    const savedItemsRepo = createVersionedRepository({
-      label: 'savedItems',
-      createDefault: () => ({ schemaVersion: 1 as const, items: [] }),
-      codec: savedItemsCodec,
-      storage: createChromeStorageSlot(SAVED_ITEMS_STORAGE_KEY),
-    });
+  /**
+   * ⚠️⚠️ **「损坏 / 未来版本不许被普通写覆盖」这条不变式，现在由仓储自己兑现。**
+   *
+   * 早先只有 `replaceAlreadyLocked` 会先读一遍，而 8 个生产调用点用的都是
+   * `writeAfterReadAlreadyLocked` —— 那个函数体只有一句 `storage.write`，
+   * 保护全靠调用方各自先读。这条用例**同时覆盖两个入口**，因为现在它们是同一实现：
+   * 将来谁把它们拆开、或把 `writeAfterReadAlreadyLocked` 退回裸写，这里立刻红。
+   */
+  it.each([
+    ['replaceAlreadyLocked', 'presets', PRESETS_STORAGE_KEY, PRESETS_REJECTED_STATES.future],
+    ['writeAfterReadAlreadyLocked', 'presets', PRESETS_STORAGE_KEY, PRESETS_REJECTED_STATES.future],
+    ['replaceAlreadyLocked', 'savedItems', SAVED_ITEMS_STORAGE_KEY, SAVED_ITEMS_REJECTED_STATES.future],
+    ['writeAfterReadAlreadyLocked', 'savedItems', SAVED_ITEMS_STORAGE_KEY, SAVED_ITEMS_REJECTED_STATES.future],
+  ] as const)(
+    'refuses to overwrite a corrupt/future value through %s (%s)',
+    async (entry, label, key, rejected) => {
+      const isPresets = label === 'presets';
+      const repo = createVersionedRepository<unknown>({
+        label,
+        createDefault: () => (isPresets ? [] : { schemaVersion: 1 as const, items: [] }),
+        codec: (isPresets ? presetCollectionCodec : savedItemsCodec) as never,
+        storage: createChromeStorageSlot(key),
+      });
+      storage[key] = rejected;
 
-    storage[PRESETS_STORAGE_KEY] = PRESETS_REJECTED_STATES.future;
-    // 替换是「先解码、解码过了才允许覆盖」：本地若是更高版本的未来态，
-    // 直接覆盖等于把用户在新版本里造的数据回滚掉，所以必须在写之前抛错。
-    await expect(withSyncLocalStateLock(() => presetRepo.replaceAlreadyLocked(
-      structuredClone(PRESETS_V1_STATE) as never,
-    ))).rejects.toThrow('presets.schemaVersion is not supported');
-    expect(storage[PRESETS_STORAGE_KEY]).toBe(PRESETS_REJECTED_STATES.future);
-
-    storage[SAVED_ITEMS_STORAGE_KEY] = SAVED_ITEMS_REJECTED_STATES.future;
-    await expect(withSyncLocalStateLock(() => savedItemsRepo.replaceAlreadyLocked(
-      structuredClone(SAVED_ITEMS_V1_STATE) as unknown as SavedItemsState,
-    ))).rejects.toThrow('savedItems.schemaVersion is not supported');
-    expect(storage[SAVED_ITEMS_STORAGE_KEY]).toBe(SAVED_ITEMS_REJECTED_STATES.future);
-    // 拒绝时连一次写都不能发生：错误必须是「写之前抛出」，而不是「写完再回滚」。
-    expect(storageSet).not.toHaveBeenCalled();
-  });
+      // 替换是「先解码、解码过了才允许覆盖」：本地若是更高版本的未来态，
+      // 直接覆盖等于把用户在新版本里造的数据回滚掉，所以必须在写之前抛错。
+      await expect(withSyncLocalStateLock(() => repo[entry](
+        (isPresets ? structuredClone(PRESETS_V1_STATE) : structuredClone(SAVED_ITEMS_V1_STATE)) as never,
+      ))).rejects.toThrow(`${label}.schemaVersion is not supported`);
+      expect(storage[key]).toBe(rejected);
+      // 拒绝时连一次写都不能发生：错误必须是「写之前抛出」，而不是「写完再回滚」。
+      expect(storageSet).not.toHaveBeenCalled();
+    },
+  );
 
   it('persists Saved Items envelope additive fields without truncation', async () => {
     const savedItemsRepo = createVersionedRepository({

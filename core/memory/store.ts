@@ -1,5 +1,6 @@
 import type { Memory, NewMemory } from '../types';
 import { MEMORY_RECORD_MISSING_CODE } from '../messaging/error-code';
+import { MEMORY_CONTENT_MAX_CHARS } from '../constants';
 import { withSyncLocalStateLock } from '../persistence/local-state-lock';
 import {
   IndexedDb,
@@ -158,7 +159,27 @@ export async function updateMemory(mem: Memory): Promise<void> {
   if (id === undefined) throw new Error('Memory id is required');
   await assertCurrentMemoryDatabaseVersion();
   await withSyncLocalStateLock(() => db.transaction('rw', memories, async (tx) => {
-    await readValidatedMemoryRecords(tx);
+    const stored = await readValidatedMemoryRecords(tx);
+    /**
+     * ⚠️⚠️ **正文长度上限必须在写之前判，而且只判「真的改了」那一档。**
+     *
+     * `decodePersistedMemoryRecord` 走的 `decodeStoredMemory` 只判非空 —— 那条是
+     * **读盘**用的解码器，必须容忍存量里超长的老记录（上限落地前存进去的），
+     * 否则它们一读就整库打不开。所以写侧不能指望它。
+     *
+     * 而这里又不能无条件拒：`memory_update` 工具的契约是「未变更的字段原样带回」
+     * （`inputSchema.required` 含 `content`，内置 `/memory` 技能也这么要求），
+     * 存量超长记录改名时会把旧正文原样回传 ⇒ 无条件判会把它锁死。判据因此是
+     * **「这次提交的正文与库里那条不同」**（`core/tool/memory.ts` 的
+     * `changesContent` 是同一判据的工具侧实现）。
+     */
+    const existing = stored.find((memory) => memory.id === id);
+    if (existing && existing.content !== validated.content
+      && validated.content.length > MEMORY_CONTENT_MAX_CHARS) {
+      throw new Error(
+        `memory.content must be at most ${MEMORY_CONTENT_MAX_CHARS} characters`,
+      );
+    }
     const updated = await tx.table(MEMORY_TABLE_NAME)
       .update(id, { ...validated, updatedAt: Date.now() });
     // ⚠️ **「行不在了」必须报出来，不能当成功。**

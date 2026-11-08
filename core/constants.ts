@@ -1,12 +1,28 @@
-export const MEMORY_TOKEN_BUDGET = 1500;
+/**
+ * 记忆注入的 token 预算 —— **整块上限，所有被选中的记忆共享**（不是每条）。
+ *
+ * ⚠️⚠️ **必须与 `MEMORY_CONTENT_MAX_CHARS` 一起算** —— 这两个数单独看都合理，
+ * 配错了就会出现「存得下、看不见」：
+ *
+ * - 一条满上限的中文记忆占 `字符数 × 0.6 + 行壳` ≈ **1207 token**（`MEMORY_CONTENT_MAX_CHARS = 2000`）；
+ * - 预算 3000 ⇒ 一条满长记忆装得下、还能再放一条，或换成九条 300 字的普通记忆。
+ *
+ * ⚠️ 旧组合是 8000 字 + 1500 预算 ⇒ 一条满长记忆要 4807 token，是预算的 **3.2 倍**
+ * ⇒ 「排第一那条自己就超预算」成了**常态**而不是兜底，它会被截到 31%，且因
+ * `selectMemories` 的 `break` 语义，后面的记忆一条都进不来。
+ * ⇒ **改任一个数都要重算另一个**，判据见 `tests/memory-selector.test.ts` 的
+ * 「一条满上限的记忆自己就装得下」那条。
+ */
+export const MEMORY_TOKEN_BUDGET = 3000;
 
 /**
  * 单条记忆正文的字符上限。
  *
  * ⚠️ **与 `core/memory/importer.ts` 的导入截断同值** —— 导入、模型保存、表单手填
- * 三条写入路径必须用同一个上限，否则「导入能进来、保存被拒」这种不一致会出现。
+ * 四条写入路径必须用同一个上限，否则「导入能进来、保存被拒」这种不一致会出现。
+ * ⚠️ **改它必须同时看 `MEMORY_TOKEN_BUDGET`**，理由见那个常量的说明。
  */
-export const MEMORY_CONTENT_MAX_CHARS = 8000;
+export const MEMORY_CONTENT_MAX_CHARS = 2000;
 
 export const PRESET_REINJECTION_INTERVAL = 10;
 

@@ -21,6 +21,7 @@ import {
   type AutomationStorageState,
 } from './storage-codec';
 import { createSerialOperationQueue } from '../persistence/serial-operation-queue';
+import { utf8ByteLength } from '../tool/result-bytes';
 
 const DEFAULT_RUN_HISTORY_LIMIT = 100;
 
@@ -542,7 +543,7 @@ function pruneRunHistory(runs: AutomationRun[]): AutomationRun[] {
 function trimRunsToFit(runs: AutomationRun[], budgetBytes: number): AutomationRun[] {
   if (runs.length <= 1) return runs;
   const sorted = [...runs].sort((a, b) => b.createdAt - a.createdAt);
-  const sizes = sorted.map((run) => utf8Bytes(JSON.stringify(run)));
+  const sizes = sorted.map((run) => utf8ByteLength(JSON.stringify(run)));
   // 数组的序列化字节 = `[` + 各条之和 + 分隔逗号 + `]`
   let total = 2 + sizes.reduce((sum, size) => sum + size, 0) + (sorted.length - 1);
   let kept = sorted.length;
@@ -555,10 +556,6 @@ function trimRunsToFit(runs: AutomationRun[], budgetBytes: number): AutomationRu
   // 当前无消费者依赖那个顺序（`getAutomationRuns` 自己排、reconcile/claim 都是
   // `map`/`find`），但那是**隐性行为变更**，不该由「裁剪」顺手做掉。
   return kept === sorted.length ? runs : sorted.slice(0, kept);
-}
-
-function utf8Bytes(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
 }
 
 function getRunHistoryBudgetBytes(): number {

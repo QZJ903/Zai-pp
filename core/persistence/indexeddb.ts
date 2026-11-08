@@ -701,19 +701,43 @@ class IndexedDbTableImpl implements IndexedDbTable {
     );
   }
 
+  /**
+   * 把一次表操作跑进事务，并把**同步抛**统一转成 rejection。
+   *
+   * ⚠️⚠️ **`objectStore()` / `openCursor()` 这两类调用失败时是同步抛的，不走 `onerror`。**
+   * 实测（fake-indexeddb 与 Chromium 一致）：
+   * - `tx.objectStore('不存在的名字')` ⇒ **同步抛 `NotFoundError`**；
+   * - 已 `abort()` 的事务上 `openCursor()` ⇒ **同步抛 `InvalidStateError`**。
+   *
+   * 而各表方法都是 `new Promise((resolve, reject) => { const request = store.get(…) })`
+   * —— 那个 `new Promise` 的执行器里同步抛出的异常会被 Promise 构造器接住变成
+   * rejection，所以**经 `operation()` 走的那条路本来就安全**。真正裸奔的是
+   * **`run()` 自己那两行**：`this.boundTx.objectStore(this.name)` 与
+   * `this.database.implicit(...)` 都在 Promise 之外 ⇒ 一个已 abort 的绑定事务会让
+   * 调用方拿到一个**同步异常**，而它的签名承诺的是 `Promise<T>`。
+   *
+   * ⚠️ 为什么不是「给 `onerror` 加 `?? new Error`」：那条路已经做过了
+   * （`modifyAllRows` / `deleteRows`），守的是 `request.error` 为 null 这一档；
+   * 而实测 `ConstraintError` 时 `request.error` **非 null**，所以那一档是兜底不是主路。
+   * 同步抛才是这里真正会发生的形态。
+   */
   private run<T>(
     mode: IDBTransactionMode,
     operation: (store: IDBObjectStore) => Promise<T>,
   ): Promise<T> {
-    if (this.boundTx) {
-      if (mode === 'readwrite' && this.boundTx.mode !== 'readwrite') {
-        return Promise.reject(
-          new Error(`IndexedDB table ${this.name} requires a readwrite transaction`),
-        );
+    try {
+      if (this.boundTx) {
+        if (mode === 'readwrite' && this.boundTx.mode !== 'readwrite') {
+          return Promise.reject(
+            new Error(`IndexedDB table ${this.name} requires a readwrite transaction`),
+          );
+        }
+        return operation(this.boundTx.objectStore(this.name));
       }
-      return operation(this.boundTx.objectStore(this.name));
+      return this.database.implicit(mode, this.name, operation);
+    } catch (error) {
+      return Promise.reject(error);
     }
-    return this.database.implicit(mode, this.name, operation);
   }
 }
 

@@ -183,7 +183,7 @@ function sanitizeCall(call: ToolCall): ToolCall {
  * 实测（`JSON.stringify` 后的字符数）：
  * - `skill_draft_create` 允许 16_000 字符指令 ⇒ 产出 JSON **16 755**（全角）
  *   ~ **64 755**（指令里全是反斜杠时的最坏转义）字符；
- * - `memory_import_preview` 单条记忆上限 8_000 字 ⇒ 5 条就 **10 328** 字符。
+ * - `memory_import_preview` 单条记忆按 `MEMORY_CONTENT_MAX_CHARS` 限长 ⇒ 5 条就超 32 KB。
  *
  * 所以按 `kind` 给两档更宽的上限，**但仍然截断** —— 不截的版本实测会让
  * `memory_import_preview` 单条到 816 KB、100 条 230 MB（预算只有 7.5 MB），

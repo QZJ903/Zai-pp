@@ -89,9 +89,22 @@ export interface SelectedMemory {
   truncated: boolean;
 }
 
+/**
+ * 记忆块在**这一轮**能用的 token 上限。
+ *
+ * 用户问得越长，越认为他自己的话更重要 ⇒ 记忆预算按每多 1 token 扣 0.2 收缩，
+ * 但**有地板**：再长也不至于把记忆砍光。
+ *
+ * ⚠️⚠️ **地板必须跟着 `MEMORY_TOKEN_BUDGET` 一起调** —— 它按「预算的约 53%」定
+ * （3000 → 1600）。地板写死成旧值（800）的话，抬预算只在**短 prompt** 上生效：
+ * 触底点会从「prompt 6500 token」提前到「14000 token 就砍到 800」，
+ * 长对话里等于没抬。⚠️ 判据见 `tests/memory-selector.test.ts` 的地板用例。
+ */
+const MEMORY_BUDGET_FLOOR = 1600;
+
 export function getMemoryBudget(promptTokens: number): number {
   if (promptTokens > 3000) {
-    return Math.max(800, MEMORY_TOKEN_BUDGET - Math.floor((promptTokens - 3000) * 0.2));
+    return Math.max(MEMORY_BUDGET_FLOOR, MEMORY_TOKEN_BUDGET - Math.floor((promptTokens - 3000) * 0.2));
   }
   return MEMORY_TOKEN_BUDGET;
 }

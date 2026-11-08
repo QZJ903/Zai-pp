@@ -1478,7 +1478,22 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * 「这个 tab id 已经不存在了」—— 用来决定「换一个目标」还是「原样抛出去」。
+ *
+ * ⚠️ **本函数只服务 `ensureTargetTabId` 这一条路，它的上游只调 `chrome.tabs.*`。**
+ * 那两处判「`debugger.detach` 时目标已经没了」的地方（`cdp.ts` / `tab-keepalive.ts`）
+ * **故意不共用本函数** —— 它们判断的是「目标状态已达成 ⇒ 不抛」，与这里「换一个目标」
+ * 处置相反；把三处并成一份会让两个相反的语义缠在一起。
+ *
+ * ⚠️ **`invalid tab id` 那半是防御性的、当前不可达** —— `chrome.tabs.get` 现版本抛的是
+ * `No tab with id: N`。留着是因为这条措辞在 Chromium 各版本间变过（早先是
+ * `Invalid tab ID`），而**判错方向的代价是用户看到一个本该自愈的报错**。
+ *
+ * ⚠️ **不做成错误码判据**：Chrome 的扩展 API 不暴露结构化错误码（只有 `runtime.lastError`
+ * 的一段文案），这里已经是能拿到的最稳定的形态。
+ */
 function isMissingTargetError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return message.includes('No tab with id') || message.includes('Invalid tab id');
+  return /no tab with id|invalid tab id/i.test(message);
 }

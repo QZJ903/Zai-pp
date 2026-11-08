@@ -42,13 +42,17 @@ function draft(content: string) {
 }
 
 describe('memory content limit', () => {
+  // ⚠️ 错误文案里的数字也引常量 —— 写死 8000 会在改上限时变成一条指向错误的红
+  // （文案已经是新值，断言还在找旧值）。
+  const overLimitPattern = new RegExp(`at most ${MEMORY_CONTENT_MAX_CHARS} characters`);
+
   it('accepts exactly the limit and rejects one unit more', async () => {
     const { getAllMemories, importMemoriesAtomically } = await import('../core/memory/store');
 
     await expect(importMemoriesAtomically([draft('x'.repeat(MEMORY_CONTENT_MAX_CHARS))]))
       .resolves.toHaveLength(1);
     await expect(importMemoriesAtomically([draft('x'.repeat(MEMORY_CONTENT_MAX_CHARS + 1))]))
-      .rejects.toThrow(/at most 8000 characters/);
+      .rejects.toThrow(overLimitPattern);
 
     expect(await getAllMemories()).toHaveLength(1);
   });
@@ -64,6 +68,6 @@ describe('memory content limit', () => {
     expect(atLimit.length).toBe(MEMORY_CONTENT_MAX_CHARS);
     await expect(importMemoriesAtomically([draft(atLimit)])).resolves.toHaveLength(1);
     await expect(importMemoriesAtomically([draft(atLimit + emoji)]))
-      .rejects.toThrow(/at most 8000 characters/);
+      .rejects.toThrow(overLimitPattern);
   });
 });

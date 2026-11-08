@@ -247,7 +247,7 @@ export async function callMcpTool(
       : {};
     return {
       ok: false,
-      summary: 'MCP 工具调用失败',
+      summary: 'MCP tool call failed',
       detail: err instanceof Error ? err.message : String(err),
       name: options.call.name,
       provider: options.call.provider,

@@ -38,7 +38,7 @@ const MIN_SNAPSHOT_TEXT_BYTES = 4_000;
  * 在续跑模板里有一条**更宽的 24_000 字符**上限，动作后的快照仍只给 4_000。
  * 24_000 字节在中文页面上约 229 个节点、英文约 301 个，两者都装得进 24_000 字符的
  * detail 上限（中文 24000 字节 ≈ 8000 字符，英文 ≈ 24000 字符）。
- * ⚠️ **单位是字节**（见 `snapshot.ts` 的 `utf8Length`）—— 与 `maxResultBytes` 同单位，
+ * ⚠️ **单位是字节**（见 `core/tool/result-bytes.ts` 的 `utf8ByteLength`）—— 与 `maxResultBytes` 同单位，
  * 不要改回 `text.length`。
  * ⚠️ **别再抬回去**：`maxResultBytes`（`browser_snapshot` 声明 40_000）**已经有消费者了**
  * —— `core/tool/runtime.ts` 的 `applyResultByteBudget` 会按它裁 `detail`。现在 24000 字节

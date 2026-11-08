@@ -269,7 +269,7 @@ describe('memory content length limit', () => {
     expect(rejected.error?.code).toBe('memory_invalid_payload');
     expect(changed.calls).toHaveLength(0);
 
-    // 边界：原样回传**恰好 8000**（等于上限）也要放行。
+    // 边界：原样回传**恰好等于上限**的正文也要放行。
     const atLimit = 'x'.repeat(MEMORY_CONTENT_MAX_CHARS);
     const edge = countingRuntime(atLimit);
     const edgeResult = await executeMemoryToolCall(edge.runtime, {

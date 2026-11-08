@@ -280,7 +280,12 @@ export function useMcpPageController(t: Translator, confirm: Confirm) {
       setCaches((current) => ({ ...current, [server.id]: cache }));
       if (cache.health.status === 'ready') {
         showBanner('success', t('sidepanel.mcpPage.messages.connectionSuccess', {
-          tools: cache.health.toolCount,
+          // ⚠️⚠️ **报的是「你能看到几个」，不是 `health.toolCount`** —— 后者是 host
+          // 发布的总数，含只由扩展自己调用的内部工具（`local_skill_preview`）⇒ 直接用它
+          // 会出现横幅说「12 个工具」而下面列表只有 11 条，用户以为少了一个。
+          // 同口径的另两处：页头汇总（`toolCount` 那个 `useMemo`）、服务行
+          // `activeTools`；三处都过 `visibleMcpTools`。
+          tools: visibleMcpTools(cache).length,
           latency: formatMilliseconds(cache.health.latencyMs),
         }));
       } else {

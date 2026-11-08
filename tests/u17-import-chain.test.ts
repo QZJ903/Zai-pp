@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MEMORY_CONTENT_MAX_CHARS } from '../core/constants';
 
 /**
  * 技能与记忆导入链的回归用例。
@@ -9,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *  ③ GitHub 解析器的三档兜底：BOM 前缀、无 frontmatter 时的 H1、根级无名字；
  *  ④ 嵌套本地技能的索引卡相对引用能改写成绝对路径（清单基与 skillDir 不同）；
  *  ⑤ 自动激活设置的并发保存按 `get,set,get,set` 串行；
- *  ⑥ 记忆导入超长条目拒绝而非静默截断（JSON / 纯文本 / 恰好 8000 三档）；
+ *  ⑥ 记忆导入超长条目拒绝而非静默截断（JSON / 纯文本 / 恰好等于上限 三档）；
  *  ⑦ `updateLocalSkillSource` 只把「路径不可用」转成 `ok:false`，存储失败原样抛；
  *  ⑧ host 错误码两侧镜像 + host 真跑返回结构化码。
  *
@@ -358,19 +359,29 @@ describe('U17-6（D1-A）记忆导入超长条目拒绝而非截断', () => {
   it('纯文本分支：超长段落逐段拒绝，不打断其余段落', async () => {
     const { previewMemoryImport } = await import('../core/memory/importer');
     const preview = previewMemoryImport({
-      content: ['第一段正常内容。', 'y'.repeat(8001), '第三段也正常。'].join('\n\n'),
+      content: [
+        '第一段正常内容。',
+        'y'.repeat(MEMORY_CONTENT_MAX_CHARS + 1),
+        '第三段也正常。',
+      ].join('\n\n'),
     });
     expect(preview.memories).toHaveLength(2);
     expect(preview.rejected).toBe(1);
     expect(preview.overLimit).toBe(1);
   });
 
-  it('边界：恰好 8000 字仍然收下', async () => {
+  it('边界：恰好等于上限仍然收下、多一个字就拒', async () => {
     const { previewMemoryImport } = await import('../core/memory/importer');
-    const preview = previewMemoryImport({ content: 'z'.repeat(8000) });
-    expect(preview.memories).toHaveLength(1);
-    expect(preview.rejected).toBe(0);
-    expect(preview.overLimit).toBe(0);
+    // ⚠️ 判据引常量、不写死数字 —— 上限是 `MEMORY_CONTENT_MAX_CHARS`，
+    // 写死会在改上限时变成一条指向错误的红。
+    const atLimit = previewMemoryImport({ content: 'z'.repeat(MEMORY_CONTENT_MAX_CHARS) });
+    expect(atLimit.memories).toHaveLength(1);
+    expect(atLimit.rejected).toBe(0);
+    expect(atLimit.overLimit).toBe(0);
+
+    const overLimit = previewMemoryImport({ content: 'z'.repeat(MEMORY_CONTENT_MAX_CHARS + 1) });
+    expect(overLimit.memories).toHaveLength(0);
+    expect(overLimit.overLimit).toBe(1);
   });
 });
 
@@ -600,7 +611,7 @@ describe('N1 · tree 条目缺 size 时不按 0 放行', () => {
     const parent = preview.skills.find((skill) => skill.path === 's000/SKILL.md');
     expect(parent?.includedFiles.map((file) => file.path)).toEqual([]);
     expect(parent?.omittedFiles.map((file) => file.path)).toEqual(['s000/references/huge.md']);
-    expect(parent?.warnings.join(' ')).toContain('未返回文件大小');
+    expect(parent?.warnings.join(' ')).toContain('did not report a file size');
   });
 });
 
@@ -766,17 +777,19 @@ describe('截断告警的措辞与 pinned 一致', () => {
     const update = await checkGitHubSkillSourceUpdates('github:owner/repo:main:.');
 
     const text = update.warnings.join(' ');
-    expect(text).toContain('预览上限 80 个');
-    expect(text).toContain('已导入的 80 个优先保留');
+    // ⚠️ 数字用正则取、不引常量 —— `MAX_SKILLS_PER_SOURCE` 是模块内部实现细节，
+    // 为测试导出它会扩大公开面。这里要守的是**措辞分支**，不是那个 80。
+    expect(text).toMatch(/the preview caps at \d+/);
+    expect(text).toContain(`keeping the ${pinned.length} already-imported one(s) first`);
     // 关键：不再声称「前 N 个」—— 保留集里有排在尾部的路径
-    expect(text).not.toContain('仅预览前');
+    expect(text).not.toContain('only the first');
   });
 
   it('无 pinned 时保留原来的「仅预览前 N 个」措辞', async () => {
     installFakeGitHub({ count: 100 });
     const { previewGitHubSkillSource } = await import('../core/skill/github-importer');
     const preview = await previewGitHubSkillSource('https://github.com/owner/repo');
-    expect(preview.warnings.join(' ')).toContain('仅预览前 80 个');
-    expect(preview.warnings.join(' ')).not.toContain('优先保留');
+    expect(preview.warnings.join(' ')).toMatch(/only the first \d+ are previewed/);
+    expect(preview.warnings.join(' ')).not.toContain('already-imported');
   });
 });

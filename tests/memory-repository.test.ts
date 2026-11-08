@@ -2,6 +2,7 @@ import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Memory, NewMemory } from '../core/types';
 import { MEMORY_RECORD_MISSING_CODE } from '../core/messaging/error-code';
+import { MEMORY_CONTENT_MAX_CHARS } from '../core/constants';
 import { MEMORY_DATABASE_NAME, MEMORY_TABLE_NAME } from '../core/memory/schema';
 import {
   MEMORY_CORRUPT_RAW_RECORD,
@@ -183,6 +184,52 @@ describe('Memory repository transaction and codec boundaries', () => {
     // `IDBObjectStore.delete()` 对不存在的键也不报错）⇒ 必须自己先在同一事务里查一次。
     await expect(deleteMemory(4242)).rejects.toThrow(MEMORY_RECORD_MISSING_CODE);
     await expect(memories.toArray()).resolves.toEqual([]);
+  });
+
+  /**
+   * ⚠️⚠️ **面板编辑那条写路径的长度上限。**
+   *
+   * `UPDATE_MEMORY` 的解码器是 `decodePersistedMemoryRecord` → `decodeStoredMemory`，
+   * 那条只判非空（它服务**读盘**，必须容忍上限落地前存进去的超长老记录）⇒
+   * 不在这里补判的话，从记忆页编辑一条就能存进任意长度的正文，上限形同虚设。
+   *
+   * ⚠️ 但判据**必须只落在「正文真的变了」那一档**：`memory_update` 工具的契约是
+   * 「未变更的字段原样带回」，存量超长记录改名时会把旧正文原样回传 ——
+   * 无条件拒会把它锁死。两条用例各守一半。
+   */
+  it('rejects an update that grows content past the limit', async () => {
+    const { db, updateMemory, importMemoriesAtomically } = await import('../core/memory/store');
+    const memories = db.table(MEMORY_TABLE_NAME);
+    await importMemoriesAtomically([
+      { type: 'user', name: 'short', content: 'ok', description: '', tags: [], pinned: false },
+    ]);
+    const [stored] = await memories.toArray() as Array<Memory>;
+
+    await expect(updateMemory({ ...stored, content: 'x'.repeat(MEMORY_CONTENT_MAX_CHARS + 1) }))
+      .rejects.toThrow(/at most \d+ characters/);
+    // 库里那条一个字都没变。
+    const [after] = await memories.toArray() as Array<Memory>;
+    expect(after.content).toBe('ok');
+  });
+
+  it('still accepts an update that echoes an already-over-limit stored body', async () => {
+    const { db, updateMemory, importMemoriesAtomically } = await import('../core/memory/store');
+    const memories = db.table(MEMORY_TABLE_NAME);
+    await importMemoriesAtomically([
+      { type: 'user', name: 'old', content: 'ok', description: '', tags: [], pinned: false },
+    ]);
+    const [stored] = await memories.toArray() as Array<Memory>;
+    expect(stored.id, '导入后应当拿到自增 id').toBeTypeOf('number');
+    // 直接写库造一条「上限落地前就存在」的超长记录（绕开写侧校验，模拟存量）。
+    const legacy = 'z'.repeat(MEMORY_CONTENT_MAX_CHARS + 500);
+    await memories.update(stored.id!, { content: legacy });
+
+    // 改名、正文原样回传 ⇒ 必须放行（否则存量记录连改名都做不到）。
+    await expect(updateMemory({ ...stored, name: 'renamed', content: legacy }))
+      .resolves.toBeUndefined();
+    const [after] = await memories.toArray() as Array<Memory>;
+    expect(after.name).toBe('renamed');
+    expect(after.content).toBe(legacy);
   });
 
   it('deletes a row that exists and leaves the others untouched', async () => {
