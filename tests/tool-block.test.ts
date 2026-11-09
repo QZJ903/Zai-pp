@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   appendToolBlockToMessage,
+  applyBlockCollapseDefault,
   createToolBlockShell,
   findToolBlock,
   findToolBlockInMessage,
@@ -53,6 +54,11 @@ function execution(overrides: Partial<ToolExecutionRecord> = {}): ToolExecutionR
   };
 }
 
+/** 块的折叠头（`role="button"` + `aria-expanded` 都挂在它身上）。 */
+function headerOf(block: HTMLElement): HTMLElement {
+  return block.querySelector<HTMLElement>('.zpp-tool-block-header')!;
+}
+
 afterEach(() => {
   document.body.innerHTML = '';
   document.getElementById(STYLE_ID)?.remove();
@@ -86,6 +92,33 @@ describe('tool block shell', () => {
     expect(block.getAttribute('data-collapsed')).toBe('false');
     header.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
     expect(block.getAttribute('data-collapsed')).toBe('true');
+  });
+
+  /**
+   * ⚠️⚠️ 折叠头是 `role="button"` —— 只翻 `data-collapsed` 时屏幕阅读器读到的是
+   * 一个**没有状态**的按钮。三档写入点（建块初值 / 用户开合 / 按默认态重算）
+   * 必须都同步 `aria-expanded`，漏任何一处都只表现为「状态停在上一次的值」。
+   */
+  it('mirrors the collapsed state onto the header aria-expanded', () => {
+    const collapsedBlock = createToolBlockShell(deps(), { collapsed: true });
+    expect(headerOf(collapsedBlock).getAttribute('aria-expanded')).toBe('false');
+
+    const expandedBlock = createToolBlockShell(deps(), { collapsed: false });
+    expect(headerOf(expandedBlock).getAttribute('aria-expanded')).toBe('true');
+
+    // 用户亲手开合
+    headerOf(collapsedBlock).click();
+    expect(collapsedBlock.getAttribute('data-collapsed')).toBe('false');
+    expect(headerOf(collapsedBlock).getAttribute('aria-expanded')).toBe('true');
+    headerOf(collapsedBlock).click();
+    expect(headerOf(collapsedBlock).getAttribute('aria-expanded')).toBe('false');
+
+    // 按默认态重算（`applyBlockCollapseDefault` 那条写入点）
+    applyBlockCollapseDefault(expandedBlock, true);
+    expect(expandedBlock.getAttribute('data-collapsed')).toBe('true');
+    expect(headerOf(expandedBlock).getAttribute('aria-expanded')).toBe('false');
+    applyBlockCollapseDefault(expandedBlock, false);
+    expect(headerOf(expandedBlock).getAttribute('aria-expanded')).toBe('true');
   });
 });
 
@@ -236,6 +269,33 @@ describe('tool block row-level collapse', () => {
     updateToolBlockContent(block, [withDetail()], deps(), () => 't');
     expect(toggleOf(block).getAttribute('aria-expanded')).toBe('true');
     expect(detailOf(block)?.hidden).toBe(false);
+  });
+
+  /**
+   * ⚠️⚠️ **同页多块是设计内形态**（历史消息各一块 + 当前这块），而行下标在每块里
+   * 都从 0 重来 ⇒ 用下标当 id 会让第二块的 `-detail-0` 撞第一块，
+   * `aria-controls` 按 id 解析时命中文档里**第一个**匹配元素。
+   * 判据是 HTML 的 id 唯一性 —— 与「看起来对不对」无关。
+   */
+  it('gives every row detail a document-unique id', () => {
+    // ⚠️ **必须挂进 document** —— `getElementById` 只在文档树里查，脱连的块一律查不到。
+    const first = render();
+    const second = render();
+    document.body.append(first, second);
+
+    const ids = [...document.querySelectorAll('.zpp-tool-block-item-detail')]
+      .map((el) => el.id)
+      .filter(Boolean);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+
+    // `aria-controls` 必须指向**自己这块**的那个详情，不是别人的。
+    for (const block of [first, second]) {
+      const toggle = toggleOf(block);
+      const controlled = toggle.getAttribute('aria-controls');
+      expect(controlled).toBeTruthy();
+      expect(document.getElementById(controlled!)).toBe(detailOf(block));
+    }
   });
 
   it('does not draw a chevron or a toggle for rows without detail', () => {

@@ -158,13 +158,22 @@ function renderSkillDraftResult(input: ToolResultRendererInput): boolean {
  * ⚠️ **成功是终态，不回到可点状态** —— 写库已经发生，把文案改回「保存 Skill」
  * 会让用户以为没存上、再点一次。只有失败才回到可重试。
  *
- * ⚠️⚠️ **失败文案不再是 `error.message`** —— 那个串常常是后台的蛇形错误码
- * （`skill_exists`）或一句英文技术描述，直接画在按钮上等于把内部标识符摊给用户。
- * 现在：**按钮只显示本地化的 `labels.failed`**，原始串只送 console（排查用）。
- * ⚠️ **唯一的例外是 `resolveFailureText`** —— 调用方已经把它翻成用户看得懂的一句话时才传
- * （记忆导入的 `invalid_memories` 就是这种）。**别把原始 `error.message` 直接传进来。**
- * ⚠️⚠️ **它是个取值函数而不是字符串** —— 字符串形态的实参在 `action()` 跑之前就被求值了，
- * 那时闭包里还没算出文案。必须等 catch 里再取。
+ * ⚠️⚠️ **失败文案分两档，判据是「这句话是给谁看的」**：
+ * - **裸错误码**（`skill_exists` / `invalid_memories` 这种蛇形标识符）**不许画给用户** ——
+ *   它只会让用户看到一串内部名字。这一档回落成调用方给的本地化兜底（`labels.failed`），
+ *   原始串只送 console。
+ * - **自然语言整句**（`core/skill/registry.ts` 抛的
+ *   「Skill edit is ambiguous because multiple custom Skills use the same name」）
+ *   **原样放行** —— 它比「保存失败」有信息量，换成兜底反而是丢信息。
+ *
+ * 这条分档的判据落在 `core/messaging/error-code.ts` 的 `looksLikeErrorCode`，
+ * 与侧边栏、自动化卡片共用同一份（三处各写一遍必然分叉）。
+ * ⚠️ **别在调用点自己判** —— 也别把 `JSON.stringify(error)` 或整个错误对象传进来，
+ * 那会把 `{code, message, retryable, details}` 摊在按钮上。
+ *
+ * ⚠️ **`resolveFailureText` 是个取值函数而不是字符串** —— 字符串形态的实参在
+ * `action()` 跑之前就被求值了，那时闭包里还没算出文案。必须等 catch 里再取。
+ * ⚠️ **不传它就一律用 `labels.failed`** —— 那一档只适用于「失败原因对用户没意义」的动作。
  */
 async function runCardAction(
   button: HTMLButtonElement,

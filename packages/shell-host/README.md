@@ -3,15 +3,13 @@
 Native Messaging Shell MCP host installer for Zai++.
 
 The host gives the extension a `shell_exec` / `local_file_*` capability by running a
-small Node.js process on the local machine and talking to it over Chrome's Native
+small Node.js process on the local machine and talking to it over the Native
 Messaging channel.
 
 ## Install
 
-From a checkout of the repository:
-
 ```bash
-npm run shell:install -- --browser chrome --extension-id <extension-id>
+npx --yes zai-pp-shell-host install --browser <chrome|edge|chromium> --extension-id <extension-id>
 ```
 
 `--extension-id` is the 32-character ID of the loaded extension
@@ -21,11 +19,21 @@ current ID for you.
 
 `--browser` accepts `chrome`, `chromium`, or `edge` (default: `chrome`).
 
+`--yes` skips npx's one-time "Ok to proceed?" prompt. The npm package is only a
+carrier: `install` copies the host runtime into your profile directory, so you can
+remove the global package afterwards without affecting the installed host.
+
+### From a repository checkout
+
+```bash
+npm run shell:install -- install --browser <chrome|edge|chromium> --extension-id <extension-id>
+```
+
 ## Other commands
 
 ```bash
-npm run shell:install -- status --browser chrome
-npm run shell:install -- uninstall --browser chrome
+npx --yes zai-pp-shell-host status --browser <chrome|edge|chromium>
+npx --yes zai-pp-shell-host uninstall --browser <chrome|edge|chromium>
 ```
 
 `install` writes the Native Messaging manifest and copies the host runtime into the
@@ -37,5 +45,5 @@ administrator rights are required.
 Pass `--log-file <path>` to have the host wrapper redirect its stderr there:
 
 ```bash
-npm run shell:install -- --browser chrome --extension-id <id> --log-file "$HOME/zai-host.log"
+npx --yes zai-pp-shell-host install --browser chrome --extension-id <id> --log-file "$HOME/zai-host.log"
 ```

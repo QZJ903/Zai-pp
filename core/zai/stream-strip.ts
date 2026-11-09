@@ -252,7 +252,7 @@ export function createZaiCompletionStreamRewriter(
   /**
    * 合成帧用的 `phase`。
    *
-   * ⚠️⚠️ **不能无脑继承 `lastPhase`** —— 真机实测（N1，2026-11-02）：
+   * ⚠️⚠️ **不能无脑继承 `lastPhase`** —— 真机实测：
    * `done` 相位的 `delta_content` **页面不渲染**（对照组 `answer` 渲染、实验组 `done` 不渲染）。
    * 而流末尾几乎总是 `done` ⇒ 继承过去的话，扣住的**用户正文**（通常是末尾半截 `<`）
    * 会落在一个页面不渲染的相位里。

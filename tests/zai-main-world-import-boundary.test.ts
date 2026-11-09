@@ -166,7 +166,7 @@ const FORBIDDEN_PATTERNS: readonly {
  * `tsconfig` 把它们都映射到仓库根（`.wxt/tsconfig.json` 的 `paths`），
  * 所以 `@/core/memory/store` 就是 `core/memory/store`。**跳过等于给这条守卫留后门**：
  * 主世界一旦接一条别名导入到带 chrome 的模块，闭包里看不到它、守卫静默放行
- * （2026-11-03 实测：注入 `import { getAllMemories } from '@/core/memory/store'`
+ * （实测：注入 `import { getAllMemories } from '@/core/memory/store'`
  * 到入口，旧版守卫**全绿**）。
  */
 const TS_PATH_ALIASES: readonly { prefix: string; replacement: string }[] = [
@@ -247,7 +247,7 @@ function importClosure(entry: string): ClosureResult {
 /**
  * ⚠️⚠️ **这一组用自带夹具直接测三个判据函数** —— 上面那组跑的是真实闭包，
  * 它的判别力取决于「生产代码此刻长什么样」；这三条不依赖那个前提。
- * 每个夹具都对应一次实测出来的盲区（2026-11-03），撤掉修法会立刻红。
+ * 每个夹具都对应一次实测出来的盲区，撤掉修法会立刻红。
  */
 describe('boundary scanner: the three blind spots', () => {
   it('B1 · resolves the tsconfig path aliases instead of skipping them', () => {

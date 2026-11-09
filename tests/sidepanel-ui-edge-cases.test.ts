@@ -138,7 +138,7 @@ describe('error message projection', () => {
 describe('single source for the plus icon', () => {
   /**
    * 这条只能做源码级断言：把内联路径换回常量，**渲染结果逐字节相同**，
-   * 任何行为用例都区分不出来（判法 31 的同族结论）。所以守的是「别再手抄回去」。
+   * 任何行为用例都区分不出来。所以守的是「别再手抄回去」。
    */
   it('keeps the plus glyph in constants.ts only', () => {
     const offenders: string[] = [];

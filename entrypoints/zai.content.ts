@@ -3853,6 +3853,12 @@ const toolPanel = createToolPanelController({
     'content.toolBlock.title',
     { count },
   ),
+  // ⚠️ **拆除时把「执行中」收成失败要用的两段文案** —— 与收尾链用的是同一对键，
+  // 否则扩展重载后页面上会留几行永远转圈的「执行中」（见 `dispose` 的说明）。
+  drainTexts: () => ({
+    failureSummary: translate(currentContentLocale, 'content.toolBlock.summaries.failed'),
+    message: translate(currentContentLocale, 'content.toolBlock.summaries.incomplete'),
+  }),
   renderDetail: (target, result) => renderToolResultWithRegistry({
     target,
     result,

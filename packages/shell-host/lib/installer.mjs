@@ -70,10 +70,13 @@ export function parseArgs(argv) {
 function printHelp() {
   console.log(`Zai++ Shell Native Host installer
 
-Usage (from the repository root):
-  npm run shell:install -- install --browser chrome --extension-id <extension-id>
-  npm run shell:install -- status --browser chrome
-  npm run shell:install -- uninstall --browser chrome
+Usage:
+  npx --yes zai-pp-shell-host install --browser chrome --extension-id <extension-id>
+  npx --yes zai-pp-shell-host status --browser chrome
+  npx --yes zai-pp-shell-host uninstall --browser chrome
+
+  From a repository checkout, replace \`npx --yes zai-pp-shell-host\`
+  with \`npm run shell:install --\`.
 
 Commands:
   install              Install the Shell Native Host
@@ -87,8 +90,8 @@ Options:
   --help               Show this help
 
 Examples:
-  npm run shell:install -- install --browser chrome --extension-id abcdefghijklmnopqrstuvwxyz123456
-  npm run shell:install -- install --browser chrome --extension-id abcdefghijklmnopqrstuvwxyz123456 --log-file "$HOME/zai-host.log"
+  npx --yes zai-pp-shell-host install --browser chrome --extension-id abcdefghijklmnopqrstuvwxyz123456
+  npx --yes zai-pp-shell-host install --browser chrome --extension-id abcdefghijklmnopqrstuvwxyz123456 --log-file "$HOME/zai-host.log"
 `);
 }
 

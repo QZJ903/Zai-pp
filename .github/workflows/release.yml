@@ -1,0 +1,142 @@
+name: Release
+
+# 触发：推一个 v*.*.* 的 tag，或在 Actions 页面手动填 tag 运行。
+# 手动那一档用于补发/重发 —— 已存在的 release 会被覆盖上传（--clobber）。
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, for example v1.0.0'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # ⚠️ 手动触发时 checkout 的是填进来的 tag，不是分支 HEAD ——
+          # 否则会对着一个移动过的分支发版。
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Validate release ref
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          TAG="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Release tag $TAG does not exist in the checked-out repository" >&2
+            exit 1
+          fi
+
+          TAG_SHA="$(git rev-list -n 1 "$TAG")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "$HEAD_SHA" != "$TAG_SHA" ]; then
+            echo "Checked-out HEAD $HEAD_SHA does not match release tag $TAG ($TAG_SHA)" >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        # ⚠️ 与 ci.yml 同口径：不带 --legacy-peer-deps。
+        run: npm ci
+
+      # ⚠️ `ci:quality` 里含 `verify:workflows`（需要 actionlint）与 `audit:prod`
+      # （会因任何 high 级漏洞失败）。这两项不适合当发版闸门 —— 前者要额外装工具、
+      # 后者会被上游依赖的披露拖着走。所以这里只跑与「这次构建能不能用」直接相关的。
+      - name: Quality gates
+        run: |
+          npm run prompt:freeze
+          npm run compile
+          npm test
+          npm run verify:automation
+          npm run smoke:mcp
+          npm run verify:mcp:mock
+          npm run smoke:shell
+
+      - name: Build and package
+        run: |
+          npm run build:all
+          npm run zip:all
+          npm run verify:sidepanel-chunks
+          npm run verify:extension-utf8
+          npm run verify:manifest-policy
+          npm run verify:release-assets
+
+      - name: Locate packages
+        id: package
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          EXPECTED_TAG="v${VERSION}"
+          if [ "$TAG" != "$EXPECTED_TAG" ]; then
+            echo "Release tag $TAG does not match package.json version $VERSION (expected $EXPECTED_TAG)" >&2
+            exit 1
+          fi
+
+          mapfile -t ZIP_FILES < <(find dist -maxdepth 1 -type f -name '*.zip' | sort)
+          if [ "${#ZIP_FILES[@]}" -ne 3 ]; then
+            echo "Expected 3 zip packages in dist/, found ${#ZIP_FILES[@]}" >&2
+            printf '%s\n' "${ZIP_FILES[@]}" >&2
+            exit 1
+          fi
+
+          {
+            echo "version=$VERSION"
+            echo "zip_files<<EOF"
+            printf '%s\n' "${ZIP_FILES[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          # ⚠️ release 发在**本仓**，用内置 token 就够（`permissions: contents: write`）。
+          GH_TOKEN: ${{ github.token }}
+          ZIP_FILES: ${{ steps.package.outputs.zip_files }}
+          VERSION: ${{ steps.package.outputs.version }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          TAG="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          TITLE="Zai++ ${VERSION}"
+          NOTES_FILE="docs/releases/${VERSION}.md"
+          mapfile -t RELEASE_FILES <<< "$ZIP_FILES"
+
+          if [ -f "$NOTES_FILE" ]; then
+            NOTES_ARGS=(--notes-file "$NOTES_FILE")
+          else
+            NOTES_ARGS=(--notes "Zai++ ${VERSION}")
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${RELEASE_FILES[@]}" --clobber
+          else
+            gh release create "$TAG" "${RELEASE_FILES[@]}" \
+              --title "$TITLE" \
+              "${NOTES_ARGS[@]}"
+          fi

@@ -446,6 +446,104 @@ describe('tool panel: pending finalize (todo 64)', () => {
 
     expect(panel.snapshot().livePending).toBe(0);
   });
+
+  /**
+   * ⚠️⚠️ **`dispose` 必须先把「执行中」收成失败再拆** —— 扩展重载 / 卸载时内容脚本
+   * 被拆除，但它挂进页面的 DOM 还在。只 `clear()` 容器的话，页面上留几行**永远转圈**
+   * 的「执行中」，而这一轮再也不会有人来收尾。
+   */
+  it('turns running rows into failed ones on dispose', async () => {
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel({ drainTexts: () => ({ failureSummary: 'FAILED', message: 'interrupted' }) });
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    await settle();
+    expect(document.querySelector('.zpp-tool-block-item-status')?.textContent).toBe('RUNNING');
+
+    panel.dispose();
+
+    // 拆完之后页面上那行必须是「失败」，不是「执行中」。
+    const status = document.querySelector('.zpp-tool-block-item-status');
+    expect(status?.textContent).toBe('FAILED');
+    expect(status?.className).toContain('error');
+  });
+
+  it('falls back to dropping the rows when no drain texts are injected', async () => {
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel();
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    await settle();
+
+    // 不注入文案 ⇒ 退化成改造前的行为（直接丢弃），不该抛。
+    expect(() => panel.dispose()).not.toThrow();
+  });
+});
+
+describe('tool panel: live session lifecycle', () => {
+  it('releases the per-request container once the turn is sealed', async () => {
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel();
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    panel.completeToolCall('req-1', execution(), CHAT_SESSION);
+    await settle();
+    expect(panel.snapshot().liveSessions).toBe(1);
+
+    panel.sealTurn('req-1');
+    await settle();
+
+    // ⚠️⚠️ **一轮结束就释放容器** —— 否则这个表按 requestId 无界增长
+    // （一次 25 步自动化 = 25 条，每条带 detail ≤4k + output ≤8k），
+    // 而出口只有换会话 / 页面重载。
+    expect(panel.snapshot().liveSessions).toBe(0);
+  });
+
+  it('keeps other in-flight turns when one is sealed', async () => {
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel();
+    await panel.install();
+
+    panel.beginToolCall('req-1', { callId: 'xml:aaa', name: 'shell_exec' }, CHAT_SESSION);
+    panel.beginToolCall('req-2', { callId: 'xml:bbb', name: 'web_search' }, CHAT_SESSION);
+    await settle();
+
+    panel.sealTurn('req-1');
+    await settle();
+
+    // 另一轮还在跑 ⇒ 它的容器必须留着（否则那一轮的结果就丢了）。
+    expect(panel.snapshot().liveSessions).toBe(1);
+    expect(panel.snapshot().livePending).toBe(1);
+  });
+
+  /**
+   * ⚠️⚠️ **一条「只有 raw、没有画行」的轮次也必须能被收尾释放。**
+   *
+   * 真形态：`noteToolCallRaw` 会 `getOrCreateSession`（它只登记合流签名的一半，
+   * **不调 `publishLiveSession`**），所以 `recordIds` 是空的。若那之后整轮被打断
+   * （`completeToolCall` / `rememberExecutions` 都没走到），留下的就是一个空壳。
+   *
+   * 判据：**「要不要 seal」与「释放条目」是两件事** —— 空壳没有块要收，但条目必须删，
+   * 否则「按 requestId 无界增长」那一条等于没修。
+   */
+  it('releases an empty container that only ever registered a raw', async () => {
+    buildRealisticMessage(UUID_A);
+    const panel = makePanel();
+    await panel.install();
+
+    // 只有 raw、没有 beginToolCall ⇒ recordIds 为空
+    panel.noteToolCallRaw('req-orphan', { callId: 'xml:raw-only', raw: '<shell_exec>{}</shell_exec>' }, CHAT_SESSION);
+    await settle();
+    expect(panel.snapshot().liveSessions).toBe(1);
+
+    panel.sealTurn('req-orphan');
+    await settle();
+
+    expect(panel.snapshot().liveSessions).toBe(0);
+  });
 });
 
 describe('tool panel: block collapse state', () => {

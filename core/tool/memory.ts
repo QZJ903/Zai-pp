@@ -348,7 +348,7 @@ async function updateExistingMemory(
    * **仍然改不动**：用户只想改个名字，模型按契约回传旧正文，却被回「content 太长」。
    * ⇒ 判据必须是「**给了、且和旧值不同、且超长**」才拒。
    *
-   * ⚠️ **这不是兼容层**（本项目自用、不写迁移）：挡的是**新写入的超长值**，
+   * ⚠️ **这不是兼容层**（不写迁移）：挡的是**新写入的超长值**，
    * 存量记录只要不改正文就一直能改其它字段。
    */
   const providedContent = stringValue(payload.content);
@@ -398,8 +398,8 @@ async function updateExistingMemory(
      *
      * ⚠️ **要动它之前先想清楚「description 该由谁维护」** —— 三选一：
      * 恒等于 name（现状）、沿用 `existing.description`、或者干脆删字段。
-     * 删字段要连带处理落盘的老记录（`codec.ts` 里它是必填），而本项目自用、
-     * 不写数据迁移，所以**没删**。
+     * 删字段要连带处理落盘的老记录（`codec.ts` 里它是必填），而不写数据迁移，
+     * 所以**没删**。
      */
     description: name || existing.description,
     tags: Array.isArray(payload.tags) ? stringArrayValue(payload.tags) : existing.tags,

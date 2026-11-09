@@ -676,7 +676,7 @@ describe('browser control: closing a tab that is running a continuation loop', (
   });
 
   it('protects it even when keep-alive is off and the tab is in the foreground', async () => {
-    // ⚠️⚠️ **这条是 U16-4 的核心** —— 原来判的是 `isKeepingAlive`，而那个集合是
+    // ⚠️⚠️ **这条守的是「保护不能挂在保活状态上」** —— 原来判的是 `isKeepingAlive`，而那个集合是
     // `wanted ∩ 真在后台` ⇒ **开关关着（默认值）** 或 **标签在前台** 时恒为 false，
     // 这两格恰恰是最常见的情况 ⇒ 默认配置下这条保护等于不存在。
     // 现在的判据由内容脚本直接回答「有没有续跑在跑」，与保活挂没挂无关。
@@ -753,7 +753,7 @@ describe('browser control: closeTab does not overwrite a concurrent target chang
   it('keeps a target that was changed while the tab was being removed', async () => {
     // ⚠️⚠️ **判据必须落在写盘那一刻** —— `closeTab` 尾部原来是「用开函数时读的 settings
     // 判断要不要清空」，而中间隔着 `await tabs.remove`。实测：target 12 → 关 12 期间
-    // 侧边栏把 target 改成 13 → 结果被旧快照覆盖成 null（U2-4 同族）。
+    // 侧边栏把 target 改成 13 → 结果被旧快照覆盖成 null（自动化侧同形）。
     const storage = new Map<string, unknown>();
     storage.set(BROWSER_CONTROL_STORAGE_KEY, {
       ...DEFAULT_BROWSER_CONTROL_SETTINGS,
@@ -1247,6 +1247,180 @@ describe('browser control: execution timeout reaches the CDP command', () => {
     const second = await service.execute('browser_refresh', {});
     expect(second.ok).toBe(true);
   });
+});
+
+/**
+ * **一次只跑一个 `browser_*` 动作。**
+ *
+ * ⚠️⚠️ 这两条守的是同一个前提的**存在性**：`browserControlService` 是 SW 里的模块级单例，
+ * `connection` 只有一条、`attachedTabId` 只有一个槽、`uidToBackendNodeId` 是实例字段
+ * 且每次 `createSnapshot` 都整个 `clear()`。**两条动作重叠就会互相踩**：
+ * 后一条拍快照会清掉前一条的 uid 映射（点错元素），后一条 attach 会换绑连接
+ * （前一条剩下的命令发到另一条标签上）。
+ *
+ * ⚠️ **用例必须 `Promise.all` 发起** —— 串行 `await` 两次抓不到任何问题
+ * （第二次开始时第一次早已结束）。这与「读-改-写必须在临界区内」那条判据同形。
+ */
+describe('browser actions are serialized across concurrent callers', () => {
+  it('does not let a second action start before the first one finishes', async () => {
+    const storage = new Map<string, unknown>();
+    storage.set(BROWSER_CONTROL_STORAGE_KEY, {
+      ...DEFAULT_BROWSER_CONTROL_SETTINGS,
+      enabled: true,
+      targetTabId: 12,
+      includeSnapshotAfterActions: false,
+    });
+    const chromeStub = createChromeStub(storage, [
+      createTab({ id: 12, active: true, title: 'Example', url: 'https://example.com/' }),
+    ]);
+    vi.stubGlobal('chrome', chromeStub);
+
+    // 用 `Page.reload` 卡住第一条动作；记录「同时在飞的命令数」的峰值。
+    let inFlight = 0;
+    let peak = 0;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    chromeStub.debugger.sendCommand.mockImplementation(async (
+      _source: chrome.debugger.Debuggee,
+      method: string,
+    ) => {
+      if (method !== 'Page.reload') return {};
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await gate;
+      inFlight -= 1;
+      return {};
+    });
+
+    const service = new BrowserControlService({ chromeApi: chromeStub as unknown as typeof chrome });
+    // ⚠️ **必须并发发起** —— 串行 `await` 会让第一条先跑完，这条用例就什么都测不到。
+    const first = service.execute('browser_refresh', {});
+    const second = service.execute('browser_refresh', {});
+    // 让两条都排上队再放闸。
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release?.();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(peak, '两条动作不能同时在飞 —— 峰值为 1 才说明串行生效').toBe(1);
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+  });
+
+  it('fails a queued action with browser_control_busy and stays usable afterwards', async () => {
+    const storage = new Map<string, unknown>();
+    storage.set(BROWSER_CONTROL_STORAGE_KEY, {
+      ...DEFAULT_BROWSER_CONTROL_SETTINGS,
+      enabled: true,
+      targetTabId: 12,
+      includeSnapshotAfterActions: false,
+    });
+    const chromeStub = createChromeStub(storage, [
+      createTab({ id: 12, active: true, title: 'Example', url: 'https://example.com/' }),
+    ]);
+    vi.stubGlobal('chrome', chromeStub);
+
+    // 第一条动作先卡住（模拟卡住的 `browser_wait_for`），稍后放它走。
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let hang = true;
+    chromeStub.debugger.sendCommand.mockImplementation(async (
+      _source: chrome.debugger.Debuggee,
+      method: string,
+    ) => {
+      if (method === 'Page.reload' && hang) await firstGate;
+      return {};
+    });
+
+    const service = new BrowserControlService({ chromeApi: chromeStub as unknown as typeof chrome });
+    const first = service.execute('browser_refresh', {});
+    // 第二条排在它后面 ⇒ 等满 10 秒上限后报忙。
+    const queued = await service.execute('browser_refresh', {});
+
+    expect(queued.ok).toBe(false);
+    expect(queued.error?.code).toBe('browser_control_busy');
+    // ⚠️ **可重试** —— 前一条跑完之后这次本来能成，不是「这个动作坏了」。
+    expect(queued.error?.retryable).toBe(true);
+
+    /**
+     * ⚠️⚠️ **超时者必须从等待队列里摘掉，否则闸门永久卡死。**
+     *
+     * 不摘的话，第一条跑完时 `releaseActionSlot()` 会把那个**早已退出的**等待者
+     * 取出来「授予」—— 对已 reject 的 promise `resolve()` 是空操作，而
+     * `actionSlotBusy` 仍然是 `true` ⇒ **以后每一次动作都会排队到超时**。
+     * 这个后果只有第三条动作测得出来（前两条都在断言「这一次报了什么」）。
+     */
+    hang = false;
+    releaseFirst?.();
+    const third = await service.execute('browser_refresh', {});
+    expect(third.ok, '前一条结束后必须能继续用 —— 闸门没被超时者的残影卡住').toBe(true);
+    await first;
+  }, 30_000);
+
+  /**
+   * ⚠️⚠️ **排队期间调用方放弃了 ⇒ 动作一次都不许执行。**
+   *
+   * 这是「结果与副作用必须一致」那条契约的另一半：`browser_*` 动作有副作用
+   * （写 storage 换目标、attach 挂 debugger），所以「调用方以为没跑」与「其实跑了」
+   * 绝不能同时成立。
+   *
+   * 两个放弃来源都在本服务**外面**：① `core/tool/runtime.ts` 的 `executeWithTimeout`
+   * 竞速到点返回 `tool_execution_timeout`；② 用户点停止 / 续环被收掉。
+   * 它们都只让调用方先返回，**被调方仍排在队里** —— 前一条一结束就会真的开跑。
+   *
+   * ⚠️ **这个洞纯排队（无限等）治不了**：它不在队列语义里，在于「调用方已经放弃、
+   * 被调方不知道」。判据只能是「拿到闸之后、动手之前再查一次 signal」。
+   * ⚠️ **用例必须并发发起**（第一条卡住 + 第二条排队 + 中途 abort），串行抓不到。
+   */
+  it('does not run a queued action whose caller already gave up', async () => {
+    const storage = new Map<string, unknown>();
+    storage.set(BROWSER_CONTROL_STORAGE_KEY, {
+      ...DEFAULT_BROWSER_CONTROL_SETTINGS,
+      enabled: true,
+      targetTabId: 12,
+      includeSnapshotAfterActions: false,
+    });
+    const chromeStub = createChromeStub(storage, [
+      createTab({ id: 12, active: true, title: 'Example', url: 'https://example.com/' }),
+    ]);
+    vi.stubGlobal('chrome', chromeStub);
+
+    // 第一条先卡住；第二条会排在它后面。
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let hang = true;
+    chromeStub.debugger.sendCommand.mockImplementation(async (
+      _source: chrome.debugger.Debuggee,
+      method: string,
+    ) => {
+      if (method === 'Page.reload' && hang) await firstGate;
+      return {};
+    });
+
+    const service = new BrowserControlService({ chromeApi: chromeStub as unknown as typeof chrome });
+    const first = service.execute('browser_refresh', {});
+    // 第二条带一个「中途被放弃」的 signal。
+    const controller = new AbortController();
+    const queued = service.execute('browser_navigate', { url: 'https://example.com/target' }, controller.signal);
+
+    // 给它排上队，然后模拟 runtime 那层的超时 / 用户点停止。
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const attachBeforeGiveUp = chromeStub.debugger.attach.mock.calls.length;
+    controller.abort();
+    // 放走第一条 ⇒ 闸转交给第二条，此时它必须在**动手之前**发现自己已放弃。
+    hang = false;
+    releaseFirst?.();
+
+    const queuedResult = await queued;
+    await first;
+
+    expect(queuedResult.ok).toBe(false);
+    expect(queuedResult.error?.code).toBe('browser_control_aborted');
+    // ⚠️ **关键断言：一条命令都没多发** —— 第二条如果真跑了会 attach + 发导航命令。
+    expect(
+      chromeStub.debugger.attach.mock.calls.length,
+      '放弃之后不许再 attach —— 那会在页面上挂出「正在调试」横幅',
+    ).toBe(attachBeforeGiveUp);
+  }, 30_000);
 });
 
 function createTab(overrides: Partial<chrome.tabs.Tab> & { id: number }): chrome.tabs.Tab {

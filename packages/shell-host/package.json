@@ -1,10 +1,19 @@
 {
   "name": "zai-pp-shell-host",
-  "version": "2.15.63",
+  "version": "1.0.0",
   "description": "Native Messaging Shell MCP host installer for Zai++",
   "type": "module",
-  "private": true,
+  "private": false,
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QZJ903/Zai-pp.git",
+    "directory": "packages/shell-host"
+  },
+  "homepage": "https://github.com/QZJ903/Zai-pp/tree/main/packages/shell-host#readme",
+  "bugs": {
+    "url": "https://github.com/QZJ903/Zai-pp/issues"
+  },
   "bin": {
     "zai-pp-shell-host": "bin/zai-pp-shell-host.mjs"
   },
@@ -16,5 +25,8 @@
   ],
   "engines": {
     "node": ">=18.17"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

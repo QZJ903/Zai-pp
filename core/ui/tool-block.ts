@@ -95,6 +95,19 @@ const ROW_KEY_ATTR = 'data-zpp-tool-row';
  */
 const ACTIVE_ATTR = 'data-zpp-tool-active';
 
+/**
+ * 行详情的 DOM id 序号 —— **全局自增，不用行下标**。
+ *
+ * ⚠️⚠️ **行下标在页面上不唯一**：同一条助手消息里各行的下标从 0 重来，而
+ * 「历史消息各一块 + 当前这块」是设计内形态 ⇒ 第二块的 `-detail-0` 与第一块撞 id，
+ * `aria-controls` 按 id 解析时会命中**文档里第一个**匹配元素，屏幕阅读器把用户
+ * 引到另一块的详情上（同时违反 HTML 的 id 唯一性）。
+ * ⚠️ **不能用块的 restore key 拼** —— 同一个 key 的块在重画期间会短暂并存
+ * （旧块还没摘、新块已建），照样撞。自增序号在进程内单调，天然不撞。
+ * ⚠️ **不落库、不进桥、不参与任何查找** —— 它只被 `aria-controls` 引用一次。
+ */
+let detailIdSequence = 0;
+
 export interface ToolBlockDependencies {
   /**
    * 把块挂进页面的哪个元素。
@@ -128,6 +141,20 @@ function doc(dependencies: ToolBlockDependencies): Document {
 }
 
 /**
+ * 写块级折叠态 —— **`data-collapsed` 与折叠头的 `aria-expanded` 的唯一写入点**。
+ *
+ * ⚠️⚠️ **两个属性必须同时写** —— 折叠头是 `role="button"`，只翻 `data-collapsed`
+ * 时屏幕阅读器读到的是一个**没有状态**的按钮，用户无从知道这块是展开还是收起。
+ * 三个写入点（建块初值 / 用户点开合 / 按默认态重算）全部走这里，
+ * 否则迟早有一处漏 —— 而漏了不会报错，只表现为无障碍状态停在上一次的值。
+ */
+function setBlockCollapsed(block: HTMLElement, collapsed: boolean): void {
+  block.setAttribute(COLLAPSED_ATTR, collapsed ? 'true' : 'false');
+  const header = block.querySelector(`.${BLOCK_CLASS}-header`);
+  header?.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+
+/**
  * 造一块空面板（只有折叠头，还没有任何行）。
  *
  * ⚠️ **折叠头是「点一下切换折叠」的按钮**：用 `role="button"` + `tabindex` 让键盘也能开合，
@@ -141,7 +168,6 @@ export function createToolBlockShell(
   const block = root.createElement('div');
   block.className = BLOCK_CLASS;
   if (options.restoreKey) block.setAttribute(RESTORE_KEY_ATTR, options.restoreKey);
-  block.setAttribute(COLLAPSED_ATTR, options.collapsed ? 'true' : 'false');
 
   const header = root.createElement('div');
   header.className = `${BLOCK_CLASS}-header`;
@@ -155,7 +181,7 @@ export function createToolBlockShell(
 
   const toggle = (): void => {
     const collapsed = block.getAttribute(COLLAPSED_ATTR) === 'true';
-    block.setAttribute(COLLAPSED_ATTR, collapsed ? 'false' : 'true');
+    setBlockCollapsed(block, !collapsed);
     // ⚠️ **用户亲手开合过，就别再按默认态重画了** —— 否则下一次重画会把它掰回默认值，
     // 用户收起来的块又弹开。见 `USER_TOGGLED_ATTR` 的说明。
     block.setAttribute(USER_TOGGLED_ATTR, 'true');
@@ -171,6 +197,9 @@ export function createToolBlockShell(
   body.className = `${BLOCK_CLASS}-body`;
 
   block.append(header, body);
+  // ⚠️ **初值也要走同一个写入点** —— `header` 此刻已经挂进 `block`，`setBlockCollapsed`
+  // 才找得到它。写成 `header.setAttribute(...)` 也行，但那样就是第二个写入点。
+  setBlockCollapsed(block, options.collapsed === true);
   return block;
 }
 
@@ -254,7 +283,12 @@ export function updateToolBlockContent(
     // ⚠️ 这是**有意的分叉**（上游控制台无条件画 chevron，展开后只有一行摘要）；
     // 判据安全：只要有 `detail` 或 `output`，格式化结果就必然比 summary 长。
     const hasDetail = detail !== '' && detail !== (execution.result.summary ?? '');
-    const detailId = hasDetail ? `${BLOCK_CLASS}-detail-${index}` : '';
+    // ⚠️ **id 必须全局唯一**（见 `detailIdSequence`）—— 用行下标会让同页第二块撞第一块。
+    let detailId = '';
+    if (hasDetail) {
+      detailIdSequence += 1;
+      detailId = `${BLOCK_CLASS}-detail-${detailIdSequence}`;
+    }
 
     toggle.append(dot, name, summary, status);
 
@@ -350,7 +384,7 @@ export function applyBlockCollapseDefault(
 ): void {
   if (block.getAttribute(USER_TOGGLED_ATTR) === 'true') return;
   const hasAction = sealedThisSession && block.getAttribute(HAS_ACTION_ATTR) === 'true';
-  block.setAttribute(COLLAPSED_ATTR, collapsedByDefault && !hasAction ? 'true' : 'false');
+  setBlockCollapsed(block, collapsedByDefault && !hasAction);
 }
 
 /**

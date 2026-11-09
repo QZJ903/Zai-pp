@@ -176,9 +176,9 @@ describe('continuation request peek: 判据行为', () => {
   });
 
   it('⚠️ `/chats/new` 路由：历史含旧模板时同样不能翻案（主判据的第二条腿）', () => {
-    // ⚠️⚠️ **这条是 ZCode 评审「需实测-2」的回归用例** —— 两个路由的 body 形状完全不同
-    // （[[zai-site]] §2.2 真机抓包）：completion 的 user 消息在**顶层 `messages[]`**，
-    // 而 `/chats/new` **顶层只有 `chat`**、消息在 `chat.history.messages.<id>.content`。
+    // ⚠️⚠️ **两个路由的 body 形状完全不同**（真机抓包）：completion 的 user 消息在
+    // **顶层 `messages[]`**，而 `/chats/new` **顶层只有 `chat`**、
+    // 消息在 `chat.history.messages.<id>.content`。
     // ⇒ 只写 completion 那条腿的话，`readZaiLastUserMessageText` 对 chatNew 恒返回 `''`
     // ⇒ 恒落粗判 ⇒ **历史里有旧模板时照样误判成续跑**（实测过：旧代码答 true）。
     const template = buildZaiContinuationPrompt('任务', [execution()], ['shell_exec']);

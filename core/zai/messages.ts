@@ -95,7 +95,7 @@ export type { ZaiHistoryToolRecord } from './history-cleanup';
  *
  * ⚠️ **必须按本项目的实际形状写，不要照抄上游 `core/messaging/schema.ts`** ——
  * 上游的 `isAugmentResult` 要求 `agentTaskPrompt` 是字符串，我们**没有这个字段**；
- * 照抄会把每一条正常结果都判成非法、所有请求静默退化成不增广（2.15.15 已踩过一次）。
+ * 照抄会把每一条正常结果都判成非法、所有请求静默退化成不增广。
  */
 
 /** 主世界 → 隔离世界：工具调用通知。 */

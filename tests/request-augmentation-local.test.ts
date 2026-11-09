@@ -71,7 +71,7 @@ const LEGACY_INSTRUCTIONS = [
  * 现在默认带一条 `references/guide.md`，并且**让根目录与 skillDir 相同**
  * （`/skills/demo` + `demo/references/guide.md` 两种基都指向同一结果），
  * 这样老用例的期望不受影响；嵌套技能（基不同）的场景由
- * `u17-import-chain.test.ts` 的专门用例覆盖。
+ * `import-chain.test.ts` 的专门用例覆盖。
  */
 function localIndexSkill(overrides: Partial<AugmentationSkill> = {}): AugmentationSkill {
   return {

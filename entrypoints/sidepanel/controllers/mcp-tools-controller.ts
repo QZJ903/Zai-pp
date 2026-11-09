@@ -523,7 +523,7 @@ export function nextMcpToolAllowlist(
  * 一键把某个工具（含它所在的服务）切到可用：写 `enabled` + `execution` + `allowlist` 三项。
  *
  * ⚠️ **当前生产侧零消费者，刻意保留** —— 它原先服务工具页那张 Python 卡片
- * （一次点击同时开服务开关、执行策略、白名单），卡片随工具页在 2.15.52 删除。
+ * （一次点击同时开服务开关、执行策略、白名单），那张卡片随工具页一起删掉了。
  * 现在唯一引用是 `tests/sidepanel-mcp-tools-controller.test.ts`。
  * ⚠️ **不删**：它是「一次开关跨三层」这一语义的唯一实现，MCP 页现在只写 allowlist
  * （`toggleTool` 走 `patchServer({ allowlist })`），两边口径不同是刻意的 ——

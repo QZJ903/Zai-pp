@@ -99,7 +99,7 @@ function installFakeGitHub(options: {
   return { fetchMock, paths };
 }
 
-describe('U17-1 GitHub 更新不被预览上限截断', () => {
+describe('GitHub 更新不被预览上限截断', () => {
   it('仓库 SKILL.md 超 80 个时，已导入的尾部技能仍随更新保留', async () => {
     storage.zai_pp_skill_sources = [{
       id: `github:owner/repo:main:.`,
@@ -135,7 +135,7 @@ describe('U17-1 GitHub 更新不被预览上限截断', () => {
   });
 });
 
-describe('U17-9 资源收集不吞嵌套 SKILL.md', () => {
+describe('资源收集不吞嵌套 SKILL.md', () => {
   it('同目录下 sub/SKILL.md 不进父技能的 includedFiles', async () => {
     installFakeGitHub({
       count: 1,
@@ -158,7 +158,7 @@ describe('U17-9 资源收集不吞嵌套 SKILL.md', () => {
   });
 });
 
-describe('U17-5 GitHub SKILL.md 解析兜底', () => {
+describe('GitHub SKILL.md 解析兜底', () => {
   it('BOM 前缀不丢 frontmatter', async () => {
     installFakeGitHub({
       count: 1,
@@ -192,7 +192,7 @@ describe('U17-5 GitHub SKILL.md 解析兜底', () => {
   });
 });
 
-describe('U17-8 自动激活设置并发保存', () => {
+describe('自动激活设置并发保存', () => {
   it('并发保存的读-写时刻序列是串行的（get,set,get,set）', async () => {
     const ops: string[] = [];
     const local = (globalThis as unknown as { chrome: { storage: { local: {
@@ -217,7 +217,7 @@ describe('U17-8 自动激活设置并发保存', () => {
   });
 });
 
-describe('U17-2 嵌套本地技能的绝对化清单', () => {
+describe('嵌套本地技能的绝对化清单', () => {
   it('rootPath 相对清单 + localRootPath 作基 → 索引卡里的相对引用能命中', async () => {
     const { composeLocalSkillPrompt } = await import('../core/interceptor/request-augmentation');
     const skill = {
@@ -334,12 +334,12 @@ describe('U17-2 嵌套本地技能的绝对化清单', () => {
       async runLocalStateMutation<T>(stage: () => Promise<() => Promise<T>>): Promise<T> { return (await stage())(); },
     };
     // ⚠️ **刻意不按文案回落** —— 老 host 上这会被当成普通失败（用户看到原始报错），
-    // 而不是「引导重新选择文件夹」。这是 D2-B 的显式取舍：宁可少引导，也不按文案猜。
+    // 而不是「引导重新选择文件夹」。这是刻意的取舍：宁可少引导，也不按文案猜。
     await expect(updateLocalSkillSource(imported.source.id, legacyDeps as never))
       .rejects.toThrow('Local Skill root is not a readable directory');
   });
 
-describe('U17-6（D1-A）记忆导入超长条目拒绝而非截断', () => {
+describe('记忆导入超长条目拒绝而非截断', () => {
   it('JSON 分支：超长条目计入 rejected + overLimit，不进 memories', async () => {
     const { previewMemoryImport } = await import('../core/memory/importer');
     const overlong = 'x'.repeat(8001);
@@ -394,7 +394,7 @@ async function installShellServer() {
   await createMcpServer(createShellMcpPresetInput({ enabled: true }));
 }
 
-describe('U17-7（D2-A）update 失败分档', () => {
+describe('update 失败分档', () => {
   it('存储写失败原样抛，不再伪装成「文件夹失效」', async () => {
     // 构造一个真实可用的 preview 响应，但让落库阶段（runLocalStateMutation）抛错。
     const { importLocalSkillSource, updateLocalSkillSource } = await import('../core/skill/local-importer');
@@ -467,7 +467,7 @@ describe('U17-7（D2-A）update 失败分档', () => {
     if (!imported.ok) throw new Error(`import failed: ${imported.error}`);
 
     // 原文件夹被删：host 报 "Local Skill root is not a readable directory:"
-    // D2-B：判据是 host 的**结构化错误码**（`normalizeMcpToolResult` 把它透到
+    // 判据是 host 的**结构化错误码**（`normalizeMcpToolResult` 把它透到
     // `error.details.structuredCode`），不是 message 文案。
     const goneDeps = {
       executeToolCall: async () => ({
@@ -489,7 +489,7 @@ describe('U17-7（D2-A）update 失败分档', () => {
   });
 });
 
-describe('D2-B · host 错误码两侧镜像', () => {
+describe('host 错误码两侧镜像', () => {
   it('host 常量与扩展侧常量逐码相同（且集合大小一致）', async () => {
     const { readFileSync } = await import('node:fs');
     const { resolve } = await import('node:path');
@@ -510,7 +510,7 @@ describe('D2-B · host 错误码两侧镜像', () => {
   });
 });
 
-describe('D2-B · host 真的返回结构化错误码', () => {
+describe('host 真的返回结构化错误码', () => {
   it('一个不存在的 root 返回 isError + structuredContent.error.code', async () => {
     const { spawn } = await import('node:child_process');
     const { resolve } = await import('node:path');

@@ -233,7 +233,7 @@ describe('the waiters themselves are still wired to the registries', () => {
      * （`stopStateWaiters` 是模块级 Set，只增不减就是泄漏）。
      *
      * ⚠️ 原判据是 `expect(source).toContain('unsubscribe')` —— **假绿**：
-     * 把 `cleanup()` 里的 `unsubscribe();` 删掉，另一处赋值还在，测试仍绿（Sonnet 复核实测）。
+     * 把 `cleanup()` 里的 `unsubscribe();` 删掉，另一处赋值还在，测试仍绿（实测过）。
      * ⇒ 判据收窄到：`cleanup` 函数体里**必须有一条裸的 `unsubscribe();` 调用**。
      */
     let cleanupBody: t.BlockStatement | null = null;
@@ -308,7 +308,7 @@ describe('long-window keepalive wiring', () => {
    */
   /**
    * **`preserveKeepAlive` 必须真的改变行为，不能只是「传了」** ——
-   * Sonnet 复核实测：删掉 `finishContinuationLoop` 里那两个 `if (!options?.preserveKeepAlive)`
+   * 实测：删掉 `finishContinuationLoop` 里那两个 `if (!options?.preserveKeepAlive)`
    * 之后，全量测试**仍然全绿**（选项变成纯装饰）。
    *
    * ⇒ 判据：那两处调用（`stopSustainedKeepAliveWatch` / `releaseTabKeepAlive`）
@@ -391,7 +391,7 @@ describe('long-window keepalive wiring', () => {
     expect(subscribes.length, '应当把 check 登记进 stopStateWaiters').toBe(1);
 
     // ⚠️⚠️ **判据必须收窄到「裸调用语句」，不能用「`check` 这个名字出现在任何位置」** ——
-    // Sonnet 复核实测：把它改成 `setTimeout(() => check(), 0);` 全绿漏过，而后台标签里
+    // 实测：把它改成 `setTimeout(() => check(), 0);` 全绿漏过，而后台标签里
     // `setTimeout(0)` 会被压到 1000ms ⇒ **等于把这条修复退回去**。
     // ⇒ 要求它是一条 `ExpressionStatement`，且 `expression` 恰好是 `check()`，
     //    并**不在任何函数体边界之内**（这里该用 `walkReachable`，与 `methodCallPositions` 相反）。
@@ -434,7 +434,7 @@ describe('long-window keepalive wiring', () => {
    */
   /**
    * **两条建循环的路径都必须真的起计时** ——
-   * Sonnet 复核实测：删掉 `handleResponseComplete` 里那处调用，全量测试**仍然全绿**。
+   * 实测：删掉 `handleResponseComplete` 里那处调用，全量测试**仍然全绿**。
    * （`findFunctionBody` 有「零调用点即抛」的保护，但两处删一处仍剩一处 ⇒ 挡不住。）
    */
   it('both loop-creation paths start the sustained keepalive watch', () => {
@@ -565,7 +565,7 @@ describe('stop observer install robustness', () => {
   });
 
   /**
-   * **上面那条不够**（Sonnet 复核指出、已实测复现）：
+   * **上面那条不够**（已实测复现）：
    * 把置位改成 `if (!document.body) { stopObserverInstalled = true; return; }`
    * —— 那**就是原缺陷本身**，而位置比较照样绿（写在 `if` 块内，`node.start` 仍大于 `if` 的 start）。
    * 这正是源码级断言的一个通病：**位置比较只能定位到语句边界，碰不到「同一语句内部」的语义**

@@ -1436,10 +1436,20 @@ function ShellSetupHint({
       ready={!isError && server.enabled && cache?.health.status === 'ready'}
       installSteps={(<>
         <div style={{ color: 'var(--ds-text-tertiary)' }}>
-          {t('sidepanel.mcpPage.shellSetup.localIntro')}
+          {t('sidepanel.mcpPage.shellSetup.publishedIntro')}
         </div>
         <div className="mt-1 font-mono break-all select-all rounded px-2 py-1" style={{ color: 'var(--ds-text)', background: 'var(--ds-surface)' }}>
           {setup.command}
+        </div>
+        {/*
+          * ⚠️ **备选命令只给源码开发者** —— 两条命令都在屏幕上，用户会犹豫抄哪条，
+          * 所以主命令必须是「大多数人能直接跑」的那条（`npx`），源码那条降级到下方。
+          */}
+        <div className="mt-1" style={{ color: 'var(--ds-text-tertiary)' }}>
+          {t('sidepanel.mcpPage.shellSetup.fallbackIntro')}
+        </div>
+        <div className="mt-1 font-mono break-all select-all rounded px-2 py-1" style={{ color: 'var(--ds-text)', background: 'var(--ds-surface)' }}>
+          {setup.fallbackCommand}
         </div>
         <div className="mt-1" style={{ color: 'var(--ds-text-tertiary)' }}>
           {t('sidepanel.mcpPage.shellSetup.detectedExtensionId', { browser: browserLabel(setup.browser) })}
@@ -1517,11 +1527,39 @@ function NativeHostHint({
 
 type NativeHostBrowser = 'chrome' | 'chromium' | 'edge';
 
-function shellInstallCommand(): { browser: NativeHostBrowser; command: string } {
+/**
+ * 两条安装命令：`npx` 是主路径，`npm run` 给源码开发者。
+ *
+ * ## 为什么主命令是 `npx`
+ *
+ * 下载扩展 zip 直接加载的人**手上没有这个仓库** —— 他抄 `npm run shell:install`
+ * 只会得到「找不到 package.json」。而 `npx` 从 registry 取包、装完即止，
+ * 不要求用户 clone，也不要求知道任何路径。
+ *
+ * ⚠️ **不做「按是否打包扩展」的分支** —— 那个判据（`update_url` 在不在 manifest 里）
+ * 在本项目恒为「已打包以外」，因为本项目**不发布到商店**。而扩展也拿不到自己的
+ * 文件系统路径（`chrome.runtime.getURL()` 给的是 `chrome-extension://<id>/`），
+ * 所以「仓库在不在」这件事在扩展这一侧判不出来。两条都显示是最诚实的做法。
+ *
+ * ⚠️ **`--yes` 不能省** —— 首次 `npx` 会问 `Ok to proceed? (y)`，
+ * 而卡片上是「可复制的单行命令」，用户不看解释直接把整行粘进终端时会被那个交互卡住。
+ *
+ * ⚠️ **不传 `--skip-officecli`** —— 那是上游的开关（它自带 OfficeCLI 安装），
+ * 本项目没有这块能力，installer 对未知长参数**直接抛错** ⇒ 传了命令必失败。
+ */
+function shellInstallCommand(): {
+  browser: NativeHostBrowser;
+  command: string;
+  fallbackCommand: string;
+} {
   const browser = currentNativeHostBrowser();
   const extensionArg = ` --extension-id ${chrome.runtime.id || '<extension-id>'}`;
   const installArgs = `install --browser ${browser}${extensionArg}`;
-  return { browser, command: `npm run shell:install -- ${installArgs}` };
+  return {
+    browser,
+    command: `npx --yes zai-pp-shell-host ${installArgs}`,
+    fallbackCommand: `npm run shell:install -- ${installArgs}`,
+  };
 }
 
 function currentNativeHostBrowser(): NativeHostBrowser {

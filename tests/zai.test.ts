@@ -621,7 +621,7 @@ describe('zai model override', () => {
 
 describe('zai chatNew model override', () => {
   /**
-   * **真机形态**的建会话 body（2026-10-30 抓包）：模型在**两个**落点同值 ——
+   * **真机形态**的建会话 body（真机抓包）：模型在**两个**落点同值 ——
    * `chat.models` 与首条 user 消息的 `models`；**`features` 对象整个不存在**，
    * agent 标志在 `chat.type` / `chat.flags` 上。
    *

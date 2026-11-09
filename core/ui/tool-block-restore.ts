@@ -72,6 +72,20 @@ export interface ToolBlockRestoreRecord {
    * 判据写成「有值且与当前会话不同 ⇒ 拒绝」，null 走原来的路。
    */
   chatSessionId?: string | null;
+  /**
+   * 这条记录属于**哪一轮请求**（`ToolCallSource.requestId`；读不到时为 null）。
+   *
+   * ⚠️⚠️ **它是合流判据里「哪一轮」这个维度** —— 见 `isCompatible`。
+   * 没有它时，「工具名 + XML 原文」这个签名**不含时间维度**，而七个零参工具
+   * （`shell_status` / `python_status` / `browser_snapshot` 等）的 XML 每轮逐字相同
+   * ⇒ 一侧没有 `messageId` 时（流式期读不到锚点），本轮的记录会被并进**上一轮**
+   * 那条记录、画到上一轮的回答下面，而本轮的回答**一条都没有**。
+   *
+   * ⚠️ **它只用于「两侧都知道时才要求相等」** —— 历史腿的记录来自服务端返回的正文，
+   * 天然没有 requestId；一条不知道就照旧按签名判（见 `isCompatible` 的三段）。
+   * 写成「必须相等」会把「刷新后存储腿 ↔ 历史腿」那条主路径一起打死。
+   */
+  requestId?: string | null;
   createdAt: number;
 }
 
@@ -168,8 +182,10 @@ export interface ToolBlockRestoreController {
    *
    * ⚠️ **收的是「记录 id」不是 requestId** —— 本模块不知道 requestId 那层概念
    * （id 由调用方给，可能是 `history:<uuid>` 也可能是 `live:<requestId>`）。
+   * ⚠️ **返回值是「实际被收尾的 id」**，可能已经被别名表解析过 —— 调用方要用它
+   * 记账，不要再用自己那份原始 id。
    */
-  sealLive: (recordIds: readonly string[]) => void;
+  sealLive: (recordIds: readonly string[]) => string[];
   /**
    * **换会话了** —— 丢掉全部记录（调用方随后会重新拉存储腿）。
    *
@@ -194,6 +210,15 @@ export interface ToolBlockRestoreController {
   retainRecords: (keep: (record: ToolBlockRestoreRecord) => boolean) => void;
   /** 开始观察页面变动（页面重建我们的块时自动重排队）。 */
   start: () => void;
+  /**
+   * 把调用方手里的 id 解析成**表里实际落地的那个**。
+   *
+   * ⚠️⚠️ **合流过的情况下两者不同** —— `merge` 保留先到那方的 id，而调用方记的是
+   * 自己投递时用的那个（见 `idAliases`）。需要「在重画之前按最终 id 记账」的调用方
+   * （`sealTurn` 的 `sealedThisSessionIds`）必须先过这一步，否则记的是一份过期 id。
+   * 未合流过时原样返回。
+   */
+  resolveRecordId: (id: string) => string;
   /** 停止观察并清空全部状态。 */
   stop: () => void;
   /** 当前记录快照（测试用）。 */
@@ -210,6 +235,16 @@ export function createToolBlockRestoreController(
 
   const records = new Map<string, ToolBlockRestoreRecord>();
   const pending = new Set<string>();
+  /**
+   * 合流时被换掉的 id → 最终落地的 id。
+   *
+   * ⚠️⚠️ **没有它，收尾会一条都对不上** —— `merge` 保留的是 `existing.id`
+   * （先到的往往是存储腿，所以是 `storage:<hash>`），而 `sealTurn` 手里拿的是
+   * 它自己记下的 `history:<uuid>` / `live:<requestId>` ⇒ `records.get(id)` 恒
+   * `undefined` ⇒ **`live` 永不清、块永不收起**（正是「跑 N 轮看到 N 大块」那个形态）。
+   * ⚠️ 表只在合流时增长，随 `clearAll` / `stop` 一起清 —— 不落库、不出模块。
+   */
+  const idAliases = new Map<string, string>();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let attempts = 0;
   let observer: MutationObserver | null = null;
@@ -218,15 +253,22 @@ export function createToolBlockRestoreController(
   /**
    * 两条腿能不能算「同一次调用」。
    *
-   * 判据按**优先级**从上往下试，任一条成立即认为相同：
-   * ① 两条都有 `messageId` 且相等 —— 最硬；
+   * 判据按**优先级**从上往下试：
+   * ① 两条都有 `messageId` 且相等 —— 最硬，直接判同；
    * ② **工具签名一致**（两条都至少有一个调用）—— storage 腿没有消息 id，
-   *    所以对「history ↔ storage」这一对，**只有这条能用**。
+   *    所以对「history ↔ storage」这一对，**只有这条能用**；
+   * ③ 两侧都知道自己属于哪一轮时，**必须同轮**。
    *
    * ⚠️ **第 ② 条是承重的**：它是两条腿唯一的公共维度。少了它，
    * storage 腿的真结果永远合流不进来（表现：刷新后只看得见工具名、看不见结果）。
    * ⚠️ 签名用「工具名 + XML 原文」—— 同一次调用的 XML 在两条腿上**逐字相同**
    * （都来自服务端存的那份正文）。
+   *
+   * ⚠️⚠️ **第 ③ 条补的是「签名不含时间维度」这个洞** —— 七个零参工具的 XML
+   * 每轮逐字相同，而流式期 `readZaiMessageId` 可能读不到锚点 ⇒ 本轮的记录会被
+   * 并进**上一轮**那条、画到上一轮的回答下面，本轮的回答一条都没有（探针实测）。
+   * ⚠️ **一条不知道就放行**：历史腿来自服务端正文、天然没有 requestId，
+   * 写成「必须相等」会把「存储腿 ↔ 历史腿」那条刷新主路径一起打死。
    *
    * ⚠️ **曾有过一条「父消息 id 相同 + 签名一致」的中间判据，已删除**：它形式上排在
    * 签名判据之前，但**成立时下面那条签名判据必然也成立**（它的条件是「签名一致」的
@@ -237,7 +279,15 @@ export function createToolBlockRestoreController(
    */
   function isCompatible(a: ToolBlockRestoreRecord, b: ToolBlockRestoreRecord): boolean {
     if (a.messageId && b.messageId) return a.messageId === b.messageId;
-    return haveMatchingSignatures(a, b);
+    if (!haveMatchingSignatures(a, b)) return false;
+    // ⚠️⚠️ **签名里不含「哪一轮」，所以两侧都知道轮次时必须相等才许并** ——
+    // 七个零参工具的 XML 每轮逐字相同，而流式期 `readZaiMessageId` 可能读不到
+    // ⇒ 一侧有锚点、一侧没有时，本轮的记录会被并进**上一轮**那条、画到上一轮的回答下面
+    // （探针实测：`records` 仍是上一轮那条、再次挂到 M1，本轮的消息一条都没有）。
+    // ⚠️ **一条不知道就放行** —— 历史腿来自服务端正文、天然没有 requestId，
+    // 写成「必须相等」会把「存储腿 ↔ 历史腿」那条刷新主路径一起打死。
+    if (a.requestId && b.requestId) return a.requestId === b.requestId;
+    return true;
   }
 
   function haveMatchingSignatures(a: ToolBlockRestoreRecord, b: ToolBlockRestoreRecord): boolean {
@@ -338,6 +388,8 @@ export function createToolBlockRestoreController(
       live: existing.live === true || incoming.live === true,
       // ⚠️ **会话归属取「有的那一方」**（理由同 `refresh`）。
       chatSessionId: existing.chatSessionId ?? incoming.chatSessionId ?? null,
+      // ⚠️ **轮次同理** —— 存储腿带 requestId、历史腿没有；取到过就一直留着。
+      requestId: existing.requestId ?? incoming.requestId ?? null,
       createdAt: Math.min(existing.createdAt, incoming.createdAt),
     };
   }
@@ -410,6 +462,8 @@ export function createToolBlockRestoreController(
       // 两条腿都可能拿不到（首条消息时地址栏还没切）。取到过就一直留着 ——
       // 它是「这条记录属于哪条会话」的冻结值，被冲成 null 会让兜底腿失去这一关。
       chatSessionId: existing.chatSessionId ?? incoming.chatSessionId ?? null,
+      // ⚠️ **轮次同理** —— 同一条记录被重复投递时，先记下的那一轮才是对的。
+      requestId: existing.requestId ?? incoming.requestId ?? null,
       createdAt: existing.createdAt,
     };
   }
@@ -453,13 +507,17 @@ export function createToolBlockRestoreController(
       if (compatibleIds.length > 0 && !hasAmbiguousCandidates(compatibleIds, record)) {
         const baseId = compatibleIds[0];
         // ⚠️ **先把 incoming 并进去，再把其余兼容记录逐条并进来** —— 顺序不影响结果
-        // （`merge` 是并集语义），但先并 incoming 能让 `id` 保持 `baseId`。
+        // （`merge` 是 `并集` 语义），但先并 incoming 能让 `id` 保持 `baseId`。
         let merged = merge(records.get(baseId)!, record);
         for (const otherId of compatibleIds.slice(1)) {
           merged = merge(merged, records.get(otherId)!);
           records.delete(otherId);
           pending.delete(otherId);
+          idAliases.set(otherId, baseId);
         }
+        // ⚠️ **incoming 的 id 也要登记** —— 合流之后它不再是一个独立条目，
+        // 而调用方（`sealTurn`）手里拿的正是这个 id（见 `idAliases`）。
+        idAliases.set(record.id, baseId);
         records.set(baseId, merged);
         pending.add(baseId);
         changed = true;
@@ -533,17 +591,37 @@ export function createToolBlockRestoreController(
    *
    * ⚠️ **只清 `live`、不动别的** —— 记录本身要留着（刷新后还得靠它渲染）。
    * ⚠️ **收完必须重排队**：块的折叠态只在 `render` 时决定，不重画就还是展开的。
+   * ⚠️⚠️ **id 要先过别名表** —— 合流之后记录可能已改名成另一个 id
+   * （见 `idAliases`），直接按传入的 id 查会一条都找不到。
+   *
+   * @returns 实际被收尾的 id（**已解析成落地的那个**）。调用方要按这份回执记账 ——
+   * 它手里那份原始 id 在合流过的情况下是过期的（`sealedThisSessionIds` 就吃这个亏）。
    */
-  function sealLive(recordIds: readonly string[]): void {
+  function sealLive(recordIds: readonly string[]): string[] {
+    const sealed: string[] = [];
     let changed = false;
-    for (const id of recordIds) {
+    for (const rawId of recordIds) {
+      const id = resolveAlias(rawId);
       const record = records.get(id);
       if (!record || record.live !== true) continue;
       records.set(id, { ...record, live: false });
       pending.add(id);
+      sealed.push(id);
       changed = true;
     }
     if (changed) schedule();
+    return sealed;
+  }
+
+  /** 沿别名表找到最终的 id（有环保护：表是单向的，理论上走不到 8 跳）。 */
+  function resolveAlias(id: string): string {
+    let current = id;
+    for (let hops = 0; hops < 8; hops += 1) {
+      const next = idAliases.get(current);
+      if (!next || next === current) return current;
+      current = next;
+    }
+    return current;
   }
 
   /**
@@ -562,6 +640,7 @@ export function createToolBlockRestoreController(
   function clearAll(): void {
     records.clear();
     pending.clear();
+    idAliases.clear();
     attempts = 0;
     if (timer !== null) {
       clearTimeout(timer);
@@ -576,6 +655,12 @@ export function createToolBlockRestoreController(
    * 跟着没了；只留着 `records` 而不排队，它们就再也没人去渲染。
    * ⚠️ **被丢弃的项要连 `pending` 一起删** —— 只删 `records` 的话，
    * `renderPending` 会因为 `records.get(id)` 取不到而静默跳过，留下永不消费的 pending。
+   * ⚠️⚠️ **`idAliases` 也要跟着清，但不能整表 `clear()`** —— 它只在 `clearAll` /
+   * `stop` 那两处是全丢，而这里**只丢一部分记录**：整表清会让**存活记录**的旧 id
+   * 失去解析（`sealLive` 手里拿的正是旧 id）。所以按「解析终点还在不在 `records` 里」
+   * 过滤 —— 终点没了的条目指向一条已删除的记录，留着只会在 id 被复用时把它解析到空地。
+   * ⚠️ **不这么做的后果是「只增不清」**：换会话走的就是这条路径（会话 id 已知那格），
+   * 页面活多久、别名表就攒多久。
    */
   function retainRecords(keep: (record: ToolBlockRestoreRecord) => boolean): void {
     for (const [id, record] of [...records]) {
@@ -585,6 +670,10 @@ export function createToolBlockRestoreController(
       }
       records.delete(id);
       pending.delete(id);
+    }
+    // ⚠️ **过滤**而不是清空 —— 见上面第三段。判据是「解析终点还在表里」。
+    for (const [from, to] of [...idAliases]) {
+      if (!records.has(resolveAlias(to))) idAliases.delete(from);
     }
     // ⚠️ 与 `requeueAll` 同形：预算归零 + 重新排一次（否则要等下一次 observer 唤醒）。
     attempts = 0;
@@ -644,7 +733,13 @@ export function createToolBlockRestoreController(
     // 宁可不显示，也不要把工具面板挂到错的回答下面。
     if (record.messageId) return null;
 
-    const fallback = messages.find((message) => !usedMessages.has(message));
+    // ⚠️⚠️ **在飞的一轮属于「最新」那条消息，不是第一条** —— 兜底腿取的是
+    // 「第一个还没被占用的」，而页面上历史消息先排、本轮那条在最后。
+    // 按正序找会把**本轮**的工具画到**最早**那条回答下面（探针实测：本轮
+    // `live:req` 落到 M1，而本轮那条是 M2）。历史腿 / 存储腿（已收尾）保持正序 ——
+    // 它们本来就该从上往下按顺序分配，上游同口径。
+    const ordered = record.live === true ? [...messages].reverse() : messages;
+    const fallback = ordered.find((message) => !usedMessages.has(message));
     return fallback ? { message: fallback, leg: 'fallback' } : null;
   }
 
@@ -726,9 +821,16 @@ export function createToolBlockRestoreController(
     // （`message-<uuid>` 可能**迟到到既有的 wrapper 上**，那条路不产生新 childList 节点）。
     // ⚠️ **`attributeFilter` 收窄到 `class`**：流式期间页面每秒大量变动，全量属性观察
     // 会把主线程吃掉；而这里只关心「锚点类挂上来了」。
+    // ⚠️⚠️ **`characterData` 不能省** —— `mutationAddsMessage` 里那一支判的就是它，
+    // 而**未在 `observe()` 里声明的类型根本不会被投递**：只写分支不写选项 = 死分支。
+    // 它覆盖的是「消息节点先建空壳、正文随后以字符数据长出来」那一档（上游
+    // `entrypoints/content/controllers/mutation-hub.ts` 同样开着）。
+    // ⚠️ **代价可忽略**：回调在 `pending.size === 0` 时于 `messageAppeared` 那一行早退，
+    // 而「有 pending」正是需要被唤醒的窗口；且按帧合流，一次变动潮只重扫一次。
     observer.observe(root, {
       childList: true,
       subtree: true,
+      characterData: true,
       attributes: true,
       attributeFilter: ['class'],
     });
@@ -787,6 +889,7 @@ export function createToolBlockRestoreController(
     attempts = 0;
     records.clear();
     pending.clear();
+    idAliases.clear();
   }
 
   return {
@@ -796,6 +899,7 @@ export function createToolBlockRestoreController(
     clearAll,
     retainRecords,
     start,
+    resolveRecordId: resolveAlias,
     stop,
     snapshot: () => ({ records: records.size, pending: pending.size }),
   };

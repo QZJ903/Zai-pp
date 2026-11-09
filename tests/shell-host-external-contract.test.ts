@@ -35,6 +35,20 @@ describe('Shell Native Host external contract', () => {
     expect(shellPackage.version).toBe(rootPackage.version);
     expect(shellPackage.engines.node).toBe(SHELL_HOST_CONTRACT.nodeEngine);
 
+    // ⚠️⚠️ **发布相关的三个字段是「npx 那条安装命令能不能成立」的前提。**
+    // 侧边栏给人的主命令是 `npx --yes zai-pp-shell-host …`，而它要求：
+    // ① 包名与 registry 上一致；② `bin` 指向真的入口（否则 npx 报「找不到可执行文件」）；
+    // ③ `private` 不是 true、且 `publishConfig.access` 是 public（否则 `npm publish` 直接拒发）。
+    // ⚠️ **三条都在 `npm publish` 之后才在用户侧暴露，而那时包已经发出去了** ——
+    // 所以只能在这里提前卡住。**`files` 也必须覆盖运行时三目录**：漏 copy `native/`
+    // 会装出一个「连得上但没有工具」的 host，而且是装完才发现。
+    expect(shellPackage.private).not.toBe(true);
+    expect(shellPackage.publishConfig?.access).toBe('public');
+    expect(shellPackage.bin).toEqual({ [SHELL_HOST_CONTRACT.packageName]: 'bin/zai-pp-shell-host.mjs' });
+    for (const dir of ['bin/', 'lib/', 'native/', 'README.md']) {
+      expect(shellPackage.files).toContain(dir);
+    }
+
     const response = await callHost(nativeEnvelope('initialize', {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },

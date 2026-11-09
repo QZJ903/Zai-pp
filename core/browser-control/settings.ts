@@ -96,7 +96,7 @@ export async function saveBrowserControlSettings(
  *
  * ⚠️ **`createPatch` 返回 `null` = 不写盘**，返回 `{}` = 按当前值重写一遍（幂等）。
  * 这个区分是从 `updateAutomationRuntimeWith`（`core/automation/store.ts`）借来的口径 ——
- * 那条修的是同一类缺陷（U2-4），两处保持同形。
+ * 那条修的是同一类缺陷，两处保持同形。
  *
  * ⚠️ **必须在串行队列里求值** —— 读与写之间不能有别人插进来，否则「读到了新值、
  * 写的时候又被插队」的中间态照旧存在。`browserControlSettingsOperations` 保证这一点。

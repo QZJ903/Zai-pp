@@ -72,6 +72,16 @@ export interface ToolHistoryRecordLike {
        * 不必等历史腿来合流（上游 `metadata.assistantMessageId` 同义）。
        */
       assistantMessageId?: string;
+      /**
+       * 执行那一刻的**请求 id**（`ToolCallSource.requestId`）—— 合流判据里
+       * 「哪一轮」这个维度。
+       *
+       * ⚠️⚠️ **读它不新增任何持久化字段** —— 它从 `ToolCall.source.requestId`
+       * 加进来那天起就在落库，`tool-record-codec.ts` 的 `isToolCallSource`
+       * 也一直验着它，只是面板这条窄视图没读。
+       * ⚠️ 没有它时，七个零参工具的 XML 每轮逐字相同 ⇒ 跨轮记录会被误并。
+       */
+      requestId?: string;
     };
   };
   result: ToolCardResult;
@@ -116,6 +126,17 @@ export interface ToolPanelDependencies {
   statusLabels: () => ToolBlockStatusLabels;
   /** 标题文案（按当前 locale）。 */
   formatTitle: ToolBlockTitleFormatter;
+  /**
+   * **拆除时把「执行中」那几行收成失败**要用的两段文案（按当前 locale）。
+   *
+   * ⚠️⚠️ **必须由调用方给，不能在这里写死或复用 `statusLabels`** ——
+   * `statusLabels` 只有「执行中 / 已执行 / 失败」三档，缺「未完成（回答被中断）」
+   * 那一句；而那正是收尾链在正常路径上用的文案（`zai.content.ts` 的
+   * `content.toolBlock.summaries.incomplete`）。
+   * ⚠️ **不注入就退化成「拆除时直接丢弃」**（改造前的行为）—— 但那是可见的谎言：
+   * 页面上会留几行永远转圈的「执行中」。
+   */
+  drainTexts?: () => { failureSummary: string; message: string };
   /** 详情渲染器（能画卡片就画，返回 false 退回纯文本）。 */
   renderDetail?: ToolBlockDependencies['renderDetail'];
   /** 取当前会话 id。 */
@@ -216,10 +237,21 @@ export interface ToolPanelController {
    * 这里与 `resolveTarget` 的会话判据是**两道**：那条挡「挂错」，这条挡「留着」。
    */
   handleSessionChange: () => void;
-  /** 全部 drain（生命周期拆除时调）。 */
+  /**
+   * 全部 drain（把每个还在跑的轮次的「执行中」行收成失败）。
+   *
+   * ⚠️ **收尾链与拆除链都用它** —— 前者在 `finalizePending` 之后按 requestId 逐轮调，
+   * 后者由 `dispose()` 统一调（见那里的顺序说明）。
+   */
   finalizeAllPending: (failureSummary: string, message: string) => void;
-  /** 当前面板快照（测试用）。 */
-  snapshot: () => { records: number; pending: number; livePending: number };
+  /**
+   * 当前面板快照（测试用）。
+   *
+   * ⚠️ **`liveSessions` 是「还没收尾的轮次」的条数** —— 收尾即删（见 `sealTurn`），
+   * 所以它是个**有界**的数；`livePending` 是这些轮次里还没出结果的行数。
+   * ⚠️ 两个数在生产里**零消费者**，只为测试保留 —— 别拿它当「本轮还在跑」的判据。
+   */
+  snapshot: () => { records: number; pending: number; livePending: number; liveSessions: number };
 }
 
 /** 实时面板的「本轮」容器 —— 一次请求对应一块。 */
@@ -401,6 +433,10 @@ export function createToolPanelController(
       // ⚠️ **会话归属用这一轮冻结的值**，不是「此刻」的地址栏 —— 见
       // `LiveSession.chatSessionId`。`null` = 不知道（首条消息时），按放行处理。
       chatSessionId: session.chatSessionId,
+      // ⚠️⚠️ **轮次就是这一轮的 requestId** —— 合流判据里「哪一轮」这一维。
+      // 缺了它，本轮的零参工具（`shell_status` 这类，XML 每轮逐字相同）会被并进
+      // **上一轮**那条记录、画到上一轮的回答下面（见 `isCompatible`）。
+      requestId,
       createdAt: session.createdAt,
     }]);
   }
@@ -554,7 +590,8 @@ export function createToolPanelController(
 
     // ⚠️⚠️ **块级折叠态三条判据见 `applyBlockCollapseDefault`**：用户亲手开合过 >
     // （本页面会话内刚收尾**且**还有没点过的按钮）> 「在飞展开、收尾 / 恢复收起」。
-    // ⚠️ 只按 `live` 是 2.15.39 的缺陷 —— 一轮跑完那一大块一直摊着，跑 N 轮就是 N 大块全展开。
+    // ⚠️ 只按 `live` 判会漏掉「已经收尾、但块里还有没点过的按钮」那一档 ——
+    // 一轮跑完那一大块一直摊着，跑 N 轮就是 N 大块全展开。
     // ⚠️ 第二档靠 `sealedThisSessionIds`：它只装「**本页面会话内**收尾过」的记录 ⇒
     // **刷新页面 / 切会话后是空集**，那时带按钮的块也一律收起（用户口径）。
     const block = createToolBlockShell(blockDeps, {
@@ -595,11 +632,29 @@ export function createToolPanelController(
     await loadStorageLeg();
   }
 
+  /**
+   * 卸。
+   *
+   * ⚠️⚠️ **必须先把「执行中」收成失败，再停编排层** —— 否则页面上留几行永远转圈的
+   * 「执行中」：内容脚本在扩展重载 / 卸载时被拆除，但它挂进页面的 DOM 还在。
+   * 收尾本身是纯内存 + DOM 操作（同步），不依赖 runtime，所以在这一步做得成。
+   * ⚠️ **顺序**：`finalizeAllPending`（改 `executions`）→ `renderPending`（重画，
+   * 让失败状态真的落到 DOM 上）→ `restore.stop()`（断观察器、清记录）。
+   * 反过来 `stop()` 会先清掉记录，重画就没人做了。
+   * ⚠️ **没有 `drainTexts` 时退化成直接丢弃**（改造前的行为）—— 见依赖上的说明。
+   */
   function dispose(): void {
     // ⚠️ **作废在飞的重试** —— 否则卸载后落在重试里的那次 `remember` 会把块挂回新 DOM。
     storageLegGate.begin();
+    const drainTexts = dependencies.drainTexts?.();
+    if (drainTexts) {
+      finalizeAllPending(drainTexts.failureSummary, drainTexts.message);
+      // ⚠️ **同步重画一轮** —— 定时器已经没机会跑了（紧接着就 `stop()`）。
+      restore.renderPending();
+    }
     restore.stop();
     liveSessions.clear();
+    sealedThisSessionIds.clear();
   }
 
   /**
@@ -669,6 +724,9 @@ export function createToolPanelController(
         }],
         // ⚠️ **会话归属就是上面那个过滤判据** —— 这批记录本来就是按它筛出来的。
         chatSessionId,
+        // ⚠️ **轮次来自落库时的 `ToolCall.source.requestId`** —— 合流判据里
+        // 「哪一轮」这一维，缺了它跨轮的同名零参工具会被误并（见 `isCompatible`）。
+        requestId: item.call?.source?.requestId ?? null,
         createdAt: item.createdAt,
       });
     }
@@ -773,7 +831,13 @@ export function createToolPanelController(
     publishLiveSession(requestId);
   }
 
-  /** 全部 drain（生命周期拆除时调）—— 循环所有会话。 */
+  /**
+   * 全部 drain —— 循环所有还活着的轮次，把「执行中」收成失败。
+   *
+   * ⚠️ **两个调用方**：`dispose()`（拆除前，见那里的顺序说明）与测试。
+   * 收尾链**不**用它 —— 那条按 requestId 逐轮 `finalizePending`，因为一轮结束时
+   * 其它轮次可能还在跑、不该被连带收掉。
+   */
   function finalizeAllPending(failureSummary: string, message: string): void {
     for (const requestId of [...liveSessions.keys()]) {
       finalizePending(requestId, failureSummary, message);
@@ -793,7 +857,7 @@ export function createToolPanelController(
    * ⚠️ **拿不到当前会话 id 时退回 `clearAll`** —— 不知道不等于都属于当前会话。
    * ⚠️ **顺序是「先清、再拉」** —— 反过来的话，新拉到的记录会被紧接着的清空删掉。
    * ⚠️ **`liveSessions` 无条件清**：那是「本轮」的收集容器，它属于旧会话的那一轮；
-   * 留着会让 `snapshot().livePending` 报出已经不存在的轮次。
+   * 留着会让 `snapshot().liveSessions` 报出已经不存在的轮次。
    */
   function handleSessionChange(): void {
     const current = dependencies.getChatSessionId();
@@ -814,17 +878,35 @@ export function createToolPanelController(
    * `live: true` 把块重新画成展开；反过来的话收尾就被它顶掉了。
    * 调用点必须按这个顺序调两个函数（见 `zai.content.ts` 的收尾链）。
    *
-   * ⚠️ **会话不从 `liveSessions` 删** —— 它还要被 `snapshot()` 读
-   * （`livePending` 是 64 的判据）。这里只清折叠标记。
+   * ⚠️ **会话在收尾后从 `liveSessions` 删掉** —— 一轮已经结束，它的容器没有
+   * 再被读的地方（`snapshot()` 的 `livePending` 只数还没收尾的那些）。
+   * 留着会让这个表按 requestId **无界增长**：一次 25 步的自动化就是 25 条，
+   * 每条还带着 detail（≤4k）与 output（≤8k），而出口只有换会话 / 页面重载。
+   *
+   * ⚠️⚠️ **「要不要 seal」与「释放条目」是两件事，不能写进同一个早退** ——
+   * `recordIds` 为空的会话**也要删**。这种会话是真的存在：`noteToolCallRaw` 会
+   * `getOrCreateSession` 但不 `publishLiveSession`（它只登记 raw、不画行），
+   * 若那之后整轮被打断（`completeToolCall` / `rememberExecutions` 都没走到），
+   * 留下的就是一个空壳。写成 `if (!session || recordIds.size === 0) return`
+   * 会让它**永远删不掉** —— 与本节开头的「不再无界增长」正好相反。
    */
   function sealTurn(requestId: string): void {
     const session = liveSessions.get(requestId);
-    if (!session || session.recordIds.size === 0) return;
-    // ⚠️ **先登记「这一轮在本页面会话内收尾过」**，再让编排层重画 ——
-    // 重画时 `applyBlockCollapseDefault` 会按这个集合决定「还有没点过的按钮就保持展开」
-    // （见 `sealedThisSessionIds`）。顺序反了的话那一刻集合还是空的，块会先收起。
-    for (const id of session.recordIds) sealedThisSessionIds.add(id);
-    restore.sealLive([...session.recordIds]);
+    if (!session) return;
+    if (session.recordIds.size > 0) {
+      // ⚠️⚠️ **先登记「这一轮在本页面会话内收尾过」**，再让编排层重画 ——
+      // 重画时 `applyBlockCollapseDefault` 会按这个集合决定「还有没点过的按钮就保持展开」
+      // （见 `sealedThisSessionIds`）。顺序反了的话那一刻集合还是空的，块会先收起。
+      //
+      // ⚠️ **用 `sealLive` 的返回值记账，不要自己先解析一遍** —— 它返回的是
+      // **实际被收尾的 id**（已过别名表）。自己调 `resolveRecordId` 预解析再丢掉返回值，
+      // 当前两处等价，但将来 `sealLive` 若开始按 `live` 过滤、跳过某些 id，
+      // `sealedThisSessionIds` 就会多记一批「其实没被收尾」的 id ⇒ 那些块的
+      // 「有按钮就保持展开」第二档会在错误的对象上生效。
+      for (const id of restore.sealLive([...session.recordIds])) sealedThisSessionIds.add(id);
+    }
+    // ⚠️ **无条件删**（含上面那格空壳）—— 见本节第二段的说明。
+    liveSessions.delete(requestId);
   }
 
   return {
@@ -841,6 +923,7 @@ export function createToolPanelController(
     finalizeAllPending,
     snapshot: () => ({
       ...restore.snapshot(),
+      liveSessions: liveSessions.size,
       livePending: [...liveSessions.values()].reduce(
         (total, session) => total + session.pendingCallIds.size,
         0,
@@ -849,7 +932,18 @@ export function createToolPanelController(
   };
 }
 
-/** 与 `entrypoints/zai.content.ts` 的 `djb2Hash` 同算法（那边是私有的，这里要独立一份）。 */
+/**
+ * 内容派生的稳定 id（给 `storageRecordId` 用）。
+ *
+ * ⚠️ **与 `entrypoints/zai.content.ts` 的 `djb2Hash` 同用途、不同算法** ——
+ * 那边是 djb2（种子 `5381`、`(hash << 5) + hash` 即 ×33），这里是 `0` 起、×31
+ * （Java 的 `String.hashCode` 那套）。**两者对同一输入给出不同的串**（实测
+ * `"a"` → `2p` vs `3t3a`），所以**不能互换**。
+ * ⚠️ **不需要与 `callId` 同源**：`storageRecordId` 只要求「同一条历史每次读回来
+ * 得到同一个 id」，不参与任何跨模块的身份比对（`callId` 那条是另一套）。
+ * ⚠️ 那边是私有的、这里是独立一份 —— 内容脚本与 `core/` 都在隔离世界，
+ * 引过去只会把内容脚本的模块图拖进来。
+ */
 function hashString(value: string): string {
   let hash = 0;
   for (let index = 0; index < value.length; index += 1) {

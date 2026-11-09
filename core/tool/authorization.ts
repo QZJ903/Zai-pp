@@ -228,7 +228,7 @@ export async function authorizeToolExecution(
  * ⚠️ **`result` 形参已删** —— 上游用它判「这次失败是否可重试」，可重试则写
  * `state: 'retryable'` 让同一 `callId` 能被重新授权。那个判据只服务联网搜索的
  * 权限前置（`isRetryableWebFetchPermissionPrecondition`），该工具已整体删除
- * ⇒ 生产者不存在、状态不可达。本项目自用、无老用户，直接删掉这一档，
+ * ⇒ 生产者不存在、状态不可达。直接删掉这一档，
  * 不留一个「为将来保留」的空壳状态（那会让去重检查多一个绕行口）。
  */
 export async function completeToolExecutionAuthorization(

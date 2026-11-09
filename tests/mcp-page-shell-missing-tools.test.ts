@@ -17,7 +17,7 @@ import { missingShellTools, shellSetupMessage } from '../entrypoints/sidepanel/p
  * `error` 为空 ⇒ 页面报「已连接，发现 N 个工具」，然后工具列表里就是少几个、
  * **一句话都不解释**。用户只能猜「是不是坏了」。
  *
- * 唯一有这条提示的是工具页那张 Python 卡片（2.15.52 删掉后就没有落点了），
+ * 唯一有这条提示的是已被删掉的工具页里那张 Python 卡片，
  * 所以搬到这里 —— 且判据从「只是 python_exec」放宽成「应有 − 实有」，
  * 因为缺的可能是任意一个工具。
  *

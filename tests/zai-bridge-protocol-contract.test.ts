@@ -341,7 +341,7 @@ describe('bridge protocol contract', () => {
 
     // ⚠️ 豁免里写「有专门的 decoder」时，那个 decoder **必须真的在接收文件里被调用** ——
     // 否则它只是一句注释，哪天调用点被删掉不会有任何东西变红。
-    // （`decodeAugmentResult` 正是注释里点名的「2.15.15 已踩过一次」的那条。）
+    // （`decodeAugmentResult` 正是注释里点名的那种「写明了却没人真调」的形态。）
     // ⚠️ 这两个 decoder 各自住在**它自己的模块里**（一个是主世界的局部函数、一个在
     // `core/zai/stream-metrics.ts`），所以这里只断言「被调用」，不要求 import 来源。
     for (const [type, exemption] of Object.entries(ZAI_BRIDGE_PAYLOAD_DECODER_EXEMPTIONS)) {

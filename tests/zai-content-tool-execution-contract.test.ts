@@ -1339,7 +1339,7 @@ describe('chatNew does not write request-scoped state it can never release', () 
     // 所以**从 `releaseRequestState` 反向枚举容器名**，逐个断言 chatNew 分支不写它们。
     //
     // ⚠️ 判据是「`releaseRequestState` 里 delete 了哪些容器」而不是手抄清单 ——
-    // 手抄的第二份清单必然分叉（B9），而这里的分叉形态是静默的：新容器没人守，
+    // 手抄的第二份清单必然分叉，而这里的分叉形态是静默的：新容器没人守，
     // chatNew 一旦写了它就成了永不释放的孤儿，且不会有任何测试变红。
     const program = readContentProgram();
     // ⚠️ **走共享实现**（只认 `program.body` 的顶层声明）—— 本地 `walkSourceAst` 版本

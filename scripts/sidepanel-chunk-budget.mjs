@@ -114,17 +114,17 @@ const BASELINE = Object.freeze({
   // 来源：`content.projectPanel.*` 21 键 + `sidepanel.projectsPage.*` 28 键（中英各一份）
   // 与 `prompt.projectContext*` 3 键全部移除，侧边栏项目页 chunk 也不再进初始 shell。
   //
-  // ⚠️⚠️ **2026-10-31 十八测（四批审计修复收口到 2.15.62）**：实测
+  // ⚠️⚠️ **2026-10-31 十八测（四批修复收口到 2.15.62）**：实测
   // raw **335812** / gzip **106170** —— **+1802 raw / +595 gzip**。
   // 来源是**净增 5 对键**（新增 11、删掉 6，中英各一份），且其中两条值本身较长：
-  // `nameTaken`（技能名判重，U7）、`keepaliveDescription`（保活开关的用户说明）。
+  // `nameTaken`（技能名判重）、`keepaliveDescription`（保活开关的用户说明）。
   // 其余 9 条是失败分档：`recordMissing` / `memoryTruncated` / `invalidContentTooLong`
   // / `scheduleTooSparse` / `pageHandshakeTimeout` / `pageContentScriptMissing`
   // / `generalDescription` / `keepaliveSectionDescription` / `aboutTagline`。
   // ⚠️ **这 11 条没有一条是装饰性文案** —— 它们各自对应一条新加的失败分档或用户开关说明，
   // 删掉就会退回到「静默失败」或「界面没说清」。所以这是**有意增长**，回写基线。
   // ⚠️ 量级核对：净增 5 键 × 约 276 raw ≈ 1380，实测 1802，多出的 ~420 来自长句值。
-  // ⚠️⚠️ **2026-11-03 八测（U2 自动化链修复的三条失败文案）**：`sidepanel` 段新增
+  // ⚠️⚠️ **2026-11-03 八测（自动化链修复的三条失败文案）**：`sidepanel` 段新增
   // `automationNotFound` / `automationAlreadyRunning` / `automationInvalidStatus`
   // （中英各 3 键），实测 raw **336356** / gzip **106254** —— **+544 raw / +84 gzip**。
   // ⚠️ **这三条是 `5da43a4` 加的，而那一批当时没构建** ⇒ 门禁从那次起就是红的
@@ -141,7 +141,17 @@ const BASELINE = Object.freeze({
   //    以及 `capability-settings` 的四个边界常量随 `McpPage` 进包。
   // ⚠️ **①的那 341826 是上一批加的、当时没构建** ⇒ 门禁从那次起就红着（同 5da43a4 那次）。
   // 判据：每一条新键都对应一处「界面原先什么都没说」或「说了假话」，删了就退回去。
-  initialShell: { raw: 342_463, gzip: 107_921 },
+  //
+  // ⚠️⚠️ **2026-11-08 重测**：实测 raw **343_645** / gzip **108_189**（chrome 与 edge 同值）。
+  // 增量 +1182 raw / +268 gzip，来源两批，逐提交构建对照过：
+  // ① **侧边栏其余五页那批**（`db6dc3a`）：单独构建实测 343_585 / 108_169 —— +1122 raw / +247 gzip。
+  //    新增键为 `preset.form.requiredFields`、`memoryPage.importEntryInvalid`、
+  //    `usage.tokensUnit` / `usage.tokenCount`、`browserControl.{loadFailed,saveFailed,enableFailed,detachFailed}`
+  //    （`targetFailed` 改带 `{error}`），以及 `automation.field.prompt`。
+  // ② **跨模块复核那批**（`fb1b810`）：+60 raw / +20 gzip，只有文案微调、无新增键。
+  // ⚠️ **①是当时没构建的那一批** ⇒ 门禁从 `db6dc3a` 起就红着（同 `5da43a4` 那次）。
+  // 判据同前：每条新键都对应一处「界面原先什么都没说」或「说了假话」，删了就退回去。
+  initialShell: { raw: 343_645, gzip: 108_189 },
   // ⚠️⚠️ **本字段只作回显，不参与任何断言** —— 门禁比对的是 `BUDGET.routeChunks`
   // （下面那份**手工定的允差**，与这里的数值没有派生关系），而 `BUDGET.initialShell`
   // 才是从 `BASELINE.initialShell` 派生出来的。两组常量的关系是**反的**，

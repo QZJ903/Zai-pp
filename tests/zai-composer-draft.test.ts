@@ -7,8 +7,7 @@ import { captureComposerDraft } from '../core/zai/composer-draft';
  * ## 为什么需要这一组（而不是只靠 AST 守卫）
  *
  * 草稿保护原先内联在 `entrypoints/zai.content.ts`（加载即执行 `defineContentScript`、
- * 不可 import），所以只能靠「按结构数调用点」的 AST 断言盯着。那种断言有两个洞
- * （2026-11-01 外部评审 P1-2 指出）：
+ * 不可 import），所以只能靠「按结构数调用点」的 AST 断言盯着。那种断言有两个洞：
  *
  * ① **锁形状不锁语义** —— 把 `restore()` 的守卫条件改错（例如去掉「当前值是空的才算
  *    我们那份」），AST 断言照绿；
@@ -111,7 +110,7 @@ describe('composer draft: 恢复的三档判据', () => {
 
 describe('composer draft: 拿不到输入框时留一次机会', () => {
   it('第一次拿不到框 ⇒ 不写、也不置位；框回来后兜底那次仍会还', () => {
-    // ⚠️⚠️ **这正是外部评审 P2-4 指出的那一档** —— 页面在注入之后可能把这一小块 DOM
+    // ⚠️⚠️ **这一档必须留一次机会** —— 页面在注入之后可能把这一小块 DOM
     // 重建掉。旧写法把 `restored = true` 放在 `if (!live) return` 之前 ⇒ 那次白丢之后，
     // `finally` 里的兜底也不会再试。
     const { deps, writes, setLive } = makeDeps(null);

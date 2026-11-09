@@ -443,17 +443,93 @@ describe('the live leg merges into the history leg of the same turn', () => {
 
     expect(harness.controller.snapshot().records).toBe(2);
   });
+
+  /**
+   * ⚠️⚠️ **签名里不含「哪一轮」，所以两侧都知道轮次时必须同轮才许并。**
+   *
+   * 真机形状：`shell_status` / `python_status` / 五个 `browser_*` 这七个零参工具的
+   * XML **每轮逐字相同**，而流式期 `readZaiMessageId` 可能读不到锚点。此时本轮的
+   * 实时记录（无锚点、有 requestId）与上一轮的存储记录（有锚点、有 requestId）
+   * 签名一致 ⇒ 只看签名就会并，结果是**本轮的结果画到上一轮的回答下面**，
+   * 本轮那条回答一条都没有（探针实测过）。
+   */
+  it('keeps two turns apart when both sides carry a different request id', () => {
+    const harness = buildHarness();
+    // ⚠️ 照真机排：上一轮的回答在中间（带锚点），本轮那条在最下面
+    // （**还没有锚点类** —— 那正是「读不到 messageId」的原因）。
+    harness.messages[1].classList.add(`message-${UUID_A}`);
+    const raw = '<shell_status></shell_status>';
+
+    // 上一轮（存储腿，带锚点 + requestId）
+    harness.controller.remember([record({
+      id: 'storage:prev',
+      source: 'storage',
+      messageId: UUID_A,
+      calls: [{ name: 'shell_status', raw }],
+      executions: [{ callId: 'xml:prev', name: 'shell_status', result: { ok: true, summary: 'PREV' } }],
+      requestId: 'req-prev',
+    })]);
+    // 本轮（实时腿，读不到锚点，但知道自己是 req-now）
+    harness.controller.remember([record({
+      id: 'live:req-now',
+      messageId: null,
+      calls: [{ name: 'shell_status', raw }],
+      executions: [{ callId: 'xml:now', name: 'shell_status', result: { ok: true, summary: 'NOW' } }],
+      live: true,
+      requestId: 'req-now',
+    })]);
+
+    // 两条都在（没被并），且本轮那条落到**最新**那条消息上（不是上一条）。
+    expect(harness.controller.snapshot().records).toBe(2);
+    harness.controller.renderPending();
+    const nowRender = harness.rendered.filter((item) => item.recordId === 'live:req-now');
+    expect(nowRender).toEqual([{ recordId: 'live:req-now', messageIndex: 2 }]);
+    // ⚠️ 关键：**不能**画到上一轮那条回答（index 1）下面。
+    expect(nowRender.map((item) => item.messageIndex)).not.toContain(1);
+  });
+
+  /**
+   * ⚠️ **反面（这条是「一条不知道就放行」的守卫）** —— 历史腿来自服务端正文、
+   * 天然没有 requestId。若写成「必须相等」，刷新后「存储腿 ↔ 历史腿」那条主路径
+   * 会整条死掉（面板退化成只有工具名、没有结果）。
+   */
+  it('still merges the two legs when only one side knows its request id', () => {
+    const harness = buildHarness();
+    harness.messages[0].classList.add(`message-${UUID_A}`);
+    const raw = '<shell_status></shell_status>';
+
+    // 历史腿：有锚点、**没有** requestId
+    harness.controller.remember([record({
+      id: `history:${UUID_A}`,
+      messageId: UUID_A,
+      calls: [{ name: 'shell_status', raw }],
+    })]);
+    // 存储腿：有结果 + requestId
+    harness.controller.remember([record({
+      id: 'storage:x',
+      source: 'storage',
+      calls: [{ name: 'shell_status', raw }],
+      executions: [{ callId: 'xml:x', name: 'shell_status', result: { ok: true, summary: 'R' } }],
+      requestId: 'req-1',
+    })]);
+
+    expect(harness.controller.snapshot().records).toBe(1);
+  });
 });
 
 describe('a record with a precise anchor never falls back to another message', () => {
   it('leaves the anchored record pending instead of mounting it on the wrong answer', () => {
     // ⚠️⚠️ **真机形状**：同一轮里 `readZaiMessageId` 先返回 null、后返回 uuid
     // ⇒ 先后产生 `live:<requestId>` 与 `history:<uuid>` 两条记录（签名对不上时不合流）。
-    // 前者没有锚点、走兜底腿**占住了正确的那条消息**；后者带着精确锚点来的时候
+    // 前者没有锚点、走兜底腿**占住了本轮那条消息**；后者带着精确锚点来的时候
     // `usedMessages` 已经把那条挡掉了 ⇒ 若兜底腿照常放行，它会被挂到**另一条回答**上。
+    //
+    // ⚠️ **顺序必须照真机排**：本轮的回答在页面最下面（`messages` 是 DOM 顺序）。
+    // 兜底腿对在飞记录是**从最新往前**找的，所以「占住正确那条」这个场景只有在
+    // 锚点挂在**最后一条**消息上时才成立 —— 排到前面去就测的是另一件事了。
     const harness = buildHarness();
-    harness.messages[0].classList.add(`message-${UUID_A}`);
-    harness.messages[1].classList.add(`message-${UUID_B}`);
+    harness.messages[2].classList.add(`message-${UUID_A}`);
+    harness.messages[0].classList.add(`message-${UUID_B}`);
 
     // 先到的是没有锚点的那条（id 退化成 live:、raw 也空 ⇒ 签名配不上）。
     harness.controller.remember([record({
@@ -473,8 +549,9 @@ describe('a record with a precise anchor never falls back to another message', (
     })]);
     harness.controller.renderPending();
 
-    // 无锚点那条占住 msg0（它本来就是「第一个没被占用的」）；有锚点那条**必须留在待渲染**。
-    expect(harness.rendered.map((item) => item.messageIndex)).toEqual([0]);
+    // 无锚点那条占住 msg2（本轮那条）；有锚点那条**必须留在待渲染**，
+    // 不能退而求其次挂到 msg0 那条别的回答上。
+    expect(harness.rendered.map((item) => item.messageIndex)).toEqual([2]);
     expect(harness.controller.snapshot().pending).toBe(1);
   });
 
@@ -567,6 +644,68 @@ describe('requeue after the page rebuilds our UI', () => {
 });
 
 describe('sealing a finished turn', () => {
+  /**
+   * ⚠️⚠️ **合流之后记录会改名，`sealLive` 必须还能找到它。**
+   *
+   * 真机形状：存储腿先到（`storage:<hash>`），本轮的实时腿后到、签名相同 ⇒ 被并进
+   * 存储腿那条、id 保持 `storage:<hash>`。而 `sealTurn` 手里拿的是自己记下的
+   * `history:<uuid>` ⇒ 直接按 id 查会**一条都找不到**、`live` 永不清、
+   * 块永远摊着（正是「跑 N 轮看到 N 大块」那个形态）。
+   */
+  it('seals a record that was merged under a different id', async () => {
+    const harness = buildHarness();
+    harness.messages[0].classList.add(`message-${UUID_A}`);
+    const raw = '<shell_exec>{"command":"ls"}</shell_exec>';
+
+    // 存储腿先到（无锚点）—— 落地 id 是它自己的。
+    harness.controller.remember([record({
+      id: 'storage:old',
+      source: 'storage',
+      messageId: null,
+      calls: [{ name: 'shell_exec', raw }],
+      executions: [{ callId: 'xml:old', name: 'shell_exec', result: { ok: true, summary: 'OLD' } }],
+    })]);
+    // 本轮的实时腿后到：签名相同 ⇒ 并进 storage:old，但它自己记的是 history:<uuid>。
+    harness.controller.remember([record({
+      id: `history:${UUID_A}`,
+      messageId: UUID_A,
+      content: '正文',
+      calls: [{ name: 'shell_exec', raw }],
+      executions: [{ callId: 'xml:new', name: 'shell_exec', result: { ok: true, summary: 'NEW' } }],
+      live: true,
+    })]);
+    harness.controller.renderPending();
+    expect(harness.controller.snapshot().records).toBe(1);
+    expect(harness.renderedLive.at(-1)).toBe(true);
+
+    // ⚠️ 收尾传的是 `history:<uuid>` —— 而记录已经叫 `storage:old`。
+    const sealed = harness.controller.sealLive([`history:${UUID_A}`]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // 必须真的收掉（回执给的是落地 id），且块被重画成收起。
+    expect(sealed).toEqual(['storage:old']);
+    expect(harness.renderedLive.at(-1)).toBe(false);
+  });
+
+  it('resolves the caller-side id to the landed one', () => {
+    const harness = buildHarness();
+    const raw = '<shell_exec>{"command":"ls"}</shell_exec>';
+    harness.controller.remember([record({
+      id: 'storage:old',
+      source: 'storage',
+      calls: [{ name: 'shell_exec', raw }],
+    })]);
+    harness.controller.remember([record({
+      id: `history:${UUID_A}`,
+      messageId: UUID_A,
+      calls: [{ name: 'shell_exec', raw }],
+    })]);
+
+    // 合流过 ⇒ 解析成落地的那个；没合流过的原样返回。
+    expect(harness.controller.resolveRecordId(`history:${UUID_A}`)).toBe('storage:old');
+    expect(harness.controller.resolveRecordId('storage:unknown')).toBe('storage:unknown');
+  });
+
   it('drops the live flag so the block collapses', async () => {
     const harness = buildHarness();
     harness.messages[0].classList.add(`message-${UUID_A}`);
@@ -739,6 +878,35 @@ describe('records from another conversation are never mounted', () => {
     // 会话没变 ⇒ 同一条记录被重新排队并再渲染一次（而不是留在表里没人管）。
     expect(harness.rendered.map((entry) => entry.recordId)).toEqual(['r1', 'r1']);
   });
+
+  /**
+   * ⚠️⚠️ **`retainRecords` 也要清别名表 —— 但只能清「解析终点已不在表里」的那些。**
+   *
+   * 它是唯一一处「只丢一部分记录」的地方（`clearAll` / `stop` 是全丢，整表清没问题）。
+   * 整表清在这里是错的：存活记录的旧 id 会失去解析，而 `sealTurn` 手里拿的**正是旧 id**。
+   * 反之不清理就是「只增不清」—— 换会话走的就是这条路径。
+   */
+  it('retainRecords drops aliases whose target is gone but keeps the live ones', () => {
+    const harness = buildHarness();
+    const raw = '<shell_exec>{"command":"ls"}</shell_exec>';
+
+    // 两组「合流后改名」：一组会留在当前会话，一组会被丢
+    harness.controller.remember([record({ id: 'storage:keep', source: 'storage', calls: [{ name: 'shell_exec', raw }], chatSessionId: 'chat-1' })]);
+    harness.controller.remember([record({ id: 'history:KEEP', messageId: UUID_A, calls: [{ name: 'shell_exec', raw }], chatSessionId: 'chat-1' })]);
+
+    const raw2 = '<web_search>{"q":"x"}</web_search>';
+    harness.controller.remember([record({ id: 'storage:drop', source: 'storage', calls: [{ name: 'web_search', raw: raw2 }], chatSessionId: 'chat-2' })]);
+    harness.controller.remember([record({ id: 'history:DROP', messageId: UUID_B, calls: [{ name: 'web_search', raw: raw2 }], chatSessionId: 'chat-2' })]);
+
+    expect(harness.controller.snapshot().records).toBe(2);
+
+    harness.controller.retainRecords((entry) => entry.chatSessionId === 'chat-1');
+
+    // 存活组的旧 id 仍能解析到落地的那个（否则 sealTurn 会一条都对不上）
+    expect(harness.controller.resolveRecordId('history:KEEP')).toBe('storage:keep');
+    // 被丢弃组的别名已清 ⇒ 原样返回（指向一条不存在的记录没有意义）
+    expect(harness.controller.resolveRecordId('history:DROP')).toBe('history:DROP');
+  });
 });
 
 describe('lifecycle', () => {
@@ -826,6 +994,44 @@ describe('the second half of the observer: a message showing up late', () => {
 
     // ⚠️ **锚点迟到**：只改 `class`，不插任何新节点。
     wrapper.classList.add(`message-${UUID_A}`);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(harness.rendered).toEqual([{ recordId: `history:${UUID_A}`, messageIndex: 0 }]);
+  });
+
+  it('wakes a waiting record when the message text grows as character data', async () => {
+    // ⚠️⚠️ **`characterData` 那一支必须真的被投递** —— 它覆盖「消息节点先建空壳、
+    // 正文随后以字符数据长出来」这一档。而 `observe()` 里**没声明**的类型
+    // 规范上根本不会投递 ⇒ 只写分支不写选项 = 死分支，记录只能靠重试预算兜。
+    // 这条用例只在 `characterData: true` 时才会绿。
+    const harness = buildHarness({ retryDelayMs: 1, maxAttempts: 1, scheduleFrame: undefined });
+    harness.messages.length = 0;
+    harness.controller.start();
+
+    // 空壳先出现：`renderPending` 跑完仍然挂不上（宿主一直在，但消息列表是空的）。
+    const wrapper = document.createElement('div');
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-assistant';
+    const text = document.createTextNode('');
+    bubble.appendChild(text);
+    wrapper.appendChild(bubble);
+    document.body.appendChild(wrapper);
+    harness.messages.push(bubble);
+
+    harness.controller.remember([record({
+      id: `history:${UUID_A}`,
+      messageId: UUID_A,
+      // ⚠️ 片段要够长（≥ `MIN_CONTENT_SNIPPET` = 12），否则内容腿不走。
+      content: '这是一段足够长的助手正文内容',
+    })]);
+    harness.controller.renderPending();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // 正文还没到、锚点也没有 ⇒ 三条腿全 miss。
+    expect(harness.rendered).toEqual([]);
+    expect(harness.controller.snapshot().pending).toBe(1);
+
+    // ⚠️ **只改字符数据**：不插新节点、不加 class ⇒ 只有 `characterData` 能唤醒。
+    text.data = '这是一段足够长的助手正文内容';
 
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(harness.rendered).toEqual([{ recordId: `history:${UUID_A}`, messageIndex: 0 }]);

@@ -70,7 +70,7 @@ describe('whole-key persistence boundaries', () => {
   it('keeps the sidepanel off the raw runtime channel entirely', () => {
     // ⚠️ 上面那条只查了三个文件；这条把范围扩到**整个 sidepanel**：
     // 唯一允许直接 `chrome.runtime.sendMessage` 的地方是 runtime client 自己。
-    // 手抄的第二份清单必然分叉（B9）—— 所以这里用「扫目录 + 白名单一个文件」代替列举。
+    // 手抄的第二份清单必然分叉 —— 所以这里用「扫目录 + 白名单一个文件」代替列举。
     const offenders = walk('entrypoints/sidepanel')
       .filter((path) => !path.endsWith('runtime-client.ts'))
       .filter((path) => readFileSync(path, 'utf8').includes('chrome.runtime.sendMessage'));

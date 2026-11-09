@@ -596,9 +596,10 @@ export const sidepanel = {
       unknown: '未知',
     },
     shellSetup: {
-      localIntro: '打开终端，在项目根目录执行以下命令：',
-      detectedExtensionId: '已自动检测 {browser} 扩展 ID。安装需要本机已安装 Node.js/npm。',
-      installNote: '命令会安装或更新 Shell Native Host。',
+      publishedIntro: '打开终端，执行以下命令（只需一次）：',
+      fallbackIntro: '从源码开发时，在项目根目录执行：',
+      detectedExtensionId: '已自动检测 {browser} 扩展 ID。安装需要本机已安装 Node.js（含 npm）。',
+      installNote: '命令会安装或更新 Shell Native Host。装完之后 npm 上的包可以删掉，不影响已安装的 host。',
       enableAndTest: '安装完成后，打开上方开关启用此服务，再点击「测试」验证连接。',
       restartAndTest: '安装完成后重启浏览器，回到这里点击「测试」验证连接。',
       forbidden: 'Native Host 已安装，但未授权当前扩展 ID。请重新运行下方安装命令后重启浏览器。',

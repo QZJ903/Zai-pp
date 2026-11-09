@@ -588,9 +588,10 @@ export const sidepanel = {
       unknown: 'Unknown',
     },
     shellSetup: {
-      localIntro: 'Open a terminal in the project root and run:',
-      detectedExtensionId: 'Detected the {browser} extension ID automatically. Node.js/npm must be installed locally.',
-      installNote: 'The command installs or updates the Shell Native Host.',
+      publishedIntro: 'Open a terminal and run the following command (once only):',
+      fallbackIntro: 'When working from source, run this in the project root:',
+      detectedExtensionId: 'Detected the {browser} extension ID automatically. Node.js (with npm) must be installed locally.',
+      installNote: 'The command installs or updates the Shell Native Host. Once installed, the npm package can be removed without affecting the host.',
       enableAndTest: 'After installation, enable this service with the switch above, then click "Test" to verify the connection.',
       restartAndTest: 'After installation, restart the browser and click "Test" here to verify the connection.',
       forbidden: 'Native Host is installed, but the current extension ID is not authorized. Run the install command again, then restart the browser.',

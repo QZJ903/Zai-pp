@@ -554,7 +554,7 @@ describe('composer draft: 三条注入链共用的草稿保护', () => {
       );
       expect(unsentExits.length, `${fn} 应当有若干个「清空过再退出」的出口`).toBeGreaterThan(0);
       for (const exit of unsentExits) {
-        // ⚠️ **判「至少一次」而不是「恰好一次」** —— 外部评审 P1-2 指出的第二个洞：
+        // ⚠️ **判「至少一次」而不是「恰好一次」** —— 那会漏掉一种写法：
         // 要求恰好一次的话，把 `clear(); restore();` 抽成一个 `releaseComposer()` 助手
         // （合理重构）就会假红，而那种重构一点问题都没有。
         // 语义的守卫在 `tests/zai-composer-draft.test.ts`（真调三档当前值）——

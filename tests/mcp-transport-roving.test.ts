@@ -11,7 +11,7 @@ import { I18nProvider } from '../entrypoints/sidepanel/i18n';
  * 这一组是手写的（自己的胶囊样式），不会从 `SegmentedControl` 继承 roving ——
  * 修之前整组每个按钮的 `tabIndex` 都是 0，Tab 会一个个穿过每个传输选项，
  * 方向键在组内无效。与 `GeneralSubPage` 的语言组、`SegmentedControl` 是同一形态的
- * 第三处（判法：WAI-ARIA APG Radio Group Pattern）。
+ * 第三处（判据：WAI-ARIA APG Radio Group Pattern）。
  */
 
 let container: HTMLDivElement;

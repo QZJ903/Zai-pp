@@ -461,7 +461,7 @@ describe('sidepanel interactions', () => {
 
   it('explains that non-bundled local Skill resources remain available on demand', async () => {
     // ⚠️ 用**当前 host 真的会发**的措辞。旧版那句 `N local supporting file(s) were omitted.`
-    // 已经没有任何生产者（本项目自用、不存在旧 host ⇒ 那层兼容过滤已删），拿它当夹具
+    // 已经没有任何生产者（不存在旧 host ⇒ 那层兼容过滤已删），拿它当夹具
     // 等于在测一条走不到的路。
     const skillWarning = 'references/17.md was omitted because the local Skill preview reached the content budget.';
     const sendMessage = vi.fn(async (message: { type: string }) => {

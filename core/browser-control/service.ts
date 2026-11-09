@@ -43,11 +43,63 @@ export type ElementPoint = {
 const DEFAULT_WAIT_TIMEOUT_MS = 5_000;
 const MAX_WAIT_TIMEOUT_MS = 60_000;
 
+/**
+ * 一条 `browser_*` 动作最多等多久轮到它，超了就快速失败。
+ *
+ * ⚠️ **必须有上限**：`browser_wait_for` 的预算是 65 秒，一条动作卡住时，排在它后面的
+ * 第二条不该陪着等满 65 秒。取 10 秒 —— **它只该覆盖「前一条快结束了」这一档**；
+ * 真排队超过 10 秒说明前一条卡住了，此时如实报忙比让模型干等更有用。
+ */
+const BROWSER_ACTION_QUEUE_TIMEOUT_MS = 10_000;
+
+interface BrowserActionWaiter {
+  /** 轮到它了：把「放闸函数」交给它。 */
+  grant: () => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export class BrowserControlService {
   private readonly dependencies: BrowserControlDependencies;
   private readonly connection: BrowserConnection | null;
   private readonly uidToBackendNodeId = new Map<string, number>();
   private lastError: string | null = null;
+  /**
+   * **一次只跑一个 `browser_*` 动作的闸门。**
+   *
+   * ⚠️⚠️ **这个类不是并发安全的，而它被全仓共用一份**：`browserControlService` 是
+   * 模块级单例、活在 service worker 里；`connection` 只有一条、`attachedTabId` 只有一个槽
+   * （`cdp.ts`），`uidToBackendNodeId` 是实例字段、每次 `createSnapshot` 都整个 `clear()`。
+   *
+   * 原来没有这道闸，靠的是「内容脚本 `executionChain` 会串行」—— **那个前提不成立**：
+   * `executionChain` 按 requestId 分桶（`zai.content.ts` 的 `ToolTurnState`），
+   * 只管**单页面内**的串行；后台 `EXECUTE_TOOL_CALL` handler 上没有任何队列
+   * （`runtime-command-registry` 的 `dispatch` 直接 `await handler.handle(...)`）。
+   * ⇒ 两个 z.ai 标签、或「手动聊天 + 自动化」同时调 `browser_*` 时真会并发。
+   *
+   * **两层后果**（都是静默的）：
+   * ① **uid 映射互清**：A 拍完快照、模型生成 `browser_click { uid: 'e5' }`；这期间 B
+   *    也拍了一张 ⇒ A 的 `e5` 没了。`resolveElement` 会「查不到就补拍一次」，
+   *    于是拿**B 那张快照**的映射去点 ⇒ 点到别的元素。
+   * ② **连接换绑**（更重）：`attach(tabId)` 的第一件事是「挂着别的就先 detach」
+   *    （`cdp.ts`），而 `sendCommand` 每次都重读 `this.attachedTabId`
+   *    ⇒ A 在一次动作中途（如 `DOM.resolveNode` 之后、`Input.dispatchMouseEvent` 之前）
+   *    被 B 换绑，**A 剩下的命令会发到 B 的标签上**。
+   *
+   * ⚠️⚠️ **不用 `createSerialOperationQueue`**：它「入队即承诺执行」—— 外面套
+   * `Promise.race` 只能让调用方先拿到超时，那条动作**稍后照样跑**（调用方以为没执行、
+   * 实际执行了，比不排队更糟）。这里要的是**等超时就彻底不跑**，所以自己维护等待队列：
+   * 超时者**从队列里摘掉**，闸门原样留给下一个。
+   *
+   * ⚠️ **只包 `execute`，不包 `setTarget` / `detach`**：`executeEnabled` 内部会调
+   * `this.setTarget(...)`（`browser_select_tab` 那条），给它们也加闸就是**重入死锁**。
+   * 那两条本身很短、也不拍快照，与动作并行可以接受。
+   *
+   * ⚠️ **代价**：两个**不同标签**上的动作也会排队。`browserControlService` 在架构上
+   * 本来就只持一条 CDP 连接（单 `attachedTabId`），所以「两个标签各自独立并行」
+   * 从来没成立过 —— 排队不是行为退步，是把真实约束写出来。
+   */
+  private actionSlotBusy = false;
+  private readonly actionWaiters: BrowserActionWaiter[] = [];
   /*
    * ⚠️⚠️ **取消信号是逐层传的参数，不是实例字段。**
    *
@@ -59,19 +111,9 @@ export class BrowserControlService {
    * `EXECUTE_TOOL_CALL` 链上**没有任何串行队列**（`runtime-command-registry.ts` 的
    * `dispatch` 直接 `await handler.handle(...)`）。
    *
-   * ⇒ 两个 z.ai 标签、或「手动聊天 + 自动化」同时调 `browser_*` 时，后进的那个会覆盖
-   * 先进那个挂上的 signal：A 写 signalA → B 写 signalB（`previousSignal` = signalA）
-   * → A 的后续命令读到 **B** 的 signal。B 取消/超时后 A 的动作被误判
-   * `browser_control_aborted`；且 B 结束把字段还原成 signalA、A 结束再还原成更早的值，
-   * **链式污染**。
-   *
-   * ⚠️ **复现不是「一并发就中」** —— 要 A 那条链上有**第二个 `sendCommand`**、且 B 在
-   * 两步之间插入才踩得到（实测：单步的 A 读到的是自己的 signal）。真实动作基本都多步
-   * （`navigate` = `Page.navigate` → 等落点 → `createSnapshot`），所以这条不是理论风险。
-   *
-   * ⚠️ **为什么不改成外层加互斥**：那会让两个**独立标签**的 `browser_*` 动作真串行，
-   * 而它们本来可以并行（各自独立的 CDP 会话）—— 为一个单标签场景下不存在的并发问题
-   * 引入一个行为退步。显式传参没有任何锁、也没有行为变化。
+   * ⚠️ **现在那条并发已由 `actionGate` 挡住**，所以把 signal 做成实例字段也不会再被
+   * 覆盖。**但仍然保持逐层传参**，理由已与并发无关：显式传参让「哪条动作拿到哪个
+   * signal」在类型上就看得见，而实例字段会诱使后来者以为「并发已经安全了，可以随便用」。
    */
 
   constructor(dependencies: BrowserControlDependencies = {}) {
@@ -174,6 +216,103 @@ export class BrowserControlService {
     payload: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<BrowserActionResult> {
+    // ⚠️ **整条动作（含失败出口的 `releaseUncontrollableTarget`）都在闸内** ——
+    // 那一关会读 `connection.tabId` 并可能 detach，落在闸外就会与另一条动作的
+    // attach 交叉。判据见 `actionSlotBusy` 的说明。
+    let release: () => void;
+    try {
+      release = await this.acquireActionSlot();
+    } catch (error) {
+      // ⚠️ **排队超时也要收敛成 `ToolResult` 形状，不能往外抛** —— 抛出去会落到
+      // 后台的 `createBackgroundErrorResponse`，那里把任何异常折成
+      // `{ code: 'background_tool_execution_failed', retryable: true }`，
+      // 「忙」这个信息当场丢掉，模型看到的是「工具坏了」。
+      // ⚠️ **不写 `lastError`** —— 那不是这个服务的错误，写进去会让 MCP/设置页
+      // 的「上次错误」串上一条与用户操作无关的文案。
+      return failureOutcome(error);
+    }
+    try {
+      /**
+       * ⚠️⚠️ **拿到闸之后、动手之前，必须再看一眼 signal。**
+       *
+       * 排队期间**调用方可能已经不等了** —— 而「不等了」有两个来源，都在本方法外面：
+       * ① `core/tool/runtime.ts` 的 `executeWithTimeout` 对整条 provider 执行做竞速，
+       *    到点就给调用方返回 `tool_execution_timeout`；
+       * ② 用户点了停止 / 续跑循环被收掉，直接把 signal abort 掉。
+       *
+       * **它们都只让调用方先返回，本方法仍排在队里** —— 前一条动作一结束，这里照样
+       * 会拿到闸并真的执行 `executeSerialized`。而这个动作**有副作用**：
+       * `ensureTargetTabId` 会写 storage 换目标、`ensureAttached` 会 attach
+       * （页面出现"正在调试"横幅，且 `chrome.debugger` 是独占的）。
+       * ⇒ 结果就是**模型收到「超时 / 已取消」（以为没点），而那次点击真发生了**。
+       *
+       * ⚠️ **这个洞纯排队（无限等）治不了** —— 它不在队列侧，在于「调用方已经放弃、
+       * 被调方不知道」。判据只能是「开跑前再查一次 signal」，不能靠队列语义。
+       */
+      if (signal?.aborted) {
+        return failureOutcome(new BrowserControlError(
+          'browser_control_aborted',
+          'The browser command was cancelled before it started.',
+          { retryable: true },
+        ));
+      }
+      return await this.executeSerialized(name, payload, signal);
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * 拿闸：轮到自己才返回「放闸函数」，**等超时就抛忙、并把自己从队列里摘掉**。
+   *
+   * ⚠️⚠️ **摘掉这一步是这条实现的核心** —— 如果超时后仍留在队列里，轮到它时没人接收
+   * （调用方早已返回），闸门会卡在这次「授予」上 ⇒ 后面所有动作永久挂死。
+   *
+   * ⚠️ **超时只发生在「还没轮到自己」时** —— 一旦进入 `executeSerialized`，它就受
+   * 自己的 `execution.timeoutMs` 管，不该被这条 10 秒的排队上限打断（否则会出现
+   * 「调用方以为没跑、其实跑了」）。
+   */
+  private async acquireActionSlot(): Promise<() => void> {
+    if (!this.actionSlotBusy) {
+      this.actionSlotBusy = true;
+      return () => this.releaseActionSlot();
+    }
+    return new Promise<() => void>((resolve, reject) => {
+      const waiter: BrowserActionWaiter = {
+        grant: () => {
+          clearTimeout(waiter.timer);
+          // 闸门在「授予」时已经转交给它，所以放闸就是这次授予的收尾。
+          resolve(() => this.releaseActionSlot());
+        },
+        timer: setTimeout(() => {
+          const index = this.actionWaiters.indexOf(waiter);
+          if (index >= 0) this.actionWaiters.splice(index, 1);
+          reject(new BrowserControlError(
+            'browser_control_busy',
+            `Another browser action is still running; this one waited more than ${BROWSER_ACTION_QUEUE_TIMEOUT_MS} ms. Try again once it finishes.`,
+            { retryable: true },
+          ));
+        }, BROWSER_ACTION_QUEUE_TIMEOUT_MS),
+      };
+      this.actionWaiters.push(waiter);
+    });
+  }
+
+  /** 放闸：有排队者就**把闸直接交给队首**（`actionSlotBusy` 保持 true）。 */
+  private releaseActionSlot(): void {
+    const next = this.actionWaiters.shift();
+    if (!next) {
+      this.actionSlotBusy = false;
+      return;
+    }
+    next.grant();
+  }
+
+  private async executeSerialized(
+    name: BrowserControlToolName,
+    payload: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<BrowserActionResult> {
     const started = this.now();
     let outcome: BrowserActionResult;
     try {
@@ -239,8 +378,13 @@ export class BrowserControlService {
    * attach（`ensureTargetTabId` 在 `ensureAttached` 之前就抛了），残留来自前一次成功动作。
    * 所以成功与失败两条出口都必须过这一关。
    *
-   * ⚠️ **本方法假设同一时刻只有一个 browser_* 动作在跑**（工具执行串行在 `executionChain`
-   * 上）。并发时一条动作的清理会 detach 掉另一条正在用的标签。
+   * ⚠️⚠️ **「同一时刻只有一个 browser_\* 动作在跑」由 `execute` 的闸保证**，不是靠
+   * `executionChain`（那个前提不成立 —— 见 `actionSlotBusy` 的说明：它按 requestId 分桶、
+   * 只管单页面内的串行，而后台 handler 上没有队列）。
+   * 本方法**整条都在闸内**（含它发生在失败出口的那一份），所以「一条动作的清理
+   * detach 掉另一条正在用的标签」不可达。
+   * ⚠️ **`setTarget` / `detach` 仍在闸外**（给它们加闸会重入死锁）—— 但那两条本身很短、
+   * 也不拍快照，与动作并行可以接受。
    *
    * 失败方向：这一关只是清理，**任何异常都不许改写动作结果**。
    */
@@ -524,7 +668,7 @@ export class BrowserControlService {
     // 中间隔着 `await tabs.remove`，若这期间侧边栏把 target 改成了另一条标签，
     // 拿旧快照判断就会把它的改动**覆盖成 null**（实测：target 12 → 关 12 期间改成 13
     // → 结果被清成 null）。`updateBrowserControlSettingsWith` 的 patch 在队列内求值，
-    // 与 U2-4 的 `updateAutomationRuntimeWith` 同形。
+    // 与 `updateAutomationRuntimeWith` 同形。
     // ⚠️ `settings` 本身仍要用 —— 它决定 `requestedTabId` 的默认值（「关当前目标」是
     // 调用那一刻的意图，读旧值是对的），只是不再拿它做写决策。
     await updateBrowserControlSettingsWith((current) => (
@@ -1462,6 +1606,22 @@ function normalizeError(error: unknown): BrowserControlError {
   if (error instanceof BrowserControlError) return error;
   const message = error instanceof Error ? error.message : String(error);
   return new BrowserControlError('browser_control_failed', message, { retryable: true });
+}
+
+/** 把一个异常折成失败形状的 `BrowserActionResult`（不动 `lastError`）。 */
+function failureOutcome(error: unknown): BrowserActionResult {
+  const normalized = normalizeError(error);
+  return {
+    ok: false,
+    summary: normalized.message,
+    detail: normalized.message,
+    error: {
+      code: normalized.code,
+      message: normalized.message,
+      retryable: normalized.retryable,
+      details: normalized.details,
+    },
+  };
 }
 
 function toJsonSafe(value: unknown): unknown {
